@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-navigator"
+version = "0.1.0-alpha"
+description = "AI guidance system for desktop tasks. Observes screen, provides navigation instructions via audio and overlays."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "stevefu-ops", email = "stevefu-ops@github.com"}
+]
+keywords = ["ai", "navigation", "guidance", "screen-reader", "accessibility"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Desktop Environment",
+]
+
+dependencies = [
+    "pyside6>=6.6.0",           # UI framework
+    "mss>=9.0.0",               # Screen capture
+    "imagehash>=4.3.0",         # pHash for screenshot dedup
+    "easyocr>=1.7.0",           # Local OCR for element locator
+    "httpx>=0.25.0",            # Async HTTP client
+    "pydantic>=2.0.0",          # Data validation
+    "python-dotenv>=1.0.0",     # Environment config
+    "pyperclip>=1.8.2",         # Clipboard access
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+tts = [
+    "piper-tts>=1.2.0",         # Local text-to-speech (v0.2+)
+]
+
+stt = [
+    "openai-whisper>=20230314",  # Local speech-to-speech (v0.2+)
+]
+
+[project.urls]
+Repository = "https://github.com/stevefu-ops/ai-navigator"
+Issues = "https://github.com/stevefu-ops/ai-navigator/issues"
+Documentation = "https://github.com/stevefu-ops/ai-navigator/blob/main/docs/design.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=src --cov-report=html --cov-report=term"
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
