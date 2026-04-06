@@ -1,0 +1,900 @@
+# AI Navigator — Software Design Document
+
+**Version:** 0.2 (Revised)
+**Date:** 2026-04-05
+**Slogan:** *The AI guides, never overrides.*
+
+---
+
+## 1. Overview
+
+AI Navigator is a cross-platform desktop application that acts as a real-time, AI-powered guidance system for computer tasks. Unlike AI agents that take control, AI Navigator observes the user's screen and delivers step-by-step navigation instructions via audio narration and on-screen overlays. The user always remains in control — every click, keystroke, and decision is theirs.
+
+### 1.1 Core Principles
+
+| Principle | Description |
+|-----------|-------------|
+| **Observe, never act** | AI Navigator reads the screen but never moves the mouse, types, or executes commands. |
+| **Guide in real-time** | Instructions adapt to what is currently on screen, not a pre-recorded script. |
+| **Human-in-the-loop** | The user decides when to proceed, deviate, or ask for clarification. |
+| **Cost-aware** | Aggressive local summarization + API caching to minimize token spend. |
+| **Privacy-first** | Screenshots are processed and discarded; only text summaries persist. User controls what is captured. |
+| **Graceful degradation** | If overlay positioning fails, fall back to text/audio descriptions. Never show a broken arrow. |
+
+### 1.2 Target Use Cases
+
+**MVP (v0.1):** Browser-based tasks only.
+- Online shopping, form-filling, tax filing
+- Web-based admin panels, SaaS tools
+
+**Post-MVP (v0.2+):**
+- 3D modeling in Blender, SolidWorks, Fusion 360
+- CLI / terminal workflows (git, docker, system admin)
+- Learning new software (Photoshop, Excel, CAD tools)
+- Enterprise internal-tool onboarding
+
+**Accessibility applications (v0.3+):**
+- Assistive guidance for users with cognitive disabilities or low tech-literacy
+- Software onboarding for aging populations
+- Potential for grants, government contracts, and partnerships with accessibility-focused organizations
+
+> **Design note:** AI Navigator's core loop — observe screen, describe what to do, point where to click — is structurally identical to an intelligent screen reader. Accessibility should be treated as a first-class use case, not an afterthought. UI text sizes, TTS quality, and instruction clarity all benefit from this framing.
+
+---
+
+## 2. System Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                        AI Navigator                          │
+│                                                              │
+│  ┌────────────┐  ┌────────────────┐  ┌─────────────────────┐ │
+│  │  Input      │  │  Core Engine   │  │  Output Layer       │ │
+│  │  Layer      │──│                │──│                     │ │
+│  │            │  │                │  │  • Overlay renderer  │ │
+│  │ • Screen   │  │ • Session mgr  │  │  • TTS engine        │ │
+│  │   capture  │  │ • State        │  │  • Clipboard mgr     │ │
+│  │ • Screen   │  │   summarizer   │  │  • Chat window       │ │
+│  │   change   │  │ • API router   │  │                     │ │
+│  │   detector │  │ • Cost ctrl    │  │                     │ │
+│  │ • Voice    │  │ • Correction   │  │                     │ │
+│  │   input    │  │   handler      │  │                     │ │
+│  │ • Chat     │  │                │  │                     │ │
+│  │   window   │  │                │  │                     │ │
+│  └────────────┘  └────────────────┘  └─────────────────────┘ │
+│                         │                                     │
+│         ┌───────────────┼───────────────┐                     │
+│         │               │               │                     │
+│  ┌──────┴───────┐ ┌─────┴──────┐ ┌──────┴──────┐             │
+│  │ Platform     │ │ Local OCR  │ │ Element     │             │
+│  │ Layer        │ │ Engine     │ │ Locator     │             │
+│  │ (OS-specific)│ │(EasyOCR /  │ │(OCR + A11y  │             │
+│  │ • Screen cap │ │ Tesseract) │ │ + template) │             │
+│  │ • Audio out  │ └────────────┘ └─────────────┘             │
+│  │ • Overlay    │                                             │
+│  │ • Hotkeys    │                                             │
+│  │ • Clipboard  │                                             │
+│  │ • A11y APIs  │                                             │
+│  └──────────────┘                                             │
+└──────────────────────────────────────────────────────────────┘
+                        │
+                        ▼
+            ┌───────────────────────┐
+            │   AI Backend(s)       │
+            │  • Anthropic API      │
+            │  • OpenAI API         │
+            │  • Local model (Ollama│
+            │    / llama.cpp)       │
+            └───────────────────────┘
+```
+
+### 2.1 Component Breakdown
+
+#### Input Layer
+
+| Component | Responsibility | Platform Notes |
+|-----------|---------------|----------------|
+| **Screen Capture** | On-demand screenshots triggered by the screen change detector | Win: DXGI / Win32 `BitBlt`; Mac: `CGWindowListCreateImage`; Linux: PipeWire / X11 `XGetImage` |
+| **Screen Change Detector** | Event-driven monitoring: OS accessibility events (window focus, UI changes), fast local pixel-diff (~10fps), and user-action signals (hotkey press). Triggers API calls only when meaningful changes occur. Replaces fixed-interval polling. | See §3.1 |
+| **Voice Input** | Continuous or push-to-talk mic capture → speech-to-text | Local: Whisper.cpp; Cloud: Whisper API / Deepgram |
+| **Chat Window** | Floating, hotkey-activated text input for typed prompts | Cross-platform UI framework (see §2.3) |
+
+#### Core Engine
+
+| Component | Responsibility |
+|-----------|---------------|
+| **Session Manager** | Manages the lifecycle of a guidance session: init → active → paused → done. Holds conversation history. Supports **session persistence** — can save and restore sessions (see §3.4). |
+| **State Summarizer** | After each AI response, extracts a compact text summary of current application state (the "hidden state"). Replaces stale screenshots with text to reduce token cost. |
+| **API Router** | Selects the AI backend (Anthropic / OpenAI / local), manages API keys, applies prompt caching headers, handles retries. Uses **structured output** (tool_use / function calling) instead of raw JSON prompting (see §6). |
+| **Cost Controller** | Tracks token usage per session and per billing period. Enforces caps. Decides when to use cached context vs. fresh image. Applies a **2–3x safety margin** to cost estimates during early versions to account for imperfect optimization. |
+| **Correction Handler** | Processes "wrong instruction" signals from the user (hotkey or voice). Triggers a re-analysis with additional context: "The user reports the previous instruction was incorrect." (see §3.5) |
+
+#### Output Layer
+
+| Component | Responsibility | Platform Notes |
+|-----------|---------------|----------------|
+| **Overlay Renderer** | Draws arrows, highlights, bounding boxes, and subtitle-style text on top of all windows. Positions are determined by the **Element Locator** (local OCR/A11y), not by AI-estimated coordinates. Falls back to subtitle-only if element cannot be located. | Win: layered `HWND` with `WS_EX_TRANSPARENT`; Mac: `NSPanel` with `NSWindowLevelFloating`; Linux: X11 override-redirect / Wayland layer-shell |
+| **TTS Engine** | Converts instruction text to speech | Local: Piper TTS / system TTS; Cloud: OpenAI TTS / ElevenLabs |
+| **Clipboard Manager** | For CLI/text-editor tasks: places generated commands/text into the system clipboard and notifies the user | Native clipboard APIs |
+| **Chat Window (output)** | Shows conversation history, choices, and clarification prompts | Same widget as input |
+
+#### Local OCR & Element Locator (NEW — critical component)
+
+The AI never estimates pixel coordinates. Instead, it returns **text descriptions** of UI elements. The Element Locator finds exact screen positions locally.
+
+```
+┌─────────────────┐         ┌──────────────────────────┐
+│   AI (cloud)     │         │   Element Locator        │
+│                  │         │   (runs locally)         │
+│  INPUT:          │         │                          │
+│  - screenshot    │         │  INPUT:                  │
+│  - context       │         │  - target_text from AI   │
+│                  │         │  - region_hint from AI   │
+│  OUTPUT:         │         │  - live screenshot       │
+│  - text: "Click  │────────▶│                          │
+│    the Modeling  │         │  STRATEGY (in priority): │
+│    tab at the    │         │  1. OS Accessibility API  │
+│    top of the    │         │     (UIA / AX / AT-SPI2) │
+│    screen"       │         │  2. Local OCR (EasyOCR)  │
+│                  │         │  3. Template matching     │
+│  (NO pixel       │         │                          │
+│   coordinates)   │         │  OUTPUT:                 │
+│                  │         │  - exact bbox on screen  │
+│                  │         │  - confidence score      │
+│                  │         │  - OR: "not found"       │
+└─────────────────┘         └──────────────────────────┘
+```
+
+**Three detection strategies, in priority order:**
+
+| Strategy | How | Best for | Limitation |
+|----------|-----|----------|------------|
+| **1. OS Accessibility APIs** | Win: UI Automation (UIA); Mac: AXUIElement; Linux: AT-SPI2. Queries the app's widget tree for element name, role, and bounding box. | Browsers, Qt/GTK apps, Office apps | Not all apps expose good trees (e.g., Blender, games) |
+| **2. Local OCR** | EasyOCR or Tesseract on the screenshot. Find all text + bounding boxes. Match AI's `target_text` against OCR results. | Any app with visible text labels | Can't find icon-only buttons; slower (~100-300ms) |
+| **3. Template Matching** | OpenCV `matchTemplate` against a library of known UI icons/widgets. | Toolbar icons, non-text elements | Requires a pre-built icon library per app; fragile across themes |
+
+**Graceful degradation:**
+- If the Element Locator finds the target with high confidence → draw overlay arrow at exact position.
+- If confidence is low → draw a highlighted region (wider area) with a text label.
+- If not found at all → show subtitle-only instruction: *"I can't pinpoint the button — look for 'Modeling' near the top of the Blender window."*
+- The user never sees an arrow pointing at empty space.
+
+**This handles window movement gracefully:** OCR runs against the *current* screen at overlay render time, not the screenshot the AI analyzed. If the user moved the window, OCR still finds the target at its new position.
+
+#### Platform Layer
+
+A thin abstraction (trait/interface) per OS capability:
+
+```
+trait ScreenCapture    { fn capture_full() -> Image; fn capture_region(rect) -> Image; }
+trait ScreenMonitor    { fn on_change(callback); fn on_focus_change(callback); }
+trait OverlayWindow    { fn show(elements: Vec<OverlayElement>); fn hide(); }
+trait GlobalHotkey     { fn register(combo, callback); fn unregister(combo); }
+trait ClipboardAccess  { fn set_text(s: &str); fn get_text() -> String; }
+trait AudioOutput      { fn speak(text: &str, voice: VoiceConfig); fn stop(); }
+trait AccessibilityAPI { fn find_element(name: &str, role: Option<&str>) -> Option<UIElement>; }
+```
+
+### 2.2 Technology Choices (Recommended)
+
+| Layer | Technology | Rationale |
+|-------|-----------|-----------|
+| **Application language** | Rust | Cross-platform, safe, fast, good FFI. Single binary distribution. |
+| **UI framework** | Tauri v2 (Rust + web frontend) | Native shell with web UI for the chat panel. Access to system APIs via Rust backend. Small binary (~5 MB). |
+| **Frontend (chat/settings)** | Svelte or React (lightweight) | Rendered inside Tauri webview. |
+| **Overlay rendering** | Native OS APIs called from Rust | Tauri doesn't support transparent overlays well — use raw platform calls via `winit` / `raw-window-handle` or a separate lightweight overlay process. |
+| **Screen capture** | `scrap` crate (Rust) or `xcap` | Cross-platform, GPU-accelerated on Windows. |
+| **Local OCR** | EasyOCR (Python) or Tesseract via FFI | ~50MB footprint. Required from MVP for overlay positioning. |
+| **Local STT** | `whisper.cpp` via FFI | Runs on CPU/GPU, no cloud dependency. |
+| **Local TTS** | `piper-rs` or system TTS | Offline capable. |
+| **AI SDK** | HTTP client (`reqwest`) | Direct REST calls to Anthropic/OpenAI. Thin wrapper, no heavy SDK dependency. Uses tool_use / function calling for structured output. |
+
+### 2.3 Alternative: Electron / Python
+
+If Rust is too high a barrier for early contributors:
+
+- **Electron + TypeScript**: Faster UI iteration, larger contributor pool, but heavier (~150 MB). Overlay support via `BrowserWindow` with `transparent: true`.
+- **Python + Qt/PySide6**: Good for prototyping, rich library ecosystem (`pyautogui`, `Pillow`), but packaging and performance are weaker. Natural fit for EasyOCR (also Python).
+
+**Recommendation:** Prototype in **Python + PySide6** for the MVP, then migrate performance-critical paths (screen capture, overlay) to Rust/Tauri for v1.0. Python is especially convenient because EasyOCR is a Python library — no FFI overhead in the MVP.
+
+---
+
+## 3. Data Flow
+
+### 3.1 Main Guidance Loop (Event-Driven)
+
+The guidance loop is **event-driven**, not polling-based. API calls are triggered by meaningful screen changes or user input — not on a fixed timer.
+
+```
+ User types prompt: "Help me buy a USB-C cable on Amazon"
+          │
+          ▼
+ ┌──────────────────┐
+ │ 1. Capture        │ ← Screenshot of current screen
+ │    screenshot      │
+ └────────┬───────────┘
+          │
+          ▼
+ ┌──────────────────┐
+ │ 2. Build API      │ ← System prompt + user prompt
+ │    payload         │   + screenshot (new)
+ │                    │   + cached_state_summary (text from prior turn)
+ │                    │   + (optional) cached image reference
+ └────────┬───────────┘
+          │
+          ▼
+ ┌──────────────────────────────────────────────────────────────┐
+ │ 3. Call AI API (using tool_use / function calling)            │
+ │    → Sends to Anthropic / OpenAI / local                     │
+ │                                                              │
+ │  AI responds via structured tool call (not raw JSON):        │
+ │                                                              │
+ │  navigate_step(                                              │
+ │    steps = [                                                 │
+ │      {                                                       │
+ │        instruction: "Click the search bar at the top center  │
+ │                      of the Amazon page.",                   │
+ │        target_text: "Search Amazon",                         │
+ │        target_region: "top-center",                          │
+ │        overlay_type: "highlight",                            │
+ │        checkpoint: false                                     │
+ │      },                                                      │
+ │      {                                                       │
+ │        instruction: "Type 'USB-C cable' and press Enter.",   │
+ │        target_text: null,                                    │
+ │        clipboard: "USB-C cable",                             │
+ │        checkpoint: true    // ← wait for screen change here  │
+ │      }                                                       │
+ │    ],                                                        │
+ │    state_summary: "Amazon.com open. Homepage. User wants     │
+ │                    USB-C cable. No search yet.",              │
+ │    needs_input: false                                        │
+ │  )                                                           │
+ └────────┬─────────────────────────────────────────────────────┘
+          │
+          ▼
+ ┌──────────────────┐
+ │ 4. Element Locator│ ← Find "Search Amazon" on live screen
+ │    (local OCR /   │    via OCR or Accessibility API
+ │     A11y API)     │    Returns exact bbox or "not found"
+ └────────┬───────────┘
+          │
+          ▼
+ ┌──────────────────┐
+ │ 5. Render output  │
+ │  • If found: draw │ ← arrow/highlight at exact position
+ │    overlay at bbox │
+ │  • If not found:  │ ← subtitle only: "Look for 'Search
+ │    show subtitle   │    Amazon' at the top of the page"
+ │  • Speak/subtitle │ ← "Click the search bar at the top"
+ │  • (if CLI) copy  │
+ │    to clipboard   │
+ └────────┬───────────┘
+          │
+          ▼
+ ┌──────────────────────────────────────────────────────────┐
+ │ 6. Advance through step sequence locally                  │
+ │    • If current step has checkpoint=false, show next step │
+ │      after a short delay (no API call needed)             │
+ │    • If current step has checkpoint=true, wait for:       │
+ │      - Screen change (detected by Screen Change Detector) │
+ │      - User voice/chat/hotkey input                       │
+ │      - User "wrong" correction signal                     │
+ └────────┬─────────────────────────────────────────────────┘
+          │  (screen changed, user spoke, or sequence complete)
+          ▼
+        Loop back to step 1
+```
+
+### 3.2 Screen Change Detection (Event-Driven)
+
+Instead of polling every 2 seconds, the system uses layered event detection:
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Screen Change Detector                  │
+│                                                      │
+│  Layer 1: OS Events (instant, free)                  │
+│  • Window focus change                               │
+│  • Window resize / move                              │
+│  • Accessibility tree mutation events                │
+│  → Trigger: immediate screenshot + possible API call │
+│                                                      │
+│  Layer 2: Fast Local Pixel-Diff (~10fps, cheap)      │
+│  • Capture low-res thumbnail (160x90)                │
+│  • Compare with previous thumbnail                   │
+│  • If > 5% pixels changed → trigger full screenshot  │
+│  → Cost: ~1ms per check, no API involved             │
+│                                                      │
+│  Layer 3: User Action Signal (instant)               │
+│  • User presses "next step" hotkey                   │
+│  • User sends chat/voice message                     │
+│  • User presses "wrong" correction hotkey            │
+│  → Trigger: immediate screenshot + API call          │
+│                                                      │
+│  Layer 4: Idle Fallback (slow, safety net)           │
+│  • If no events for 10 seconds during active session │
+│  • Take a screenshot and check via pHash             │
+│  • Catches changes that OS events missed             │
+│  → Fallback only, not the primary mechanism          │
+└─────────────────────────────────────────────────────┘
+```
+
+**Why this matters for cost and UX:**
+- No wasted API calls during idle periods (user reading, thinking)
+- Instant response when user completes a step (< 500ms to detect change)
+- The 10fps pixel-diff is a local operation — no API cost
+
+### 3.3 State Management
+
+```
+Session {
+    id: UUID,
+    task_description: String,         // "Buy a USB-C cable on Amazon"
+    conversation: Vec<Turn>,          // Full chat history (text only)
+    current_state_summary: String,    // "Amazon > search results > page 1 > no item selected"
+    current_step_sequence: Vec<Step>, // Multi-step sequence from last AI response
+    current_step_index: int,          // Which step the user is on
+    cached_image_id: Option<String>,  // API-side cache reference
+    token_usage: TokenCounter,
+    started_at: Timestamp,
+    last_active_at: Timestamp,        // For session persistence
+}
+
+Turn {
+    role: User | Assistant | Correction,  // Correction = "wrong" signal
+    content: String,
+    screenshot_hash: Option<String>,
+    timestamp: Timestamp,
+}
+
+Step {
+    instruction: String,              // What to show/speak to user
+    target_text: Option<String>,      // For Element Locator to find
+    target_region: Option<String>,    // Rough area hint: "top-left", "center", etc.
+    overlay_type: String,             // "arrow", "highlight", "circle", "none"
+    clipboard: Option<String>,        // Text to copy to clipboard
+    checkpoint: bool,                 // If true, wait for screen change before advancing
+}
+```
+
+### 3.4 Session Persistence & Resume
+
+Sessions can be saved to disk and resumed later (e.g., after a crash, app restart, or next day).
+
+```
+Saved session file (~/.ai-navigator/sessions/{id}.json):
+{
+    "id": "abc-123",
+    "task_description": "File 2025 tax return on TurboTax",
+    "state_summary": "TurboTax > W-2 entry > employer #1 done, employer #2 not started",
+    "conversation_history": [...],   // Text only, no images
+    "token_usage": { "input": 12500, "output": 3200 },
+    "last_active_at": "2026-04-05T14:30:00Z"
+}
+```
+
+On resume:
+1. Load saved session.
+2. Capture fresh screenshot.
+3. Send to AI with: *"Resuming session. Last known state: {state_summary}. Here is the current screen. Assess whether the state is still valid and provide the next instruction."*
+
+This costs one API call to re-sync. No old screenshots needed.
+
+### 3.5 User Correction Flow
+
+When the AI gives a wrong instruction, the user needs a fast way to signal this without typing a paragraph.
+
+```
+User presses correction hotkey (default: Ctrl+Shift+X)
+    │
+    ▼
+┌──────────────────────────────────────────────────┐
+│  Correction Handler                               │
+│                                                   │
+│  1. Capture fresh screenshot immediately          │
+│  2. Add correction context to API call:           │
+│     "The user pressed the 'wrong' button,         │
+│      indicating the previous instruction was       │
+│      incorrect or they cannot find the element.    │
+│      Analyze the current screen carefully and      │
+│      provide a corrected instruction. Describe     │
+│      the target element differently."              │
+│  3. Send to API (fresh screenshot + correction     │
+│     context + state summary)                       │
+│  4. New response replaces the current step         │
+│     sequence                                       │
+└──────────────────────────────────────────────────┘
+```
+
+The correction hotkey is also available as a button in the floating window for mouse users.
+
+**Why this is critical:** Without a correction mechanism, users who receive a wrong instruction have to type "that's wrong, I don't see that button" — which is slow and breaks flow. A single hotkey press gets them back on track in ~2 seconds.
+
+### 3.6 Screenshot Deduplication
+
+Before sending a screenshot to the API:
+1. Compute a perceptual hash (pHash) of the new screenshot.
+2. Compare with the previous screenshot's hash.
+3. If similarity > 95%, skip the API call (nothing changed).
+4. This works alongside event-driven detection as a safety net to avoid duplicate API calls when OS events fire but the screen content hasn't meaningfully changed.
+
+---
+
+## 4. API & Token Management
+
+### 4.1 Cost Model
+
+Costs below are based on April 2026 public pricing (approximate).
+
+| Operation | Anthropic (Claude Sonnet 4) | OpenAI (GPT-4o) |
+|-----------|-----------------------------|------------------|
+| Input text (per 1M tokens) | $3.00 | $2.50 |
+| Output text (per 1M tokens) | $15.00 | $10.00 |
+| Image input (per image ~1000x700) | ~800 tokens ≈ $0.0024 | ~765 tokens ≈ $0.0019 |
+| Cached input (per 1M tokens) | $0.30 (90% discount) | $1.25 (50% discount) |
+
+#### Per-Interaction Cost Estimate
+
+| Scenario | Tokens In | Tokens Out | Cost |
+|----------|-----------|------------|------|
+| **First turn** (system prompt + image + user prompt) | ~2,500 | ~500 (multi-step) | ~$0.015 |
+| **Follow-up turn** (cached system + state summary + new image) | ~1,500 (500 cached) | ~400 | ~$0.009 |
+| **Text-only follow-up** (cached system + state summary, no image) | ~800 (500 cached) | ~200 | ~$0.004 |
+| **Correction turn** (fresh image + correction context) | ~2,000 | ~400 | ~$0.012 |
+
+> **Early-stage safety margin:** The estimates above assume optimizations (dedup, caching, summarization) work perfectly. During v0.1–v0.3, apply a **2–3x multiplier** to all cost projections. Budget for $0.03/turn average, not $0.01. As optimizations mature, actual costs will converge toward the ideal estimates.
+
+#### Session Cost Estimate (with safety margin applied)
+
+| Task Complexity | Turns | Ideal Cost | Budgeted Cost (2.5x) |
+|----------------|-------|------------|----------------------|
+| Simple (5-turn browser task) | 5 | $0.04 – $0.06 | $0.10 – $0.15 |
+| Medium (15-turn guided workflow) | 15 | $0.10 – $0.15 | $0.25 – $0.40 |
+| Complex (40-turn tax filing) | 40 | $0.25 – $0.40 | $0.60 – $1.00 |
+
+> **Note on multi-step sequences (§3.1):** Because the AI can return 2–4 steps per turn, a "15-turn session" in the new design may only need 8–10 actual API calls. This offsets the safety margin.
+
+#### Monthly Cost Per Active User (estimated, with safety margin)
+
+| Usage Tier | Sessions/month | Avg API calls | Monthly API cost (budgeted) |
+|-----------|---------------|---------------|----------------------------|
+| Light | 20 | ~80 | $3 – $5 |
+| Moderate | 60 | ~300 | $10 – $18 |
+| Heavy | 150 | ~700 | $25 – $45 |
+
+### 4.2 Cost Optimization Strategies
+
+```
+Priority  Strategy                         Savings         In MVP?
+───────── ──────────────────────────────── ──────────────  ───────
+1         Event-driven capture (not poll)  Eliminates idle calls   Yes
+2         Screenshot dedup (pHash)         50-70% fewer API calls  Yes
+3         Text state summaries             Replace old images      Yes
+4         Multi-step sequences             2-4x fewer API calls    Yes
+5         API prompt caching               90% cheaper on system prompt  v0.2
+6         Model tiering                    Use Haiku for change detection  v0.2
+7         Local model fallback             $0 for capable GPUs     v0.3
+```
+
+### 4.3 Token Budget System
+
+```python
+class TokenBudget:
+    daily_cap: int          # e.g., 100,000 tokens/day for free tier
+    monthly_cap: int        # e.g., 5,000,000 tokens/month for Pro
+    current_daily: int
+    current_monthly: int
+    safety_margin: float    # 2.5 during v0.x, reduce toward 1.0 as optimizations mature
+
+    def can_spend(self, estimated_tokens: int) -> bool:
+        adjusted = int(estimated_tokens * self.safety_margin)
+        return (self.current_daily + adjusted <= self.daily_cap and
+                self.current_monthly + adjusted <= self.monthly_cap)
+
+    def on_limit_approaching(self, threshold=0.8):
+        # Warn user at 80% usage
+        # Suggest switching to local model if available
+        pass
+
+    def on_limit_reached(self):
+        # Options: pause, switch to local model, warn user
+        # Never silently fail
+        pass
+```
+
+### 4.4 Multi-Provider Strategy
+
+```
+┌─────────────────────────────────────────┐
+│            API Router                    │
+│                                          │
+│  if user.has_own_key("anthropic"):       │
+│      use Anthropic API (tool_use)        │
+│  elif user.has_own_key("openai"):        │
+│      use OpenAI API (function_calling)   │
+│  elif user.plan == "pro":                │
+│      use managed_key (our account)       │
+│      apply monthly_cap                   │
+│  elif local_model_available():           │
+│      use local (Ollama / llama.cpp)      │
+│  else:                                   │
+│      prompt user to add API key          │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 5. Privacy & Security
+
+### 5.1 Data Handling
+
+| Data | Stored Locally? | Sent to Cloud? | Retention |
+|------|----------------|----------------|-----------|
+| Screenshots | In-memory only (RAM) | Current frame only, to API | Discarded after AI response |
+| State summaries | In-memory (session); optionally persisted to disk for resume | Yes, as text context | Session end or user deletes |
+| Conversation text | Local log (opt-in) | Yes, to API | User-controlled |
+| API keys | Local encrypted store | Never | Until user deletes |
+| Voice audio | In-memory buffer | To STT service (if cloud) | Discarded after transcription |
+| Session files | Local disk (opt-in) | Never | User-controlled |
+
+### 5.2 Security Measures
+
+- **No screenshot persistence**: Images never touch disk unless user explicitly enables session recording.
+- **Local-first option**: Voice + vision can run entirely offline (Whisper.cpp + local LLM) for air-gapped / sensitive environments.
+- **API key encryption**: Stored using OS keychain (Windows Credential Vault / macOS Keychain / libsecret on Linux).
+- **Overlay isolation**: The overlay window is input-transparent — it cannot intercept clicks or keystrokes.
+
+### 5.3 User-Controlled Privacy (replaces "sensitive screen detection")
+
+Instead of unreliable heuristic detection of sensitive screens, the user has explicit control:
+
+| Control | Description | Default |
+|---------|-------------|---------|
+| **Pause hotkey** | `Ctrl+Shift+P` — instantly stops all screen capture. Overlay shows "Paused" indicator. | Always available |
+| **Resume hotkey** | Same hotkey toggles resume. | — |
+| **App blocklist** | User can list apps where capture is never active (e.g., "1Password", "KeePass"). Checked against foreground window title. | Empty |
+| **URL blocklist** | For browser tasks: user can list URL patterns where capture pauses (e.g., `*.bank.com`, `*/login*`). Checked via browser tab title or accessibility API. | Empty |
+| **Capture indicator** | A small persistent icon (like a camera LED) shows when screen capture is active. User always knows. | On |
+
+> **Why not auto-detect?** Heuristic detection of "sensitive" screens is unreliable. A false negative (failing to detect a banking site) creates liability. A false positive (pausing during normal use) is annoying. Explicit user control is simpler, more trustworthy, and avoids both failure modes.
+
+---
+
+## 6. Prompt Design
+
+### 6.1 Structured Output via Tool Use
+
+Instead of asking the AI to return raw JSON (which is fragile and fails silently on malformed output), we use the AI provider's **structured output** mechanism:
+
+- **Anthropic:** `tool_use` — define a tool schema, AI "calls" it with validated parameters.
+- **OpenAI:** `function_calling` — same concept, different API surface.
+- **Local models:** Fall back to JSON mode with validation + retry on parse failure.
+
+This gives us **schema validation for free** — if the AI returns invalid parameters, the API itself reports an error, rather than our app crashing on malformed JSON.
+
+### 6.2 Tool Schema Definition
+
+```json
+{
+  "name": "navigate_step",
+  "description": "Provide navigation instructions for the user. Return one or more steps. Steps with checkpoint=true will wait for the user to complete the action before proceeding.",
+  "input_schema": {
+    "type": "object",
+    "required": ["steps", "state_summary", "needs_input"],
+    "properties": {
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["instruction", "checkpoint"],
+          "properties": {
+            "instruction": {
+              "type": "string",
+              "description": "The instruction shown/spoken to the user. Be specific about visual appearance and position."
+            },
+            "target_text": {
+              "type": "string",
+              "description": "Exact text label of the UI element to highlight. Used by local OCR to find the element. Null if no specific element."
+            },
+            "target_region": {
+              "type": "string",
+              "enum": ["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"],
+              "description": "Rough screen region to narrow OCR search."
+            },
+            "overlay_type": {
+              "type": "string",
+              "enum": ["arrow", "highlight", "circle", "none"],
+              "description": "Type of visual overlay to draw on the target element."
+            },
+            "clipboard": {
+              "type": "string",
+              "description": "Text to copy to clipboard (for CLI commands or text entry). Null if not applicable."
+            },
+            "checkpoint": {
+              "type": "boolean",
+              "description": "If true, wait for the user to complete this action (screen change detected) before showing the next step. If false, show the next step after a short delay."
+            }
+          }
+        }
+      },
+      "state_summary": {
+        "type": "string",
+        "description": "Compact summary of current application state for context tracking. Not shown to user."
+      },
+      "needs_input": {
+        "type": "boolean",
+        "description": "If true, the AI needs the user to answer a question or make a choice before proceeding."
+      }
+    }
+  }
+}
+```
+
+### 6.3 System Prompt (Core)
+
+```
+You are AI Navigator, a real-time guidance assistant. You observe the user's
+screen and provide step-by-step navigation instructions. You NEVER perform
+actions — the user does everything.
+
+Rules:
+1. Provide 1-4 steps per response. Group small sequential actions (click, type,
+   press Enter) into one response to reduce round-trips.
+2. Mark the last meaningful action in a sequence as checkpoint=true so the system
+   waits for the user to complete it before calling you again.
+3. Refer to UI elements by their EXACT visible text label in target_text (this is
+   used by local OCR to find the element on screen). Also describe the element's
+   visual appearance and approximate position in the instruction text.
+4. NEVER output pixel coordinates. You do not know the exact position of elements.
+5. If the screen shows the user completed the step, acknowledge and move forward.
+6. If the screen shows something unexpected, describe what you see and suggest
+   how to recover.
+7. For CLI/terminal tasks, provide the exact command in the clipboard field.
+8. Output a state_summary for internal context tracking (not shown to the user).
+9. If you need clarification, set needs_input=true and ask a short question in
+   the instruction field.
+
+Use the navigate_step tool for all responses.
+```
+
+---
+
+## 7. MVP Plan
+
+### 7.1 MVP Scope (v0.1)
+
+**Goal:** Single-platform (Windows) prototype that can guide a user through **browser-based tasks** end-to-end.
+
+**Focus decision:** The MVP targets browser tasks exclusively. Browsers have excellent accessibility API support, predictable layouts, and text-heavy UIs that work well with OCR. Complex apps like Blender have sparse accessibility trees and icon-heavy UIs — they are explicitly out of scope until v0.2+ when template matching and Nav-Packs are available.
+
+| Feature | In MVP? | Notes |
+|---------|---------|-------|
+| Event-driven screen capture | Yes | OS events + pixel-diff + idle fallback |
+| Text chat input | Yes | Simple window (PySide6) |
+| AI API call (Anthropic, tool_use) | Yes | Single provider, structured output |
+| Multi-step sequences | Yes | AI returns 1-4 steps per response |
+| Text instruction output | Yes | Displayed in chat window + subtitle |
+| Local OCR (Element Locator) | Yes | EasyOCR for overlay positioning |
+| OCR-positioned overlay arrows | Yes | Core differentiator, must be in MVP |
+| Subtitle fallback | Yes | When OCR can't find target |
+| Correction hotkey ("wrong") | Yes | Ctrl+Shift+X triggers re-analysis |
+| Screenshot dedup (pHash) | Yes | Cost control |
+| State summarization | Yes | Core to cost control |
+| Session persistence (save/resume) | Yes | JSON file, simple |
+| Clipboard commands | Yes | For CLI tasks |
+| Pause/resume capture hotkey | Yes | Privacy control |
+| TTS audio output | No | v0.2 |
+| Voice input | No | v0.2 |
+| Prompt caching | No | v0.2 |
+| OS Accessibility API integration | No | v0.2 (OCR is sufficient for browser tasks in MVP) |
+| Multi-platform | No | Windows only for MVP |
+| Local model support | No | v0.3 |
+| Cost dashboard | No | v0.2 |
+| Nav-Packs | No | v0.3 |
+
+### 7.2 MVP Milestones
+
+```
+Week 1-2:   Project scaffold + event-driven screen capture + basic chat UI
+Week 3-4:   API integration (Anthropic tool_use) + multi-step sequences
+            + state summarization + prompt engineering
+Week 5-6:   EasyOCR integration + Element Locator + overlay arrow rendering
+            + subtitle fallback
+Week 7-8:   Correction hotkey + session persistence + clipboard manager
+            + screenshot dedup + pause/resume hotkey
+Week 9-10:  End-to-end testing with browser tasks (Amazon, Google Forms,
+            TurboTax web) + bug fixes
+Week 11:    Internal demo + feedback collection
+Week 12:    v0.1 release (alpha)
+```
+
+### 7.3 MVP Tech Stack
+
+| Component | Choice | Notes |
+|-----------|--------|-------|
+| Language | Python 3.11+ | |
+| UI | PySide6 (Qt) | |
+| Screen capture | `mss` (Python, cross-platform) | |
+| Screen change detection | `mss` low-res capture at 10fps + `imagehash` pHash | |
+| Local OCR | `easyocr` | ~50MB models, runs on CPU, ~100-300ms per frame |
+| Image hashing | `imagehash` (pHash) | |
+| API client | `httpx` (async) | Using Anthropic tool_use for structured output |
+| Overlay | Qt frameless transparent window (`Qt.WindowStaysOnTopHint + Qt.FramelessWindowHint + Qt.WA_TranslucentBackground`) | |
+| Clipboard | `pyperclip` | |
+| Session storage | JSON files in `~/.ai-navigator/sessions/` | |
+| Packaging | PyInstaller → single .exe | |
+
+### 7.4 Post-MVP Roadmap
+
+```
+v0.2  TTS + voice input (shipped together) + prompt caching + cost dashboard
+      + OS Accessibility API integration (UIA on Windows)
+      + model tiering (Haiku for change detection)
+v0.3  Blender / complex-app support + template matching for icons
+      + local model support + macOS port + Nav-Packs (app-specific prompts)
+v0.4  Linux port + plugin system + enterprise features (SSO, audit logs)
+      + accessibility-focused UX pass (large text, high contrast, screen reader compat)
+v1.0  Rust/Tauri rewrite of core + installer + public launch
+```
+
+> **Note on v0.2 voice:** TTS and voice input are shipped in the same release. Users who want to talk to the navigator expect it to talk back. Shipping one without the other creates a broken interaction model.
+
+---
+
+## 8. Business Model — Cost & Pricing Framework
+
+### 8.1 Tiers
+
+| Tier | Price | AI Backend | Token Cap | Features |
+|------|-------|-----------|-----------|----------|
+| **Community** | Free | BYOK (own API key) or local model | None (user pays API directly) | Core guidance, subtitle overlay only, no session persistence, no Nav-Packs |
+| **Personal Pro** | $25–30/month | Managed (our keys) | ~5M tokens/month (~200 medium sessions) | Full overlay (arrows + highlights), session persistence + resume, TTS, voice input, basic Nav-Packs, priority support |
+| **Enterprise** | Custom | Managed + on-prem option | Custom | Custom Nav-Packs, SSO, audit logs, private deployment, dedicated support |
+
+### 8.2 Feature Gating (Community vs. Pro)
+
+To prevent the free tier from fully cannibalizing Pro subscriptions, quality-of-life features are gated:
+
+| Feature | Community (Free) | Personal Pro |
+|---------|-------------------|-------------|
+| Core guidance loop | Yes | Yes |
+| Subtitle instructions | Yes | Yes |
+| OCR overlay (arrows, highlights) | Basic (arrows only) | Full (arrows + highlights + circles) |
+| Multi-step sequences | Max 2 steps/turn | Up to 4 steps/turn |
+| Session persistence / resume | No | Yes |
+| Voice input + TTS | No | Yes |
+| Nav-Packs | No | Yes (bundled basic pack) |
+| Correction hotkey | Yes | Yes |
+| Cost dashboard | Basic | Detailed with history |
+| Support | Community forum | Email + priority |
+
+> **Principle:** The free tier must be genuinely useful (core guidance works), but Pro should feel noticeably smoother and more powerful. Users who invest time in AI Navigator should naturally want to upgrade.
+
+### 8.3 Operational Cost Per Pro User (with safety margin)
+
+| Item | Monthly Cost (early) | Monthly Cost (mature) |
+|------|---------------------|-----------------------|
+| API tokens (avg usage, 2.5x margin) | $12 – $20 | $5 – $8 |
+| Infrastructure (servers, auth, billing) | $1 – $2 | $1 – $2 |
+| **Total COGS per user** | **$13 – $22** | **$6 – $10** |
+| **Pro price** | **$25 – $30** | **$25 – $30** |
+| **Gross margin (early)** | **10% – 45%** | — |
+| **Gross margin (mature)** | — | **55% – 75%** |
+
+> **Pricing rationale:** At $12-20/month (original plan), gross margins during the early period (before optimizations mature) would be near-zero or negative for heavy users. At $25-30/month, even worst-case early users are sustainable. As optimizations improve, margins expand significantly. This also positions the product as a professional tool, not a toy.
+
+> **Usage-based fallback:** If a Pro user exceeds 5M tokens/month, offer overage at $5/1M tokens (below retail API pricing, still profitable). This protects against heavy outliers without hard-cutting their access.
+
+### 8.4 Nav-Packs (Future Revenue)
+
+"Nav-Packs" are curated prompt bundles + overlay templates for specific applications:
+- **Blender Nav-Pack**: Knows Blender's UI layout, icon library for template matching, common workflows, hotkeys.
+- **Tax Filing Nav-Pack**: Understands TurboTax / IRS forms, knows what fields mean, seasonal availability.
+- **Enterprise Nav-Pack**: Custom-built for a company's internal tools. Requires onboarding engagement.
+
+Free tier gets generic guidance. Pro gets basic Nav-Packs. Enterprise gets custom packs.
+
+Nav-Packs can also be sold individually ($5–10 one-time) for Community users who want app-specific guidance without a full Pro subscription.
+
+---
+
+## 9. Project Structure (MVP)
+
+```
+ai-navigator/
+├── README.md
+├── pyproject.toml              # Python project config (dependencies, scripts)
+├── src/
+│   ├── main.py                 # Entry point
+│   ├── config.py               # Settings, API keys, paths, hotkey bindings
+│   ├── core/
+│   │   ├── session.py          # Session lifecycle management + persistence
+│   │   ├── state.py            # State summary storage
+│   │   ├── cost_tracker.py     # Token usage tracking with safety margin
+│   │   ├── correction.py       # Correction handler (re-analysis on "wrong" signal)
+│   │   └── step_sequencer.py   # Advances through multi-step sequences locally
+│   ├── input/
+│   │   ├── screen_capture.py   # Screenshot capture (on-demand)
+│   │   ├── screen_monitor.py   # Event-driven screen change detection
+│   │   ├── voice_input.py      # (stub for v0.2)
+│   │   └── chat_input.py       # Chat text input handling
+│   ├── ai/
+│   │   ├── api_router.py       # Provider selection + request building
+│   │   ├── anthropic.py        # Anthropic API client (tool_use)
+│   │   ├── openai_client.py    # OpenAI API client (stub)
+│   │   ├── local_model.py      # Local model client (stub)
+│   │   ├── prompts.py          # System prompts
+│   │   └── tool_schemas.py     # navigate_step tool schema definition
+│   ├── locator/
+│   │   ├── element_locator.py  # Orchestrates OCR + A11y + template matching
+│   │   ├── ocr_engine.py       # EasyOCR wrapper, text → bbox mapping
+│   │   ├── a11y_engine.py      # (stub for v0.2) OS Accessibility API wrapper
+│   │   └── template_engine.py  # (stub for v0.3) Icon template matching
+│   ├── output/
+│   │   ├── overlay.py          # Screen overlay renderer (arrows, highlights, subtitles)
+│   │   ├── tts.py              # Text-to-speech (stub for v0.2)
+│   │   └── clipboard.py        # Clipboard manager
+│   └── ui/
+│       ├── main_window.py      # Main chat window (PySide6)
+│       └── floating_window.py  # Hotkey-activated floating input + correction button
+├── assets/
+│   └── icons/
+├── sessions/                   # Default session storage directory
+├── tests/
+│   ├── test_screen_capture.py
+│   ├── test_screen_monitor.py
+│   ├── test_api_router.py
+│   ├── test_element_locator.py
+│   ├── test_step_sequencer.py
+│   ├── test_state_summary.py
+│   └── test_session_persistence.py
+└── docs/
+    └── design.md               # This document
+```
+
+---
+
+## 10. Key Risks & Mitigations
+
+| # | Risk | Impact | Mitigation |
+|---|------|--------|------------|
+| 1 | **OCR fails to locate target element** | Arrow points nowhere or overlay is absent | Three-tier fallback: OCR → Accessibility API → subtitle-only. User never sees a broken arrow. |
+| 2 | **High API cost per session (early)** | Operating at a loss for heavy users | 2.5x safety margin in budget. Usage-based overage pricing. Pro priced at $25-30 to absorb variance. |
+| 3 | **Screen capture permission denied** | App is useless | Clear onboarding flow with OS-specific setup wizard. On macOS, guide user through System Preferences > Privacy > Screen Recording. |
+| 4 | **Latency (API round-trip)** | Guidance feels sluggish, user loses patience | Multi-step sequences reduce round-trips by 2-4x. Event-driven capture eliminates idle delays. Streaming API responses for perceived speed. Target < 2s for first step to appear. |
+| 5 | **Privacy backlash / trust** | Users won't install or will uninstall | Explicit user controls (pause hotkey, app blocklist, capture indicator). Local-first option. No disk persistence of screenshots. Open-source community edition. |
+| 6 | **Cross-platform overlay differences** | Buggy or inconsistent UX | Abstract overlay behind platform trait. MVP is Windows-only — invest in getting one platform right before expanding. |
+| 7 | **Multi-step sequence goes stale** | AI's step 3 is wrong because user did something unexpected at step 2 | Checkpoint system. At each checkpoint, re-capture screen and validate before advancing. If screen doesn't match expected state, discard remaining steps and call AI. |
+| 8 | **Wrong instruction with no recourse** | User frustrated, loses trust | Correction hotkey (Ctrl+Shift+X) in MVP. One press triggers re-analysis. Also available as button in floating window. |
+| 9 | **Community tier too generous** | Pro subscriptions cannibalized | Feature gating: no session persistence, no voice, no Nav-Packs, limited multi-step in free tier. Free must be useful, Pro must be noticeably better. |
+| 10 | **App crash mid-task** | User loses all progress | Session persistence saves state summary + conversation to disk. Resume costs one API call to re-sync. |
+
+---
+
+## 11. Success Metrics (MVP)
+
+| Metric | Target | How Measured |
+|--------|--------|-------------|
+| Task completion rate | > 70% of started browser tasks completed | Session logs (task_description → final state_summary) |
+| Avg. response latency | < 2s from screen change to first instruction displayed | Timestamps in session log |
+| Avg. session cost (API) | < $0.40 for a 15-turn session (with safety margin) | Token counter |
+| Element Locator accuracy | > 80% of overlay arrows point to correct element | Manual QA testing on sample tasks |
+| Screenshot dedup hit rate | > 50% (API calls avoided) | Counter in screen monitor |
+| Correction rate | < 20% of turns trigger correction hotkey | Session logs |
+| User satisfaction (survey) | > 4/5 | Post-session survey |
+| Session resume success | > 90% of resumed sessions correctly re-sync | Manual QA |
+
+---
+
+## Appendix A: Revision History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 0.1 | 2026-04-05 | Initial draft |
+| 0.2 | 2026-04-05 | Major revision addressing 13 review findings: (1) Local OCR + Element Locator as core MVP component for overlay accuracy; (2) event-driven screen capture replacing 2s polling; (3) multi-step sequences with checkpoints; (4) TTS + voice input paired in v0.2; (5) structured output via tool_use replacing raw JSON prompts; (6) user-controlled privacy replacing heuristic sensitive-screen detection; (7) 2-3x cost safety margin for early versions; (8) MVP focused on browser tasks only; (9) correction hotkey and handler; (10) session persistence and resume; (11) Pro pricing raised to $25-30/month; (12) feature gating between Community and Pro; (13) accessibility positioning as first-class use case. |
+
+---
+
+*Document end. This is a living document — update as decisions are made.*
