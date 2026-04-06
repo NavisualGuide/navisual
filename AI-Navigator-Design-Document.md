@@ -1,6 +1,6 @@
 # AI Navigator — Software Design Document
 
-**Version:** 0.2 (Revised)
+**Version:** 0.3 (Revised)
 **Date:** 2026-04-05
 **Slogan:** *The AI guides, never overrides.*
 
@@ -150,7 +150,7 @@ The AI never estimates pixel coordinates. Instead, it returns **text description
 | Strategy | How | Best for | Limitation |
 |----------|-----|----------|------------|
 | **1. OS Accessibility APIs** | Win: UI Automation (UIA); Mac: AXUIElement; Linux: AT-SPI2. Queries the app's widget tree for element name, role, and bounding box. | Browsers, Qt/GTK apps, Office apps | Not all apps expose good trees (e.g., Blender, games) |
-| **2. Local OCR** | EasyOCR or Tesseract on the screenshot. Find all text + bounding boxes. Match AI's `target_text` against OCR results. | Any app with visible text labels | Can't find icon-only buttons; slower (~100-300ms) |
+| **2. Local OCR (PaddleOCR)** | PaddleOCR on the screenshot (~50-150ms on CPU, significantly faster than EasyOCR's 200-500ms). Find all text + bounding boxes. Match AI's `target_text` against results. Runs in a **separate process** in parallel with the API call (see §2.4). | Any app with visible text labels | Can't find icon-only buttons |
 | **3. Template Matching** | OpenCV `matchTemplate` against a library of known UI icons/widgets. | Toolbar icons, non-text elements | Requires a pre-built icon library per app; fragile across themes |
 
 **Graceful degradation:**
@@ -175,28 +175,84 @@ trait AudioOutput      { fn speak(text: &str, voice: VoiceConfig); fn stop(); }
 trait AccessibilityAPI { fn find_element(name: &str, role: Option<&str>) -> Option<UIElement>; }
 ```
 
-### 2.2 Technology Choices (Recommended)
+### 2.2 Technology Choices — Production Target (v1.0)
 
 | Layer | Technology | Rationale |
 |-------|-----------|-----------|
-| **Application language** | Rust | Cross-platform, safe, fast, good FFI. Single binary distribution. |
+| **Application language** | Rust | Cross-platform, safe, fast, good FFI. Single binary distribution. No SmartScreen issues with native code. |
 | **UI framework** | Tauri v2 (Rust + web frontend) | Native shell with web UI for the chat panel. Access to system APIs via Rust backend. Small binary (~5 MB). |
 | **Frontend (chat/settings)** | Svelte or React (lightweight) | Rendered inside Tauri webview. |
 | **Overlay rendering** | Native OS APIs called from Rust | Tauri doesn't support transparent overlays well — use raw platform calls via `winit` / `raw-window-handle` or a separate lightweight overlay process. |
 | **Screen capture** | `scrap` crate (Rust) or `xcap` | Cross-platform, GPU-accelerated on Windows. |
-| **Local OCR** | EasyOCR (Python) or Tesseract via FFI | ~50MB footprint. Required from MVP for overlay positioning. |
+| **Local OCR** | PaddleOCR via FFI or Tesseract | PaddleOCR: ~50-150ms on CPU vs EasyOCR's 200-500ms. Lighter dependency than PyTorch. |
 | **Local STT** | `whisper.cpp` via FFI | Runs on CPU/GPU, no cloud dependency. |
 | **Local TTS** | `piper-rs` or system TTS | Offline capable. |
 | **AI SDK** | HTTP client (`reqwest`) | Direct REST calls to Anthropic/OpenAI. Thin wrapper, no heavy SDK dependency. Uses tool_use / function calling for structured output. |
 
-### 2.3 Alternative: Electron / Python
+### 2.3 Technology Choices — MVP (v0.1, Python)
 
-If Rust is too high a barrier for early contributors:
+The MVP is built in Python for prototyping speed. Key considerations:
 
-- **Electron + TypeScript**: Faster UI iteration, larger contributor pool, but heavier (~150 MB). Overlay support via `BrowserWindow` with `transparent: true`.
-- **Python + Qt/PySide6**: Good for prototyping, rich library ecosystem (`pyautogui`, `Pillow`), but packaging and performance are weaker. Natural fit for EasyOCR (also Python).
+- **Python + Qt/PySide6**: Rich library ecosystem, natural fit for PaddleOCR (also Python).
+- **Tauri/Rust migration at v0.3** (not v1.0) to solve the distribution/SmartScreen problem before public launch.
+- **CPU-heavy work in separate processes** to avoid GIL contention with Qt UI (see §2.4).
 
-**Recommendation:** Prototype in **Python + PySide6** for the MVP, then migrate performance-critical paths (screen capture, overlay) to Rust/Tauri for v1.0. Python is especially convenient because EasyOCR is a Python library — no FFI overhead in the MVP.
+### 2.4 Concurrency Architecture (GIL Mitigation)
+
+Python's Global Interpreter Lock (GIL) prevents true multithreading for CPU-bound work. Running 10fps pixel-diffing and OCR on the same thread as PySide6's Qt event loop will cause the UI to stutter or freeze. The solution is a **multi-process architecture**:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  MAIN PROCESS (Qt event loop)                             │
+│                                                          │
+│  • PySide6 UI rendering (chat window, overlay)           │
+│  • asyncio event loop for I/O (API calls via httpx)      │
+│  • Receives results from worker processes via Queues     │
+│  • Never does CPU-heavy work                             │
+└─────────────┬────────────────────────────────────────────┘
+              │  multiprocessing.Queue (results)
+              │
+    ┌─────────┴──────────┬───────────────────────┐
+    │                    │                       │
+┌───┴──────────┐  ┌──────┴──────────┐  ┌─────────┴────────┐
+│ Screen       │  │ OCR Worker      │  │ Diff Worker       │
+│ Capture      │  │ (Process)       │  │ (Process)         │
+│ Worker       │  │                 │  │                   │
+│ (Process)    │  │ • PaddleOCR     │  │ • 10fps low-res   │
+│              │  │   inference     │  │   pixel-diff      │
+│ • mss screen │  │ • Text → bbox   │  │ • pHash compare   │
+│   capture    │  │   mapping       │  │ • Emits "changed" │
+│ • On-demand  │  │ • ~50-150ms/    │  │   events to main  │
+│              │  │   frame (CPU)   │  │   process          │
+└──────────────┘  └─────────────────┘  └──────────────────┘
+```
+
+**Key rules:**
+1. **Main process**: Only Qt UI + asyncio I/O. No CPU work.
+2. **Diff Worker**: Runs in a separate `multiprocessing.Process`. Captures low-res thumbnails at 10fps, compares with pHash. Sends "screen changed" events to main process via `multiprocessing.Queue`.
+3. **OCR Worker**: Runs in a separate `multiprocessing.Process`. Receives full screenshots, returns text + bounding box results. Runs in **parallel with the API call** — by the time the API returns `target_text`, OCR results are already cached.
+4. **Communication**: All inter-process communication via `multiprocessing.Queue` (non-blocking on the main thread via `QTimer` polling or `asyncio` integration).
+
+```python
+# Pseudocode: OCR runs in parallel with API call
+async def guidance_turn(screenshot):
+    # Start OCR and API call concurrently
+    ocr_future = ocr_worker.submit(screenshot)     # Separate process
+    api_future = call_anthropic_api(screenshot)     # Async I/O
+
+    # API call returns target_text; OCR already has all text+bbox cached
+    api_response = await api_future          # ~1.2-2.0s
+    ocr_results = await ocr_future           # ~50-150ms (already done by now)
+
+    # Instant lookup — no waiting for OCR after API returns
+    bbox = ocr_results.find(api_response.target_text)
+    render_overlay(bbox)
+```
+
+This pattern ensures:
+- UI never freezes (GIL never blocked by CPU work)
+- OCR latency is hidden behind the API call latency
+- 10fps pixel-diff runs smoothly in its own process
 
 ---
 
@@ -225,52 +281,60 @@ The guidance loop is **event-driven**, not polling-based. API calls are triggere
           │
           ▼
  ┌──────────────────────────────────────────────────────────────┐
- │ 3. Call AI API (using tool_use / function calling)            │
- │    → Sends to Anthropic / OpenAI / local                     │
+ │ 3. In PARALLEL (see §2.4):                                   │
  │                                                              │
- │  AI responds via structured tool call (not raw JSON):        │
+ │  ┌─ API Call (async I/O) ────────────────────────────────┐   │
+ │  │ Call AI API (tool_use / function calling)              │   │
+ │  │ → Sends to Anthropic / OpenAI / local                 │   │
+ │  │                                                       │   │
+ │  │ AI responds via structured tool call:                  │   │
+ │  │                                                       │   │
+ │  │ navigate_step(                                        │   │
+ │  │   steps = [                                           │   │
+ │  │     {                                                 │   │
+ │  │       instruction: "Click the search bar...",         │   │
+ │  │       target_text: "Search Amazon",                   │   │
+ │  │       target_region: "top-center",                    │   │
+ │  │       overlay_type: "highlight",                      │   │
+ │  │       checkpoint: false                               │   │
+ │  │     },                                                │   │
+ │  │     {                                                 │   │
+ │  │       instruction: "Type 'USB-C cable'...",           │   │
+ │  │       target_text: null,                              │   │
+ │  │       clipboard: "USB-C cable",                       │   │
+ │  │       checkpoint: true                                │   │
+ │  │     }                                                 │   │
+ │  │   ],                                                  │   │
+ │  │   state_summary: "Amazon.com open. Homepage...",      │   │
+ │  │   needs_input: false                                  │   │
+ │  │ )                                                     │   │
+ │  └───────────────────────────────────────────────────────┘   │
  │                                                              │
- │  navigate_step(                                              │
- │    steps = [                                                 │
- │      {                                                       │
- │        instruction: "Click the search bar at the top center  │
- │                      of the Amazon page.",                   │
- │        target_text: "Search Amazon",                         │
- │        target_region: "top-center",                          │
- │        overlay_type: "highlight",                            │
- │        checkpoint: false                                     │
- │      },                                                      │
- │      {                                                       │
- │        instruction: "Type 'USB-C cable' and press Enter.",   │
- │        target_text: null,                                    │
- │        clipboard: "USB-C cable",                             │
- │        checkpoint: true    // ← wait for screen change here  │
- │      }                                                       │
- │    ],                                                        │
- │    state_summary: "Amazon.com open. Homepage. User wants     │
- │                    USB-C cable. No search yet.",              │
- │    needs_input: false                                        │
- │  )                                                           │
+ │  ┌─ OCR Pre-index (separate process, ~50-150ms) ─────────┐  │
+ │  │ PaddleOCR scans ENTIRE screenshot immediately.         │  │
+ │  │ Caches ALL text + bounding boxes found on screen.      │  │
+ │  │ Finishes BEFORE the API call returns.                  │  │
+ │  │ → Result: {"Search Amazon": bbox(612,42,798,68), ...}  │  │
+ │  └───────────────────────────────────────────────────────┘  │
+ │                                                              │
+ │  Both finish → instant lookup: match target_text to cached   │
+ │  OCR results. No sequential OCR wait after API response.     │
  └────────┬─────────────────────────────────────────────────────┘
           │
           ▼
- ┌──────────────────┐
- │ 4. Element Locator│ ← Find "Search Amazon" on live screen
- │    (local OCR /   │    via OCR or Accessibility API
- │     A11y API)     │    Returns exact bbox or "not found"
- └────────┬───────────┘
-          │
-          ▼
- ┌──────────────────┐
- │ 5. Render output  │
- │  • If found: draw │ ← arrow/highlight at exact position
- │    overlay at bbox │
- │  • If not found:  │ ← subtitle only: "Look for 'Search
- │    show subtitle   │    Amazon' at the top of the page"
- │  • Speak/subtitle │ ← "Click the search bar at the top"
- │  • (if CLI) copy  │
- │    to clipboard   │
- └────────┬───────────┘
+ ┌──────────────────────┐
+ │ 4. Render output      │
+ │  • Stream subtitle as │ ← User sees text at ~0.8s (via API streaming)
+ │    API response arrives│
+ │  • Once full response  │
+ │    + OCR cached:       │
+ │  • If found: draw      │ ← arrow/highlight at exact position (~1.5-2s)
+ │    overlay at bbox     │
+ │  • If not found:       │ ← subtitle only: "Look for 'Search
+ │    keep subtitle only  │    Amazon' at the top of the page"
+ │  • (if CLI) copy       │
+ │    to clipboard        │
+ └────────┬───────────────┘
           │
           ▼
  ┌──────────────────────────────────────────────────────────┐
@@ -715,16 +779,17 @@ Week 12:    v0.1 release (alpha)
 | Component | Choice | Notes |
 |-----------|--------|-------|
 | Language | Python 3.11+ | |
-| UI | PySide6 (Qt) | |
-| Screen capture | `mss` (Python, cross-platform) | |
-| Screen change detection | `mss` low-res capture at 10fps + `imagehash` pHash | |
-| Local OCR | `easyocr` | ~50MB models, runs on CPU, ~100-300ms per frame |
+| UI | PySide6 (Qt) | Main process only (see §2.4) |
+| Screen capture | `mss` (Python, cross-platform) | In capture worker process |
+| Screen change detection | `mss` low-res capture at 10fps + `imagehash` pHash | In diff worker process (bypasses GIL) |
+| Local OCR | `paddleocr` | ~50-150ms on CPU (2-3x faster than EasyOCR). In OCR worker process. |
 | Image hashing | `imagehash` (pHash) | |
-| API client | `httpx` (async) | Using Anthropic tool_use for structured output |
+| API client | `httpx` (async) | Streaming + tool_use for structured output |
+| Concurrency | `multiprocessing` (Process + Queue) | CPU work in separate processes; asyncio for I/O |
 | Overlay | Qt frameless transparent window (`Qt.WindowStaysOnTopHint + Qt.FramelessWindowHint + Qt.WA_TranslucentBackground`) | |
 | Clipboard | `pyperclip` | |
 | Session storage | JSON files in `~/.ai-navigator/sessions/` | |
-| Packaging | PyInstaller → single .exe | |
+| Packaging | `pip install ai-navigator` (PyPI) | No PyInstaller for MVP — avoids SmartScreen (see §7.5) |
 
 ### 7.4 Post-MVP Roadmap
 
@@ -732,14 +797,42 @@ Week 12:    v0.1 release (alpha)
 v0.2  TTS + voice input (shipped together) + prompt caching + cost dashboard
       + OS Accessibility API integration (UIA on Windows)
       + model tiering (Haiku for change detection)
-v0.3  Blender / complex-app support + template matching for icons
-      + local model support + macOS port + Nav-Packs (app-specific prompts)
+v0.3  Tauri/Rust rewrite of core (solves SmartScreen) + EV code signing
+      + Blender / complex-app support + template matching for icons
+      + local model support + macOS port + Nav-Packs
 v0.4  Linux port + plugin system + enterprise features (SSO, audit logs)
       + accessibility-focused UX pass (large text, high contrast, screen reader compat)
-v1.0  Rust/Tauri rewrite of core + installer + public launch
+v1.0  Public launch + MSIX packaging for Microsoft Store + native installer
 ```
 
 > **Note on v0.2 voice:** TTS and voice input are shipped in the same release. Users who want to talk to the navigator expect it to talk back. Shipping one without the other creates a broken interaction model.
+
+> **Note on Tauri migration at v0.3 (not v1.0):** The Python/PyInstaller distribution problem (§7.5) means the Tauri rewrite must happen before any broad public distribution. v0.3 is the target, giving ~6 months of Python-based development for rapid iteration before investing in the native rewrite.
+
+### 7.5 Distribution Strategy (SmartScreen Mitigation)
+
+**The Problem:** A PyInstaller `.exe` that requests global keyboard hooks, accesses the clipboard, and continuously captures the screen is indistinguishable from malware to Windows Defender SmartScreen. It will be blocked for nearly all users.
+
+**Strategy by phase:**
+
+| Phase | Distribution | Target Audience | SmartScreen Risk |
+|-------|-------------|-----------------|------------------|
+| **v0.1 alpha** | `pip install ai-navigator` (PyPI) | Developers, technical testers who have Python installed | **None** — no `.exe`, no SmartScreen |
+| **v0.2 beta** | Still PyPI. Optional: unsigned `.exe` with manual instructions for Windows Defender exceptions | Power users willing to whitelist | **Medium** — but audience accepts it |
+| **v0.3** | **Tauri native binary** + EV code signing ($400/yr) | Early adopters | **Low** — native binary + signed certificate builds reputation |
+| **v1.0** | MSIX packaging (Microsoft Store) + direct download (signed) | General public | **None** — Store apps bypass SmartScreen |
+
+**Why `pip install` for MVP:**
+- MVP alpha testers are developers/power-users who already have Python
+- Zero SmartScreen issues — there is no `.exe`
+- Fast iteration — no build/package step during development
+- EasyOCR/PaddleOCR install naturally via pip
+
+**EV Code Signing timeline:**
+- Purchase EV certificate at v0.3 launch (~$400/year)
+- Sign all Tauri binaries
+- SmartScreen reputation builds over ~1000 installs
+- By v1.0 launch, reputation is established
 
 ---
 
@@ -863,13 +956,17 @@ ai-navigator/
 | 1 | **OCR fails to locate target element** | Arrow points nowhere or overlay is absent | Three-tier fallback: OCR → Accessibility API → subtitle-only. User never sees a broken arrow. |
 | 2 | **High API cost per session (early)** | Operating at a loss for heavy users | 2.5x safety margin in budget. Usage-based overage pricing. Pro priced at $25-30 to absorb variance. |
 | 3 | **Screen capture permission denied** | App is useless | Clear onboarding flow with OS-specific setup wizard. On macOS, guide user through System Preferences > Privacy > Screen Recording. |
-| 4 | **Latency (API round-trip)** | Guidance feels sluggish, user loses patience | Multi-step sequences reduce round-trips by 2-4x. Event-driven capture eliminates idle delays. Streaming API responses for perceived speed. Target < 2s for first step to appear. |
-| 5 | **Privacy backlash / trust** | Users won't install or will uninstall | Explicit user controls (pause hotkey, app blocklist, capture indicator). Local-first option. No disk persistence of screenshots. Open-source community edition. |
+| 4 | **Latency (API round-trip + OCR)** | Guidance feels sluggish, user loses patience | Split latency target: subtitle < 1s (via streaming), overlay arrow < 2.5s. OCR runs in parallel with API call in separate process (§2.4). Multi-step sequences reduce round-trips 2-4x. |
+| 5 | **Privacy backlash / trust** | Users won't install or will uninstall | Explicit user controls (pause hotkey, app blocklist, capture indicator). Local-first option. No disk persistence of screenshots. Source-available (FSL) community edition. |
 | 6 | **Cross-platform overlay differences** | Buggy or inconsistent UX | Abstract overlay behind platform trait. MVP is Windows-only — invest in getting one platform right before expanding. |
 | 7 | **Multi-step sequence goes stale** | AI's step 3 is wrong because user did something unexpected at step 2 | Checkpoint system. At each checkpoint, re-capture screen and validate before advancing. If screen doesn't match expected state, discard remaining steps and call AI. |
 | 8 | **Wrong instruction with no recourse** | User frustrated, loses trust | Correction hotkey (Ctrl+Shift+X) in MVP. One press triggers re-analysis. Also available as button in floating window. |
 | 9 | **Community tier too generous** | Pro subscriptions cannibalized | Feature gating: no session persistence, no voice, no Nav-Packs, limited multi-step in free tier. Free must be useful, Pro must be noticeably better. |
 | 10 | **App crash mid-task** | User loses all progress | Session persistence saves state summary + conversation to disk. Resume costs one API call to re-sync. |
+| 11 | **Windows SmartScreen blocks .exe** | Users can't install the app; app appears to be malware | MVP ships as `pip install` (no .exe). Tauri native binary at v0.3. EV code signing at v0.3. MSIX/Microsoft Store at v1.0. See §7.5. |
+| 12 | **Python GIL causes UI stutter** | Chat window freezes during OCR/screen-diff; app feels broken | Multi-process architecture (§2.4): CPU work in `multiprocessing.Process`, Qt event loop stays on main process. Zero CPU-heavy work on main thread. |
+| 13 | **Code cloned without commercial rights** | Competitor ships a clone; no legal recourse | FSL (Functional Source License) — source-available with 2-year non-compete. Converts to MIT/Apache after 2 years. See §12. |
+| 14 | **OCR dependency too large** | App download/install size balloons to 2GB+ with PyTorch/CUDA | Use PaddleOCR (CPU-only, ~100MB) instead of EasyOCR (PyTorch, 500MB+). No CUDA dependency for MVP. |
 
 ---
 
@@ -878,13 +975,64 @@ ai-navigator/
 | Metric | Target | How Measured |
 |--------|--------|-------------|
 | Task completion rate | > 70% of started browser tasks completed | Session logs (task_description → final state_summary) |
-| Avg. response latency | < 2s from screen change to first instruction displayed | Timestamps in session log |
+| **Subtitle latency** | **< 1s** from screen change to subtitle text appearing (via API streaming) | Timestamps in session log |
+| **Overlay arrow latency** | **< 2.5s** from screen change to overlay arrow rendered at correct position | Timestamps in session log |
 | Avg. session cost (API) | < $0.40 for a 15-turn session (with safety margin) | Token counter |
 | Element Locator accuracy | > 80% of overlay arrows point to correct element | Manual QA testing on sample tasks |
+| OCR processing time | < 150ms per frame (PaddleOCR on CPU) | Performance profiling |
 | Screenshot dedup hit rate | > 50% (API calls avoided) | Counter in screen monitor |
 | Correction rate | < 20% of turns trigger correction hotkey | Session logs |
 | User satisfaction (survey) | > 4/5 | Post-session survey |
 | Session resume success | > 90% of resumed sessions correctly re-sync | Manual QA |
+| UI responsiveness | No Qt event loop stalls > 50ms | Performance profiling (main process) |
+
+---
+
+## 12. Licensing Strategy
+
+### 12.1 The Problem
+
+Shipping code on a public GitHub repository without a license means "all rights reserved" (no one can legally use it), but enforcement is impractical. Conversely, using MIT/Apache allows anyone — including well-funded competitors — to clone the product and sell it.
+
+For a solo developer building a commercial product with an open development model, neither extreme works.
+
+### 12.2 Recommended License: FSL (Functional Source License)
+
+**FSL** is a source-available license designed for exactly this situation. Used by HashiCorp, Sentry, and others.
+
+| Aspect | FSL Terms |
+|--------|-----------|
+| **Source code** | Public and readable on GitHub |
+| **Non-competing use** | Anyone can use, modify, and deploy for any purpose that does not compete with AI Navigator |
+| **Competing use** | Prohibited during the non-compete period |
+| **Non-compete period** | 2 years from each version's release date |
+| **After 2 years** | Each version automatically converts to MIT or Apache 2.0 (your choice) |
+| **Contributor license** | Contributors grant you a license to use their contributions commercially |
+
+### 12.3 How This Maps to Business Tiers
+
+| Tier | License Implication |
+|------|---------------------|
+| **Community (Free)** | Users run the FSL-licensed code with their own API keys. They can modify it for personal/non-competing use. |
+| **Personal Pro** | Proprietary service layer on top of FSL code (managed API keys, Nav-Packs, priority features). |
+| **Enterprise** | Separate commercial license agreement. May include on-prem deployment rights, custom Nav-Packs, and SLA. |
+
+### 12.4 What Counts as "Competing"
+
+The FSL requires you to define what "competing" means. For AI Navigator:
+
+> **Competing use** means offering a product or service that provides AI-powered screen guidance, navigation instructions, or overlay-based user assistance as a primary function — substantially similar to AI Navigator.
+
+> **Non-competing use** includes: using AI Navigator internally at a company, integrating AI Navigator into a product where screen guidance is not the primary function, academic research, personal use, and contributing to the AI Navigator project.
+
+### 12.5 Action Items
+
+1. **Before any more public code:** Add `LICENSE.md` to the repository with the FSL text.
+2. **Add a `CONTRIBUTING.md`** with a Contributor License Agreement (CLA) or Developer Certificate of Origin (DCO).
+3. **Add license header** to all source files.
+4. **Choose the conversion license:** MIT (simpler, more permissive) or Apache 2.0 (includes patent grant). Recommend **Apache 2.0** for the patent protection.
+
+> **Reference:** https://fsl.software/ — official FSL website with full license text and FAQ.
 
 ---
 
@@ -894,6 +1042,7 @@ ai-navigator/
 |---------|------|---------|
 | 0.1 | 2026-04-05 | Initial draft |
 | 0.2 | 2026-04-05 | Major revision addressing 13 review findings: (1) Local OCR + Element Locator as core MVP component for overlay accuracy; (2) event-driven screen capture replacing 2s polling; (3) multi-step sequences with checkpoints; (4) TTS + voice input paired in v0.2; (5) structured output via tool_use replacing raw JSON prompts; (6) user-controlled privacy replacing heuristic sensitive-screen detection; (7) 2-3x cost safety margin for early versions; (8) MVP focused on browser tasks only; (9) correction hotkey and handler; (10) session persistence and resume; (11) Pro pricing raised to $25-30/month; (12) feature gating between Community and Pro; (13) accessibility positioning as first-class use case. |
+| 0.3 | 2026-04-05 | Engineering feasibility fixes: (1) Replaced PyInstaller with `pip install` for MVP, added SmartScreen mitigation strategy and distribution roadmap (§7.5); (2) Replaced EasyOCR with PaddleOCR (~50-150ms vs 200-500ms), added parallel OCR+API execution, split latency metric into subtitle < 1s / overlay < 2.5s; (3) Added multi-process architecture (§2.4) to mitigate Python GIL — CPU work in separate processes, Qt event loop stays responsive; (4) Added FSL licensing strategy (§12) with non-compete clause, CLA guidance, and tier mapping. Also: moved Tauri rewrite from v1.0 to v0.3. |
 
 ---
 

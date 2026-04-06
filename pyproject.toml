@@ -8,7 +8,7 @@ version = "0.1.0-alpha"
 description = "AI guidance system for desktop tasks. Observes screen, provides navigation instructions via audio and overlays."
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = {text = "FSL-1.1-Apache-2.0"}
 authors = [
     {name = "stevefu-ops", email = "stevefu-ops@github.com"}
 ]
@@ -16,7 +16,7 @@ keywords = ["ai", "navigation", "guidance", "screen-reader", "accessibility"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3.11",
     "Topic :: Desktop Environment",
@@ -26,7 +26,8 @@ dependencies = [
     "pyside6>=6.6.0",           # UI framework
     "mss>=9.0.0",               # Screen capture
     "imagehash>=4.3.0",         # pHash for screenshot dedup
-    "easyocr>=1.7.0",           # Local OCR for element locator
+    "paddleocr>=2.7.0",         # Local OCR (faster than EasyOCR, lighter than PyTorch)
+    "paddlepaddle>=2.5.0",      # PaddleOCR backend (CPU-only, no CUDA needed)
     "httpx>=0.25.0",            # Async HTTP client
     "pydantic>=2.0.0",          # Data validation
     "python-dotenv>=1.0.0",     # Environment config

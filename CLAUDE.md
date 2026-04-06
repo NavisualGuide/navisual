@@ -2,6 +2,7 @@
 
 **Version:** 0.1.0-alpha
 **Status:** Scaffolding complete. MVP implementation starting.
+**License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
 **Design Doc:** [AI-Navigator-Design-Document.md](AI-Navigator-Design-Document.md)
 **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
 
@@ -41,7 +42,7 @@
 │                                                         │
 │ Strategies (in priority):                               │
 │ 1. OS Accessibility APIs (UIA/AX/AT-SPI2) - fastest    │
-│ 2. Local OCR (EasyOCR) - fallback, works on any app    │
+│ 2. Local OCR (PaddleOCR) - fallback, works on any app    │
 │ 3. Template matching (icons) - v0.3                    │
 │                                                         │
 │ Output: exact bbox or "not found" → graceful fallback  │
@@ -73,7 +74,7 @@
 | OpenAI Client | `ai/openai_client.py` | OpenAI API (function_calling) | STUB |
 | Tool Schemas | `ai/tool_schemas.py` | navigate_step tool definition | TODO |
 | Element Locator | `locator/element_locator.py` | Orchestrates OCR + A11y + templates | TODO |
-| OCR Engine | `locator/ocr_engine.py` | EasyOCR wrapper, text → bbox | TODO |
+| OCR Engine | `locator/ocr_engine.py` | PaddleOCR wrapper, text → bbox | TODO |
 | A11y Engine | `locator/a11y_engine.py` | Stub for v0.2 (UIA on Windows) | STUB |
 | Overlay Renderer | `output/overlay.py` | Qt frameless window for overlays | TODO |
 | Clipboard Manager | `output/clipboard.py` | System clipboard access | TODO |
@@ -219,7 +220,7 @@ if __name__ == "__main__":
 ```
 Week 1-2:  Screen capture + event detection + basic chat UI
 Week 3-4:  Anthropic API + tool_use + state summarization
-Week 5-6:  EasyOCR integration + Element Locator + overlay rendering
+Week 5-6:  PaddleOCR integration + Element Locator + overlay rendering
 Week 7-8:  Correction hotkey + session persistence + clipboard
 Week 9-10: End-to-end testing (browser tasks)
 Week 11:   Internal demo + feedback
@@ -234,7 +235,7 @@ Week 12:   v0.1 alpha release
 | Text chat input | ✓ | PySide6 window |
 | Anthropic API (tool_use) | ✓ | Structured output |
 | Multi-step sequences | ✓ | 1-4 steps per response, checkpoints |
-| Local OCR (Element Locator) | ✓ | EasyOCR for overlay positioning |
+| Local OCR (Element Locator) | ✓ | PaddleOCR for overlay positioning |
 | Overlay arrows | ✓ | Based on OCR-found positions |
 | Correction hotkey | ✓ | Ctrl+Shift+X → re-analysis |
 | Session persistence | ✓ | Save/resume sessions |
@@ -247,9 +248,10 @@ Week 12:   v0.1 alpha release
 
 ```
 v0.2  TTS + voice input (paired) + prompt caching + Accessibility API (UIA)
-v0.3  Blender/complex apps + template matching + local model support + macOS
-v0.4  Linux + Nav-Packs + accessibility UX pass + plugin system
-v1.0  Rust/Tauri rewrite + public launch
+v0.3  Tauri/Rust rewrite (SmartScreen fix) + EV code signing + Blender support
+      + template matching + local model support + macOS + Nav-Packs
+v0.4  Linux + plugin system + accessibility UX pass + enterprise features
+v1.0  MSIX packaging (Microsoft Store) + native installer + public launch
 ```
 
 ---
@@ -419,6 +421,38 @@ Longer explanation (wrap at 80 chars):
 
 **Benefit:** Can ship v0.1 in 12 weeks, learn from real users, then expand.
 
+### 7. Multi-Process Architecture (GIL Mitigation)
+
+**Why:** Python's GIL prevents true multithreading for CPU work. Running 10fps pixel-diff + OCR on the same thread as Qt freezes the UI.
+
+**Decision:** CPU-heavy work (OCR, pHash, screen diff) runs in separate `multiprocessing.Process` workers. Main process only handles Qt UI + asyncio I/O. Communication via `multiprocessing.Queue`.
+
+**Benefit:** UI never stalls. OCR runs in parallel with API calls — by the time the API returns `target_text`, OCR results are already cached.
+
+### 8. PaddleOCR over EasyOCR
+
+**Why:** EasyOCR depends on PyTorch (~500MB+, 2GB+ with CUDA). CPU inference is 200-500ms.
+
+**Decision:** Use PaddleOCR — ~50-150ms on CPU, ~100MB dependency, no CUDA needed.
+
+**Benefit:** 2-3x faster OCR, 5x smaller dependency footprint.
+
+### 9. pip install for MVP (No PyInstaller)
+
+**Why:** A PyInstaller `.exe` doing screen capture + hotkeys + clipboard = SmartScreen blocks it as malware.
+
+**Decision:** MVP ships as `pip install ai-navigator`. Tauri native binary at v0.3 with EV code signing.
+
+**Benefit:** Zero SmartScreen issues. MVP testers are developers who have Python.
+
+### 10. FSL License (Functional Source License)
+
+**Why:** MIT is too permissive (competitors clone freely). GPL prevents closed-source Pro tier. No license = ambiguous rights.
+
+**Decision:** FSL-1.1-Apache-2.0. Source-available, 2-year non-compete, converts to Apache 2.0.
+
+**Benefit:** Code is public (trust, transparency), but commercial rights protected during growth phase.
+
 ---
 
 ## Links & References
@@ -426,7 +460,7 @@ Longer explanation (wrap at 80 chars):
 - **Design Document:** [AI-Navigator-Design-Document.md](AI-Navigator-Design-Document.md) (§1–11 detailed specs)
 - **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
 - **Anthropic API:** https://docs.anthropic.com (tool_use, vision, caching)
-- **EasyOCR:** https://github.com/JaidedAI/EasyOCR
+- **PaddleOCR:** https://github.com/PaddlePaddle/PaddleOCR
 - **PySide6:** https://doc.qt.io/qtforpython-6/
 - **Prompt Caching:** https://docs.anthropic.com/en/docs/build-a-system-with-claude/architecture (cost control)
 

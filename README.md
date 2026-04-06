@@ -177,7 +177,7 @@ This is an early-stage project. Contributions welcome!
 
 ## License
 
-MIT License — see LICENSE file.
+FSL-1.1-Apache-2.0 (Functional Source License) — see LICENSE file. Source-available with a 2-year non-compete clause. Each version converts to Apache 2.0 two years after release.
 
 ## Design & Research
 
@@ -196,11 +196,11 @@ For developers and contributors, read [CLAUDE.md](CLAUDE.md) for a project guide
 ## Roadmap
 
 ```
-v0.1 (week 12)  MVP: browser tasks, Windows, text/overlay guidance
+v0.1 (week 12)  MVP: browser tasks, Windows, text/overlay guidance (pip install)
 v0.2 (month 5)  TTS + voice input, prompt caching, accessibility APIs
-v0.3 (month 8)  Complex apps (Blender), local models, macOS, Nav-Packs
+v0.3 (month 8)  Tauri/Rust rewrite, complex apps (Blender), macOS, Nav-Packs
 v0.4 (month 10) Linux, plugin system, accessibility UX pass
-v1.0 (month 12) Rust/Tauri rewrite, public launch
+v1.0 (month 12) MSIX packaging, native installer, public launch
 ```
 
 ## Questions?
