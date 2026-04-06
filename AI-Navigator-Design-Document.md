@@ -1,6 +1,6 @@
 # AI Navigator — Software Design Document
 
-**Version:** 0.3 (Revised)
+**Version:** 0.4 (Revised)
 **Date:** 2026-04-05
 **Slogan:** *The AI guides, never overrides.*
 
@@ -118,48 +118,68 @@ AI Navigator is a cross-platform desktop application that acts as a real-time, A
 | **Clipboard Manager** | For CLI/text-editor tasks: places generated commands/text into the system clipboard and notifies the user | Native clipboard APIs |
 | **Chat Window (output)** | Shows conversation history, choices, and clarification prompts | Same widget as input |
 
-#### Local OCR & Element Locator (NEW — critical component)
+#### Element Locator (critical component)
 
 The AI never estimates pixel coordinates. Instead, it returns **text descriptions** of UI elements. The Element Locator finds exact screen positions locally.
 
 ```
-┌─────────────────┐         ┌──────────────────────────┐
-│   AI (cloud)     │         │   Element Locator        │
-│                  │         │   (runs locally)         │
-│  INPUT:          │         │                          │
-│  - screenshot    │         │  INPUT:                  │
-│  - context       │         │  - target_text from AI   │
-│                  │         │  - region_hint from AI   │
-│  OUTPUT:         │         │  - live screenshot       │
-│  - text: "Click  │────────▶│                          │
-│    the Modeling  │         │  STRATEGY (in priority): │
-│    tab at the    │         │  1. OS Accessibility API  │
-│    top of the    │         │     (UIA / AX / AT-SPI2) │
-│    screen"       │         │  2. Local OCR (EasyOCR)  │
-│                  │         │  3. Template matching     │
-│  (NO pixel       │         │                          │
-│   coordinates)   │         │  OUTPUT:                 │
-│                  │         │  - exact bbox on screen  │
-│                  │         │  - confidence score      │
-│                  │         │  - OR: "not found"       │
-└─────────────────┘         └──────────────────────────┘
+┌─────────────────┐         ┌──────────────────────────────────────┐
+│   AI (cloud)     │         │   Element Locator (runs locally)     │
+│                  │         │                                      │
+│  INPUT:          │         │  INPUT:                              │
+│  - screenshot    │         │  - target_text from AI               │
+│  - context       │         │  - target_role (optional: "button",  │
+│                  │         │    "tab", "link", "textbox")         │
+│  OUTPUT:         │         │  - region_hint from AI               │
+│  - text: "Click  │         │                                      │
+│    the Modeling  │────────▶│  STRATEGY (in priority):             │
+│    tab at the    │         │                                      │
+│    top of the    │         │  ┌─ 1. Accessibility API (< 5ms) ──┐│
+│    screen"       │         │  │ UIA / AX / AT-SPI2              ││
+│                  │         │  │ Query widget tree by name+role   ││
+│  - target_role:  │         │  │ → Returns exact bbox instantly   ││
+│    "tab"         │         │  └──────────────┬───────────────────┘│
+│                  │         │        found? ──┤                    │
+│  (NO pixel       │         │     yes ↓       │ no ↓               │
+│   coordinates)   │         │   USE BBOX   ┌──┴──────────────────┐│
+│                  │         │              │ 2. OCR fallback      ││
+│                  │         │              │    (50-150ms)        ││
+│                  │         │              │ PaddleOCR on screen  ││
+│                  │         │              │ Match target_text    ││
+│                  │         │              └──────────┬───────────┘│
+│                  │         │              found? ────┤            │
+│                  │         │           yes ↓         │ no ↓       │
+│                  │         │         USE BBOX    SUBTITLE ONLY   │
+└─────────────────┘         └──────────────────────────────────────┘
 ```
 
-**Three detection strategies, in priority order:**
+**Detection strategies, in strict priority order:**
 
-| Strategy | How | Best for | Limitation |
-|----------|-----|----------|------------|
-| **1. OS Accessibility APIs** | Win: UI Automation (UIA); Mac: AXUIElement; Linux: AT-SPI2. Queries the app's widget tree for element name, role, and bounding box. | Browsers, Qt/GTK apps, Office apps | Not all apps expose good trees (e.g., Blender, games) |
-| **2. Local OCR (PaddleOCR)** | PaddleOCR on the screenshot (~50-150ms on CPU, significantly faster than EasyOCR's 200-500ms). Find all text + bounding boxes. Match AI's `target_text` against results. Runs in a **separate process** in parallel with the API call (see §2.4). | Any app with visible text labels | Can't find icon-only buttons |
-| **3. Template Matching** | OpenCV `matchTemplate` against a library of known UI icons/widgets. | Toolbar icons, non-text elements | Requires a pre-built icon library per app; fragile across themes |
+| Priority | Strategy | Latency | How | Best for | Limitation |
+|----------|----------|---------|-----|----------|------------|
+| **1 (primary)** | **OS Accessibility API** | **< 5ms** | Win: UI Automation (UIA) via `uiautomation` or `comtypes`. Queries the foreground app's widget tree for element name, role, and bounding box. | Browsers (excellent trees), Qt/GTK apps, Office apps | Not all apps expose good trees (Blender, games, Electron with poor a11y) |
+| **2 (fallback)** | **Local OCR (PaddleOCR)** | 50–150ms | PaddleOCR on the screenshot. Find all text + bounding boxes. Match AI's `target_text` against results. Runs in a **separate process** (see §2.4). | Any app with visible text labels, when A11y tree is unavailable or sparse | Can't find icon-only buttons |
+| **3 (future, v0.3)** | **Template Matching** | ~50ms | OpenCV `matchTemplate` against a library of known UI icons/widgets. | Toolbar icons, non-text elements | Requires pre-built icon library per app; fragile across themes |
+
+**Why Accessibility API is primary for MVP:**
+- The MVP targets **browser tasks only**. Chrome, Firefox, and Edge expose some of the richest accessibility trees of any application class.
+- UIA returns element name, role (`button`, `tab`, `link`, `textbox`), bounding box, and state (`enabled`, `focused`) — all in **< 5ms**.
+- This eliminates the entire OCR latency budget from the critical path for browser tasks.
+- The AI can also return `target_role` (e.g., "tab", "button") which makes the UIA query more precise.
+
+**When does OCR kick in?**
+- The A11y tree returns no match (element name doesn't match `target_text`)
+- The A11y tree is empty or unavailable (e.g., app doesn't support UIA)
+- The matched A11y element has no bounding box (rare, but possible)
+- OCR runs in a separate process in parallel with the API call (§2.4), so when A11y fails, OCR results are already cached — no additional wait.
 
 **Graceful degradation:**
-- If the Element Locator finds the target with high confidence → draw overlay arrow at exact position.
-- If confidence is low → draw a highlighted region (wider area) with a text label.
-- If not found at all → show subtitle-only instruction: *"I can't pinpoint the button — look for 'Modeling' near the top of the Blender window."*
+- A11y finds the target (< 5ms) → draw overlay arrow at exact position. **This is the normal path for browser tasks.**
+- A11y fails, OCR finds the target (already cached) → draw overlay arrow at OCR position.
+- Both fail → show subtitle-only instruction: *"I can't pinpoint the button — look for 'Modeling' near the top of the Blender window."*
 - The user never sees an arrow pointing at empty space.
 
-**This handles window movement gracefully:** OCR runs against the *current* screen at overlay render time, not the screenshot the AI analyzed. If the user moved the window, OCR still finds the target at its new position.
+**Window movement is handled naturally:** Both UIA and OCR query the *current* state — UIA queries the live widget tree (positions update instantly when windows move), OCR scans the live screenshot. Neither depends on the screenshot the AI analyzed.
 
 #### Platform Layer
 
@@ -234,24 +254,37 @@ Python's Global Interpreter Lock (GIL) prevents true multithreading for CPU-boun
 4. **Communication**: All inter-process communication via `multiprocessing.Queue` (non-blocking on the main thread via `QTimer` polling or `asyncio` integration).
 
 ```python
-# Pseudocode: OCR runs in parallel with API call
+# Pseudocode: A11y is instant; OCR pre-caches in parallel as fallback
 async def guidance_turn(screenshot):
-    # Start OCR and API call concurrently
-    ocr_future = ocr_worker.submit(screenshot)     # Separate process
-    api_future = call_anthropic_api(screenshot)     # Async I/O
+    # Start OCR pre-indexing and API call concurrently
+    ocr_future = ocr_worker.submit(screenshot)     # Separate process, ~50-150ms
+    api_future = call_anthropic_api(screenshot)     # Async I/O, ~1.2-2.0s
 
-    # API call returns target_text; OCR already has all text+bbox cached
-    api_response = await api_future          # ~1.2-2.0s
-    ocr_results = await ocr_future           # ~50-150ms (already done by now)
+    # API returns target_text + target_role
+    api_response = await api_future
 
-    # Instant lookup — no waiting for OCR after API returns
-    bbox = ocr_results.find(api_response.target_text)
-    render_overlay(bbox)
+    # Step 1: Try Accessibility API FIRST (< 5ms, on main process — it's I/O, not CPU)
+    bbox = a11y_engine.find(
+        name=api_response.target_text,
+        role=api_response.target_role   # e.g., "button", "tab"
+    )
+
+    # Step 2: If A11y failed, use pre-cached OCR results (already done by now)
+    if bbox is None:
+        ocr_results = await ocr_future  # Already finished during API wait
+        bbox = ocr_results.find(api_response.target_text)
+
+    # Step 3: Render overlay or fall back to subtitle
+    if bbox:
+        render_overlay(bbox)
+    else:
+        render_subtitle(api_response.instruction)
 ```
 
 This pattern ensures:
-- UI never freezes (GIL never blocked by CPU work)
-- OCR latency is hidden behind the API call latency
+- **Browser tasks (MVP)**: A11y finds the element in < 5ms after API returns. OCR never needed.
+- **Complex apps (v0.3+)**: If A11y tree is sparse, OCR results are already cached from the parallel pre-index.
+- UI never freezes (GIL never blocked by CPU work — A11y queries are I/O, not CPU)
 - 10fps pixel-diff runs smoothly in its own process
 
 ---
@@ -322,19 +355,24 @@ The guidance loop is **event-driven**, not polling-based. API calls are triggere
  └────────┬─────────────────────────────────────────────────────┘
           │
           ▼
- ┌──────────────────────┐
- │ 4. Render output      │
- │  • Stream subtitle as │ ← User sees text at ~0.8s (via API streaming)
- │    API response arrives│
- │  • Once full response  │
- │    + OCR cached:       │
- │  • If found: draw      │ ← arrow/highlight at exact position (~1.5-2s)
- │    overlay at bbox     │
- │  • If not found:       │ ← subtitle only: "Look for 'Search
- │    keep subtitle only  │    Amazon' at the top of the page"
- │  • (if CLI) copy       │
- │    to clipboard        │
- └────────┬───────────────┘
+ ┌──────────────────────────────────────────────────────────────┐
+ │ 4. Locate element + Render output                            │
+ │                                                              │
+ │  • Stream subtitle as API response arrives                   │
+ │    → User sees text at ~0.8s (via API streaming)             │
+ │                                                              │
+ │  • Once full response received:                              │
+ │    a) Try Accessibility API (< 5ms, instant for browsers)    │
+ │       → Found? Draw overlay arrow at exact bbox              │
+ │    b) A11y miss? Use pre-cached OCR results (already done)   │
+ │       → Found? Draw overlay arrow at OCR bbox                │
+ │    c) Both miss? Keep subtitle only:                         │
+ │       "Look for 'Search Amazon' at the top of the page"      │
+ │                                                              │
+ │  • Overlay arrow appears at ~1.5-2s (API is the bottleneck,  │
+ │    not the element locator)                                  │
+ │  • (if CLI) copy to clipboard                                │
+ └────────┬─────────────────────────────────────────────────────┘
           │
           ▼
  ┌──────────────────────────────────────────────────────────┐
@@ -660,7 +698,12 @@ This gives us **schema validation for free** — if the AI returns invalid param
             },
             "target_text": {
               "type": "string",
-              "description": "Exact text label of the UI element to highlight. Used by local OCR to find the element. Null if no specific element."
+              "description": "Exact text label of the UI element to highlight. Used by Accessibility API and OCR to find the element. Null if no specific element."
+            },
+            "target_role": {
+              "type": "string",
+              "enum": ["button", "tab", "link", "textbox", "menuitem", "checkbox", "radio", "combobox", "slider", "image", "heading", "other"],
+              "description": "The UI role/type of the target element. Used to narrow Accessibility API queries. Improves match accuracy."
             },
             "target_region": {
               "type": "string",
@@ -708,9 +751,10 @@ Rules:
    press Enter) into one response to reduce round-trips.
 2. Mark the last meaningful action in a sequence as checkpoint=true so the system
    waits for the user to complete it before calling you again.
-3. Refer to UI elements by their EXACT visible text label in target_text (this is
-   used by local OCR to find the element on screen). Also describe the element's
-   visual appearance and approximate position in the instruction text.
+3. Refer to UI elements by their EXACT visible text label in target_text and their
+   UI role in target_role (e.g., "button", "tab", "link"). These are used by the
+   Accessibility API and OCR to find the element on screen. Also describe the
+   element's visual appearance and approximate position in the instruction text.
 4. NEVER output pixel coordinates. You do not know the exact position of elements.
 5. If the screen shows the user completed the step, acknowledge and move forward.
 6. If the screen shows something unexpected, describe what you see and suggest
@@ -740,9 +784,10 @@ Use the navigate_step tool for all responses.
 | AI API call (Anthropic, tool_use) | Yes | Single provider, structured output |
 | Multi-step sequences | Yes | AI returns 1-4 steps per response |
 | Text instruction output | Yes | Displayed in chat window + subtitle |
-| Local OCR (Element Locator) | Yes | EasyOCR for overlay positioning |
-| OCR-positioned overlay arrows | Yes | Core differentiator, must be in MVP |
-| Subtitle fallback | Yes | When OCR can't find target |
+| OS Accessibility API (UIA) | Yes | **Primary** element locator for browser tasks (< 5ms) |
+| Local OCR fallback (PaddleOCR) | Yes | Fallback when A11y tree unavailable or no match |
+| Overlay arrows (A11y/OCR-positioned) | Yes | Core differentiator, must be in MVP |
+| Subtitle fallback | Yes | When both A11y and OCR fail to find target |
 | Correction hotkey ("wrong") | Yes | Ctrl+Shift+X triggers re-analysis |
 | Screenshot dedup (pHash) | Yes | Cost control |
 | State summarization | Yes | Core to cost control |
@@ -752,7 +797,7 @@ Use the navigate_step tool for all responses.
 | TTS audio output | No | v0.2 |
 | Voice input | No | v0.2 |
 | Prompt caching | No | v0.2 |
-| OS Accessibility API integration | No | v0.2 (OCR is sufficient for browser tasks in MVP) |
+| Template matching (icons) | No | v0.3 (for non-text UI elements in complex apps) |
 | Multi-platform | No | Windows only for MVP |
 | Local model support | No | v0.3 |
 | Cost dashboard | No | v0.2 |
@@ -764,8 +809,8 @@ Use the navigate_step tool for all responses.
 Week 1-2:   Project scaffold + event-driven screen capture + basic chat UI
 Week 3-4:   API integration (Anthropic tool_use) + multi-step sequences
             + state summarization + prompt engineering
-Week 5-6:   EasyOCR integration + Element Locator + overlay arrow rendering
-            + subtitle fallback
+Week 5-6:   UIA integration (primary) + PaddleOCR fallback + Element Locator
+            + overlay arrow rendering + subtitle fallback
 Week 7-8:   Correction hotkey + session persistence + clipboard manager
             + screenshot dedup + pause/resume hotkey
 Week 9-10:  End-to-end testing with browser tasks (Amazon, Google Forms,
@@ -782,7 +827,8 @@ Week 12:    v0.1 release (alpha)
 | UI | PySide6 (Qt) | Main process only (see §2.4) |
 | Screen capture | `mss` (Python, cross-platform) | In capture worker process |
 | Screen change detection | `mss` low-res capture at 10fps + `imagehash` pHash | In diff worker process (bypasses GIL) |
-| Local OCR | `paddleocr` | ~50-150ms on CPU (2-3x faster than EasyOCR). In OCR worker process. |
+| Accessibility API | `uiautomation` (Windows UIA wrapper) | **Primary** element locator. < 5ms. No extra dependency on Windows. |
+| Local OCR (fallback) | `paddleocr` | Fallback when A11y fails. ~50-150ms on CPU. In OCR worker process. |
 | Image hashing | `imagehash` (pHash) | |
 | API client | `httpx` (async) | Streaming + tool_use for structured output |
 | Concurrency | `multiprocessing` (Process + Queue) | CPU work in separate processes; asyncio for I/O |
@@ -795,7 +841,6 @@ Week 12:    v0.1 release (alpha)
 
 ```
 v0.2  TTS + voice input (shipped together) + prompt caching + cost dashboard
-      + OS Accessibility API integration (UIA on Windows)
       + model tiering (Haiku for change detection)
 v0.3  Tauri/Rust rewrite of core (solves SmartScreen) + EV code signing
       + Blender / complex-app support + template matching for icons
@@ -921,9 +966,9 @@ ai-navigator/
 │   │   ├── prompts.py          # System prompts
 │   │   └── tool_schemas.py     # navigate_step tool schema definition
 │   ├── locator/
-│   │   ├── element_locator.py  # Orchestrates OCR + A11y + template matching
-│   │   ├── ocr_engine.py       # EasyOCR wrapper, text → bbox mapping
-│   │   ├── a11y_engine.py      # (stub for v0.2) OS Accessibility API wrapper
+│   │   ├── element_locator.py  # Orchestrates A11y → OCR → template fallback chain
+│   │   ├── a11y_engine.py      # PRIMARY: OS Accessibility API (UIA on Windows, < 5ms)
+│   │   ├── ocr_engine.py       # FALLBACK: PaddleOCR wrapper, text → bbox mapping
 │   │   └── template_engine.py  # (stub for v0.3) Icon template matching
 │   ├── output/
 │   │   ├── overlay.py          # Screen overlay renderer (arrows, highlights, subtitles)
@@ -953,10 +998,10 @@ ai-navigator/
 
 | # | Risk | Impact | Mitigation |
 |---|------|--------|------------|
-| 1 | **OCR fails to locate target element** | Arrow points nowhere or overlay is absent | Three-tier fallback: OCR → Accessibility API → subtitle-only. User never sees a broken arrow. |
+| 1 | **Element locator fails to find target** | Arrow points nowhere or overlay is absent | Three-tier fallback: Accessibility API (< 5ms, primary) → OCR (50-150ms, fallback) → subtitle-only. User never sees a broken arrow. |
 | 2 | **High API cost per session (early)** | Operating at a loss for heavy users | 2.5x safety margin in budget. Usage-based overage pricing. Pro priced at $25-30 to absorb variance. |
 | 3 | **Screen capture permission denied** | App is useless | Clear onboarding flow with OS-specific setup wizard. On macOS, guide user through System Preferences > Privacy > Screen Recording. |
-| 4 | **Latency (API round-trip + OCR)** | Guidance feels sluggish, user loses patience | Split latency target: subtitle < 1s (via streaming), overlay arrow < 2.5s. OCR runs in parallel with API call in separate process (§2.4). Multi-step sequences reduce round-trips 2-4x. |
+| 4 | **Latency (API round-trip)** | Guidance feels sluggish, user loses patience | Split latency target: subtitle < 1s (via streaming), overlay arrow < 2s. UIA locates elements in < 5ms (no OCR wait on critical path for browser tasks). OCR fallback runs in parallel with API call. Multi-step sequences reduce round-trips 2-4x. |
 | 5 | **Privacy backlash / trust** | Users won't install or will uninstall | Explicit user controls (pause hotkey, app blocklist, capture indicator). Local-first option. No disk persistence of screenshots. Source-available (FSL) community edition. |
 | 6 | **Cross-platform overlay differences** | Buggy or inconsistent UX | Abstract overlay behind platform trait. MVP is Windows-only — invest in getting one platform right before expanding. |
 | 7 | **Multi-step sequence goes stale** | AI's step 3 is wrong because user did something unexpected at step 2 | Checkpoint system. At each checkpoint, re-capture screen and validate before advancing. If screen doesn't match expected state, discard remaining steps and call AI. |
@@ -976,10 +1021,13 @@ ai-navigator/
 |--------|--------|-------------|
 | Task completion rate | > 70% of started browser tasks completed | Session logs (task_description → final state_summary) |
 | **Subtitle latency** | **< 1s** from screen change to subtitle text appearing (via API streaming) | Timestamps in session log |
-| **Overlay arrow latency** | **< 2.5s** from screen change to overlay arrow rendered at correct position | Timestamps in session log |
+| **Overlay arrow latency (A11y path)** | **< 2s** from screen change to overlay arrow (API is the bottleneck, not locator) | Timestamps in session log |
+| **Overlay arrow latency (OCR fallback)** | **< 2.5s** from screen change to overlay arrow (when A11y tree unavailable) | Timestamps in session log |
+| A11y hit rate (browser tasks) | > 85% of elements found via UIA without OCR fallback | Element Locator logs |
 | Avg. session cost (API) | < $0.40 for a 15-turn session (with safety margin) | Token counter |
-| Element Locator accuracy | > 80% of overlay arrows point to correct element | Manual QA testing on sample tasks |
-| OCR processing time | < 150ms per frame (PaddleOCR on CPU) | Performance profiling |
+| Element Locator accuracy | > 90% of overlay arrows point to correct element (A11y + OCR combined) | Manual QA testing on sample tasks |
+| UIA query time | < 10ms per element lookup | Performance profiling |
+| OCR processing time (fallback) | < 150ms per frame (PaddleOCR on CPU) | Performance profiling |
 | Screenshot dedup hit rate | > 50% (API calls avoided) | Counter in screen monitor |
 | Correction rate | < 20% of turns trigger correction hotkey | Session logs |
 | User satisfaction (survey) | > 4/5 | Post-session survey |
@@ -1043,6 +1091,7 @@ The FSL requires you to define what "competing" means. For AI Navigator:
 | 0.1 | 2026-04-05 | Initial draft |
 | 0.2 | 2026-04-05 | Major revision addressing 13 review findings: (1) Local OCR + Element Locator as core MVP component for overlay accuracy; (2) event-driven screen capture replacing 2s polling; (3) multi-step sequences with checkpoints; (4) TTS + voice input paired in v0.2; (5) structured output via tool_use replacing raw JSON prompts; (6) user-controlled privacy replacing heuristic sensitive-screen detection; (7) 2-3x cost safety margin for early versions; (8) MVP focused on browser tasks only; (9) correction hotkey and handler; (10) session persistence and resume; (11) Pro pricing raised to $25-30/month; (12) feature gating between Community and Pro; (13) accessibility positioning as first-class use case. |
 | 0.3 | 2026-04-05 | Engineering feasibility fixes: (1) Replaced PyInstaller with `pip install` for MVP, added SmartScreen mitigation strategy and distribution roadmap (§7.5); (2) Replaced EasyOCR with PaddleOCR (~50-150ms vs 200-500ms), added parallel OCR+API execution, split latency metric into subtitle < 1s / overlay < 2.5s; (3) Added multi-process architecture (§2.4) to mitigate Python GIL — CPU work in separate processes, Qt event loop stays responsive; (4) Added FSL licensing strategy (§12) with non-compete clause, CLA guidance, and tier mapping. Also: moved Tauri rewrite from v1.0 to v0.3. |
+| 0.4 | 2026-04-05 | Promoted OS Accessibility API (UIA) to **primary** element locator for MVP, replacing OCR-first approach. UIA queries the browser's widget tree in < 5ms vs OCR's 50-150ms. OCR demoted to fallback (still runs in parallel as pre-cache). Added `target_role` field to tool schema for precise UIA queries. Updated data flow, pseudocode, success metrics (A11y hit rate > 85%, overlay latency < 2s on A11y path), risk table, and MVP scope. Removed UIA from v0.2 roadmap (now in MVP). |
 
 ---
 

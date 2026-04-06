@@ -42,7 +42,8 @@
 │                                                         │
 │ Strategies (in priority):                               │
 │ 1. OS Accessibility APIs (UIA/AX/AT-SPI2) - fastest    │
-│ 2. Local OCR (PaddleOCR) - fallback, works on any app    │
+│ 1. OS Accessibility API (UIA) - PRIMARY, < 5ms           │
+│ 2. Local OCR (PaddleOCR) - FALLBACK, works on any app   │
 │ 3. Template matching (icons) - v0.3                    │
 │                                                         │
 │ Output: exact bbox or "not found" → graceful fallback  │
@@ -74,8 +75,8 @@
 | OpenAI Client | `ai/openai_client.py` | OpenAI API (function_calling) | STUB |
 | Tool Schemas | `ai/tool_schemas.py` | navigate_step tool definition | TODO |
 | Element Locator | `locator/element_locator.py` | Orchestrates OCR + A11y + templates | TODO |
-| OCR Engine | `locator/ocr_engine.py` | PaddleOCR wrapper, text → bbox | TODO |
-| A11y Engine | `locator/a11y_engine.py` | Stub for v0.2 (UIA on Windows) | STUB |
+| OCR Engine | `locator/ocr_engine.py` | **FALLBACK**: PaddleOCR wrapper, text → bbox | TODO |
+| A11y Engine | `locator/a11y_engine.py` | **PRIMARY**: Windows UIA element lookup (< 5ms) | TODO |
 | Overlay Renderer | `output/overlay.py` | Qt frameless window for overlays | TODO |
 | Clipboard Manager | `output/clipboard.py` | System clipboard access | TODO |
 | TTS Engine | `output/tts.py` | Stub for v0.2 | STUB |
@@ -235,8 +236,9 @@ Week 12:   v0.1 alpha release
 | Text chat input | ✓ | PySide6 window |
 | Anthropic API (tool_use) | ✓ | Structured output |
 | Multi-step sequences | ✓ | 1-4 steps per response, checkpoints |
-| Local OCR (Element Locator) | ✓ | PaddleOCR for overlay positioning |
-| Overlay arrows | ✓ | Based on OCR-found positions |
+| OS Accessibility API (UIA) | ✓ | **Primary** element locator (< 5ms for browsers) |
+| Local OCR fallback (PaddleOCR) | ✓ | Fallback when A11y tree unavailable |
+| Overlay arrows | ✓ | Positioned by A11y (primary) or OCR (fallback) |
 | Correction hotkey | ✓ | Ctrl+Shift+X → re-analysis |
 | Session persistence | ✓ | Save/resume sessions |
 | Clipboard commands | ✓ | For CLI tasks |
