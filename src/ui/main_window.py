@@ -205,15 +205,92 @@ class MainWindow(QMainWindow):
         self._token_label.setText(f"Tokens: {total_tokens:,}")
 
     def set_processing(self, is_processing: bool) -> None:
-        """Enable/disable input during API calls."""
-        self._input_field.setEnabled(not is_processing)
+        """Update UI state during API calls.
+
+        Input field stays enabled so the user can type the next message
+        while waiting — queued and sent after the current response arrives.
+        Only the send button is visually updated to show thinking state.
+        """
         self._send_button.setEnabled(not is_processing)
         if is_processing:
             self._send_button.setText("Thinking...")
-            self.show_status("Processing...")
+            self.show_status("Processing... (you can still type)")
         else:
             self._send_button.setText("Send")
             self.show_status("Ready")
+
+    def begin_streaming_message(self) -> None:
+        """Prepare for a streaming message.
+
+        Writes a temporary "thinking" indicator. The placeholder is removed by
+        end_streaming_message() — add_message() always writes the final text.
+        """
+        cursor = self._chat_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
+        header_fmt = QTextCharFormat()
+        header_fmt.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        header_fmt.setForeground(QColor("#FF6B35"))
+        cursor.insertText("\nNavigator:\n", header_fmt)
+
+        content_fmt = QTextCharFormat()
+        content_fmt.setFont(QFont("Segoe UI", 11))
+        content_fmt.setForeground(QColor("#888888"))
+        cursor.insertText("▋\n", content_fmt)
+
+        # Record where the placeholder starts so we can remove it
+        self._streaming_placeholder_start = cursor.position() - len("▋\n") - len("\nNavigator:\n")
+        self._streaming_text = ""
+        self._chat_display.setTextCursor(cursor)
+        self._chat_display.verticalScrollBar().setValue(
+            self._chat_display.verticalScrollBar().maximum()
+        )
+
+    def append_streaming_chunk(self, text: str) -> None:
+        """Update the streaming placeholder with accumulated instruction text."""
+        if not hasattr(self, "_streaming_placeholder_start"):
+            return
+        self._streaming_text += text
+
+        # Find the placeholder and update it in-place
+        cursor = self._chat_display.textCursor()
+        cursor.setPosition(self._streaming_placeholder_start)
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+
+        header_fmt = QTextCharFormat()
+        header_fmt.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        header_fmt.setForeground(QColor("#FF6B35"))
+
+        content_fmt = QTextCharFormat()
+        content_fmt.setFont(QFont("Segoe UI", 11))
+        content_fmt.setForeground(QColor("#888888"))
+
+        cursor.beginEditBlock()
+        cursor.removeSelectedText()
+        cursor.insertText("\nNavigator:\n", header_fmt)
+        cursor.insertText(self._streaming_text + " ▋\n", content_fmt)
+        cursor.endEditBlock()
+
+        self._chat_display.verticalScrollBar().setValue(
+            self._chat_display.verticalScrollBar().maximum()
+        )
+
+    def end_streaming_message(self) -> None:
+        """Remove the streaming placeholder.
+
+        The final text is always written by add_message() after this —
+        streaming is purely visual feedback during the API wait.
+        """
+        if not hasattr(self, "_streaming_placeholder_start"):
+            return
+
+        cursor = self._chat_display.textCursor()
+        cursor.setPosition(self._streaming_placeholder_start)
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+
+        del self._streaming_placeholder_start
+        del self._streaming_text
 
     def clear_chat(self) -> None:
         """Clear the chat display."""

@@ -1,7 +1,7 @@
 # AI Navigator — Software Design Document
 
-**Version:** 0.4 (Revised)
-**Date:** 2026-04-05
+**Version:** 0.7
+**Date:** 2026-04-08
 **Slogan:** *The AI guides, never overrides.*
 
 ---
@@ -158,7 +158,7 @@ The AI never estimates pixel coordinates. Instead, it returns **text description
 | Priority | Strategy | Latency | How | Best for | Limitation |
 |----------|----------|---------|-----|----------|------------|
 | **1 (primary)** | **OS Accessibility API** | **< 5ms** | Win: UI Automation (UIA) via `uiautomation` or `comtypes`. Queries the foreground app's widget tree for element name, role, and bounding box. | Browsers (excellent trees), Qt/GTK apps, Office apps | Not all apps expose good trees (Blender, games, Electron with poor a11y) |
-| **2 (fallback)** | **Local OCR (PaddleOCR)** | 50–150ms | PaddleOCR on the screenshot. Find all text + bounding boxes. Match AI's `target_text` against results. Runs in a **separate process** (see §2.4). | Any app with visible text labels, when A11y tree is unavailable or sparse | Can't find icon-only buttons |
+| **2 (fallback)** | **Local OCR** | 10–150ms | OCR on the screenshot. Find all text + bounding boxes. Match AI's `target_text` against results. Runs in a **separate process** (see §2.4). **On Windows**, uses `Windows.Media.Ocr` (built-in, ~10ms, no model downloads). **On macOS/Linux (future)**, falls back to PaddleOCR (~50-150ms on CPU). | Any app with visible text labels, when A11y tree is unavailable or sparse | Can't find icon-only buttons |
 | **3 (future, v0.3)** | **Template Matching** | ~50ms | OpenCV `matchTemplate` against a library of known UI icons/widgets. | Toolbar icons, non-text elements | Requires pre-built icon library per app; fragile across themes |
 
 **Why Accessibility API is primary for MVP:**
@@ -238,12 +238,12 @@ Python's Global Interpreter Lock (GIL) prevents true multithreading for CPU-boun
 │ Screen       │  │ OCR Worker      │  │ Diff Worker       │
 │ Capture      │  │ (Process)       │  │ (Process)         │
 │ Worker       │  │                 │  │                   │
-│ (Process)    │  │ • PaddleOCR     │  │ • 10fps low-res   │
-│              │  │   inference     │  │   pixel-diff      │
-│ • mss screen │  │ • Text → bbox   │  │ • pHash compare   │
-│   capture    │  │   mapping       │  │ • Emits "changed" │
-│ • On-demand  │  │ • ~50-150ms/    │  │   events to main  │
-│              │  │   frame (CPU)   │  │   process          │
+│ (Process)    │  │ • Win: WinOCR   │  │ • 10fps low-res   │
+│              │  │   (~10ms/frame) │  │   pixel-diff      │
+│ • mss screen │  │ • Other: Paddle │  │ • pHash compare   │
+│   capture    │  │   (~50-150ms)   │  │ • Emits "changed" │
+│ • On-demand  │  │ • Text → bbox   │  │   events to main  │
+│              │  │   mapping       │  │   process          │
 └──────────────┘  └─────────────────┘  └──────────────────┘
 ```
 
@@ -377,12 +377,18 @@ The guidance loop is **event-driven**, not polling-based. API calls are triggere
           ▼
  ┌──────────────────────────────────────────────────────────┐
  │ 6. Advance through step sequence locally                  │
- │    • If current step has checkpoint=false, show next step │
- │      after a short delay (no API call needed)             │
- │    • If current step has checkpoint=true, wait for:       │
- │      - Screen change (detected by Screen Change Detector) │
- │      - User voice/chat/hotkey input                       │
- │      - User "wrong" correction signal                     │
+ │                                                          │
+ │  Screen change detected:                                 │
+ │   a) At checkpoint step → advance + re-query if done     │
+ │   b) Mid-sequence (non-checkpoint) → auto-advance to     │
+ │      next step (no API call). Screen change is treated   │
+ │      as implicit user confirmation.                      │
+ │   c) Sequence complete + screen changed → re-query AI    │
+ │      (debounced: only once per 5 seconds to avoid noise) │
+ │                                                          │
+ │  User voice/chat/hotkey input → always triggers loop     │
+ │  User types while AI is processing → message queued,     │
+ │  sent automatically when current response finishes       │
  └────────┬─────────────────────────────────────────────────┘
           │  (screen changed, user spoke, or sequence complete)
           ▼
@@ -608,23 +614,47 @@ class TokenBudget:
 
 ### 4.4 Multi-Provider Strategy
 
+Four providers are supported as of v0.1.1. Provider is selected via `API_PROVIDER` in `.env`.
+
+| Provider | Key Required | Free Tier | Vision | Structured Output | Best For |
+|----------|-------------|-----------|--------|-------------------|----------|
+| **anthropic** | `ANTHROPIC_API_KEY` | No | Yes | `tool_use` (native) | Highest guidance quality |
+| **gemini** | `GEMINI_API_KEY` | Yes (~1,500 req/day) | Yes | Function calling (native) | New users — zero cost to start |
+| **ollama** | None | Yes (local) | Yes (llama3.2-vision) | JSON mode + schema prompt | Privacy-first, offline use |
+| **openai** | `OPENAI_API_KEY` | No | Yes | `function_calling` (v0.2) | Alternative cloud provider |
+
 ```
-┌─────────────────────────────────────────┐
-│            API Router                    │
-│                                          │
-│  if user.has_own_key("anthropic"):       │
-│      use Anthropic API (tool_use)        │
-│  elif user.has_own_key("openai"):        │
-│      use OpenAI API (function_calling)   │
-│  elif user.plan == "pro":                │
-│      use managed_key (our account)       │
-│      apply monthly_cap                   │
-│  elif local_model_available():           │
-│      use local (Ollama / llama.cpp)      │
-│  else:                                   │
-│      prompt user to add API key          │
-└─────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                    API Router                        │
+│                                                      │
+│  provider = config.API_PROVIDER                      │
+│                                                      │
+│  "anthropic" → AnthropicClient (tool_use)            │
+│  "gemini"    → GeminiClient (function calling)       │
+│               Free tier via Google AI Studio         │
+│               ~1,500 req/day, no credit card         │
+│  "ollama"    → OllamaClient (JSON mode)              │
+│               Local inference, no API cost           │
+│               Requires: ollama serve + vision model  │
+│  "openai"    → OpenAIClient (function_calling, v0.2) │
+│                                                      │
+│  Budget check skipped for Ollama (free/local).       │
+│  All cloud providers: pre-flight can_spend() check.  │
+└─────────────────────────────────────────────────────┘
 ```
+
+**Recommended onboarding path for new users:**
+1. Start with Gemini free tier (`API_PROVIDER=gemini`, free key from Google AI Studio)
+2. Upgrade to Anthropic Sonnet for higher quality when ready to pay
+3. Switch to Ollama for privacy-sensitive tasks at any time
+
+**Anthropic model selection** (set via `ANTHROPIC_MODEL`):
+
+| Model | Speed | Cost | Quality | Use case |
+|-------|-------|------|---------|----------|
+| `claude-haiku-4-5-20251001` | Fastest | ~20× cheaper than Sonnet | Good | Development/testing, simple tasks |
+| `claude-sonnet-4-6` | Balanced | — | High | Default — production guidance |
+| `claude-opus-4-6` | Slower | ~5× more than Sonnet | Highest | Complex multi-app workflows |
 
 ---
 
@@ -763,9 +793,19 @@ Rules:
 8. Output a state_summary for internal context tracking (not shown to the user).
 9. If you need clarification, set needs_input=true and ask a short question in
    the instruction field.
+10. BROWSER REFERENCES: Refer to web browsers generically — say "open your browser"
+    or "click your browser in the taskbar", never by specific name (Edge, Chrome,
+    Firefox). The user chooses their own browser.
+11. AI NAVIGATOR WINDOW: If you see the "AI Navigator" window (your own interface)
+    is covering important screen elements, tell the user to minimize or move it —
+    NEVER to close it. Closing the app ends the session.
+12. LANGUAGE: Always respond in English, regardless of the user's system language,
+    browser language, or the language of any text visible on screen.
 
 Use the navigate_step tool for all responses.
 ```
+
+The state summary sent with each follow-up request also includes the current AI Navigator window geometry (position + size), so the model can reason about whether the app window is occluding important content.
 
 ---
 
@@ -777,46 +817,97 @@ Use the navigate_step tool for all responses.
 
 **Focus decision:** The MVP targets browser tasks exclusively. Browsers have excellent accessibility API support, predictable layouts, and text-heavy UIs that work well with OCR. Complex apps like Blender have sparse accessibility trees and icon-heavy UIs — they are explicitly out of scope until v0.2+ when template matching and Nav-Packs are available.
 
-| Feature | In MVP? | Notes |
-|---------|---------|-------|
-| Event-driven screen capture | Yes | OS events + pixel-diff + idle fallback |
-| Text chat input | Yes | Simple window (PySide6) |
-| AI API call (Anthropic, tool_use) | Yes | Single provider, structured output |
-| Multi-step sequences | Yes | AI returns 1-4 steps per response |
-| Text instruction output | Yes | Displayed in chat window + subtitle |
-| OS Accessibility API (UIA) | Yes | **Primary** element locator for browser tasks (< 5ms) |
-| Local OCR fallback (PaddleOCR) | Yes | Fallback when A11y tree unavailable or no match |
-| Overlay arrows (A11y/OCR-positioned) | Yes | Core differentiator, must be in MVP |
-| Subtitle fallback | Yes | When both A11y and OCR fail to find target |
-| Correction hotkey ("wrong") | Yes | Ctrl+Shift+X triggers re-analysis |
-| Screenshot dedup (pHash) | Yes | Cost control |
-| State summarization | Yes | Core to cost control |
-| Session persistence (save/resume) | Yes | JSON file, simple |
-| Clipboard commands | Yes | For CLI tasks |
-| Pause/resume capture hotkey | Yes | Privacy control |
-| TTS audio output | No | v0.2 |
-| Voice input | No | v0.2 |
-| Prompt caching | No | v0.2 |
-| Template matching (icons) | No | v0.3 (for non-text UI elements in complex apps) |
-| Multi-platform | No | Windows only for MVP |
-| Local model support | No | v0.3 |
-| Cost dashboard | No | v0.2 |
-| Nav-Packs | No | v0.3 |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Event-driven screen capture | ✅ v0.1 | OS events + pixel-diff + idle fallback |
+| Text chat input | ✅ v0.1 | PySide6 main window + floating window |
+| AI API — Anthropic (tool_use) | ✅ v0.1 | Structured output, primary provider |
+| AI API — Google Gemini Flash | ✅ v0.1.1 | Free tier, function calling, multimodal |
+| AI API — Ollama (local) | ✅ v0.1.1 | No API key, JSON mode, vision-capable models |
+| AI API — OpenAI | Stub | v0.2 |
+| Multi-step sequences | ✅ v0.1 | AI returns 1-4 steps per response |
+| Screen change auto-advance | ✅ v0.1.1 | Mid-sequence steps advance automatically on screen change |
+| Input queuing during processing | ✅ v0.1.1 | User can type while AI is thinking; messages queued |
+| OS Accessibility API (UIA) | ✅ v0.1 | **Primary** element locator (< 5ms) |
+| Local OCR fallback | ✅ v0.1.4 | Windows: `Windows.Media.Ocr` (built-in, ~10ms). macOS/Linux fallback: PaddleOCR |
+| Overlay arrows | ✅ v0.1 | Positioned by A11y (primary) or OCR (fallback) |
+| Subtitle fallback | ✅ v0.1 | When both A11y and OCR fail |
+| Correction hotkey | ✅ v0.1 | Ctrl+Shift+X triggers re-analysis |
+| Screenshot dedup (pHash) | ✅ v0.1 | Cost control |
+| State summarization | ✅ v0.1 | Core to cost control |
+| Window self-awareness | ✅ v0.1.1 | AI Navigator window geometry in state context; rules 10+11 in prompt |
+| Generic browser references | ✅ v0.1.1 | System prompt rule — no Edge/Chrome/Firefox specifics |
+| English-only responses | ✅ v0.1.2 | System prompt rule 12 — always English regardless of system locale |
+| Overlay visibility (contrast) | ✅ v0.1.2 | White outline under all overlay types; visible on any background |
+| Session persistence (save/resume) | ✅ v0.1 | JSON file |
+| Clipboard commands | ✅ v0.1 | For CLI tasks |
+| Pause/resume capture hotkey | ✅ v0.1 | Privacy control |
+| Streaming responses | ❌ | v0.2 — biggest speed win |
+| TTS audio output | ❌ | v0.2 |
+| Voice input | ❌ | v0.2 |
+| Prompt caching | ❌ | v0.2 |
+| Multi-monitor support | ❌ | v0.2 |
+| Template matching (icons) | ❌ | v0.3 |
+| Multi-platform (macOS/Linux) | ❌ | Windows only for MVP |
+| Cost dashboard | ❌ | v0.2 |
+| Nav-Packs | ❌ | v0.3 |
 
-### 7.2 MVP Milestones
+### 7.2 Milestones
 
 ```
-Week 1-2:   Project scaffold + event-driven screen capture + basic chat UI
-Week 3-4:   API integration (Anthropic tool_use) + multi-step sequences
-            + state summarization + prompt engineering
-Week 5-6:   UIA integration (primary) + PaddleOCR fallback + Element Locator
-            + overlay arrow rendering + subtitle fallback
-Week 7-8:   Correction hotkey + session persistence + clipboard manager
-            + screenshot dedup + pause/resume hotkey
-Week 9-10:  End-to-end testing with browser tasks (Amazon, Google Forms,
-            TurboTax web) + bug fixes
-Week 11:    Internal demo + feedback collection
-Week 12:    v0.1 release (alpha)
+✅ Week 1-2:   Project scaffold + event-driven screen capture + basic chat UI
+✅ Week 3-4:   API integration (Anthropic tool_use) + multi-step sequences
+               + state summarization + prompt engineering
+✅ Week 5-6:   UIA integration (primary) + PaddleOCR fallback + Element Locator
+               + overlay arrow rendering + subtitle fallback
+✅ Week 7-8:   Correction hotkey + session persistence + clipboard manager
+               + screenshot dedup + pause/resume hotkey
+✅ Week 9-10:  47 tests passing. First real-world tests: Amazon + SolidWorks
+✅ Week 11:    v0.1.0-alpha released
+
+✅ v0.1.1 (2026-04-06):
+   - Gemini Flash provider (free tier for new users)
+   - Ollama provider (local, no API key)
+   - System prompt rules: generic browser + window self-awareness
+   - Screen change auto-advance (mid-sequence steps)
+   - Input queuing during processing (input box stays enabled)
+   - Window geometry in state context
+
+✅ v0.1.2 (2026-04-07):
+   - System prompt rule 12: always respond in English (fixes Chinese/locale response)
+   - Overlay visibility: white contrasting outline under all overlay types
+     (arrow/highlight/circle now visible on any background color)
+   - Overlay stroke thickness increased: 4px colored + 10px white outline
+   - .env.example fully rewritten with all providers, models, and settings
+
+✅ v0.1.3 (2026-04-08):
+   - OCR fix: `show_log` and `use_gpu` arguments conditionally included via
+     `inspect.signature` (both removed in newer PaddleOCR versions)
+   - Race condition fix: `_is_processing` set synchronously before scheduling
+     async API calls, preventing duplicate calls from rapid screen-change events
+   - A11y fix: replaced invalid `auto.PropertyCondition`/`auto.PropertyId` API
+     with correct `Control(RegexName=...)` uiautomation API
+   - A11y fix: window/titlebar/pane controls excluded from element matches;
+     4× name-length filter prevents matching browser tab titles as elements
+   - System prompt rule 3 updated: `target_text` limited to 1–5 words max
+
+✅ v0.1.4 (2026-04-08):
+   - OCR backend replaced: `Windows.Media.Ocr` (built-in Windows 10/11 API via
+     `winrt`) is now primary on Windows. PaddleOCR retained as fallback for
+     non-Windows platforms only. Eliminates PaddlePaddle 3.x PIR+OneDNN bug
+     (`ConvertPirAttribute2RuntimeAttribute` errors on every inference call).
+     Windows OCR is ~10ms vs ~150ms for PaddleOCR, with zero model downloads.
+   - `winrt-Windows.Media.Ocr` + related winrt packages added to pyproject.toml
+   - OCR result format: line-level bboxes (merged words) + individual word bboxes
+     emitted in parallel so both single-word and multi-word `target_text` match
+
+🚧 v0.2 (next):
+   - Streaming responses (subtitle < 500ms — biggest perceived speed win)
+   - Prompt caching (90% cost reduction on system prompt)
+   - TTS + voice input (paired)
+   - Multi-monitor support
+   - Model tiering (Haiku for change detection)
+   - Cost dashboard
 ```
 
 ### 7.3 MVP Tech Stack
@@ -828,7 +919,7 @@ Week 12:    v0.1 release (alpha)
 | Screen capture | `mss` (Python, cross-platform) | In capture worker process |
 | Screen change detection | `mss` low-res capture at 10fps + `imagehash` pHash | In diff worker process (bypasses GIL) |
 | Accessibility API | `uiautomation` (Windows UIA wrapper) | **Primary** element locator. < 5ms. No extra dependency on Windows. |
-| Local OCR (fallback) | `paddleocr` | Fallback when A11y fails. ~50-150ms on CPU. In OCR worker process. |
+| Local OCR (fallback) | `Windows.Media.Ocr` (Windows 10/11 built-in) via `winrt` | **Primary OCR on Windows**: ~10ms, zero model downloads, no dependency issues. Falls back to `paddleocr` on non-Windows platforms. In OCR worker process. |
 | Image hashing | `imagehash` (pHash) | |
 | API client | `httpx` (async) | Streaming + tool_use for structured output |
 | Concurrency | `multiprocessing` (Process + Queue) | CPU work in separate processes; asyncio for I/O |
@@ -837,18 +928,20 @@ Week 12:    v0.1 release (alpha)
 | Session storage | JSON files in `~/.ai-navigator/sessions/` | |
 | Packaging | `pip install ai-navigator` (PyPI) | No PyInstaller for MVP — avoids SmartScreen (see §7.5) |
 
-### 7.4 Post-MVP Roadmap
+### 7.4 Roadmap
 
 ```
-v0.2  TTS + voice input (shipped together) + prompt caching + cost dashboard
-      + model tiering (Haiku for change detection)
+v0.2  Streaming responses + prompt caching + TTS + voice input (paired)
+      + multi-monitor support + model tiering + cost dashboard
 v0.3  Tauri/Rust rewrite of core (solves SmartScreen) + EV code signing
       + Blender / complex-app support + template matching for icons
-      + local model support + macOS port + Nav-Packs
+      + quantized local model improvements + macOS port + Nav-Packs
 v0.4  Linux port + plugin system + enterprise features (SSO, audit logs)
       + accessibility-focused UX pass (large text, high contrast, screen reader compat)
 v1.0  Public launch + MSIX packaging for Microsoft Store + native installer
 ```
+
+> **Note on streaming (v0.2 priority #1):** The biggest user-perceived speed issue is waiting for the full API response before showing anything. Streaming renders the instruction subtitle as tokens arrive (< 500ms for first token vs. 2s for full response). This single change will make the app feel substantially faster without any model or infrastructure changes.
 
 > **Note on v0.2 voice:** TTS and voice input are shipped in the same release. Users who want to talk to the navigator expect it to talk back. Shipping one without the other creates a broken interaction model.
 
@@ -960,10 +1053,11 @@ ai-navigator/
 │   │   └── chat_input.py       # Chat text input handling
 │   ├── ai/
 │   │   ├── api_router.py       # Provider selection + request building
-│   │   ├── anthropic.py        # Anthropic API client (tool_use)
-│   │   ├── openai_client.py    # OpenAI API client (stub)
-│   │   ├── local_model.py      # Local model client (stub)
-│   │   ├── prompts.py          # System prompts
+│   │   ├── anthropic_client.py # Anthropic API client (tool_use)
+│   │   ├── gemini_client.py    # Google Gemini client (function calling, free tier)
+│   │   ├── ollama_client.py    # Ollama local model client (JSON mode)
+│   │   ├── openai_client.py    # OpenAI API client (stub, v0.2)
+│   │   ├── prompts.py          # System prompts (rules 1-11)
 │   │   └── tool_schemas.py     # navigate_step tool schema definition
 │   ├── locator/
 │   │   ├── element_locator.py  # Orchestrates A11y → OCR → template fallback chain
@@ -1092,6 +1186,9 @@ The FSL requires you to define what "competing" means. For AI Navigator:
 | 0.2 | 2026-04-05 | Major revision addressing 13 review findings: (1) Local OCR + Element Locator as core MVP component for overlay accuracy; (2) event-driven screen capture replacing 2s polling; (3) multi-step sequences with checkpoints; (4) TTS + voice input paired in v0.2; (5) structured output via tool_use replacing raw JSON prompts; (6) user-controlled privacy replacing heuristic sensitive-screen detection; (7) 2-3x cost safety margin for early versions; (8) MVP focused on browser tasks only; (9) correction hotkey and handler; (10) session persistence and resume; (11) Pro pricing raised to $25-30/month; (12) feature gating between Community and Pro; (13) accessibility positioning as first-class use case. |
 | 0.3 | 2026-04-05 | Engineering feasibility fixes: (1) Replaced PyInstaller with `pip install` for MVP, added SmartScreen mitigation strategy and distribution roadmap (§7.5); (2) Replaced EasyOCR with PaddleOCR (~50-150ms vs 200-500ms), added parallel OCR+API execution, split latency metric into subtitle < 1s / overlay < 2.5s; (3) Added multi-process architecture (§2.4) to mitigate Python GIL — CPU work in separate processes, Qt event loop stays responsive; (4) Added FSL licensing strategy (§12) with non-compete clause, CLA guidance, and tier mapping. Also: moved Tauri rewrite from v1.0 to v0.3. |
 | 0.4 | 2026-04-05 | Promoted OS Accessibility API (UIA) to **primary** element locator for MVP, replacing OCR-first approach. UIA queries the browser's widget tree in < 5ms vs OCR's 50-150ms. OCR demoted to fallback (still runs in parallel as pre-cache). Added `target_role` field to tool schema for precise UIA queries. Updated data flow, pseudocode, success metrics (A11y hit rate > 85%, overlay latency < 2s on A11y path), risk table, and MVP scope. Removed UIA from v0.2 roadmap (now in MVP). |
+| 0.6 | 2026-04-07 | (1) System prompt rule 12: always respond in English — fixes locale-driven Chinese responses. (2) Overlay visibility overhaul: white contrasting outline drawn underneath all overlay types (arrow/highlight/circle) so they're visible on any background; thickness increased from 3px to 4px inner + 10px white outline. (3) `.env.example` fully rewritten with all four providers, all model options with comments, all config settings. Updated §6.3 (system prompt), §7.1 (scope table), §7.2 (milestones). |
+| 0.7 | 2026-04-08 | v0.1.3 + v0.1.4 changes: (1) A11y engine fixed — replaced invalid `PropertyCondition`/`PropertyId` COM API with correct `Control(RegexName=...)` uiautomation Python API; added WindowControl/TitleBarControl/PaneControl exclusion and 4× name-length ratio guard to prevent matching browser tab titles as UI elements; A11y search depth increased to 12 (fast path) and 8 (slow path) for Chrome DOM depth. (2) OCR backend switched to `Windows.Media.Ocr` as primary on Windows — eliminates PaddlePaddle 3.x PIR+OneDNN `ConvertPirAttribute2RuntimeAttribute` bug that caused every OCR inference to fail; Windows OCR is ~10ms vs 150ms with zero model downloads; PaddleOCR retained as non-Windows fallback. (3) PaddleOCR compatibility shims: `use_gpu`/`show_log` conditional inclusion, `cls` parameter try/except, 3.x dict result format support. (4) System prompt rule 3 updated: `target_text` limited to 1–5 words. Updated §3.3 (OCR locator table), §2.4 (concurrency diagram), §7.1 (scope table), §7.2 (milestones), §7.3 (tech stack). |
+| 0.5 | 2026-04-06 | Post-first-test updates from Amazon + SolidWorks testing. (1) Multi-provider AI: added Gemini Flash (free tier, function calling) and Ollama (local, JSON mode) — §4.4 and §9 updated; (2) System prompt rules 10+11: generic browser references (not Edge/Chrome/Firefox by name), AI Navigator window self-awareness (minimize not close); (3) Window geometry injected into state context so model knows app window position; (4) Screen change auto-advance: mid-sequence (non-checkpoint) steps now advance automatically on screen change — previously stuck at `pass`; (5) Screen change re-query: when step sequence is complete and screen changes, AI is re-queried (debounced 5s); (6) Input queuing: input box stays enabled during processing, messages typed while thinking are queued and sent on completion; (7) §7.1 MVP scope table updated to track v0.1 / v0.1.1 / v0.2 status; (8) §7.2 milestones updated with completed items and v0.2 plan; (9) §7.4 roadmap updated; streaming flagged as v0.2 priority #1 for perceived speed. |
 
 ---
 

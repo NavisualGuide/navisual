@@ -1,14 +1,17 @@
 """Local OCR engine for AI Navigator (FALLBACK locator).
 
-Uses PaddleOCR for text detection and recognition. Runs in a separate
-multiprocessing.Process to avoid blocking the main Qt thread (GIL mitigation).
+On Windows, uses Windows.Media.Ocr (built-in, zero-install, fast).
+On other platforms, falls back to PaddleOCR.
+Runs in a separate multiprocessing.Process to avoid blocking the Qt thread.
 
 Only used when the Accessibility API fails to find the target element.
 """
 
+import asyncio
 import io
 import logging
 import multiprocessing as mp
+import sys
 from difflib import SequenceMatcher
 from typing import Optional
 
@@ -26,63 +29,208 @@ class OCRResult(BaseModel):
     confidence: float
 
 
-class OCREngine:
-    """PaddleOCR wrapper for text detection and bounding box extraction.
+# ---------------------------------------------------------------------------
+# Windows OCR backend (Windows.Media.Ocr — built into Windows 10/11)
+# ---------------------------------------------------------------------------
 
-    Designed to be used inside a worker process. The PaddleOCR model
-    is initialized lazily on first use (downloads ~100MB of models).
+class WindowsOCREngine:
+    """Windows.Media.Ocr wrapper — native, zero-install, no OneDNN issues.
+
+    Uses the Windows Runtime OCR engine, which is always available on
+    Windows 10/11. Outputs line-level results with merged bounding boxes
+    so that multi-word target_text ("Search Amazon") can be matched.
     """
+
+    def __init__(self) -> None:
+        self._engine = None
+
+    def _ensure_initialized(self) -> None:
+        if self._engine is None:
+            import winrt.windows.media.ocr as win_ocr
+            self._engine = win_ocr.OcrEngine.try_create_from_user_profile_languages()
+            if self._engine is None:
+                raise RuntimeError("Windows OCR engine unavailable (no recognizer languages installed?)")
+            logger.info("Windows OCR engine initialized")
+
+    def process_screenshot(self, image_bytes: bytes) -> list[OCRResult]:
+        """Run OCR on a screenshot image and return line-level text with bboxes."""
+        self._ensure_initialized()
+        return asyncio.run(self._recognize_async(image_bytes))
+
+    async def _recognize_async(self, image_bytes: bytes) -> list[OCRResult]:
+        import winrt.windows.graphics.imaging as imaging
+        import winrt.windows.storage.streams as streams
+
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="BMP")
+
+        mem = streams.InMemoryRandomAccessStream()
+        writer = streams.DataWriter(mem)
+        writer.write_bytes(bytearray(buf.getvalue()))
+        await writer.store_async()
+        mem.seek(0)
+
+        decoder = await imaging.BitmapDecoder.create_async(mem)
+        bitmap = await decoder.get_software_bitmap_async()
+        result = await self._engine.recognize_async(bitmap)
+
+        ocr_results: list[OCRResult] = []
+        for line in result.lines:
+            words = list(line.words)
+            if not words:
+                continue
+
+            # Merge all word bboxes in the line into one spanning rect
+            xs = [w.bounding_rect.x for w in words]
+            ys = [w.bounding_rect.y for w in words]
+            x2s = [w.bounding_rect.x + w.bounding_rect.width for w in words]
+            y2s = [w.bounding_rect.y + w.bounding_rect.height for w in words]
+            x = int(min(xs))
+            y = int(min(ys))
+            w = int(max(x2s) - x)
+            h = int(max(y2s) - y)
+            text = " ".join(wrd.text for wrd in words).strip()
+
+            if text:
+                ocr_results.append(OCRResult(text=text, bbox=(x, y, w, h), confidence=1.0))
+
+            # Also emit individual words so single-word searches match precisely
+            for wrd in words:
+                r = wrd.bounding_rect
+                word_text = wrd.text.strip()
+                if word_text and word_text != text:
+                    ocr_results.append(OCRResult(
+                        text=word_text,
+                        bbox=(int(r.x), int(r.y), int(r.width), int(r.height)),
+                        confidence=0.95,
+                    ))
+
+        return ocr_results
+
+    @staticmethod
+    def is_available() -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            import winrt.windows.media.ocr  # noqa: F401
+            import winrt.windows.graphics.imaging  # noqa: F401
+            import winrt.windows.storage.streams  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+
+# ---------------------------------------------------------------------------
+# PaddleOCR backend (fallback for non-Windows or if Windows OCR unavailable)
+# ---------------------------------------------------------------------------
+
+class PaddleOCREngine:
+    """PaddleOCR wrapper for text detection and bounding box extraction."""
 
     def __init__(self, lang: str = "en") -> None:
         self._lang = lang
         self._ocr = None
 
     def _ensure_initialized(self) -> None:
-        """Lazy-initialize PaddleOCR (must happen inside the worker process)."""
         if self._ocr is None:
-            from paddleocr import PaddleOCR
+            # Disable OneDNN via Python API before importing PaddleOCR.
+            # PaddlePaddle 3.x has a PIR+OneDNN bug; FLAGS_use_mkldnn=0 prevents
+            # OneDNN dispatch in the old executor (may not cover PIR executor).
+            try:
+                import paddle
+                paddle.set_flags({"FLAGS_use_mkldnn": 0})
+            except Exception:
+                pass
 
-            self._ocr = PaddleOCR(
-                use_angle_cls=True,
-                lang=self._lang,
-                show_log=False,
-                use_gpu=False,
-            )
+            from paddleocr import PaddleOCR
+            import inspect
+            paddle_params = inspect.signature(PaddleOCR.__init__).parameters
+
+            if "use_doc_orientation_classify" in paddle_params:
+                # PaddleOCR 3.x: disable doc-processing sub-models to reduce
+                # the number of OneDNN-affected models loaded at init.
+                kwargs: dict = {
+                    "lang": self._lang,
+                    "use_doc_orientation_classify": False,
+                    "use_doc_unwarping": False,
+                    "use_textline_orientation": False,
+                }
+            else:
+                # PaddleOCR 2.x
+                kwargs = {"use_angle_cls": True, "lang": self._lang}
+                if "use_gpu" in paddle_params:
+                    kwargs["use_gpu"] = False
+                if "show_log" in paddle_params:
+                    kwargs["show_log"] = False
+
+            self._ocr = PaddleOCR(**kwargs)
             logger.info("PaddleOCR initialized (lang=%s)", self._lang)
 
     def process_screenshot(self, image_bytes: bytes) -> list[OCRResult]:
-        """Run OCR on a screenshot and return all detected text with bounding boxes.
-
-        Args:
-            image_bytes: PNG or JPEG image bytes.
-
-        Returns:
-            List of OCRResult with text, bbox, and confidence.
-        """
         self._ensure_initialized()
-
         import numpy as np
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         img_array = np.array(img)
 
-        results = self._ocr.ocr(img_array, cls=True)
+        # PaddleOCR 3.x removed the cls parameter (angle classification is init-time).
+        try:
+            results = self._ocr.ocr(img_array, cls=True)
+        except TypeError:
+            results = self._ocr.ocr(img_array)
+
         if not results or not results[0]:
             return []
 
         ocr_results = []
         for line in results[0]:
-            points, (text, confidence) = line
-            # Convert 4-point polygon to bounding box
-            xs = [p[0] for p in points]
-            ys = [p[1] for p in points]
-            x = int(min(xs))
-            y = int(min(ys))
-            w = int(max(xs) - x)
-            h = int(max(ys) - y)
-            ocr_results.append(OCRResult(text=text, bbox=(x, y, w, h), confidence=confidence))
+            try:
+                if isinstance(line, dict):
+                    # PaddleOCR 3.x dict format
+                    points = line.get("det_poly") or line.get("bbox", [])
+                    text = line.get("rec_text") or line.get("text", "")
+                    confidence = float(line.get("rec_score", 0.0) or line.get("confidence", 0.0))
+                else:
+                    # PaddleOCR 2.x nested-list format
+                    points, (text, confidence) = line
+
+                if not points or not text:
+                    continue
+
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                x = int(min(xs)); y = int(min(ys))
+                w = int(max(xs) - x); h = int(max(ys) - y)
+                ocr_results.append(OCRResult(text=text, bbox=(x, y, w, h), confidence=float(confidence)))
+            except Exception as e:
+                logger.debug("Skipping malformed OCR line: %s", e)
+                continue
 
         return ocr_results
+
+
+# ---------------------------------------------------------------------------
+# OCREngine: selects backend automatically
+# ---------------------------------------------------------------------------
+
+class OCREngine:
+    """Selects Windows OCR (primary on Windows) or PaddleOCR (fallback).
+
+    Designed to run inside a worker process.
+    """
+
+    def __init__(self, lang: str = "en") -> None:
+        if WindowsOCREngine.is_available():
+            self._backend: WindowsOCREngine | PaddleOCREngine = WindowsOCREngine()
+            logger.info("OCREngine: using Windows.Media.Ocr backend")
+        else:
+            self._backend = PaddleOCREngine(lang=lang)
+            logger.info("OCREngine: using PaddleOCR backend (lang=%s)", lang)
+
+    def process_screenshot(self, image_bytes: bytes) -> list[OCRResult]:
+        """Run OCR on a screenshot and return all detected text with bounding boxes."""
+        return self._backend.process_screenshot(image_bytes)
 
     @staticmethod
     def find_text(
@@ -96,17 +244,6 @@ class OCREngine:
         """Find the best match for target_text in OCR results.
 
         Uses case-insensitive substring matching, then fuzzy matching as fallback.
-
-        Args:
-            target_text: The text to find.
-            ocr_results: Pre-computed OCR results.
-            region_hint: Optional region to narrow search (e.g., "top-center").
-            screen_width: Screen width for region filtering.
-            screen_height: Screen height for region filtering.
-            min_confidence: Minimum OCR confidence threshold.
-
-        Returns:
-            Best matching OCRResult, or None.
         """
         if not ocr_results or not target_text:
             return None
@@ -141,6 +278,10 @@ class OCREngine:
 
         return best_match
 
+
+# ---------------------------------------------------------------------------
+# OCRWorker: runs OCREngine in a separate process
+# ---------------------------------------------------------------------------
 
 class OCRWorker:
     """Runs OCR in a separate process to avoid blocking the Qt main thread.
@@ -177,7 +318,6 @@ class OCRWorker:
 
     def submit(self, image_bytes: bytes) -> None:
         """Submit a screenshot for OCR processing (non-blocking)."""
-        # Clear any stale request
         while not self._request_queue.empty():
             try:
                 self._request_queue.get_nowait()
@@ -186,10 +326,7 @@ class OCRWorker:
         self._request_queue.put(image_bytes)
 
     def get_results(self, timeout: float = 0.1) -> list[OCRResult]:
-        """Get the latest OCR results (non-blocking with short timeout).
-
-        Returns cached results if no new results are available.
-        """
+        """Get the latest OCR results (non-blocking). Returns cached if no new results."""
         try:
             while not self._result_queue.empty():
                 raw_results = self._result_queue.get_nowait()
@@ -209,6 +346,12 @@ def _ocr_worker_loop(
     lang: str,
 ) -> None:
     """Main loop for the OCR worker process."""
+    import os
+    # Belt-and-suspenders: also set env vars for PaddleOCR fallback path
+    os.environ.setdefault("FLAGS_use_mkldnn", "0")
+    os.environ.setdefault("PADDLE_DISABLE_ONEDNN", "True")
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
     engine = OCREngine(lang=lang)
 
     while True:
@@ -218,10 +361,9 @@ def _ocr_worker_loop(
                 break
 
             results = engine.process_screenshot(image_bytes)
-            # Send results as dicts (Pydantic models aren't picklable across processes)
             result_dicts = [r.model_dump() for r in results]
 
-            # Clear stale results
+            # Clear stale results before publishing
             while not result_queue.empty():
                 try:
                     result_queue.get_nowait()
@@ -245,17 +387,14 @@ def _filter_by_region(
     def in_region(r: OCRResult) -> bool:
         cx = r.bbox[0] + r.bbox[2] / 2
         cy = r.bbox[1] + r.bbox[3] / 2
-
         col = "left" if cx < third_w else ("right" if cx > 2 * third_w else "center")
         row = "top" if cy < third_h else ("bottom" if cy > 2 * third_h else "center")
-
-        region_parts = region.split("-")
-        if len(region_parts) == 2:
-            return row == region_parts[0] and col == region_parts[1]
+        parts = region.split("-")
+        if len(parts) == 2:
+            return row == parts[0] and col == parts[1]
         elif region == "center":
             return row == "center" and col == "center"
         return True
 
     filtered = [r for r in results if in_region(r)]
-    # Fall back to all results if region filter eliminated everything
     return filtered if filtered else results

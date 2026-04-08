@@ -139,14 +139,26 @@ class A11yEngine:
         control_type_name: Optional[str],
         auto,
     ) -> Optional[A11yResult]:
-        """Search for element by name using UIA FindFirst."""
+        """Search for element by exact name using uiautomation's Control() search."""
         try:
-            # Try exact name match first
-            condition = auto.PropertyCondition(auto.PropertyId.NameProperty, target_lower)
-            element = root.FindFirst(auto.TreeScope.Descendants, condition)
-
-            if element and self._validate_element(element, control_type_name, auto):
-                return self._element_to_result(element, auto)
+            # uiautomation uses Control(Name=...) style, not COM PropertyCondition
+            kwargs = {"searchDepth": 10, "Name": target_lower}
+            if control_type_name:
+                # e.g. root.ButtonControl(Name=...) via getattr
+                finder = getattr(root, control_type_name, None)
+                if finder:
+                    element = finder(**{"searchDepth": 10, "Name": target_lower})
+                    if element and element.Exists(0):
+                        result = self._element_to_result(element, auto)
+                        if result:
+                            return result
+            # Generic Control search (case-insensitive via RegexName)
+            import re
+            pattern = "(?i)^" + re.escape(target_lower) + "$"
+            element = root.Control(searchDepth=10, RegexName=pattern)
+            if element and element.Exists(0):
+                if self._validate_element(element, control_type_name, auto):
+                    return self._element_to_result(element, auto)
         except Exception:
             pass
         return None
@@ -158,19 +170,46 @@ class A11yEngine:
         control_type_name: Optional[str],
         auto,
     ) -> Optional[A11yResult]:
-        """Walk the UIA tree searching for partial name matches."""
-        try:
-            # Use GetChildren for a broader search
-            # This is slower but catches partial matches
-            children = self._get_all_controls(root, auto, max_depth=6)
+        """Walk the UIA tree searching for partial name matches.
 
+        Uses uiautomation RegexName for substring match first (fast path),
+        then falls back to manual tree walk for non-ASCII or complex patterns.
+        """
+        import re
+
+        # Fast path: regex substring search via uiautomation
+        try:
+            pattern = "(?i)" + re.escape(target_lower)
+            if control_type_name:
+                finder = getattr(root, control_type_name, None)
+                if finder:
+                    element = finder(searchDepth=12, RegexName=pattern)
+                    if element and element.Exists(0):
+                        result = self._element_to_result(element, auto)
+                        if result:
+                            return result
+            element = root.Control(searchDepth=12, RegexName=pattern)
+            if element and element.Exists(0):
+                result = self._element_to_result(element, auto)
+                if result:
+                    return result
+        except Exception:
+            pass
+
+        # Slow path: manual walk (catches edge cases the regex search misses)
+        try:
+            children = self._get_all_controls(root, auto, max_depth=8)
             for control in children:
                 try:
                     name = control.Name
                     if not name:
                         continue
-
                     name_lower = name.lower()
+                    # Skip elements whose name is much longer than target — these are
+                    # container titles (e.g. browser tab "Amazon.ca: USB-C Cable...") that
+                    # happen to contain the target as a substring but are not the real element.
+                    if len(name) > len(target_lower) * 4:
+                        continue
                     if target_lower in name_lower or name_lower in target_lower:
                         if self._validate_element(control, control_type_name, auto):
                             return self._element_to_result(control, auto)
@@ -200,13 +239,19 @@ class A11yEngine:
             pass
 
     def _validate_element(self, element, control_type_name: Optional[str], auto) -> bool:
-        """Check if element matches the required control type."""
-        if control_type_name is None:
-            return True
+        """Check if element matches the required control type.
+
+        Always rejects container/window elements (they match by substring but
+        are not interactive UI elements the user can act on).
+        """
         try:
-            # Get the element's ControlTypeName
             actual_type = element.ControlTypeName
-            return actual_type == control_type_name
+            # Never return window/titlebar/pane containers as located elements
+            if actual_type in ("WindowControl", "TitleBarControl", "PaneControl"):
+                return False
+            if control_type_name:
+                return actual_type == control_type_name
+            return True
         except Exception:
             return True  # Accept if we can't check the type
 

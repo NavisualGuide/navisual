@@ -19,11 +19,47 @@ class Config(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # --- API ---
-    api_provider: str = Field(default="anthropic", description="AI backend: anthropic, openai, local")
+    api_provider: str = Field(
+        default="anthropic",
+        description="AI backend: anthropic | gemini | ollama | openai",
+    )
+
+    # Anthropic
     anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
+    anthropic_model: str = Field(
+        default="claude-sonnet-4-6",
+        description="Anthropic model ID. Options: claude-haiku-4-5-20251001 (fast/cheap), "
+                    "claude-sonnet-4-6 (balanced), claude-opus-4-6 (most capable)",
+    )
+
+    # Google Gemini — free tier via Google AI Studio (~1,500 req/day, no credit card)
+    gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
+    gemini_model: str = Field(
+        default="gemini-2.0-flash",
+        description="Gemini model ID. Options: gemini-2.0-flash (free tier), "
+                    "gemini-1.5-pro (higher quality, paid)",
+    )
+
+    # Ollama — local inference, no API key, runs on-device
+    ollama_base_url: str = Field(
+        default="http://localhost:11434",
+        description="Ollama server URL. Default: http://localhost:11434",
+    )
+    ollama_model: str = Field(
+        default="llama3.2-vision",
+        description="Ollama model name. Vision-capable models: llama3.2-vision, llava:7b, moondream. "
+                    "Pull with: ollama pull llama3.2-vision",
+    )
+    ollama_timeout_sec: int = Field(
+        default=120,
+        description="Ollama request timeout (longer than cloud APIs — local inference is slower)",
+    )
+
+    # OpenAI (v0.2)
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
-    anthropic_model: str = Field(default="claude-sonnet-4-20250514", description="Anthropic model ID")
-    api_timeout_sec: int = Field(default=30, description="API request timeout in seconds")
+
+    # Shared API settings
+    api_timeout_sec: int = Field(default=30, description="Cloud API request timeout in seconds")
     api_max_retries: int = Field(default=3, description="Max retry attempts for API calls")
 
     # --- Logging ---
@@ -53,7 +89,7 @@ class Config(BaseSettings):
     # --- Overlay ---
     overlay_color: str = Field(default="#FF6B35", description="Overlay highlight color")
     overlay_arrow_color: str = Field(default="#FF6B35", description="Arrow color")
-    overlay_thickness: int = Field(default=3, description="Overlay border thickness")
+    overlay_thickness: int = Field(default=4, description="Overlay inner stroke thickness (white outline is 2x+2)")
     subtitle_font_size: int = Field(default=18, description="Subtitle text font size")
     subtitle_bg_opacity: int = Field(default=180, description="Subtitle background opacity (0-255)")
 

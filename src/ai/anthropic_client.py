@@ -1,13 +1,15 @@
 """Anthropic API client for AI Navigator.
 
 Uses httpx for direct REST calls to the Anthropic Messages API with tool_use
-for structured output. Returns validated NavigateStepResponse objects.
+for structured output. Supports streaming via SSE for fast first-token display.
+Returns validated NavigateStepResponse objects.
 """
 
 import asyncio
-import base64
+import json
 import logging
-from typing import Optional
+import re
+from typing import Callable, Optional
 
 import httpx
 
@@ -57,13 +59,20 @@ class AnthropicClient:
         messages: list[dict],
         screenshot_b64: Optional[str] = None,
         system_prompt: str = "",
+        on_text_chunk: Optional[Callable[[str], None]] = None,
     ) -> tuple[NavigateStepResponse, int, int]:
-        """Send a message to the Anthropic API with tool_use.
+        """Send a message to the Anthropic API with tool_use streaming.
+
+        Streams the response via SSE. As the tool input JSON arrives in chunks,
+        extracts the first instruction text incrementally and calls on_text_chunk
+        for each new character — so the UI can show text as it arrives.
 
         Args:
             messages: Conversation history in Anthropic format.
             screenshot_b64: Base64-encoded JPEG screenshot (optional).
             system_prompt: System prompt text.
+            on_text_chunk: Optional callback called with each new instruction
+                           text fragment as it streams in.
 
         Returns:
             Tuple of (NavigateStepResponse, input_tokens, output_tokens).
@@ -73,45 +82,41 @@ class AnthropicClient:
         """
         client = await self._ensure_client()
 
-        # Build the request payload
         payload = {
             "model": self.model,
             "max_tokens": 1024,
+            "stream": True,
             "system": system_prompt,
             "tools": [NAVIGATE_STEP_TOOL],
             "tool_choice": {"type": "tool", "name": "navigate_step"},
             "messages": messages,
         }
 
-        # Execute with retries
         last_error = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = await client.post(ANTHROPIC_API_URL, json=payload)
-
-                if response.status_code == 200:
-                    return self._parse_response(response.json())
-
-                # Handle specific error codes
-                if response.status_code == 429:  # Rate limit
-                    retry_after = int(response.headers.get("retry-after", 5))
-                    logger.warning("Rate limited, retrying in %ds (attempt %d/%d)",
-                                   retry_after, attempt, self.max_retries)
-                    await asyncio.sleep(retry_after)
-                    continue
-                elif response.status_code == 529:  # Overloaded
-                    logger.warning("API overloaded, retrying in 10s (attempt %d/%d)",
-                                   attempt, self.max_retries)
-                    await asyncio.sleep(10)
-                    continue
-                else:
-                    error_body = response.text
-                    logger.error("API error %d: %s", response.status_code, error_body[:200])
-                    last_error = AnthropicAPIError(response.status_code, error_body)
-                    if response.status_code >= 500:
-                        await asyncio.sleep(2 ** attempt)
+                async with client.stream("POST", ANTHROPIC_API_URL, json=payload) as resp:
+                    if resp.status_code == 429:
+                        retry_after = int(resp.headers.get("retry-after", 5))
+                        logger.warning("Rate limited, retrying in %ds (attempt %d/%d)",
+                                       retry_after, attempt, self.max_retries)
+                        await asyncio.sleep(retry_after)
                         continue
-                    raise last_error
+                    elif resp.status_code == 529:
+                        logger.warning("API overloaded, retrying in 10s (attempt %d/%d)",
+                                       attempt, self.max_retries)
+                        await asyncio.sleep(10)
+                        continue
+                    elif resp.status_code != 200:
+                        error_body = await resp.aread()
+                        logger.error("API error %d: %s", resp.status_code, error_body[:200])
+                        last_error = AnthropicAPIError(resp.status_code, error_body.decode())
+                        if resp.status_code >= 500:
+                            await asyncio.sleep(2 ** attempt)
+                            continue
+                        raise last_error
+
+                    return await self._stream_response(resp, on_text_chunk)
 
             except httpx.TimeoutException:
                 logger.warning("API timeout (attempt %d/%d)", attempt, self.max_retries)
@@ -124,39 +129,98 @@ class AnthropicClient:
 
         raise last_error or AnthropicAPIError(0, "Max retries exceeded")
 
-    def _parse_response(self, data: dict) -> tuple[NavigateStepResponse, int, int]:
-        """Parse the API response and extract the tool_use result.
+    async def _stream_response(
+        self,
+        resp: httpx.Response,
+        on_text_chunk: Optional[Callable[[str], None]],
+    ) -> tuple[NavigateStepResponse, int, int]:
+        """Process the SSE stream, calling on_text_chunk as instruction text arrives.
 
-        Returns:
-            Tuple of (NavigateStepResponse, input_tokens, output_tokens).
+        Anthropic streams tool input as `input_json_delta` events containing
+        partial JSON. We accumulate these and extract the `instruction` field
+        text incrementally using a simple state machine — no JSON parser needed
+        until the stream is complete.
         """
-        # Extract token usage
+        accumulated_json = ""
+        input_tokens = 0
+        output_tokens = 0
+
+        # State for incremental instruction extraction
+        instruction_prefix = '"instruction": "'
+        emitted_instruction_len = 0  # chars of instruction already sent to callback
+        in_instruction = False        # currently inside an instruction value
+
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                break
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            event_type = event.get("type", "")
+
+            # Accumulate tool input JSON deltas
+            if event_type == "content_block_delta":
+                delta = event.get("delta", {})
+                if delta.get("type") == "input_json_delta":
+                    chunk = delta.get("partial_json", "")
+                    accumulated_json += chunk
+
+                    # Incrementally emit instruction text to callback
+                    if on_text_chunk and chunk:
+                        _emit_instruction_chunks(
+                            accumulated_json, chunk,
+                            emitted_instruction_len, in_instruction,
+                            instruction_prefix, on_text_chunk,
+                        )
+                        # Update state
+                        if not in_instruction and instruction_prefix in accumulated_json:
+                            in_instruction = True
+                        if in_instruction:
+                            visible = _extract_visible_instruction(accumulated_json)
+                            emitted_instruction_len = len(visible)
+
+            elif event_type == "message_delta":
+                usage = event.get("usage", {})
+                output_tokens = usage.get("output_tokens", output_tokens)
+
+            elif event_type == "message_start":
+                usage = event.get("message", {}).get("usage", {})
+                input_tokens = usage.get("input_tokens", 0)
+
+        return self._parse_tool_json(accumulated_json), input_tokens, output_tokens
+
+    def _parse_tool_json(self, accumulated_json: str) -> NavigateStepResponse:
+        """Parse the fully accumulated tool input JSON into a NavigateStepResponse."""
+        try:
+            data = json.loads(accumulated_json)
+            return NavigateStepResponse(**data)
+        except (json.JSONDecodeError, Exception) as e:
+            raise AnthropicAPIError(0, f"Failed to parse tool input JSON: {e}\n{accumulated_json[:200]}")
+
+    def _parse_response(self, data: dict) -> tuple[NavigateStepResponse, int, int]:
+        """Parse a non-streaming API response (kept for fallback compatibility)."""
         usage = data.get("usage", {})
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
-        # Find the tool_use content block
         content_blocks = data.get("content", [])
         for block in content_blocks:
             if block.get("type") == "tool_use" and block.get("name") == "navigate_step":
                 tool_input = block.get("input", {})
                 response = NavigateStepResponse(**tool_input)
-                logger.debug(
-                    "Parsed navigate_step: %d steps, state='%s'",
-                    len(response.steps), response.state_summary[:50],
-                )
                 return response, input_tokens, output_tokens
 
-        # No tool_use block found — check for text response
         text_content = " ".join(
             block.get("text", "") for block in content_blocks if block.get("type") == "text"
         )
         if text_content:
             logger.warning("AI returned text instead of tool_use: %s", text_content[:100])
-
-        raise AnthropicAPIError(
-            0, "No navigate_step tool_use block in response"
-        )
+        raise AnthropicAPIError(0, "No navigate_step tool_use block in response")
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -175,6 +239,66 @@ class AnthropicAPIError(Exception):
         self.status_code = status_code
         self.message = message
         super().__init__(f"Anthropic API error ({status_code}): {message}")
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------------------------
+
+# Matches the start of any instruction value in the partial tool JSON
+_INSTRUCTION_RE = re.compile(r'"instruction":\s*"')
+
+
+def _extract_visible_instruction(partial_json: str) -> str:
+    """Extract the first instruction string from partial (possibly incomplete) JSON.
+
+    Scans forward from the `"instruction": "` marker and collects characters
+    up to the first unescaped `"` or end of string, whichever comes first.
+    """
+    m = _INSTRUCTION_RE.search(partial_json)
+    if not m:
+        return ""
+    start = m.end()
+    result = []
+    i = start
+    while i < len(partial_json):
+        ch = partial_json[i]
+        if ch == "\\" and i + 1 < len(partial_json):
+            # Handle escape sequences — convert \" to " etc.
+            next_ch = partial_json[i + 1]
+            if next_ch == '"':
+                result.append('"')
+            elif next_ch == 'n':
+                result.append('\n')
+            elif next_ch == 't':
+                result.append('\t')
+            else:
+                result.append(next_ch)
+            i += 2
+            continue
+        if ch == '"':
+            break  # end of string value
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
+def _emit_instruction_chunks(
+    accumulated_json: str,
+    _new_chunk: str,
+    already_emitted: int,
+    in_instruction: bool,
+    prefix: str,
+    callback: Callable[[str], None],
+) -> None:
+    """Emit any new instruction characters since the last call."""
+    if not in_instruction and prefix not in accumulated_json:
+        return
+    visible = _extract_visible_instruction(accumulated_json)
+    if len(visible) > already_emitted:
+        new_text = visible[already_emitted:]
+        if new_text:
+            callback(new_text)
 
 
 def build_messages(

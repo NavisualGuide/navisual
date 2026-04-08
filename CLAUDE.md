@@ -1,7 +1,7 @@
 # AI Navigator — Project Guide
 
 **Version:** 0.1.0-alpha
-**Status:** Scaffolding complete. MVP implementation starting.
+**Status:** MVP complete. First real-world test passed (Amazon + SolidWorks). v0.1.4 shipped.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
 **Design Doc:** [AI-Navigator-Design-Document.md](AI-Navigator-Design-Document.md)
 **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
@@ -70,10 +70,12 @@
 | Screen Monitor | `input/screen_monitor.py` | Event-driven detection | TODO |
 | Chat Input | `input/chat_input.py` | User prompt input | TODO |
 | Voice Input | `input/voice_input.py` | Stub for v0.2 | STUB |
-| API Router | `ai/api_router.py` | Provider selection, request building | TODO |
-| Anthropic Client | `ai/anthropic.py` | Anthropic API (tool_use) | TODO |
+| API Router | `ai/api_router.py` | Provider selection, request building | DONE |
+| Anthropic Client | `ai/anthropic_client.py` | Anthropic API (tool_use) | DONE |
+| Gemini Client | `ai/gemini_client.py` | Google Gemini API (function calling) | DONE |
+| Ollama Client | `ai/ollama_client.py` | Local Ollama inference (JSON mode) | DONE |
 | OpenAI Client | `ai/openai_client.py` | OpenAI API (function_calling) | STUB |
-| Tool Schemas | `ai/tool_schemas.py` | navigate_step tool definition | TODO |
+| Tool Schemas | `ai/tool_schemas.py` | navigate_step tool definition | DONE |
 | Element Locator | `locator/element_locator.py` | Orchestrates OCR + A11y + templates | TODO |
 | OCR Engine | `locator/ocr_engine.py` | **FALLBACK**: PaddleOCR wrapper, text → bbox | TODO |
 | A11y Engine | `locator/a11y_engine.py` | **PRIMARY**: Windows UIA element lookup (< 5ms) | TODO |
@@ -206,26 +208,69 @@ if __name__ == "__main__":
 
 ## Current Status
 
-### ✅ Completed
+### ✅ Completed (v0.1.0-alpha)
 - Design document v0.2 (comprehensive)
-- Project structure scaffolded
-- pyproject.toml configured
-- GitHub repo initialized & pushed
-- CLAUDE.md (this file)
+- All six layers implemented with 47 passing tests
+- Anthropic API (tool_use), PaddleOCR, Windows UIA A11y
+- PySide6 UI (main window + floating window + overlay)
+- Session persistence, correction hotkey, clipboard
+- Multi-step sequencer with checkpoint support
+- Cost tracker (daily/monthly caps with safety margin)
+- First real-world test: Amazon + SolidWorks
 
-### 🚧 In Progress
-- Starting MVP implementation
+### ✅ Completed (v0.1.1)
+- Multi-provider AI: Gemini Flash (free tier) + Ollama (local) + Anthropic
+- System prompt: generic browser language (no Edge/Chrome/Firefox specifics)
+- System prompt: AI Navigator window self-awareness (minimize, not close)
+- Input box stays enabled during API calls — messages queue automatically
+- Screen change auto-advance: mid-sequence steps now advance without user prompt
+- Screen change re-query: when sequence complete + screen changes, AI re-queries (debounced 5s)
+- Window geometry in state context so AI knows where the Navigator window is
+- Startup message shows active provider + model
 
-### 📋 MVP Milestones
+### ✅ Completed (v0.1.2)
+- System prompt rule 12: always respond in English (fixes Chinese/locale responses)
+- Overlay visibility: white contrasting outline under all overlay types (visible on any background)
+- .env.example fully rewritten with all providers, all model options, all settings
+
+### ✅ Completed (v0.1.3)
+- OCR fix: `show_log` and `use_gpu` arguments conditionally included via `inspect.signature`
+  (both removed in newer PaddleOCR versions)
+- Race condition fix: `_is_processing` set synchronously in `handle_screen_change` before
+  scheduling async API calls, preventing duplicate calls from rapid screen-change events
+- `_handle_checkpoint_completed` resets `_is_processing` in non-API branches so UI stays responsive
+- A11y engine: replaced invalid `PropertyCondition`/`PropertyId` API with `Control(RegexName=...)`
+- A11y engine: window/titlebar/pane controls excluded; 4× name-length guard prevents browser tab
+  title false matches; search depth increased to 12 (fast) / 8 (slow) for Chrome's deep DOM
+- System prompt rule 3: `target_text` limited to 1–5 words max
+
+### ✅ Completed (v0.1.4)
+- OCR backend replaced on Windows: `Windows.Media.Ocr` (built-in Windows 10/11, via `winrt`)
+  is now primary. Eliminates PaddlePaddle 3.x PIR+OneDNN `ConvertPirAttribute2RuntimeAttribute`
+  bug that crashed every OCR inference. ~10ms vs ~150ms, zero model downloads.
+- PaddleOCR retained as fallback for non-Windows platforms (macOS/Linux in future)
+- `winrt-Windows.Media.Ocr` and related packages added to `pyproject.toml`
+- OCR results: line-level merged bbox + individual word bboxes for precise single-word matching
+- PaddleOCR 3.x compatibility: dict result format, `cls` try/except, `use_doc_orientation_classify`
+  flags to reduce model load and limit OneDNN exposure
+
+### 🚧 Next: v0.2
+
+### 📋 Upcoming Milestones
 
 ```
-Week 1-2:  Screen capture + event detection + basic chat UI
-Week 3-4:  Anthropic API + tool_use + state summarization
-Week 5-6:  PaddleOCR integration + Element Locator + overlay rendering
-Week 7-8:  Correction hotkey + session persistence + clipboard
-Week 9-10: End-to-end testing (browser tasks)
-Week 11:   Internal demo + feedback
-Week 12:   v0.1 alpha release
+v0.2 (Priority order):
+  1. Streaming responses — render instructions as they arrive (perceived speed fix)
+  2. Prompt caching — cache system prompt + tool schemas (90% cheaper for Anthropic)
+  3. TTS + voice input (paired feature)
+  4. Model tiering — use Haiku for screen-change detection, Sonnet for guidance
+  5. Multi-monitor support (currently single-monitor only)
+
+v0.3:
+  6. Tauri/Rust rewrite for native .exe (SmartScreen fix) + EV code signing
+  7. Template matching (icon-based locator, not just text)
+  8. macOS support (AX Accessibility API)
+  9. Local model improvements (better vision quality via quantized models)
 ```
 
 ### 🎯 MVP Scope (v0.1)
@@ -246,15 +291,26 @@ Week 12:   v0.1 alpha release
 | Accessibility API | ✗ | v0.2 (OCR sufficient for browsers) |
 | Multi-platform | ✗ | Windows only for MVP |
 
-### 📅 Post-MVP Roadmap
+### 📅 Full Roadmap
 
 ```
-v0.2  TTS + voice input (paired) + prompt caching + Accessibility API (UIA)
+v0.2  Streaming responses + prompt caching + TTS + voice input
+      + multi-monitor support + model tiering (Haiku for detection)
 v0.3  Tauri/Rust rewrite (SmartScreen fix) + EV code signing + Blender support
-      + template matching + local model support + macOS + Nav-Packs
+      + template matching + quantized local models + macOS + Nav-Packs
 v0.4  Linux + plugin system + accessibility UX pass + enterprise features
 v1.0  MSIX packaging (Microsoft Store) + native installer + public launch
 ```
+
+### 🔍 Known Issues / Future Improvements
+
+| Issue | Priority | Notes |
+|-------|----------|-------|
+| Response speed | High | Fix: streaming (v0.2) + prompt caching (v0.2) |
+| Single-monitor only | Medium | Multi-monitor: v0.2 |
+| Ollama vision quality | Medium | Improve with better quantized models |
+| Daily token cap blocks testing | Low | Set `DAILY_TOKEN_CAP=1000000` in .env |
+| Screen-change re-query too eager | Low | Tune `_screen_change_requery_cooldown_sec` if noisy |
 
 ---
 
@@ -264,8 +320,32 @@ v1.0  MSIX packaging (Microsoft Store) + native installer + public launch
 
 ```bash
 # .env
+
+# --- Provider selection ---
+# Options: anthropic | gemini | ollama | openai
+API_PROVIDER=anthropic
+
+# --- Anthropic (Claude) ---
 ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...           # Optional, for testing
+# ANTHROPIC_MODEL=claude-haiku-4-5-20251001   # Fast & cheap
+# ANTHROPIC_MODEL=claude-sonnet-4-6           # Default — balanced
+# ANTHROPIC_MODEL=claude-opus-4-6             # Most capable
+
+# --- Google Gemini (free tier for new users) ---
+# GEMINI_API_KEY=AIza...        # Free key: https://aistudio.google.com/apikey
+# GEMINI_MODEL=gemini-2.0-flash  # Default — free tier, multimodal, fast
+
+# --- Ollama (local, no API key, runs on-device) ---
+# OLLAMA_BASE_URL=http://localhost:11434
+# OLLAMA_MODEL=llama3.2-vision   # Requires: ollama pull llama3.2-vision
+
+# --- OpenAI (v0.2) ---
+OPENAI_API_KEY=sk-...           # Optional, stub for now
+
+# --- Budget (raise for testing) ---
+DAILY_TOKEN_CAP=1000000         # Default 100k is tight for development
+COST_SAFETY_MARGIN=1.2          # Default 2.5x is conservative
+
 LOG_LEVEL=INFO
 DEBUG_MODE=false
 ```

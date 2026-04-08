@@ -27,7 +27,16 @@ dependencies = [
     "mss>=9.0.0",               # Screen capture
     "imagehash>=4.3.0",         # pHash for screenshot dedup
     "uiautomation>=2.0.18",    # PRIMARY: Windows UI Automation (< 5ms element lookup)
-    "paddleocr>=2.7.0",         # FALLBACK: Local OCR (faster than EasyOCR, lighter than PyTorch)
+    # Windows OCR (primary OCR backend — built into Windows 10/11, zero ML models)
+    "winrt-runtime>=2.0.0",
+    "winrt-Windows.Media.Ocr>=2.0.0",
+    "winrt-Windows.Graphics.Imaging>=2.0.0",
+    "winrt-Windows.Storage.Streams>=2.0.0",
+    "winrt-Windows.Foundation>=2.0.0",
+    "winrt-Windows.Foundation.Collections>=2.0.0",
+    "winrt-Windows.Globalization>=2.0.0",
+    # PaddleOCR (fallback OCR for non-Windows platforms)
+    "paddleocr>=2.7.0",         # FALLBACK: Local OCR (used only when Windows OCR unavailable)
     "paddlepaddle>=2.5.0",      # PaddleOCR backend (CPU-only, no CUDA needed)
     "httpx>=0.25.0",            # Async HTTP client
     "pydantic>=2.0.0",          # Data validation
@@ -45,12 +54,28 @@ dev = [
     "pytest-cov>=4.0.0",
 ]
 
+# Provider extras — install only what you use
+gemini = [
+    # No extra dependencies: uses httpx (already in core) + Google AI Studio REST API
+    # Get a free API key at https://aistudio.google.com/apikey
+]
+
+ollama = [
+    # No extra dependencies: uses httpx (already in core) + local Ollama server
+    # Install Ollama: https://ollama.com
+    # Pull a vision model: ollama pull llama3.2-vision
+]
+
+openai = [
+    "openai>=1.0.0",             # OpenAI SDK (v0.2+)
+]
+
 tts = [
     "piper-tts>=1.2.0",         # Local text-to-speech (v0.2+)
 ]
 
 stt = [
-    "openai-whisper>=20230314",  # Local speech-to-speech (v0.2+)
+    "openai-whisper>=20230314",  # Local speech-to-text (v0.2+)
 ]
 
 [project.urls]

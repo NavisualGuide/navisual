@@ -53,7 +53,8 @@ class OverlayWindow(QWidget):
 
         # Visual config
         self._color = QColor("#FF6B35")
-        self._thickness = 3
+        self._thickness = 4          # Inner colored stroke
+        self._outline_thickness = 8  # White outline drawn underneath for contrast
         self._subtitle_font_size = 18
         self._subtitle_bg_opacity = 180
 
@@ -62,10 +63,11 @@ class OverlayWindow(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.clear)
 
-    def set_colors(self, color: str, thickness: int = 3) -> None:
+    def set_colors(self, color: str, thickness: int = 4) -> None:
         """Update overlay colors from config."""
         self._color = QColor(color)
         self._thickness = thickness
+        self._outline_thickness = thickness * 2 + 2
 
     def set_subtitle_style(self, font_size: int = 18, bg_opacity: int = 180) -> None:
         """Update subtitle visual style."""
@@ -147,79 +149,106 @@ class OverlayWindow(QWidget):
         finally:
             painter.end()
 
-    def _draw_arrow(self, painter: QPainter, x: int, y: int, w: int, h: int) -> None:
-        """Draw an arrow pointing to the target bbox."""
-        pen = QPen(self._color, self._thickness)
-        painter.setPen(pen)
+    def _make_pen(self, color: QColor, width: int, round_cap: bool = False) -> QPen:
+        """Create a QPen safely using the two-arg constructor + setters.
 
-        # Target center
+        Avoids the multi-arg QPen(QColor, width, style, cap) constructor which
+        is not valid in PySide6 — only QPen(QBrush, width, ...) accepts extra args.
+        """
+        pen = QPen(color)
+        pen.setWidth(width)
+        if round_cap:
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        return pen
+
+    def _white_pen(self, width: int) -> QPen:
+        return self._make_pen(QColor(255, 255, 255, 220), width, round_cap=True)
+
+    def _draw_arrow(self, painter: QPainter, x: int, y: int, w: int, h: int) -> None:
+        """Draw an arrow pointing to the target bbox.
+
+        White outline drawn first, colored stroke on top — visible on any background.
+        """
         cx = x + w // 2
         cy = y + h // 2
-
-        # Arrow origin: offset from target (pick the direction with most space)
-        screen_w = self.width()
         screen_h = self.height()
-        offset = 120
+        offset = 130
 
-        # Choose arrow origin based on available space
         if cy > screen_h // 2:
-            # Target is in bottom half — arrow comes from above
             ox, oy = cx, max(0, y - offset)
         else:
-            # Target is in top half — arrow comes from below
             ox, oy = cx, min(screen_h, y + h + offset)
 
-        # Draw the line
+        # --- White outline pass ---
+        painter.setPen(self._white_pen(self._outline_thickness))
         painter.drawLine(QPoint(ox, oy), QPoint(cx, cy))
+        painter.drawRect(x - 3, y - 3, w + 6, h + 6)
+        self._draw_arrowhead(painter, ox, oy, cx, cy, size=22, color=QColor(255, 255, 255, 220))
 
-        # Draw arrowhead
-        self._draw_arrowhead(painter, ox, oy, cx, cy)
-
-        # Draw highlight box around target
-        highlight_pen = QPen(self._color, 2)
-        painter.setPen(highlight_pen)
-        painter.drawRect(x - 2, y - 2, w + 4, h + 4)
+        # --- Colored pass ---
+        painter.setPen(self._make_pen(self._color, self._thickness, round_cap=True))
+        painter.drawLine(QPoint(ox, oy), QPoint(cx, cy))
+        painter.setPen(self._make_pen(self._color, self._thickness))
+        painter.drawRect(x - 3, y - 3, w + 6, h + 6)
+        self._draw_arrowhead(painter, ox, oy, cx, cy, size=16, color=self._color)
 
     def _draw_arrowhead(
-        self, painter: QPainter, x1: int, y1: int, x2: int, y2: int
+        self,
+        painter: QPainter,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        size: int = 16,
+        color: Optional[QColor] = None,
     ) -> None:
-        """Draw an arrowhead at the end of a line (at x2, y2)."""
-        arrow_size = 14
+        """Draw a filled arrowhead at (x2, y2) pointing from (x1, y1).
+
+        Saves and restores painter pen so callers are unaffected.
+        """
+        if color is None:
+            color = self._color
         angle = math.atan2(y2 - y1, x2 - x1)
 
         p1 = QPoint(
-            int(x2 - arrow_size * math.cos(angle - math.pi / 6)),
-            int(y2 - arrow_size * math.sin(angle - math.pi / 6)),
+            int(x2 - size * math.cos(angle - math.pi / 6)),
+            int(y2 - size * math.sin(angle - math.pi / 6)),
         )
         p2 = QPoint(
-            int(x2 - arrow_size * math.cos(angle + math.pi / 6)),
-            int(y2 - arrow_size * math.sin(angle + math.pi / 6)),
+            int(x2 - size * math.cos(angle + math.pi / 6)),
+            int(y2 - size * math.sin(angle + math.pi / 6)),
         )
 
+        saved_pen = painter.pen()
         triangle = QPolygon([QPoint(x2, y2), p1, p2])
-        painter.setBrush(QBrush(self._color))
+        painter.setBrush(QBrush(color))
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPolygon(triangle)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(saved_pen)  # Restore pen for caller
 
     def _draw_highlight(self, painter: QPainter, x: int, y: int, w: int, h: int) -> None:
-        """Draw a colored rectangle highlight around the target."""
-        # Semi-transparent fill
+        """Draw a colored rectangle highlight. White outline for contrast."""
         fill_color = QColor(self._color)
-        fill_color.setAlpha(40)
+        fill_color.setAlpha(70)
         painter.fillRect(x, y, w, h, fill_color)
 
-        # Solid border
-        pen = QPen(self._color, self._thickness)
-        painter.setPen(pen)
+        painter.setPen(self._white_pen(self._outline_thickness))
+        painter.drawRect(x - 2, y - 2, w + 4, h + 4)
+
+        painter.setPen(self._make_pen(self._color, self._thickness))
         painter.drawRect(x, y, w, h)
 
     def _draw_circle(self, painter: QPainter, x: int, y: int, w: int, h: int) -> None:
-        """Draw a circle around the target center."""
+        """Draw a circle around the target center. White outline for contrast."""
         cx = x + w // 2
         cy = y + h // 2
-        radius = max(w, h) // 2 + 15
+        radius = max(w, h) // 2 + 18
 
-        pen = QPen(self._color, self._thickness)
-        painter.setPen(pen)
+        painter.setPen(self._white_pen(self._outline_thickness))
+        painter.drawEllipse(QPoint(cx, cy), radius + 2, radius + 2)
+
+        painter.setPen(self._make_pen(self._color, self._thickness))
         painter.drawEllipse(QPoint(cx, cy), radius, radius)
 
     def _draw_subtitle(self, painter: QPainter, text: str) -> None:
