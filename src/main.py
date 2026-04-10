@@ -30,6 +30,7 @@ from src.core.cost_tracker import CostTracker
 from src.core.session import Session, SessionManager
 from src.core.step_sequencer import StepSequencer
 from src.input.chat_input import ChatInputHandler
+from src.input.voice_input import VoiceInput
 from src.input.screen_capture import (
     capture_screenshot_b64,
     image_to_bytes,
@@ -38,6 +39,7 @@ from src.input.screen_monitor import ScreenChangeEvent, ScreenMonitor
 from src.locator.element_locator import ElementLocator
 from src.output.clipboard import copy_to_clipboard
 from src.output.overlay import OverlayWindow
+from src.output.tts import TTSEngine
 from src.ui.floating_window import FloatingWindow
 from src.ui.main_window import MainWindow
 
@@ -57,6 +59,7 @@ class GuidanceEngine(QObject):
     processing_started = Signal()
     processing_finished = Signal()
     streaming_chunk = Signal(str)    # Partial instruction text during streaming
+    voice_transcript = Signal(str)   # Recognized speech from background voice thread
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -95,7 +98,8 @@ class GuidanceEngine(QObject):
         self._active = False
         self._pending_messages: deque[str] = deque()  # Queued user messages during processing
         self._last_api_call_time: float = 0.0  # Debounce re-queries from screen changes
-        self._screen_change_requery_cooldown_sec: float = 5.0
+        self._screen_change_requery_cooldown_sec: float = 2.0
+        self._last_screenshot_size: tuple[int, int] = (0, 0)  # (width, height) of last captured image
         # Callback to get the AI Navigator window geometry (set by Application after init)
         # Returns a string like "AI Navigator window: top-left corner, 600x750px" or None
         self._get_window_context: Optional[callable] = None
@@ -233,6 +237,7 @@ class GuidanceEngine(QObject):
 
         try:
             screenshot_b64, img = capture_screenshot_b64()
+            self._last_screenshot_size = (img.width, img.height)
             self._element_locator.start_ocr_precache(image_to_bytes(img))
 
             response = await self._api_router.send_initial_request(
@@ -260,7 +265,7 @@ class GuidanceEngine(QObject):
         finally:
             self._flush_pending_messages(session)
 
-    async def _send_followup_request(self, session: Session, user_text: str) -> None:
+    async def _send_followup_request(self, session: Session, user_text: str, use_fast_model: bool = False) -> None:
         """Send a follow-up guidance request."""
         if not self._is_processing:
             self._is_processing = True
@@ -268,6 +273,7 @@ class GuidanceEngine(QObject):
 
         try:
             screenshot_b64, img = capture_screenshot_b64()
+            self._last_screenshot_size = (img.width, img.height)
             self._element_locator.start_ocr_precache(image_to_bytes(img))
 
             state_summary = None
@@ -285,6 +291,7 @@ class GuidanceEngine(QObject):
                 state_summary=state_summary,
                 session=session,
                 on_text_chunk=self.streaming_chunk.emit,
+                use_fast_model=use_fast_model,
             )
 
             self._last_api_call_time = time.monotonic()
@@ -306,10 +313,15 @@ class GuidanceEngine(QObject):
             self._flush_pending_messages(session)
 
     async def _send_screen_change_followup(self, session: Session) -> None:
-        """Re-query the AI after a screen change when no active steps remain."""
+        """Re-query the AI after a screen change when no active steps remain.
+
+        Uses the fast model (Haiku) — screen-change re-queries are frequent and
+        the task context is already established, so a cheaper model is sufficient.
+        """
         await self._send_followup_request(
             session,
             "The screen changed. Here is the current screen. What is the next step?",
+            use_fast_model=True,
         )
 
     async def _handle_checkpoint_completed(self, session: Session) -> None:
@@ -324,10 +336,14 @@ class GuidanceEngine(QObject):
             self.processing_finished.emit()
             self.response_ready.emit(self._step_sequencer)
         elif self._step_sequencer.is_complete:
-            # Sequence done — query AI for next steps
+            # Sequence done — query AI for next steps.
+            # Use fast model: the prior step's context is established and the
+            # screen just changed to a predictable next state, so full-model
+            # reasoning is not needed here.
             await self._send_followup_request(
                 session,
                 "The user completed the previous step. Here is the current screen.",
+                use_fast_model=True,
             )
         else:
             # Next step is also a checkpoint — show it without an API call.
@@ -401,6 +417,11 @@ class GuidanceEngine(QObject):
     def element_locator(self) -> ElementLocator:
         return self._element_locator
 
+    @property
+    def last_screenshot_size(self) -> tuple[int, int]:
+        """(width, height) of the most recently captured screenshot (post-resize)."""
+        return self._last_screenshot_size
+
 
 class Application:
     """Main application class that wires together all components."""
@@ -425,6 +446,32 @@ class Application:
         self._overlay = OverlayWindow()
         self._floating_window = FloatingWindow()
 
+        # TTS engine (optional)
+        self._tts = TTSEngine(
+            rate=self._config.tts_rate,
+            volume=self._config.tts_volume,
+        )
+        if self._config.enable_tts and self._tts.is_available:
+            self._tts.start()
+            logger.info("TTS enabled")
+
+        # Voice input (optional) — transcript callback emits a Qt signal for thread safety
+        self._voice_input = VoiceInput(
+            on_transcript=self._engine.voice_transcript.emit,
+            language="en-US",
+        )
+        if self._config.enable_voice_input and self._voice_input.is_available:
+            self._voice_input.start()
+            self._floating_window.set_voice_enabled(True)
+            logger.info("Voice input enabled")
+            # Poll is_listening at 200ms to sync button state after timeouts
+            self._voice_timer = QTimer()
+            self._voice_timer.setInterval(200)
+            self._voice_timer.timeout.connect(self._sync_listening_state)
+            self._voice_timer.start()
+        else:
+            self._voice_timer = None
+
         # Configure overlay from config
         self._overlay.set_colors(self._config.overlay_color, self._config.overlay_thickness)
         self._overlay.set_subtitle_style(
@@ -437,10 +484,81 @@ class Application:
         # Connect signals
         self._connect_signals()
 
+        # Global hotkeys
+        self._setup_hotkeys()
+
         # Screen monitor polling timer
         self._monitor_timer = QTimer()
         self._monitor_timer.setInterval(50)  # 50ms = 20Hz polling
         self._monitor_timer.timeout.connect(self._engine.screen_monitor.poll)
+
+    def _setup_hotkeys(self) -> None:
+        """Register global hotkeys via Win32 RegisterHotKey + Qt native event filter.
+
+        RegisterHotKey is the most reliable Windows global hotkey API — it posts
+        WM_HOTKEY to the thread message queue and is not affected by GIL contention
+        or hook timeouts that plague SetWindowsHookEx-based libraries.
+        """
+        import ctypes
+        import ctypes.wintypes
+        from PySide6.QtCore import QAbstractNativeEventFilter
+
+        MOD_CONTROL  = 0x0002
+        MOD_SHIFT    = 0x0004
+        MOD_NOREPEAT = 0x4000
+
+        # Virtual key codes for single-character keys and special keys
+        VK_EXTRA = {"space": 0x20, "f1": 0x70, "f2": 0x71, "f3": 0x72,
+                    "f4": 0x73, "f5": 0x74, "f12": 0x7B}
+
+        def parse(hotkey_str: str) -> tuple[int, int]:
+            """Parse 'ctrl+shift+x' → (modifiers, vk_code)."""
+            mods = MOD_NOREPEAT
+            vk = 0
+            for part in hotkey_str.lower().split("+"):
+                part = part.strip()
+                if part == "ctrl":    mods |= MOD_CONTROL
+                elif part == "shift": mods |= MOD_SHIFT
+                elif part in VK_EXTRA: vk = VK_EXTRA[part]
+                elif len(part) == 1:  vk = ord(part.upper())
+            return mods, vk
+
+        definitions = [
+            (1, self._config.correction_hotkey,      self._on_correction),
+            (2, self._config.pause_hotkey,           self._on_pause_toggle),
+            (3, self._config.next_step_hotkey,       self._on_next_step),
+            (4, self._config.floating_window_hotkey, self._floating_window.toggle_visibility),
+        ]
+
+        registered: dict[int, object] = {}
+        for hid, hotkey_str, callback in definitions:
+            mods, vk = parse(hotkey_str)
+            if vk and ctypes.windll.user32.RegisterHotKey(None, hid, mods, vk):
+                registered[hid] = callback
+            else:
+                logger.warning("Failed to register hotkey %d: %s (vk=0x%02X)", hid, hotkey_str, vk)
+
+        WM_HOTKEY = 0x0312
+
+        class _HotkeyFilter(QAbstractNativeEventFilter):
+            def nativeEventFilter(self_, eventType, message):  # noqa: N805
+                if eventType == b"windows_generic_MSG":
+                    msg = ctypes.wintypes.MSG.from_address(int(message))
+                    if msg.message == WM_HOTKEY:
+                        cb = registered.get(msg.wParam)
+                        if cb:
+                            cb()
+                return False, 0
+
+        self._hotkey_filter = _HotkeyFilter()
+        self._app.installNativeEventFilter(self._hotkey_filter)
+        self._registered_hotkey_ids = list(registered.keys())
+
+        logger.info(
+            "Hotkeys registered (Win32): correction=%s, pause=%s, next=%s, float=%s",
+            self._config.correction_hotkey, self._config.pause_hotkey,
+            self._config.next_step_hotkey, self._config.floating_window_hotkey,
+        )
 
     def _get_window_context(self) -> Optional[str]:
         """Return the AI Navigator window position as a context string for the AI.
@@ -454,6 +572,66 @@ class Application:
             f"width={geo.width()}, height={geo.height()}. "
             f"If this window covers important content, tell the user to minimize or move it — NOT close it.]"
         )
+
+    def _build_monitor_map(self) -> None:
+        """Build a mapping from physical mss monitors to Qt logical screens.
+
+        Both A11y (UIA BoundingRectangle) and OCR (mss pixels) return physical
+        pixel coordinates in the virtual desktop coordinate space. Qt overlay
+        uses logical pixels. Conversion is per-screen because each monitor can
+        have a different DPR (e.g. 2.0 on a HiDPI screen, 1.0 on a 1080p screen).
+
+        Monitors are matched by sorting both mss and Qt screens left-to-right,
+        which correctly handles typical multi-monitor horizontal arrangements.
+        """
+        import mss as _mss
+        with _mss.mss() as sct:
+            # monitors[0] is the virtual desktop aggregate; 1..N are physical monitors.
+            # monitors[0].left/top is the virtual desktop origin, which can be negative
+            # when a monitor is positioned to the left or above the primary.
+            # mss screenshots always start at pixel (0,0) = virtual (left, top), so
+            # OCR coordinates (always ≥ 0) must be offset by this origin to obtain
+            # virtual screen coordinates before the physical→logical conversion.
+            self._virtual_origin = (sct.monitors[0]["left"], sct.monitors[0]["top"])
+            self._vd_width = sct.monitors[0]["width"]
+            self._vd_height = sct.monitors[0]["height"]
+            mss_monitors = sorted(sct.monitors[1:], key=lambda m: m["left"])
+        qt_screens = sorted(self._app.screens(), key=lambda s: s.geometry().x())
+        self._monitor_map = list(zip(mss_monitors, qt_screens))
+        logger.info("Virtual desktop origin (mss): %s", self._virtual_origin)
+        for mon, screen in self._monitor_map:
+            logger.info(
+                "Monitor map: mss physical left=%d top=%d w=%d h=%d  ↔  "
+                "Qt logical x=%d y=%d w=%d h=%d DPR=%.2f",
+                mon["left"], mon["top"], mon["width"], mon["height"],
+                screen.geometry().x(), screen.geometry().y(),
+                screen.geometry().width(), screen.geometry().height(),
+                screen.devicePixelRatio(),
+            )
+
+    def _scale_to_logical(self, bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        """Convert a physical-pixel bbox to Qt logical pixels.
+
+        Finds which physical monitor contains the bbox centre, then divides by
+        that screen's DPR and offsets by that screen's logical origin.
+        Falls back to the primary screen's DPR if no match found.
+        """
+        x, y, w, h = bbox
+        cx, cy = x + w // 2, y + h // 2
+        for mon, screen in self._monitor_map:
+            ml, mt, mw, mh = mon["left"], mon["top"], mon["width"], mon["height"]
+            if ml <= cx < ml + mw and mt <= cy < mt + mh:
+                dpr = screen.devicePixelRatio()
+                geom = screen.geometry()
+                return (
+                    int(geom.x() + (x - ml) / dpr),
+                    int(geom.y() + (y - mt) / dpr),
+                    int(w / dpr),
+                    int(h / dpr),
+                )
+        # Fallback: primary screen DPR, no offset correction
+        dpr = self._app.primaryScreen().devicePixelRatio()
+        return (int(x / dpr), int(y / dpr), int(w / dpr), int(h / dpr))
 
     def _apply_dark_theme(self) -> None:
         """Apply a dark color palette."""
@@ -491,6 +669,10 @@ class Application:
         self._floating_window.correction_requested.connect(self._on_correction)
         self._floating_window.pause_toggled.connect(self._on_pause_toggle)
         self._floating_window.next_step_requested.connect(self._on_next_step)
+        self._floating_window.mic_pressed.connect(self._on_mic_pressed)
+
+        # Voice input → engine (thread-safe via signal)
+        self._engine.voice_transcript.connect(self._on_voice_transcript)
 
         # Session management
         self._main_window.new_session_requested.connect(self._on_new_session)
@@ -526,6 +708,10 @@ class Application:
         # visual-only feedback and is removed by end_streaming_message before this.
         self._main_window.add_message("assistant", step.instruction)
 
+        # Speak the instruction if TTS is enabled
+        if self._config.enable_tts and self._tts.is_available:
+            self._tts.speak(step.instruction)
+
         # Show progress
         progress = sequencer.get_progress()
         if progress:
@@ -538,17 +724,51 @@ class Application:
                 "system", f"Copied to clipboard: {step.clipboard}"
             )
 
-        # Locate element and show overlay
+        # Locate element and show overlay.
+        # Enforce the 1–5 word limit on target_text regardless of what the model
+        # returned — long strings (e.g. full placeholder text) never match.
         if step.target_text:
+            words = step.target_text.split()
+            target_text = " ".join(words[:5]) if len(words) > 5 else step.target_text
             result = self._engine.element_locator.locate(
-                target_text=step.target_text,
+                target_text=target_text,
                 target_role=step.target_role.value if step.target_role else None,
                 target_region=step.target_region.value if step.target_region else None,
             )
 
             if result.bbox:
+                # Coordinate spaces:
+                # - A11y (UIA BoundingRectangle): virtual screen coords (can be negative).
+                # - OCR (mss image): image-relative coords in the downscaled screenshot.
+                #   The screenshot is captured at full virtual-desktop resolution then
+                #   downscaled (thumbnail) before OCR — so OCR coords are in image space,
+                #   not virtual desktop space. Steps to convert:
+                #   1. Scale up from image pixels to virtual desktop pixels.
+                #   2. Add virtual origin offset to get virtual screen coordinates.
+                if result.method == "ocr":
+                    ox, oy = self._virtual_origin
+                    x, y, w, h = result.bbox
+                    ss_w, ss_h = self._engine.last_screenshot_size
+                    if ss_w > 0 and self._vd_width > 0:
+                        sx = self._vd_width / ss_w
+                        sy = self._vd_height / ss_h
+                    else:
+                        sx, sy = 1.0, 1.0
+                    virt_bbox = (
+                        int(x * sx) + ox,
+                        int(y * sy) + oy,
+                        int(w * sx),
+                        int(h * sy),
+                    )
+                else:
+                    virt_bbox = result.bbox
+                scaled = self._scale_to_logical(virt_bbox)
+                logger.info(
+                    "Overlay: method=%s image=%s virtual=%s → logical=%s",
+                    result.method, result.bbox, virt_bbox, scaled,
+                )
                 self._overlay.show_overlay(
-                    bbox=result.bbox,
+                    bbox=scaled,
                     overlay_type=step.overlay_type.value,
                     instruction=step.instruction,
                 )
@@ -572,6 +792,7 @@ class Application:
     @Slot()
     def _on_correction(self) -> None:
         """Handle correction request."""
+        self._tts.stop()
         self._main_window.add_message("system", "Correction requested — re-analyzing...")
         self._overlay.clear()
         self._engine.handle_correction()
@@ -590,6 +811,25 @@ class Application:
         """Handle next step request."""
         self._overlay.clear()
         self._engine.handle_next_step()
+
+    @Slot()
+    def _on_mic_pressed(self) -> None:
+        """Trigger a push-to-talk listen cycle."""
+        if self._voice_input.is_listening:
+            return  # Already recording
+        self._floating_window.set_listening(True)
+        self._voice_input.listen()
+
+    @Slot(str)
+    def _on_voice_transcript(self, text: str) -> None:
+        """Handle recognized speech — route it as a user message."""
+        self._floating_window.set_listening(False)
+        self._on_user_message(text)
+
+    @Slot()
+    def _sync_listening_state(self) -> None:
+        """Poll voice input listening state to sync button after timeouts."""
+        self._floating_window.set_listening(self._voice_input.is_listening)
 
     @Slot()
     def _on_new_session(self) -> None:
@@ -640,6 +880,15 @@ class Application:
                 "Example: 'Help me buy a USB-C cable on Amazon'"
             )
 
+        # Tell the element locator the full virtual desktop size so OCR region
+        # filtering works correctly across all monitors (not just primary).
+        virtual = self._app.primaryScreen().virtualGeometry()
+        self._engine.element_locator.set_screen_size(virtual.width(), virtual.height())
+        logger.debug("Virtual desktop size: %dx%d", virtual.width(), virtual.height())
+
+        # Build monitor map for physical→logical pixel conversion
+        self._build_monitor_map()
+
         # Start engine
         self._engine.start()
 
@@ -654,7 +903,17 @@ class Application:
             exit_code = self._app.exec()
         finally:
             self._monitor_timer.stop()
+            if self._voice_timer:
+                self._voice_timer.stop()
+            try:
+                import ctypes
+                for hid in getattr(self, "_registered_hotkey_ids", []):
+                    ctypes.windll.user32.UnregisterHotKey(None, hid)
+            except Exception:
+                pass
             self._engine.stop()
+            self._tts.shutdown()
+            self._voice_input.shutdown()
 
         return exit_code
 

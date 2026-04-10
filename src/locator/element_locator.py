@@ -127,7 +127,7 @@ class ElementLocator:
                     confidence=a11y_result.confidence,
                     element_name=a11y_result.name,
                 )
-            logger.debug("A11y miss for '%s' (role=%s), trying OCR fallback", target_text, target_role)
+            logger.info("A11y miss for '%s' (role=%s), trying OCR fallback", target_text, target_role)
 
         # Strategy 2: OCR fallback (pre-cached results)
         if self._ocr_worker:
@@ -152,7 +152,7 @@ class ElementLocator:
                         confidence=match.confidence,
                         element_name=match.text,
                     )
-            logger.debug("OCR miss for '%s'", target_text)
+            logger.info("OCR miss for '%s'", target_text)
 
         # Strategy 3: Not found — overlay will use subtitle-only
         logger.info("Element not found: '%s' — falling back to subtitle", target_text)

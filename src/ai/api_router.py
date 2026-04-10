@@ -17,7 +17,7 @@ import logging
 from typing import TYPE_CHECKING, Callable, Optional
 
 from src.ai.anthropic_client import AnthropicClient, build_messages
-from src.ai.gemini_client import GeminiClient, build_gemini_messages
+from src.ai.gemini_client import GeminiAPIError, GeminiClient, build_gemini_messages
 from src.ai.ollama_client import OllamaClient, OllamaError, build_ollama_messages
 from src.ai.openai_client import OpenAIClient
 from src.ai.prompts import (
@@ -89,8 +89,9 @@ class APIRouter:
                     max_retries=self._config.api_max_retries,
                 )
                 logger.info(
-                    "API Router: Gemini client initialized (model: %s)",
+                    "API Router: Gemini client initialized (model: %s, fast model: %s)",
                     self._config.gemini_model,
+                    self._config.gemini_fast_model,
                 )
             else:
                 logger.warning(
@@ -157,6 +158,7 @@ class APIRouter:
         state_summary: Optional[str] = None,
         session: Optional["Session"] = None,
         on_text_chunk: Optional[Callable[[str], None]] = None,
+        use_fast_model: bool = False,
     ) -> NavigateStepResponse:
         """Send a guidance request to the AI backend.
 
@@ -195,11 +197,17 @@ class APIRouter:
                 state_summary=state_summary,
                 conversation_history=conversation_history,
             )
+            # Model tiering: use fast model for automated screen-change re-queries
+            model_override = None
+            if use_fast_model and self._config.anthropic_fast_model != self._config.anthropic_model:
+                model_override = self._config.anthropic_fast_model
+                logger.debug("Model tiering: using fast model %s", model_override)
             response, in_tokens, out_tokens = await self._anthropic_client.send_message(
                 messages=messages,
                 screenshot_b64=screenshot_b64,
                 system_prompt=SYSTEM_PROMPT,
                 on_text_chunk=on_text_chunk,
+                model_override=model_override,
             )
 
         elif provider == "gemini" and self._gemini_client:
@@ -209,12 +217,33 @@ class APIRouter:
                 state_summary=state_summary,
                 conversation_history=conversation_history,
             )
-            response, in_tokens, out_tokens = await self._gemini_client.send_message(
-                messages=messages,
-                screenshot_b64=screenshot_b64,
-                system_prompt=SYSTEM_PROMPT,
-                on_text_chunk=on_text_chunk,
-            )
+            model_override = None
+            if use_fast_model and self._config.gemini_fast_model != self._config.gemini_model:
+                model_override = self._config.gemini_fast_model
+            try:
+                response, in_tokens, out_tokens = await self._gemini_client.send_message(
+                    messages=messages,
+                    screenshot_b64=screenshot_b64,
+                    system_prompt=SYSTEM_PROMPT,
+                    on_text_chunk=on_text_chunk,
+                    model_override=model_override,
+                )
+            except GeminiAPIError as e:
+                # 503 = primary model overloaded. Fall back to fast model if different.
+                fast = self._config.gemini_fast_model
+                if e.status_code == 503 and fast != (model_override or self._config.gemini_model):
+                    logger.warning(
+                        "Gemini primary model unavailable (503), falling back to fast model: %s", fast
+                    )
+                    response, in_tokens, out_tokens = await self._gemini_client.send_message(
+                        messages=messages,
+                        screenshot_b64=screenshot_b64,
+                        system_prompt=SYSTEM_PROMPT,
+                        on_text_chunk=on_text_chunk,
+                        model_override=fast,
+                    )
+                else:
+                    raise
 
         elif provider == "ollama" and self._ollama_client:
             messages = build_ollama_messages(
@@ -256,6 +285,7 @@ class APIRouter:
         screenshot_b64: Optional[str] = None,
         session: Optional["Session"] = None,
         on_text_chunk: Optional[Callable[[str], None]] = None,
+        use_fast_model: bool = False,
     ) -> NavigateStepResponse:
         """Send the first request for a new task."""
         user_text = INITIAL_CONTEXT_TEMPLATE.format(task_description=task_description)
@@ -264,6 +294,7 @@ class APIRouter:
             screenshot_b64=screenshot_b64,
             session=session,
             on_text_chunk=on_text_chunk,
+            use_fast_model=use_fast_model,
         )
 
     async def send_resume_request(

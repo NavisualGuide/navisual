@@ -1,9 +1,9 @@
 # AI Navigator — Project Guide
 
-**Version:** 0.1.0-alpha
-**Status:** MVP complete. First real-world test passed (Amazon + SolidWorks). v0.1.4 shipped.
+**Version:** 0.2.0
+**Status:** v0.2 complete. Streaming, prompt caching, multi-monitor, model tiering, TTS, voice input all shipped.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
-**Design Doc:** [AI-Navigator-Design-Document.md](AI-Navigator-Design-Document.md)
+**Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md)
 **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
 
 ---
@@ -69,7 +69,7 @@
 | Screen Capture | `input/screen_capture.py` | On-demand screenshots | TODO |
 | Screen Monitor | `input/screen_monitor.py` | Event-driven detection | TODO |
 | Chat Input | `input/chat_input.py` | User prompt input | TODO |
-| Voice Input | `input/voice_input.py` | Stub for v0.2 | STUB |
+| Voice Input | `input/voice_input.py` | Push-to-talk via SpeechRecognition + Google STT | DONE |
 | API Router | `ai/api_router.py` | Provider selection, request building | DONE |
 | Anthropic Client | `ai/anthropic_client.py` | Anthropic API (tool_use) | DONE |
 | Gemini Client | `ai/gemini_client.py` | Google Gemini API (function calling) | DONE |
@@ -81,7 +81,7 @@
 | A11y Engine | `locator/a11y_engine.py` | **PRIMARY**: Windows UIA element lookup (< 5ms) | TODO |
 | Overlay Renderer | `output/overlay.py` | Qt frameless window for overlays | TODO |
 | Clipboard Manager | `output/clipboard.py` | System clipboard access | TODO |
-| TTS Engine | `output/tts.py` | Stub for v0.2 | STUB |
+| TTS Engine | `output/tts.py` | Text-to-speech via pyttsx3 (Windows SAPI) | DONE |
 | Main Window | `ui/main_window.py` | Chat UI (PySide6) | TODO |
 | Floating Window | `ui/floating_window.py` | Hotkey-activated input + correction button | TODO |
 
@@ -135,6 +135,9 @@
 | Event-driven detection | Eliminate idle polling | MVP |
 | Prompt caching (Anthropic) | 90% cheaper on system prompt | v0.2 |
 | Model tiering (Claude Haiku) | For simple change detection | v0.2 |
+| API-send screenshot downscaling | 75% image token reduction (768×432 cap) | v0.3 |
+| Active window crop | Up to 80% image token cut | v0.3 |
+| Extended model tiering | Gemini Flash (free) for re-queries; Haiku for mid-sequence | v0.3 |
 
 ---
 
@@ -254,23 +257,74 @@ if __name__ == "__main__":
 - PaddleOCR 3.x compatibility: dict result format, `cls` try/except, `use_doc_orientation_classify`
   flags to reduce model load and limit OneDNN exposure
 
-### 🚧 Next: v0.2
+### ✅ Completed (v0.2.0)
+- **Streaming responses** — instructions render word-by-word as they arrive (Anthropic + Gemini)
+- **Prompt caching** — Anthropic beta header + `cache_control: ephemeral` on system + tools (90% cheaper for system prompt)
+- **Multi-monitor support** — overlay spans virtual desktop union; active screen detection for subtitle positioning
+- **Model tiering** — Haiku (`anthropic_fast_model`) for screen-change re-queries; Sonnet for initial/user-triggered guidance
+- **TTS** — pyttsx3 via Windows SAPI; queue-draining so only latest instruction is spoken; enabled via `ENABLE_TTS=true`
+- **Voice input** — push-to-talk via SpeechRecognition + PyAudio + Google Web Speech API; mic button in floating window; `ENABLE_VOICE_INPUT=true`; transcript thread-safe via Qt signal
+
+### 🚧 Next: v0.3
 
 ### 📋 Upcoming Milestones
 
 ```
-v0.2 (Priority order):
-  1. Streaming responses — render instructions as they arrive (perceived speed fix)
-  2. Prompt caching — cache system prompt + tool schemas (90% cheaper for Anthropic)
-  3. TTS + voice input (paired feature)
-  4. Model tiering — use Haiku for screen-change detection, Sonnet for guidance
-  5. Multi-monitor support (currently single-monitor only)
+v0.3 — Stability + Efficiency (Python, Windows):
+  1. Bug fixes: overlay coordinate (OCR image-space offset), subtitle persistence
+  2. Token optimization:
+       - API-send screenshot downscaling (768×432 max, separate from local capture)
+       - Active window crop before API send: GetWindowRect pre-API crop only
+         (~20 lines). Do NOT rearchitect the monitor pipeline — that ships in Rust.
+       - Extended model tiering: Gemini Flash for all automated re-queries
+  3. Single screen mode: user picks one screen to capture; halves image token cost
+       and eliminates multi-monitor coordinate complexity for most use cases
+  4. Settings window: in-app UI to choose API provider + enter API key;
+       no more .env editing for beta testers; stored in ~/.ai-navigator/settings.json
+  5. UI consolidation: merge chat + floating control into one window;
+       keyboard shortcut legend; draggable subtitle overlay
+  6. PyPI packaging: publish to PyPI (pip install ai-navigator)
 
-v0.3:
-  6. Tauri/Rust rewrite for native .exe (SmartScreen fix) + EV code signing
-  7. Template matching (icon-based locator, not just text)
-  8. macOS support (AX Accessibility API)
-  9. Local model improvements (better vision quality via quantized models)
+v0.4 — Distribution (Windows):
+  1. Signed Windows installer: embedded Python + NSIS/WiX + OV cert (~$100/yr)
+       — no Python required on user machine; interim before full Tauri rewrite
+  2. EV code signing ($400/yr) — builds SmartScreen reputation
+  3. Tauri/Rust rewrite: Rust backend (screen capture, A11y, hotkeys, tray,
+       overlay via native layered window); Svelte web frontend (chat UI,
+       settings); Python AI layer retained as bundled sidecar (PyInstaller
+       binary) — JSON-lines IPC over stdin/stdout, screenshots via temp file.
+       Single binary ~5MB (Tauri) + ~40MB sidecar. See SDD §2.5.
+  4. Full window-tracking pipeline (Rust): SetWinEventHook tracks window moves;
+       capture scoped to target window only; coordinates become window-relative
+       (no DPR matrix, no virtual origin); IVirtualDesktopManager for virtual
+       desktop detection; IsIconic for minimise/restore handling
+
+v0.5 — Complex Apps + Nav-Packs:
+  1. Template matching: OpenCV matchTemplate for icon-only UI elements
+  2. Nav-Packs v1: pack format + loader; built-in packs for Blender + SolidWorks
+  3. Community pack submission format (GitHub-based)
+  4. Quantized local model improvements (LLaVA-Next, Qwen-VL-Chat)
+
+v1.0 — Public Launch (Windows):
+  1. MSIX packaging → Microsoft Store submission
+  2. Enterprise features: SSO (SAML 2.0 / Azure AD), audit logs
+  3. Plugin system for third-party Nav-Pack developers
+  4. Full Nav-Pack library (Pro + community)
+  5. Browser Companion extension (Chrome, Pro feature): Chrome Extension MV3 +
+       native messaging bridge; DOM getBoundingClientRect() replaces OCR for
+       browser tasks (~99% accuracy); MutationObserver replaces pixel-diff for
+       SPA navigation. See SDD §7.6.
+
+v1.x — Platform Expansion (post-public-launch):
+  1. macOS (clean port — strong API parity):
+       A11y: AXUIElement; OCR: Vision.framework (built-in, ~10ms);
+       window bounds/tracking: CGWindowListCopyWindowInfo + AX notifications;
+       window capture: CGWindowListCreateImage; .pkg + Apple Developer cert
+  2. Linux X11 (workable, fragmented):
+       A11y: AT-SPI2 (pyatspi); OCR: Tesseract; window tracking: XSelectInput;
+       AppImage / Flatpak distribution
+  3. Linux Wayland: requires XWayland — Wayland deliberately blocks cross-process
+       window position queries and capture. Not natively supportable.
 ```
 
 ### 🎯 MVP Scope (v0.1)
@@ -287,19 +341,20 @@ v0.3:
 | Correction hotkey | ✓ | Ctrl+Shift+X → re-analysis |
 | Session persistence | ✓ | Save/resume sessions |
 | Clipboard commands | ✓ | For CLI tasks |
-| TTS / Voice input | ✗ | v0.2 |
-| Accessibility API | ✗ | v0.2 (OCR sufficient for browsers) |
+| TTS | ✓ | pyttsx3/Windows SAPI, `ENABLE_TTS=true` |
+| Voice input (PTT) | ✓ | SpeechRecognition + Google STT, `ENABLE_VOICE_INPUT=true` |
 | Multi-platform | ✗ | Windows only for MVP |
 
 ### 📅 Full Roadmap
 
 ```
-v0.2  Streaming responses + prompt caching + TTS + voice input
-      + multi-monitor support + model tiering (Haiku for detection)
-v0.3  Tauri/Rust rewrite (SmartScreen fix) + EV code signing + Blender support
-      + template matching + quantized local models + macOS + Nav-Packs
-v0.4  Linux + plugin system + accessibility UX pass + enterprise features
-v1.0  MSIX packaging (Microsoft Store) + native installer + public launch
+v0.2  DONE — streaming + prompt caching + multi-monitor + model tiering + TTS + voice input
+v0.3  Bug fixes + token optimization + single screen mode + settings window
+      + UI consolidation + PyPI packaging
+v0.4  Signed Windows installer + EV code signing + Tauri/Rust rewrite
+v0.5  Template matching + Nav-Packs v1 + Blender/SolidWorks + quantized local models
+v1.0  MSIX (Microsoft Store) + enterprise (SSO, audit logs) + plugin system + public launch
+v1.x  macOS port + Linux port  (after public launch)
 ```
 
 ### 🔍 Known Issues / Future Improvements
@@ -539,7 +594,7 @@ Longer explanation (wrap at 80 chars):
 
 ## Links & References
 
-- **Design Document:** [AI-Navigator-Design-Document.md](AI-Navigator-Design-Document.md) (§1–11 detailed specs)
+- **Design Document:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md) (§1–11 detailed specs)
 - **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
 - **Anthropic API:** https://docs.anthropic.com (tool_use, vision, caching)
 - **PaddleOCR:** https://github.com/PaddlePaddle/PaddleOCR

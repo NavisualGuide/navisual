@@ -174,27 +174,47 @@ class A11yEngine:
 
         Uses uiautomation RegexName for substring match first (fast path),
         then falls back to manual tree walk for non-ASCII or complex patterns.
+
+        Two passes when a control_type is specified:
+        1. Role-specific search (fast, precise).
+        2. Role-agnostic search (catches elements with unexpected UIA roles,
+           e.g. TurboTax "Continue" rendered as HyperlinkControl instead of
+           ButtonControl).
         """
         import re
 
-        # Fast path: regex substring search via uiautomation
-        try:
-            pattern = "(?i)" + re.escape(target_lower)
-            if control_type_name:
-                finder = getattr(root, control_type_name, None)
-                if finder:
-                    element = finder(searchDepth=12, RegexName=pattern)
-                    if element and element.Exists(0):
-                        result = self._element_to_result(element, auto)
-                        if result:
-                            return result
-            element = root.Control(searchDepth=12, RegexName=pattern)
-            if element and element.Exists(0):
-                result = self._element_to_result(element, auto)
-                if result:
-                    return result
-        except Exception:
-            pass
+        pattern = "(?i)" + re.escape(target_lower)
+
+        def _try_regex(ctype: Optional[str]) -> Optional[A11yResult]:
+            """Attempt a RegexName search for the given control type (or any)."""
+            try:
+                if ctype:
+                    finder = getattr(root, ctype, None)
+                    if finder:
+                        element = finder(searchDepth=12, RegexName=pattern)
+                        if element and element.Exists(0):
+                            result = self._element_to_result(element, auto)
+                            if result:
+                                return result
+                element = root.Control(searchDepth=12, RegexName=pattern)
+                if element and element.Exists(0):
+                    result = self._element_to_result(element, auto)
+                    if result:
+                        return result
+            except Exception:
+                pass
+            return None
+
+        # Pass 1: role-specific (if a role was requested)
+        result = _try_regex(control_type_name)
+        if result:
+            return result
+
+        # Pass 2: role-agnostic fallback (catches wrong-role elements)
+        if control_type_name:
+            result = _try_regex(None)
+            if result:
+                return result
 
         # Slow path: manual walk (catches edge cases the regex search misses)
         try:
@@ -211,7 +231,7 @@ class A11yEngine:
                     if len(name) > len(target_lower) * 4:
                         continue
                     if target_lower in name_lower or name_lower in target_lower:
-                        if self._validate_element(control, control_type_name, auto):
+                        if self._validate_element(control, None, auto):  # role-agnostic
                             return self._element_to_result(control, auto)
                 except Exception:
                     continue

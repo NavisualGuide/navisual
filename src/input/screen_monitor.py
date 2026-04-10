@@ -201,7 +201,10 @@ def _diff_worker_loop(
 
     interval = 1.0 / fps
     sct = mss.mss()
-    monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+    # monitors[0] is the virtual desktop aggregate (union of all screens).
+    # Using it instead of monitors[1] ensures we detect changes on ANY monitor —
+    # critical for multi-monitor setups where the target app may be on any screen.
+    monitor = sct.monitors[0]
 
     prev_frame = None
     paused = False
