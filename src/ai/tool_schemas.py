@@ -83,6 +83,14 @@ class NavigateStepResponse(BaseModel):
         default=False,
         description="If true, AI needs user to answer a question before proceeding.",
     )
+    request_full_screen: bool = Field(
+        default=False,
+        description=(
+            "Set true when the task requires seeing the full desktop "
+            "(Start Menu, taskbar, Desktop, OS dialogs). "
+            "The engine will serve the complete virtual desktop screenshot for the next turn."
+        ),
+    )
 
 
 # Anthropic tool_use schema (sent in the API request)
@@ -152,6 +160,14 @@ NAVIGATE_STEP_TOOL = {
             "needs_input": {
                 "type": "boolean",
                 "description": "If true, AI needs the user to answer a question.",
+            },
+            "request_full_screen": {
+                "type": "boolean",
+                "description": (
+                    "Set true when the task requires seeing the full desktop "
+                    "(Start Menu, taskbar, Desktop, OS dialogs). "
+                    "The engine will serve the full virtual desktop screenshot next turn."
+                ),
             },
         },
     },

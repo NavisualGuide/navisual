@@ -49,6 +49,7 @@ class AnthropicClient:
                 headers={
                     "x-api-key": self.api_key,
                     "anthropic-version": ANTHROPIC_VERSION,
+                    "anthropic-beta": "prompt-caching-2024-07-31",
                     "content-type": "application/json",
                 },
             )
@@ -60,6 +61,7 @@ class AnthropicClient:
         screenshot_b64: Optional[str] = None,
         system_prompt: str = "",
         on_text_chunk: Optional[Callable[[str], None]] = None,
+        model_override: Optional[str] = None,
     ) -> tuple[NavigateStepResponse, int, int]:
         """Send a message to the Anthropic API with tool_use streaming.
 
@@ -82,12 +84,27 @@ class AnthropicClient:
         """
         client = await self._ensure_client()
 
+        # Use cache_control on system prompt + tool schema — both are large and
+        # constant across every request. Anthropic charges 10% of input token cost
+        # for cache writes and only 10% for cache reads (90% cheaper on hits).
+        # Minimum cacheable block = 1024 tokens; system prompt + tool schema easily
+        # exceeds this. Cache lifetime is 5 minutes (extended on each hit).
+        cached_tool = dict(NAVIGATE_STEP_TOOL)
+        cached_tool["cache_control"] = {"type": "ephemeral"}
+
+        effective_model = model_override or self.model
         payload = {
-            "model": self.model,
+            "model": effective_model,
             "max_tokens": 1024,
             "stream": True,
-            "system": system_prompt,
-            "tools": [NAVIGATE_STEP_TOOL],
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "tools": [cached_tool],
             "tool_choice": {"type": "tool", "name": "navigate_step"},
             "messages": messages,
         }
@@ -116,7 +133,8 @@ class AnthropicClient:
                             continue
                         raise last_error
 
-                    return await self._stream_response(resp, on_text_chunk)
+                    result = await self._stream_response(resp, on_text_chunk)
+                    return result
 
             except httpx.TimeoutException:
                 logger.warning("API timeout (attempt %d/%d)", attempt, self.max_retries)
@@ -191,6 +209,12 @@ class AnthropicClient:
             elif event_type == "message_start":
                 usage = event.get("message", {}).get("usage", {})
                 input_tokens = usage.get("input_tokens", 0)
+                cache_read = usage.get("cache_read_input_tokens", 0)
+                cache_write = usage.get("cache_creation_input_tokens", 0)
+                if cache_read:
+                    logger.info("Prompt cache HIT: %d tokens read (saved ~90%% cost)", cache_read)
+                elif cache_write:
+                    logger.info("Prompt cache WRITE: %d tokens cached for future requests", cache_write)
 
         return self._parse_tool_json(accumulated_json), input_tokens, output_tokens
 

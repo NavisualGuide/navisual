@@ -35,6 +35,11 @@ Rules:
     NEVER to close it. Closing the app ends the session.
 12. LANGUAGE: Always respond in English, regardless of the user's system language,
     browser language, or the language of any text visible on screen.
+13. SCREEN SCOPE: The screenshot may show only the foreground application window
+    (active-window crop is enabled by default). If you need to see the full desktop
+    — for example, to navigate the Start Menu, taskbar, Desktop icons, or a system
+    dialog outside the current app — set request_full_screen=true in your response.
+    The next screenshot will show the complete virtual desktop.
 
 Use the navigate_step tool for all responses."""
 

@@ -31,13 +31,31 @@ class Config(BaseSettings):
         description="Anthropic model ID. Options: claude-haiku-4-5-20251001 (fast/cheap), "
                     "claude-sonnet-4-6 (balanced), claude-opus-4-6 (most capable)",
     )
+    anthropic_fast_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="Faster/cheaper model for screen-change re-queries. "
+                    "Set to same as anthropic_model to disable tiering.",
+    )
 
-    # Google Gemini — free tier via Google AI Studio (~1,500 req/day, no credit card)
+    # Google Gemini — free tier via Google AI Studio (no credit card)
     gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
     gemini_model: str = Field(
-        default="gemini-2.0-flash",
-        description="Gemini model ID. Options: gemini-2.0-flash (free tier), "
-                    "gemini-1.5-pro (higher quality, paid)",
+        default="gemini-2.5-flash",
+        description=(
+            "Gemini model ID. "
+            "gemini-2.5-flash: default, free tier, strong vision, fast. "
+            "gemini-2.5-flash-lite: cheapest paid option ($0.10/MTok), good for re-queries. "
+            "gemini-2.5-pro: highest quality, free tier, use for initial analysis. "
+            "gemini-3.1-flash-lite-preview: newest free option, worth benchmarking."
+        ),
+    )
+    gemini_fast_model: str = Field(
+        default="gemini-2.5-flash-lite",
+        description=(
+            "Cheaper Gemini model for automated screen-change re-queries. "
+            "gemini-2.5-flash-lite: $0.10/MTok input, free tier available. "
+            "Set to same as gemini_model to disable tiering."
+        ),
     )
 
     # Ollama — local inference, no API key, runs on-device
@@ -70,6 +88,14 @@ class Config(BaseSettings):
     capture_interval_ms: int = Field(default=2000, description="Idle fallback capture interval")
     max_screenshot_width: int = Field(default=1920)
     max_screenshot_height: int = Field(default=1080)
+    # API-send image is downscaled separately from the local OCR capture.
+    # 768×432 = 2 Gemini/Claude tiles (~3,200 tokens vs 12,800 at 1920×1080 — 75% reduction).
+    max_api_screenshot_width: int = Field(default=768, description="Max width sent to AI API (token optimization)")
+    max_api_screenshot_height: int = Field(default=432, description="Max height sent to AI API (token optimization)")
+    enable_active_window_crop: bool = Field(
+        default=True,
+        description="Crop API screenshot to the foreground window before sending (reduces tokens ~80%)",
+    )
     diff_thumbnail_width: int = Field(default=160, description="Low-res thumbnail for pixel-diff")
     diff_thumbnail_height: int = Field(default=90)
     diff_fps: int = Field(default=10, description="Pixel-diff check frequency")
@@ -115,8 +141,10 @@ class Config(BaseSettings):
     )
 
     # --- Feature Flags ---
-    enable_tts: bool = Field(default=False, description="Text-to-speech (v0.2)")
-    enable_voice_input: bool = Field(default=False, description="Voice input (v0.2)")
+    enable_tts: bool = Field(default=False, description="Text-to-speech output via pyttsx3")
+    tts_rate: int = Field(default=175, description="TTS speech rate (words per minute)")
+    tts_volume: float = Field(default=1.0, description="TTS volume (0.0-1.0)")
+    enable_voice_input: bool = Field(default=False, description="Voice input via microphone")
     capture_indicator_visible: bool = Field(default=True, description="Show capture active indicator")
 
     def ensure_dirs(self) -> None:

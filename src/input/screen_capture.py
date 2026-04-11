@@ -7,6 +7,7 @@ captures for API calls and low-resolution thumbnails for pixel-diff monitoring.
 import base64
 import io
 import logging
+import sys
 from typing import Optional
 
 import mss
@@ -36,8 +37,10 @@ def capture_screenshot() -> Image.Image:
     config = get_config()
     sct = _get_sct()
 
-    # Capture primary monitor (index 0 is all monitors, 1 is primary)
-    monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+    # Capture the full virtual desktop (all monitors combined).
+    # monitors[0] is the bounding box of all screens; monitors[1] is primary only.
+    # Using monitors[0] ensures apps on secondary monitors are visible to the AI.
+    monitor = sct.monitors[0]
     raw = sct.grab(monitor)
 
     img = Image.frombytes("RGB", (raw.width, raw.height), raw.rgb)
@@ -83,7 +86,7 @@ def capture_thumbnail() -> Image.Image:
     config = get_config()
     sct = _get_sct()
 
-    monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+    monitor = sct.monitors[0]  # Full virtual desktop (all monitors)
     raw = sct.grab(monitor)
 
     img = Image.frombytes("RGB", (raw.width, raw.height), raw.rgb)
@@ -109,3 +112,162 @@ def image_to_bytes(img: Image.Image, fmt: str = "PNG") -> bytes:
     buffer = io.BytesIO()
     img.save(buffer, format=fmt)
     return buffer.getvalue()
+
+
+def capture_screenshot_raw() -> Image.Image:
+    """Capture the full virtual desktop at native resolution (no downscaling).
+
+    Used as input to prepare_api_image() before cropping/downscaling.
+    """
+    sct = _get_sct()
+    monitor = sct.monitors[0]
+    raw = sct.grab(monitor)
+    return Image.frombytes("RGB", (raw.width, raw.height), raw.rgb)
+
+
+def get_foreground_window_rect() -> Optional[tuple[int, int, int, int]]:
+    """Return the foreground window bounds in virtual-desktop physical pixels (x, y, w, h).
+
+    Uses DwmGetWindowAttribute with DWMWA_EXTENDED_FRAME_BOUNDS to get the
+    precise window rect, excluding the invisible drop-shadow region.
+    Falls back to GetWindowRect if DWM fails.
+    Returns None if no foreground window, bounds are invalid, or the foreground
+    window belongs to our own process (AI Navigator is focused — skip crop so the
+    AI sees the full desktop, not just our own UI).
+    Windows only — returns None on other platforms.
+    """
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+    import ctypes.wintypes
+    import os
+
+    hwnd = ctypes.windll.user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+
+    # If the foreground window is our own process, skip the crop.
+    # This happens when the user types into AI Navigator — we want the AI to see
+    # the full desktop (including the target app), not just our own window.
+    pid = ctypes.c_ulong(0)
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if pid.value == os.getpid():
+        return None
+
+    class _RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long), ("top", ctypes.c_long),
+            ("right", ctypes.c_long), ("bottom", ctypes.c_long),
+        ]
+
+    rect = _RECT()
+    DWMWA_EXTENDED_FRAME_BOUNDS = 9
+    hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+        hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(rect), ctypes.sizeof(rect)
+    )
+    if hr != 0:
+        # DWM unavailable — fall back to GetWindowRect
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+
+    x, y = rect.left, rect.top
+    w = rect.right - rect.left
+    h = rect.bottom - rect.top
+    if w <= 0 or h <= 0:
+        return None
+    return (x, y, w, h)
+
+
+def prepare_api_image(
+    raw_img: Image.Image,
+    force_full: bool = False,
+    quality: int = 85,
+) -> str:
+    """Prepare a raw screenshot for API transmission with token optimization.
+
+    Steps:
+    1. Crop to the foreground window (if enable_active_window_crop is True and
+       force_full is False) — reduces tokens by up to 80% on typical tasks.
+    2. Downscale to max_api_screenshot_width × max_api_screenshot_height
+       (768×432 by default = 2 vision tiles, ~75% token reduction vs 1920×1080).
+
+    Args:
+        raw_img: Full-resolution virtual desktop image from capture_screenshot_raw().
+        force_full: Skip window crop even if enable_active_window_crop is True.
+                    Set when the AI needs to see the full desktop.
+        quality: JPEG quality for the output (default 85).
+
+    Returns:
+        Base64-encoded JPEG string for the AI API.
+    """
+    config = get_config()
+    img = raw_img
+
+    cropped = False
+    if config.enable_active_window_crop and not force_full:
+        win_rect = get_foreground_window_rect()
+        if win_rect:
+            # The mss image starts at pixel (0,0) = virtual coord (monitors[0].left, monitors[0].top).
+            # Convert virtual coords to image-local coords by subtracting the virtual origin.
+            sct = _get_sct()
+            ox = sct.monitors[0]["left"]
+            oy = sct.monitors[0]["top"]
+            wx, wy, ww, wh = win_rect
+            ix = wx - ox
+            iy = wy - oy
+            ix2 = ix + ww
+            iy2 = iy + wh
+            # Clamp to image bounds
+            ix = max(0, min(ix, img.width))
+            iy = max(0, min(iy, img.height))
+            ix2 = max(0, min(ix2, img.width))
+            iy2 = max(0, min(iy2, img.height))
+            if ix2 > ix and iy2 > iy:
+                img = img.crop((ix, iy, ix2, iy2))
+                cropped = True
+
+    # Downscale to API max dimensions (separate from OCR capture dimensions)
+    max_w = config.max_api_screenshot_width
+    max_h = config.max_api_screenshot_height
+    pre_w, pre_h = img.width, img.height
+    if img.width > max_w or img.height > max_h:
+        img = img.copy()  # thumbnail() is in-place — avoid mutating raw_img
+        img.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+
+    logger.debug(
+        "API image: %dx%d → %dx%d (%.0f%% scale, cropped=%s, force_full=%s)",
+        pre_w, pre_h, img.width, img.height,
+        100.0 * img.width / pre_w,
+        cropped, force_full,
+    )
+    return image_to_b64(img, fmt="JPEG", quality=quality)
+
+
+def capture_for_guidance(
+    force_full: bool = False,
+) -> tuple[str, Image.Image]:
+    """Single-capture entry point for the guidance loop.
+
+    Captures the virtual desktop once and derives two images:
+    - api_b64: cropped (foreground window) + downscaled to API max dims for token reduction.
+    - ocr_img: full virtual desktop downscaled to max_screenshot dims for local OCR.
+
+    Args:
+        force_full: Send the full desktop to the API (skip window crop).
+
+    Returns:
+        (api_b64, ocr_img)
+    """
+    config = get_config()
+    raw_img = capture_screenshot_raw()
+
+    # OCR image: downscale to max_screenshot dims (unchanged from prior behaviour)
+    ocr_img = raw_img.copy()
+    max_w, max_h = config.max_screenshot_width, config.max_screenshot_height
+    if ocr_img.width > max_w or ocr_img.height > max_h:
+        ocr_img.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+
+    # API image: crop + downscale for token efficiency
+    api_b64 = prepare_api_image(raw_img, force_full=force_full)
+
+    return api_b64, ocr_img

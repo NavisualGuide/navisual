@@ -11,6 +11,7 @@ import asyncio
 import io
 import logging
 import multiprocessing as mp
+import re
 import sys
 from difflib import SequenceMatcher
 from typing import Optional
@@ -19,6 +20,18 @@ from PIL import Image
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+_PUNCT_RE = re.compile(r"^[\W_]+|[\W_]+$")
+
+
+def _strip_punct(text: str) -> str:
+    """Strip leading/trailing punctuation and whitespace from an OCR token.
+
+    Handles curly quotes, backticks, apostrophes etc. that OCR sometimes
+    attaches to a word when reading subtitle or inline-quoted text.
+    Example: "'Continue'" → "Continue", '"Yes"' → "Yes"
+    """
+    return _PUNCT_RE.sub("", text).strip()
 
 
 class OCRResult(BaseModel):
@@ -253,25 +266,48 @@ class OCREngine:
         # Filter by confidence
         candidates = [r for r in ocr_results if r.confidence >= min_confidence]
 
+        # Filter out strings too long to be a UI label.
+        # Subtitle/instruction text rendered on screen by the overlay is read by OCR
+        # and can match the target word (e.g. "Continue" inside "Click the Continue button").
+        # Real UI element labels are never more than ~60 characters.
+        MAX_LABEL_LEN = 60
+        candidates = [r for r in candidates if len(r.text.strip()) <= MAX_LABEL_LEN]
+
         # Filter by region if hint provided
         if region_hint:
             candidates = _filter_by_region(candidates, region_hint, screen_width, screen_height)
 
-        # Strategy 1: Exact match (case-insensitive)
+        # Strategy 1: Exact match (case-insensitive, punctuation-stripped)
         for r in candidates:
-            if r.text.lower().strip() == target_lower:
+            if _strip_punct(r.text).lower() == target_lower:
                 return r
 
         # Strategy 2: Substring match
+        # Strip surrounding punctuation before comparing — OCR sometimes reads subtitle
+        # fragments like "'Continue'" or '"Yes"' as separate word-level results, which
+        # would otherwise match the real target text via fuzzy matching.
+        # Guard: only allow an OCR token to match as a substring of the target if it's
+        # at least 6 chars — short tokens like "in", "with", "for" appear everywhere
+        # in body text and produce false positives.
+        MIN_SUBSTR_LEN = 8
         for r in candidates:
-            if target_lower in r.text.lower() or r.text.lower() in target_lower:
+            r_clean = _strip_punct(r.text).lower()
+            if not r_clean:
+                continue
+            if target_lower in r_clean:
+                return r
+            if r_clean in target_lower and len(r_clean) >= MIN_SUBSTR_LEN:
                 return r
 
         # Strategy 3: Fuzzy match (SequenceMatcher, > 0.7 ratio)
+        # Use punctuation-stripped text so "'Continue'" scores as "Continue".
         best_match = None
         best_ratio = 0.0
         for r in candidates:
-            ratio = SequenceMatcher(None, target_lower, r.text.lower().strip()).ratio()
+            r_clean = _strip_punct(r.text).lower()
+            if not r_clean:
+                continue
+            ratio = SequenceMatcher(None, target_lower, r_clean).ratio()
             if ratio > best_ratio and ratio > 0.7:
                 best_ratio = ratio
                 best_match = r

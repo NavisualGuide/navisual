@@ -8,9 +8,11 @@ The overlay never intercepts clicks or keystrokes — it is purely visual.
 
 import logging
 import math
+import sys
 from typing import Optional
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPolygon
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -38,11 +40,10 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
-        # Cover the full primary screen
-        screen = QApplication.primaryScreen()
-        if screen:
-            geo = screen.geometry()
-            self.setGeometry(geo)
+        # Cover the virtual desktop (union of all screens).
+        # This ensures the overlay works on any monitor in a multi-monitor setup.
+        # The window is input-transparent so covering inactive screens is harmless.
+        self._update_geometry()
 
         # Overlay state
         self._bbox: Optional[tuple[int, int, int, int]] = None  # (x, y, w, h)
@@ -62,6 +63,52 @@ class OverlayWindow(QWidget):
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.clear)
+
+        # Exclude from screen capture so the overlay does not appear in mss
+        # screenshots.  This prevents the screen-change monitor from firing on
+        # overlay updates and prevents OCR from reading subtitle text.
+        # WDA_EXCLUDEFROMCAPTURE (0x11) is available on Windows 10 2004+.
+        self._affinity_set = False
+
+    def showEvent(self, event) -> None:
+        """Apply WDA_EXCLUDEFROMCAPTURE the first time the window is shown.
+
+        The HWND is only guaranteed valid after the OS window is created, which
+        happens on first show. The affinity must be re-applied after any
+        setWindowFlags call that recreates the native window.
+        """
+        super().showEvent(event)
+        if sys.platform == "win32" and not self._affinity_set:
+            try:
+                import ctypes
+                WDA_EXCLUDEFROMCAPTURE = 0x00000011
+                hwnd = int(self.winId())
+                if ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
+                    self._affinity_set = True
+                    logger.debug("Overlay excluded from screen capture (WDA_EXCLUDEFROMCAPTURE)")
+                else:
+                    logger.warning("SetWindowDisplayAffinity failed — overlay may appear in screenshots")
+            except Exception as exc:
+                logger.warning("Could not set display affinity: %s", exc)
+
+    def _update_geometry(self) -> None:
+        """Set overlay geometry to the virtual desktop union of all screens."""
+        virtual = QRect()
+        for screen in QGuiApplication.screens():
+            virtual = virtual.united(screen.geometry())
+        if virtual.isValid():
+            self.setGeometry(virtual)
+
+    def _active_screen_rect(self) -> QRect:
+        """Return the geometry of the screen containing the current bbox, or primary."""
+        if self._bbox:
+            cx = self._bbox[0] + self._bbox[2] // 2
+            cy = self._bbox[1] + self._bbox[3] // 2
+            for screen in QGuiApplication.screens():
+                if screen.geometry().contains(cx, cy):
+                    return screen.geometry()
+        primary = QApplication.primaryScreen()
+        return primary.geometry() if primary else self.geometry()
 
     def set_colors(self, color: str, thickness: int = 4) -> None:
         """Update overlay colors from config."""
@@ -171,10 +218,14 @@ class OverlayWindow(QWidget):
         """
         cx = x + w // 2
         cy = y + h // 2
-        screen_h = self.height()
+        # Use the active screen height for arrow placement decisions
+        screen_rect = self._active_screen_rect()
+        geo = self.geometry()
+        screen_h = screen_rect.height()
+        local_cy = cy - (screen_rect.y() - geo.y())  # cy relative to screen top
         offset = 130
 
-        if cy > screen_h // 2:
+        if local_cy > screen_h // 2:
             ox, oy = cx, max(0, y - offset)
         else:
             ox, oy = cx, min(screen_h, y + h + offset)
@@ -252,25 +303,46 @@ class OverlayWindow(QWidget):
         painter.drawEllipse(QPoint(cx, cy), radius, radius)
 
     def _draw_subtitle(self, painter: QPainter, text: str) -> None:
-        """Draw subtitle text at the bottom-center of the screen."""
+        """Draw subtitle text at the bottom-center of the active screen."""
         font = QFont("Segoe UI", self._subtitle_font_size)
         font.setBold(True)
         painter.setFont(font)
 
+        # Use the active screen rect so subtitles appear on the right monitor
+        screen_rect = self._active_screen_rect()
+        geo = self.geometry()
+        # Convert screen-absolute coords to overlay-local coords
+        sx = screen_rect.x() - geo.x()
+        sy = screen_rect.y() - geo.y()
+        sw = screen_rect.width()
+        sh = screen_rect.height()
+
         # Calculate text bounds
         metrics = painter.fontMetrics()
-        # Wrap long text
-        max_width = int(self.width() * 0.7)
+        max_width = int(sw * 0.7)
         text_rect = metrics.boundingRect(
             QRect(0, 0, max_width, 0),
             Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter,
             text,
         )
 
-        # Position at bottom-center
+        # Position subtitle away from the target element.
+        # If the bbox is in the bottom half of the screen (or no bbox), place at top.
+        # If it's in the top half, place at bottom. Prevents subtitle from covering the target.
         margin = 40
-        x = (self.width() - text_rect.width()) // 2
-        y = self.height() - text_rect.height() - margin
+        x = sx + (sw - text_rect.width()) // 2
+        if self._bbox:
+            _, ey, _, eh = self._bbox
+            element_center_y = ey + eh // 2
+            screen_mid = sy + sh // 2
+            if element_center_y >= screen_mid:
+                # Target in bottom half → subtitle at top
+                y = sy + margin
+            else:
+                # Target in top half → subtitle at bottom
+                y = sy + sh - text_rect.height() - margin
+        else:
+            y = sy + sh - text_rect.height() - margin
 
         # Draw background
         bg_rect = QRect(

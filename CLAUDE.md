@@ -1,7 +1,7 @@
 # AI Navigator — Project Guide
 
-**Version:** 0.2.0
-**Status:** v0.2 complete. Streaming, prompt caching, multi-monitor, model tiering, TTS, voice input all shipped.
+**Version:** 0.3.0
+**Status:** v0.3 complete. Token optimization, active-window crop, UI consolidation (ConsolidatedPanel), checkpoint rework, multi-window A11y.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
 **Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md)
 **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
@@ -265,25 +265,28 @@ if __name__ == "__main__":
 - **TTS** — pyttsx3 via Windows SAPI; queue-draining so only latest instruction is spoken; enabled via `ENABLE_TTS=true`
 - **Voice input** — push-to-talk via SpeechRecognition + PyAudio + Google Web Speech API; mic button in floating window; `ENABLE_VOICE_INPUT=true`; transcript thread-safe via Qt signal
 
-### 🚧 Next: v0.3
+### ✅ Completed (v0.3.0)
+- **Token optimization** — API-send screenshot downscaled to 768×432 max (2 vision tiles, ~75% token reduction vs 1920×1080); active-window crop via `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` cuts tokens up to 80% more; self-process exclusion prevents crop to AI Navigator's own window
+- **Extended model tiering** — Gemini Flash Lite for all automated screen-change re-queries; Gemini Flash (full) for initial and user-triggered requests
+- **UI consolidation** — `MainWindow` + `FloatingWindow` replaced by single `ConsolidatedPanel` (`src/ui/panel_window.py`); two states: panel mode (360×540, full UI) and icon mode (56×56 draggable dot); `WDA_EXCLUDEFROMCAPTURE` applied so panel never appears in API screenshots
+- **Checkpoint rework** — Checkpoint steps no longer auto-complete on screen change (too noisy in complex apps like OneNote ribbons). Completion is now explicit: user presses **→ Next** button or Ctrl+Shift+N. Next button re-queries the AI with `[User completed: '...']` context so it advances rather than repeating the same instruction
+- **A11y multi-window search** — When AI Navigator is the foreground window (user clicked Next button), the A11y engine now searches all other desktop top-level windows instead of returning nothing. Fixes "arrow missing after Next" issue
+- **A11y false-match fix** — `_search_descendants` regex changed from substring `(?i)Insert` to anchored `(?i)^Insert$`; prevents "Insert" matching "Insert Space", "Insert Row", etc.
+- **Own-window crop exclusion** — `get_foreground_window_rect()` checks PID against `os.getpid()`; if AI Navigator is foreground, returns None so full desktop is sent to API
+- **System prompt rule 13** — Added screen-scope rule: AI can set `request_full_screen=true` when it needs to see beyond the active window crop (Start Menu, taskbar, system dialogs)
+
+### 🚧 Next: v0.3.1 / v0.4
 
 ### 📋 Upcoming Milestones
 
 ```
-v0.3 — Stability + Efficiency (Python, Windows):
-  1. Bug fixes: overlay coordinate (OCR image-space offset), subtitle persistence
-  2. Token optimization:
-       - API-send screenshot downscaling (768×432 max, separate from local capture)
-       - Active window crop before API send: GetWindowRect pre-API crop only
-         (~20 lines). Do NOT rearchitect the monitor pipeline — that ships in Rust.
-       - Extended model tiering: Gemini Flash for all automated re-queries
-  3. Single screen mode: user picks one screen to capture; halves image token cost
-       and eliminates multi-monitor coordinate complexity for most use cases
-  4. Settings window: in-app UI to choose API provider + enter API key;
-       no more .env editing for beta testers; stored in ~/.ai-navigator/settings.json
-  5. UI consolidation: merge chat + floating control into one window;
-       keyboard shortcut legend; draggable subtitle overlay
-  6. PyPI packaging: publish to PyPI (pip install ai-navigator)
+v0.3.1 — Remaining v0.3 items (Python, Windows):
+  1. Single screen mode: user picks one screen to capture
+  2. Settings window: in-app UI for API provider + key (no more .env editing)
+  3. PyPI packaging: pip install ai-navigator
+  4. Subtitle persistence fix (overlay subtitle lingers too long)
+
+v0.4 — Distribution (Windows):
 
 v0.4 — Distribution (Windows):
   1. Signed Windows installer: embedded Python + NSIS/WiX + OV cert (~$100/yr)
@@ -349,8 +352,9 @@ v1.x — Platform Expansion (post-public-launch):
 
 ```
 v0.2  DONE — streaming + prompt caching + multi-monitor + model tiering + TTS + voice input
-v0.3  Bug fixes + token optimization + single screen mode + settings window
-      + UI consolidation + PyPI packaging
+v0.3  DONE — token optimization + active-window crop + UI consolidation (ConsolidatedPanel)
+      + checkpoint rework + multi-window A11y + A11y false-match fix
+v0.3.1  single screen mode + settings window + PyPI packaging + subtitle persistence
 v0.4  Signed Windows installer + EV code signing + Tauri/Rust rewrite
 v0.5  Template matching + Nav-Packs v1 + Blender/SolidWorks + quantized local models
 v1.0  MSIX (Microsoft Store) + enterprise (SSO, audit logs) + plugin system + public launch
@@ -637,4 +641,4 @@ python -m src.main
 
 ---
 
-*Last updated: 2026-04-05*
+*Last updated: 2026-04-11*

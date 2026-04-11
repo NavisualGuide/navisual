@@ -97,6 +97,14 @@ GEMINI_NAVIGATE_STEP_FUNCTION = {
                 "type": "boolean",
                 "description": "If true, AI needs the user to answer a question first.",
             },
+            "request_full_screen": {
+                "type": "boolean",
+                "description": (
+                    "Set true when the task requires seeing the full desktop "
+                    "(Start Menu, taskbar, Desktop, OS dialogs). "
+                    "The engine will serve the full virtual desktop screenshot next turn."
+                ),
+            },
         },
     },
 }
@@ -148,6 +156,7 @@ class GeminiClient:
         screenshot_b64: Optional[str] = None,
         system_prompt: str = "",
         on_text_chunk: Optional[Callable[[str], None]] = None,
+        model_override: Optional[str] = None,
     ) -> tuple[NavigateStepResponse, int, int]:
         """Send a message to the Gemini API with streaming function calling.
 
@@ -170,6 +179,9 @@ class GeminiClient:
         import asyncio
 
         client = await self._ensure_client()
+        effective_model = model_override or self.model
+        if model_override and model_override != self.model:
+            logger.debug("Gemini model tiering: using %s", effective_model)
 
         payload: dict = {
             "contents": messages,
@@ -188,7 +200,8 @@ class GeminiClient:
         last_error: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                async with client.stream("POST", self.stream_url, json=payload) as resp:
+                url = f"{GEMINI_API_BASE}/{effective_model}:streamGenerateContent?alt=sse&key={self.api_key}"
+                async with client.stream("POST", url, json=payload) as resp:
                     if resp.status_code == 429:
                         logger.warning("Gemini rate limited (attempt %d/%d)", attempt, self.max_retries)
                         await asyncio.sleep(5 * attempt)

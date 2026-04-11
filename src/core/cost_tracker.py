@@ -54,7 +54,7 @@ class CostTracker:
         """Load persisted usage data."""
         if self._storage_path and self._storage_path.exists():
             try:
-                data = json.loads(self._storage_path.read_text())
+                data = json.loads(self._storage_path.read_text(encoding="utf-8"))
                 self._usage = TokenUsage(**data)
                 # Reset if day or month has changed
                 today = date.today()
@@ -75,7 +75,7 @@ class CostTracker:
         """Persist usage data to disk."""
         if self._storage_path:
             self._storage_path.parent.mkdir(parents=True, exist_ok=True)
-            self._storage_path.write_text(self._usage.model_dump_json(indent=2))
+            self._storage_path.write_text(self._usage.model_dump_json(indent=2), encoding="utf-8")
 
     @property
     def daily_total(self) -> int:

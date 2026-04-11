@@ -33,6 +33,7 @@ class FloatingWindow(QWidget):
     correction_requested = Signal()
     pause_toggled = Signal()
     next_step_requested = Signal()
+    mic_pressed = Signal()  # Push-to-talk trigger
 
     def __init__(self) -> None:
         super().__init__()
@@ -141,6 +142,16 @@ class FloatingWindow(QWidget):
         self._next_btn.clicked.connect(self.next_step_requested.emit)
         btn_layout.addWidget(self._next_btn)
 
+        # Mic button (hidden by default; shown when voice input is enabled)
+        self._mic_btn = QPushButton("🎤 Speak")
+        self._mic_btn.setStyleSheet(
+            btn_style.format(bg="#1565C0", fg="white", hover="#0D47A1")
+        )
+        self._mic_btn.setToolTip("Push to talk (Ctrl+Shift+M)")
+        self._mic_btn.clicked.connect(self.mic_pressed.emit)
+        self._mic_btn.setVisible(False)
+        btn_layout.addWidget(self._mic_btn)
+
         layout.addLayout(btn_layout)
 
     def _position_bottom_right(self) -> None:
@@ -174,6 +185,21 @@ class FloatingWindow(QWidget):
         """Update the pause button state externally."""
         self._is_paused = paused
         self._pause_btn.setText("▶ Resume" if paused else "⏸ Pause")
+
+    def set_voice_enabled(self, enabled: bool) -> None:
+        """Show or hide the mic button."""
+        self._mic_btn.setVisible(enabled)
+        if enabled:
+            self.setFixedSize(450, 140)  # Widen to fit mic button
+
+    def set_listening(self, listening: bool) -> None:
+        """Update mic button appearance while recording."""
+        if listening:
+            self._mic_btn.setText("🔴 Listening...")
+            self._mic_btn.setEnabled(False)
+        else:
+            self._mic_btn.setText("🎤 Speak")
+            self._mic_btn.setEnabled(True)
 
     # --- Dragging support ---
     def mousePressEvent(self, event) -> None:

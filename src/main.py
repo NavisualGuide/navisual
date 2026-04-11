@@ -32,7 +32,7 @@ from src.core.step_sequencer import StepSequencer
 from src.input.chat_input import ChatInputHandler
 from src.input.voice_input import VoiceInput
 from src.input.screen_capture import (
-    capture_screenshot_b64,
+    capture_for_guidance,
     image_to_bytes,
 )
 from src.input.screen_monitor import ScreenChangeEvent, ScreenMonitor
@@ -40,8 +40,7 @@ from src.locator.element_locator import ElementLocator
 from src.output.clipboard import copy_to_clipboard
 from src.output.overlay import OverlayWindow
 from src.output.tts import TTSEngine
-from src.ui.floating_window import FloatingWindow
-from src.ui.main_window import MainWindow
+from src.ui.panel_window import ConsolidatedPanel
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +99,7 @@ class GuidanceEngine(QObject):
         self._last_api_call_time: float = 0.0  # Debounce re-queries from screen changes
         self._screen_change_requery_cooldown_sec: float = 2.0
         self._last_screenshot_size: tuple[int, int] = (0, 0)  # (width, height) of last captured image
+        self._next_turn_full_screen: bool = False  # Set when AI requests full desktop screenshot
         # Callback to get the AI Navigator window geometry (set by Application after init)
         # Returns a string like "AI Navigator window: top-left corner, 600x750px" or None
         self._get_window_context: Optional[callable] = None
@@ -169,10 +169,14 @@ class GuidanceEngine(QObject):
     def handle_screen_change(self, event: ScreenChangeEvent) -> None:
         """Handle a screen change event (from screen monitor).
 
-        Three cases:
-        1. At a checkpoint step → user completed it, advance/re-query.
-        2. Mid-sequence (non-checkpoint) → screen changed, auto-advance to next step.
-        3. Sequence complete with active session → re-query AI (debounced).
+        Two cases handled here:
+        1. Mid-sequence NON-checkpoint step → screen changed, auto-advance to next step.
+        2. Sequence complete with active session → re-query AI (debounced).
+
+        NOTE: Checkpoint steps do NOT complete on screen change — they require an
+        explicit Next button press (handle_next_step).  Screen-change detection in
+        complex apps (OneNote ribbons, browser animations) is too noisy to reliably
+        distinguish "user completed the action" from "UI redrawn for other reasons".
         """
         if self._is_processing or not self._active:
             return
@@ -182,15 +186,11 @@ class GuidanceEngine(QObject):
             return
 
         if self._step_sequencer.is_at_checkpoint:
-            # User completed a checkpoint step.
-            # Set _is_processing synchronously here — before _run_async — so
-            # subsequent screen-change events (firing 10ms later at 10fps) see
-            # the flag and bail immediately instead of scheduling duplicate calls.
-            self._is_processing = True
-            self.processing_started.emit()
-            self._run_async(self._handle_checkpoint_completed(session))
+            # Checkpoint step is waiting for explicit user confirmation (Next button).
+            # Ignore screen changes — they're too noisy to use as completion signal.
+            return
 
-        elif not self._step_sequencer.is_complete:
+        if not self._step_sequencer.is_complete:
             # Mid-sequence non-checkpoint step: screen changed → auto-advance.
             # advance() is synchronous so state changes before the next event fires.
             next_step = self._step_sequencer.advance()
@@ -218,10 +218,47 @@ class GuidanceEngine(QObject):
         self._run_async(self._handle_correction(session))
 
     def handle_next_step(self) -> None:
-        """Handle next-step hotkey press."""
-        step = self._step_sequencer.advance()
-        if step:
+        """Handle next-step button / hotkey press.
+
+        Advances past the current step (checkpoint or not).  If the sequence is
+        now complete, re-queries the AI with completion context so it knows to
+        move on rather than repeat the same instruction.
+        """
+        if self._is_processing:
+            return
+
+        # Capture the instruction BEFORE advancing so we can tell the AI what was done.
+        completed_instruction = (
+            self._step_sequencer.current_step.instruction
+            if self._step_sequencer.current_step else ""
+        )
+
+        next_step = self._step_sequencer.advance()
+        if next_step:
+            # More steps remain — show next one immediately.
             self.response_ready.emit(self._step_sequencer)
+            return
+
+        # Sequence complete — re-query AI so it knows what was just done and
+        # can provide the next instruction.
+        session = self._session_manager.current_session
+        if session is None:
+            return
+
+        completion_prefix = (
+            f"[User completed: '{completed_instruction}']\n\n"
+            if completed_instruction else ""
+        )
+        self._is_processing = True
+        self.processing_started.emit()
+        self._run_async(
+            self._send_followup_request(
+                session,
+                f"{completion_prefix}The user has completed the previous step. "
+                "Here is the updated screen. What is the next step?",
+                use_fast_model=False,  # User explicitly triggered — use full model
+            )
+        )
 
     def toggle_pause(self) -> bool:
         """Toggle screen monitoring pause."""
@@ -236,7 +273,9 @@ class GuidanceEngine(QObject):
             self.processing_started.emit()
 
         try:
-            screenshot_b64, img = capture_screenshot_b64()
+            force_full = self._next_turn_full_screen
+            self._next_turn_full_screen = False
+            screenshot_b64, img = capture_for_guidance(force_full=force_full)
             self._last_screenshot_size = (img.width, img.height)
             self._element_locator.start_ocr_precache(image_to_bytes(img))
 
@@ -272,7 +311,9 @@ class GuidanceEngine(QObject):
             self.processing_started.emit()
 
         try:
-            screenshot_b64, img = capture_screenshot_b64()
+            force_full = self._next_turn_full_screen
+            self._next_turn_full_screen = False
+            screenshot_b64, img = capture_for_guidance(force_full=force_full)
             self._last_screenshot_size = (img.width, img.height)
             self._element_locator.start_ocr_precache(image_to_bytes(img))
 
@@ -326,6 +367,13 @@ class GuidanceEngine(QObject):
 
     async def _handle_checkpoint_completed(self, session: Session) -> None:
         """Handle when user completes a checkpoint step."""
+        # Capture the completed instruction BEFORE advancing so we can record it.
+        completed_instruction = (
+            self._step_sequencer.current_step.instruction
+            if self._step_sequencer.current_step
+            else ""
+        )
+
         # Advance past the checkpoint
         next_step = self._step_sequencer.advance()
 
@@ -336,13 +384,16 @@ class GuidanceEngine(QObject):
             self.processing_finished.emit()
             self.response_ready.emit(self._step_sequencer)
         elif self._step_sequencer.is_complete:
-            # Sequence done — query AI for next steps.
-            # Use fast model: the prior step's context is established and the
-            # screen just changed to a predictable next state, so full-model
-            # reasoning is not needed here.
+            # Sequence done — record completion in session so AI doesn't repeat the
+            # last instruction, then query AI for the next steps.
+            if completed_instruction:
+                session.add_turn(
+                    role="user",
+                    content=f"[Completed: {completed_instruction}]",
+                )
             await self._send_followup_request(
                 session,
-                "The user completed the previous step. Here is the current screen.",
+                "The user just completed the previous step. Here is the updated screen. What is the next step?",
                 use_fast_model=True,
             )
         else:
@@ -379,6 +430,11 @@ class GuidanceEngine(QObject):
 
     def _process_response(self, session: Session, response: NavigateStepResponse) -> None:
         """Process an AI response: update state, load steps, emit signal."""
+        # If the AI needs to see the full desktop next turn, set the flag.
+        if response.request_full_screen:
+            self._next_turn_full_screen = True
+            logger.debug("AI requested full-screen screenshot for next turn")
+
         # Update session state
         session.update_state(response.state_summary)
         if response.steps:
@@ -442,9 +498,8 @@ class Application:
         self._engine = GuidanceEngine(self._config)
 
         # UI components
-        self._main_window = MainWindow()
+        self._panel = ConsolidatedPanel()
         self._overlay = OverlayWindow()
-        self._floating_window = FloatingWindow()
 
         # TTS engine (optional)
         self._tts = TTSEngine(
@@ -462,7 +517,7 @@ class Application:
         )
         if self._config.enable_voice_input and self._voice_input.is_available:
             self._voice_input.start()
-            self._floating_window.set_voice_enabled(True)
+            self._panel.set_voice_enabled(True)
             logger.info("Voice input enabled")
             # Poll is_listening at 200ms to sync button state after timeouts
             self._voice_timer = QTimer()
@@ -478,7 +533,7 @@ class Application:
             self._config.subtitle_font_size, self._config.subtitle_bg_opacity,
         )
 
-        # Give engine a way to read the AI Navigator window position
+        # Give engine a way to read the AI Navigator panel position
         self._engine._get_window_context = self._get_window_context
 
         # Connect signals
@@ -527,7 +582,7 @@ class Application:
             (1, self._config.correction_hotkey,      self._on_correction),
             (2, self._config.pause_hotkey,           self._on_pause_toggle),
             (3, self._config.next_step_hotkey,       self._on_next_step),
-            (4, self._config.floating_window_hotkey, self._floating_window.toggle_visibility),
+            (4, self._config.floating_window_hotkey, self._panel.toggle_visibility),
         ]
 
         registered: dict[int, object] = {}
@@ -561,12 +616,8 @@ class Application:
         )
 
     def _get_window_context(self) -> Optional[str]:
-        """Return the AI Navigator window position as a context string for the AI.
-
-        This lets Claude know where the app window is so it can suggest
-        'minimize it' rather than 'close it' when the window occludes the screen.
-        """
-        geo = self._main_window.geometry()
+        """Return the AI Navigator panel position as a context string for the AI."""
+        geo = self._panel.geometry()
         return (
             f"[AI Navigator window position: x={geo.x()}, y={geo.y()}, "
             f"width={geo.width()}, height={geo.height()}. "
@@ -652,49 +703,46 @@ class Application:
     def _connect_signals(self) -> None:
         """Wire up all signal connections between components."""
         # User input → engine
-        self._main_window.message_submitted.connect(self._on_user_message)
-        self._floating_window.message_submitted.connect(self._on_user_message)
+        self._panel.message_submitted.connect(self._on_user_message)
 
         # Engine → UI
         self._engine.response_ready.connect(self._on_response_ready)
         self._engine.error_occurred.connect(self._on_error)
         self._engine.processing_started.connect(self._on_processing_started)
         self._engine.processing_finished.connect(self._on_processing_finished)
-        self._engine.streaming_chunk.connect(self._main_window.append_streaming_chunk)
+        self._engine.streaming_chunk.connect(self._panel.append_streaming_chunk)
 
         # Screen monitor → engine
         self._engine.screen_monitor.on_change(self._engine.handle_screen_change)
 
-        # Floating window actions
-        self._floating_window.correction_requested.connect(self._on_correction)
-        self._floating_window.pause_toggled.connect(self._on_pause_toggle)
-        self._floating_window.next_step_requested.connect(self._on_next_step)
-        self._floating_window.mic_pressed.connect(self._on_mic_pressed)
+        # Panel actions
+        self._panel.correction_requested.connect(self._on_correction)
+        self._panel.pause_toggled.connect(self._on_pause_toggle)
+        self._panel.next_step_requested.connect(self._on_next_step)
+        self._panel.mic_pressed.connect(self._on_mic_pressed)
+        self._panel.new_session_requested.connect(self._on_new_session)
+        self._panel.save_session_requested.connect(self._on_save_session)
 
         # Voice input → engine (thread-safe via signal)
         self._engine.voice_transcript.connect(self._on_voice_transcript)
 
-        # Session management
-        self._main_window.new_session_requested.connect(self._on_new_session)
-        self._main_window.save_session_requested.connect(self._on_save_session)
-
     @Slot(str)
     def _on_user_message(self, text: str) -> None:
         """Handle user message from any input source."""
-        self._main_window.add_message("user", text)
+        self._panel.add_message("user", text)
         self._engine.handle_user_message(text)
 
     @Slot()
     def _on_processing_started(self) -> None:
-        self._main_window.set_processing(True)
+        self._panel.set_processing(True)
         self._streaming_active = True
-        self._main_window.begin_streaming_message()
+        self._panel.begin_streaming_message()
 
     @Slot()
     def _on_processing_finished(self) -> None:
-        self._main_window.set_processing(False)
+        self._panel.set_processing(False)
         if getattr(self, "_streaming_active", False):
-            self._main_window.end_streaming_message()
+            self._panel.end_streaming_message()
             self._streaming_active = False
 
     @Slot(object)
@@ -706,7 +754,7 @@ class Application:
 
         # Always write the final instruction via add_message — streaming is
         # visual-only feedback and is removed by end_streaming_message before this.
-        self._main_window.add_message("assistant", step.instruction)
+        self._panel.add_message("assistant", step.instruction)
 
         # Speak the instruction if TTS is enabled
         if self._config.enable_tts and self._tts.is_available:
@@ -715,12 +763,12 @@ class Application:
         # Show progress
         progress = sequencer.get_progress()
         if progress:
-            self._main_window.show_status(progress)
+            self._panel.show_status(progress)
 
         # Copy to clipboard if needed
         if step.clipboard:
             copy_to_clipboard(step.clipboard)
-            self._main_window.add_message(
+            self._panel.add_message(
                 "system", f"Copied to clipboard: {step.clipboard}"
             )
 
@@ -780,20 +828,19 @@ class Application:
         # Update token display
         session = self._engine.session_manager.current_session
         if session:
-            self._main_window.update_token_display(session.total_tokens)
+            self._panel.update_token_display(session.total_tokens)
 
     @Slot(str)
     def _on_error(self, message: str) -> None:
         """Handle errors from the engine."""
-        self._main_window.add_message("system", f"Error: {message}")
-        self._main_window.show_status("Error occurred")
+        self._panel.add_message("system", f"Error: {message}")
         logger.error("Engine error: %s", message)
 
     @Slot()
     def _on_correction(self) -> None:
         """Handle correction request."""
         self._tts.stop()
-        self._main_window.add_message("system", "Correction requested — re-analyzing...")
+        self._panel.add_message("system", "Correction requested — re-analyzing...")
         self._overlay.clear()
         self._engine.handle_correction()
 
@@ -801,8 +848,7 @@ class Application:
     def _on_pause_toggle(self) -> None:
         """Handle pause toggle."""
         paused = self._engine.toggle_pause()
-        self._floating_window.set_paused(paused)
-        self._main_window.show_status("Paused" if paused else "Active")
+        self._panel.set_paused(paused)
         if paused:
             self._overlay.clear()
 
@@ -817,31 +863,27 @@ class Application:
         """Trigger a push-to-talk listen cycle."""
         if self._voice_input.is_listening:
             return  # Already recording
-        self._floating_window.set_listening(True)
+        self._panel.set_listening(True)
         self._voice_input.listen()
 
     @Slot(str)
     def _on_voice_transcript(self, text: str) -> None:
         """Handle recognized speech — route it as a user message."""
-        self._floating_window.set_listening(False)
+        self._panel.set_listening(False)
         self._on_user_message(text)
 
     @Slot()
     def _sync_listening_state(self) -> None:
         """Poll voice input listening state to sync button after timeouts."""
-        self._floating_window.set_listening(self._voice_input.is_listening)
+        self._panel.set_listening(self._voice_input.is_listening)
 
     @Slot()
     def _on_new_session(self) -> None:
         """Handle new session request."""
-        self._main_window.clear_chat()
+        self._panel.clear_chat()
         self._overlay.clear()
         self._engine.step_sequencer.reset()
-        self._main_window.show_status("New session — type your request")
-        self._main_window.add_message(
-            "system",
-            "New session started. What would you like help with?"
-        )
+        self._panel.add_message("system", "New session started. What would you like help with?")
 
     @Slot()
     def _on_save_session(self) -> None:
@@ -849,9 +891,9 @@ class Application:
         session = self._engine.session_manager.current_session
         if session:
             path = self._engine.session_manager.save_session(session)
-            self._main_window.show_status(f"Session saved: {path.name}")
+            self._panel.add_message("system", f"Session saved: {path.name}")
         else:
-            self._main_window.show_status("No active session to save")
+            self._panel.add_message("system", "No active session to save")
 
     def run(self) -> int:
         """Start the application and enter the event loop."""
@@ -871,9 +913,9 @@ class Application:
                 )
             else:
                 hint = "Set ANTHROPIC_API_KEY in .env."
-            self._main_window.add_message("system", f"Warning: {hint}")
+            self._panel.add_message("system", f"Warning: {hint}")
         else:
-            self._main_window.add_message(
+            self._panel.add_message(
                 "system",
                 f"AI Navigator ready — using {router.provider_name}\n"
                 "Type a task description to get started.\n"
@@ -895,8 +937,8 @@ class Application:
         # Start screen monitor polling
         self._monitor_timer.start()
 
-        # Show windows
-        self._main_window.show()
+        # Show panel (starts expanded at bottom-right)
+        self._panel.show()
 
         # Run Qt event loop
         try:

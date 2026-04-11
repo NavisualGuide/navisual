@@ -42,6 +42,7 @@ dependencies = [
     "pydantic>=2.0.0",          # Data validation
     "python-dotenv>=1.0.0",     # Environment config
     "pyperclip>=1.8.2",         # Clipboard access
+    "keyboard>=0.13.5",         # Global hotkeys (Windows/Linux/macOS)
 ]
 
 [project.optional-dependencies]
@@ -71,11 +72,13 @@ openai = [
 ]
 
 tts = [
-    "piper-tts>=1.2.0",         # Local text-to-speech (v0.2+)
+    "pyttsx3>=2.90",             # Local TTS via Windows SAPI / macOS NSSpeechSynthesizer
 ]
 
 stt = [
-    "openai-whisper>=20230314",  # Local speech-to-text (v0.2+)
+    "SpeechRecognition>=3.10.0",  # Push-to-talk STT via Google Web Speech API
+    "pyaudio>=0.2.14",            # Microphone access (Windows: install PortAudio first)
+    "openai-whisper>=20230314",   # Local speech-to-text (v0.2+, alternative backend)
 ]
 
 [project.urls]

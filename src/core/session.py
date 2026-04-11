@@ -113,7 +113,7 @@ class SessionManager:
             raise ValueError("No session to save")
 
         file_path = self.session_dir / f"{session.id}.json"
-        file_path.write_text(session.model_dump_json(indent=2))
+        file_path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
         logger.info("Session saved: %s", file_path)
         return file_path
 
@@ -123,7 +123,7 @@ class SessionManager:
         if not file_path.exists():
             raise FileNotFoundError(f"Session not found: {session_id}")
 
-        session = Session.model_validate_json(file_path.read_text())
+        session = Session.model_validate_json(file_path.read_text(encoding="utf-8"))
         self._current_session = session
         logger.info("Session loaded: %s", session_id)
         return session
@@ -133,7 +133,7 @@ class SessionManager:
         sessions = []
         for path in sorted(self.session_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 sessions.append({
                     "id": data.get("id", path.stem),
                     "task_description": data.get("task_description", "Unknown"),

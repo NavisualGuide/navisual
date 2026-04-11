@@ -9,6 +9,7 @@ On Linux (v0.4+): will use AT-SPI2.
 """
 
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -101,16 +102,11 @@ class A11yEngine:
         timeout_ms: int,
     ) -> Optional[A11yResult]:
         """Perform the actual UIA search."""
+        import ctypes
         import uiautomation as auto
 
         # Set search timeout
         auto.SetGlobalSearchTimeout(timeout_ms / 1000.0)
-
-        # Get the foreground window
-        foreground = auto.GetForegroundControl()
-        if foreground is None:
-            logger.debug("No foreground window found")
-            return None
 
         # Build search conditions
         target_lower = target_text.lower()
@@ -120,15 +116,52 @@ class A11yEngine:
         if target_role and target_role in _ROLE_TO_CONTROL_TYPE:
             control_type_name = _ROLE_TO_CONTROL_TYPE[target_role]
 
-        # Strategy 1: Direct name search
-        result = self._search_by_name(foreground, target_lower, control_type_name, auto)
-        if result:
-            return result
+        # Determine which window(s) to search.
+        # If the foreground window is our own process (e.g. user just clicked the
+        # Next button in AI Navigator), GetForegroundControl() would return our panel
+        # and we'd never find the target in the user's app.
+        # In that case, walk the desktop's top-level windows and search each one that
+        # belongs to a different process.
+        our_pid = os.getpid()
+        foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
+        fg_pid = ctypes.c_ulong(0)
+        ctypes.windll.user32.GetWindowThreadProcessId(foreground_hwnd, ctypes.byref(fg_pid))
+        foreground_is_ours = (fg_pid.value == our_pid)
 
-        # Strategy 2: Search in descendants (broader, slightly slower)
-        result = self._search_descendants(foreground, target_lower, control_type_name, auto)
-        if result:
-            return result
+        if not foreground_is_ours:
+            # Normal case: search the foreground window.
+            foreground = auto.GetForegroundControl()
+            if foreground is None:
+                logger.debug("No foreground window found")
+                return None
+            search_roots = [foreground]
+        else:
+            # Our panel is focused — search all other top-level windows so we can
+            # still locate elements in the user's target application.
+            logger.debug("A11y: foreground is AI Navigator, searching all other windows")
+            desktop = auto.GetRootControl()
+            search_roots = []
+            try:
+                for child in desktop.GetChildren():
+                    try:
+                        if child.ProcessId != our_pid:
+                            search_roots.append(child)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if not search_roots:
+                return None
+
+        for root in search_roots:
+            # Strategy 1: Direct name search
+            result = self._search_by_name(root, target_lower, control_type_name, auto)
+            if result:
+                return result
+            # Strategy 2: Search in descendants (broader, slightly slower)
+            result = self._search_descendants(root, target_lower, control_type_name, auto)
+            if result:
+                return result
 
         return None
 
@@ -183,7 +216,9 @@ class A11yEngine:
         """
         import re
 
-        pattern = "(?i)" + re.escape(target_lower)
+        # Use anchored exact match — same as fast path — so "Insert" does NOT
+        # match "Insert Space", "Insert Row", etc. (substring false-positives).
+        pattern = "(?i)^" + re.escape(target_lower) + "$"
 
         def _try_regex(ctype: Optional[str]) -> Optional[A11yResult]:
             """Attempt a RegexName search for the given control type (or any)."""

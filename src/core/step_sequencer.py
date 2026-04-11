@@ -6,11 +6,17 @@ is reached, reducing round-trips by 2-4x.
 """
 
 import logging
+import time
 from typing import Optional
 
 from src.ai.tool_schemas import NavigateStep
 
 logger = logging.getLogger(__name__)
+
+# Minimum seconds a checkpoint step must be visible before a screen change
+# can be treated as the user completing it.  Prevents instant-completion
+# false-positives when a queued screen-change event fires right after load.
+CHECKPOINT_MIN_DWELL_SEC = 1.0
 
 
 class StepSequencer:
@@ -41,6 +47,7 @@ class StepSequencer:
     def __init__(self) -> None:
         self._steps: list[NavigateStep] = []
         self._current_index: int = 0
+        self._step_shown_at: float = 0.0  # monotonic time when current step was loaded/advanced to
 
     def load_steps(self, steps: list[NavigateStep]) -> None:
         """Load a new step sequence from an AI response.
@@ -49,6 +56,7 @@ class StepSequencer:
         """
         self._steps = list(steps)
         self._current_index = 0
+        self._step_shown_at = time.monotonic()
         logger.info("Loaded %d steps into sequencer", len(self._steps))
         if self._steps:
             logger.debug("First step: %s", self._steps[0].instruction[:80])
@@ -82,6 +90,16 @@ class StepSequencer:
         return step is not None and step.checkpoint
 
     @property
+    def checkpoint_ready(self) -> bool:
+        """True when the current checkpoint step has been visible long enough
+        that a screen change can be treated as the user completing it.
+
+        Guards against queued screen-change events firing instantly after
+        a new step is loaded and falsely marking it as done.
+        """
+        return (time.monotonic() - self._step_shown_at) >= CHECKPOINT_MIN_DWELL_SEC
+
+    @property
     def remaining_steps(self) -> int:
         """Number of steps remaining including current."""
         return max(0, len(self._steps) - self._current_index)
@@ -95,6 +113,7 @@ class StepSequencer:
             return None
 
         self._current_index += 1
+        self._step_shown_at = time.monotonic()
         step = self.current_step
 
         if step:
