@@ -4,6 +4,8 @@
 **Status:** v0.3 complete. Token optimization, active-window crop, UI consolidation (ConsolidatedPanel), checkpoint rework, multi-window A11y.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
 **Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md)
+**Settings:** [settings.md](docs/settings.md)
+**Nav-Packs:** [nav-packs.md](docs/nav-packs.md)
 **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
 
 ---
@@ -282,7 +284,7 @@ if __name__ == "__main__":
 ```
 v0.3.1 — Remaining v0.3 items (Python, Windows):
   1. Single screen mode: user picks one screen to capture
-  2. Settings window: in-app UI for API provider + key (no more .env editing)
+  2. Settings window: in-app UI for API provider + key (no more .env editing) — see [settings.md](docs/settings.md)
   3. PyPI packaging: pip install ai-navigator
   4. Subtitle persistence fix (overlay subtitle lingers too long)
 

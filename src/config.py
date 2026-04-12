@@ -102,6 +102,22 @@ class Config(BaseSettings):
     diff_threshold: float = Field(default=0.05, description="Pixel change threshold (0-1)")
     phash_threshold: int = Field(default=5, description="pHash Hamming distance threshold")
     idle_timeout_sec: int = Field(default=10, description="Seconds before idle fallback check")
+    checkpoint_auto_advance: bool = Field(
+        default=True,
+        description=(
+            "Auto-complete checkpoint steps when a large screen change is detected "
+            "(e.g. page navigation). When False, every step requires the → Next button. "
+            "Disable to reduce interruptions or save tokens on slow connections."
+        ),
+    )
+    checkpoint_auto_advance_threshold: float = Field(
+        default=0.30,
+        description=(
+            "Fraction of pixels that must change to auto-complete a checkpoint step "
+            "(0.0–1.0). Only used when checkpoint_auto_advance=True. "
+            "0.30 catches full page navigations; raise to require a bigger change."
+        ),
+    )
 
     # --- OCR ---
     ocr_confidence_threshold: float = Field(default=0.5, description="Minimum OCR confidence")

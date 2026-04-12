@@ -169,14 +169,14 @@ class GuidanceEngine(QObject):
     def handle_screen_change(self, event: ScreenChangeEvent) -> None:
         """Handle a screen change event (from screen monitor).
 
-        Two cases handled here:
-        1. Mid-sequence NON-checkpoint step → screen changed, auto-advance to next step.
-        2. Sequence complete with active session → re-query AI (debounced).
+        Three cases handled here:
+        1. Checkpoint step + LARGE change (>30% pixels) → auto-advance.
+           Full page navigation / new dialog reliably means the user completed the action.
+        2. Mid-sequence non-checkpoint step → auto-advance on any detected change.
+        3. Sequence complete with active session → re-query AI (debounced).
 
-        NOTE: Checkpoint steps do NOT complete on screen change — they require an
-        explicit Next button press (handle_next_step).  Screen-change detection in
-        complex apps (OneNote ribbons, browser animations) is too noisy to reliably
-        distinguish "user completed the action" from "UI redrawn for other reasons".
+        Small screen changes at a checkpoint (radio ticks, focus rings, tooltips) are
+        still ignored — those still require the → Next button.
         """
         if self._is_processing or not self._active:
             return
@@ -186,9 +186,14 @@ class GuidanceEngine(QObject):
             return
 
         if self._step_sequencer.is_at_checkpoint:
-            # Checkpoint step is waiting for explicit user confirmation (Next button).
-            # Ignore screen changes — they're too noisy to use as completion signal.
-            return
+            # Checkpoint step: auto-complete only when the feature is enabled AND the
+            # screen change is large enough (page navigation, new dialog, etc.).
+            # Small changes (radio ticks, focus rings, tooltips) always require → Next.
+            if not self._config.checkpoint_auto_advance:
+                return
+            if event.change_pct <= self._config.checkpoint_auto_advance_threshold:
+                return
+            # Large change + feature enabled → fall through and advance below.
 
         if not self._step_sequencer.is_complete:
             # Mid-sequence non-checkpoint step: screen changed → auto-advance.
@@ -775,53 +780,65 @@ class Application:
         # Locate element and show overlay.
         # Enforce the 1–5 word limit on target_text regardless of what the model
         # returned — long strings (e.g. full placeholder text) never match.
+        # Also skip locate for very short strings (< 3 chars): single/double-char
+        # targets ("I", "A") reliably match garbage off-screen UIA elements.
         if step.target_text:
             words = step.target_text.split()
             target_text = " ".join(words[:5]) if len(words) > 5 else step.target_text
-            result = self._engine.element_locator.locate(
-                target_text=target_text,
-                target_role=step.target_role.value if step.target_role else None,
-                target_region=step.target_region.value if step.target_region else None,
-            )
+            # Skip element location for very short strings (< 3 chars).
+            # Single/double-char targets ("I", "A") reliably match garbage
+            # off-screen UIA elements; fall back to subtitle immediately.
+            if len(target_text.strip()) < 3:
+                logger.debug(
+                    "target_text '%s' too short for reliable location — subtitle fallback",
+                    target_text,
+                )
+                self._overlay.show_subtitle(step.instruction)
+            else:
+                result = self._engine.element_locator.locate(
+                    target_text=target_text,
+                    target_role=step.target_role.value if step.target_role else None,
+                    target_region=step.target_region.value if step.target_region else None,
+                )
 
-            if result.bbox:
-                # Coordinate spaces:
-                # - A11y (UIA BoundingRectangle): virtual screen coords (can be negative).
-                # - OCR (mss image): image-relative coords in the downscaled screenshot.
-                #   The screenshot is captured at full virtual-desktop resolution then
-                #   downscaled (thumbnail) before OCR — so OCR coords are in image space,
-                #   not virtual desktop space. Steps to convert:
-                #   1. Scale up from image pixels to virtual desktop pixels.
-                #   2. Add virtual origin offset to get virtual screen coordinates.
-                if result.method == "ocr":
-                    ox, oy = self._virtual_origin
-                    x, y, w, h = result.bbox
-                    ss_w, ss_h = self._engine.last_screenshot_size
-                    if ss_w > 0 and self._vd_width > 0:
-                        sx = self._vd_width / ss_w
-                        sy = self._vd_height / ss_h
+                if result.bbox:
+                    # Coordinate spaces:
+                    # - A11y (UIA BoundingRectangle): virtual screen coords (can be negative).
+                    # - OCR (mss image): image-relative coords in the downscaled screenshot.
+                    #   The screenshot is captured at full virtual-desktop resolution then
+                    #   downscaled (thumbnail) before OCR — so OCR coords are in image space,
+                    #   not virtual desktop space. Steps to convert:
+                    #   1. Scale up from image pixels to virtual desktop pixels.
+                    #   2. Add virtual origin offset to get virtual screen coordinates.
+                    if result.method == "ocr":
+                        ox, oy = self._virtual_origin
+                        x, y, w, h = result.bbox
+                        ss_w, ss_h = self._engine.last_screenshot_size
+                        if ss_w > 0 and self._vd_width > 0:
+                            sx = self._vd_width / ss_w
+                            sy = self._vd_height / ss_h
+                        else:
+                            sx, sy = 1.0, 1.0
+                        virt_bbox = (
+                            int(x * sx) + ox,
+                            int(y * sy) + oy,
+                            int(w * sx),
+                            int(h * sy),
+                        )
                     else:
-                        sx, sy = 1.0, 1.0
-                    virt_bbox = (
-                        int(x * sx) + ox,
-                        int(y * sy) + oy,
-                        int(w * sx),
-                        int(h * sy),
+                        virt_bbox = result.bbox
+                    scaled = self._scale_to_logical(virt_bbox)
+                    logger.info(
+                        "Overlay: method=%s image=%s virtual=%s → logical=%s",
+                        result.method, result.bbox, virt_bbox, scaled,
+                    )
+                    self._overlay.show_overlay(
+                        bbox=scaled,
+                        overlay_type=step.overlay_type.value,
+                        instruction=step.instruction,
                     )
                 else:
-                    virt_bbox = result.bbox
-                scaled = self._scale_to_logical(virt_bbox)
-                logger.info(
-                    "Overlay: method=%s image=%s virtual=%s → logical=%s",
-                    result.method, result.bbox, virt_bbox, scaled,
-                )
-                self._overlay.show_overlay(
-                    bbox=scaled,
-                    overlay_type=step.overlay_type.value,
-                    instruction=step.instruction,
-                )
-            else:
-                self._overlay.show_subtitle(step.instruction)
+                    self._overlay.show_subtitle(step.instruction)
         else:
             self._overlay.show_subtitle(step.instruction)
 

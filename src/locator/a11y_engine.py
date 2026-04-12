@@ -251,9 +251,13 @@ class A11yEngine:
             if result:
                 return result
 
-        # Slow path: manual walk (catches edge cases the regex search misses)
+        # Slow path: manual walk (catches edge cases the regex search misses).
+        # Capped at 200 ms wall-clock time so a large UIA tree (TurboTax, Office)
+        # never blocks the Qt main thread long enough to freeze the UI.
+        import time as _time
+        deadline = _time.monotonic() + 0.20
         try:
-            children = self._get_all_controls(root, auto, max_depth=8)
+            children = self._get_all_controls(root, auto, max_depth=8, deadline=deadline)
             for control in children:
                 try:
                     name = control.Name
@@ -274,22 +278,27 @@ class A11yEngine:
             pass
         return None
 
-    def _get_all_controls(self, root, auto, max_depth: int = 6) -> list:
+    def _get_all_controls(self, root, auto, max_depth: int = 6, deadline: float = 0.0) -> list:
         """Recursively get all controls up to max_depth."""
         controls = []
-        self._collect_controls(root, controls, auto, depth=0, max_depth=max_depth)
+        self._collect_controls(root, controls, auto, depth=0, max_depth=max_depth, deadline=deadline)
         return controls
 
-    def _collect_controls(self, element, controls: list, auto, depth: int, max_depth: int) -> None:
-        """Recursively collect UI controls."""
+    def _collect_controls(
+        self, element, controls: list, auto, depth: int, max_depth: int, deadline: float = 0.0
+    ) -> None:
+        """Recursively collect UI controls, stopping at max_depth or deadline."""
         if depth >= max_depth:
+            return
+        import time as _time
+        if deadline and _time.monotonic() > deadline:
             return
         try:
             children = element.GetChildren()
             if children:
                 for child in children:
                     controls.append(child)
-                    self._collect_controls(child, controls, auto, depth + 1, max_depth)
+                    self._collect_controls(child, controls, auto, depth + 1, max_depth, deadline)
         except Exception:
             pass
 
@@ -317,8 +326,21 @@ class A11yEngine:
             if rect.width() <= 0 or rect.height() <= 0:
                 return None
 
+            x, y, w, h = rect.left, rect.top, rect.width(), rect.height()
+
+            # Reject elements with obviously bogus coordinates.  The UIA tree can
+            # contain virtual / off-screen elements from minimised or ghost windows
+            # whose BoundingRectangle is set to something like (-31000, -31000).
+            # No real multi-monitor desktop spans beyond ±10 000 px on either axis.
+            if abs(x) > 10_000 or abs(y) > 10_000:
+                logger.debug(
+                    "A11y: rejected off-screen element '%s' at (%d, %d, %d, %d)",
+                    element.Name, x, y, w, h,
+                )
+                return None
+
             return A11yResult(
-                bbox=(rect.left, rect.top, rect.width(), rect.height()),
+                bbox=(x, y, w, h),
                 name=element.Name or "",
                 role=element.ControlTypeName or "unknown",
             )
