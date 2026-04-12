@@ -246,6 +246,12 @@ class OCREngine:
         return self._backend.process_screenshot(image_bytes)
 
     @staticmethod
+    # Roles that are typically rendered as visually distinct, larger elements.
+    # When target_role matches one of these, prefer larger bounding-box matches.
+    _BUTTON_LIKE_ROLES: frozenset[str] = frozenset({
+        "button", "link", "tab", "menuitem", "checkbox", "radio",
+    })
+
     def find_text(
         target_text: str,
         ocr_results: list[OCRResult],
@@ -253,15 +259,22 @@ class OCREngine:
         screen_width: int = 1920,
         screen_height: int = 1080,
         min_confidence: float = 0.5,
+        target_role: Optional[str] = None,
     ) -> Optional[OCRResult]:
         """Find the best match for target_text in OCR results.
 
         Uses case-insensitive substring matching, then fuzzy matching as fallback.
+
+        When target_role is button-like (button, link, tab, …) and multiple
+        exact matches exist, prefers the one with the largest bounding box.
+        Buttons are visually larger than inline text that happens to share the
+        same word (e.g. TurboTax "Click a Fix button" vs the blue Fix button).
         """
         if not ocr_results or not target_text:
             return None
 
         target_lower = target_text.lower().strip()
+        prefer_largest = target_role in OCREngine._BUTTON_LIKE_ROLES
 
         # Filter by confidence
         candidates = [r for r in ocr_results if r.confidence >= min_confidence]
@@ -277,10 +290,18 @@ class OCREngine:
         if region_hint:
             candidates = _filter_by_region(candidates, region_hint, screen_width, screen_height)
 
-        # Strategy 1: Exact match (case-insensitive, punctuation-stripped)
-        for r in candidates:
-            if _strip_punct(r.text).lower() == target_lower:
-                return r
+        # Strategy 1: Exact match (case-insensitive, punctuation-stripped).
+        # Collect ALL exact matches; when target_role is button-like, pick the
+        # largest bounding box — buttons are bigger than inline text that shares
+        # the same word (e.g. "Fix" in a sentence vs the blue Fix button).
+        exact_matches = [
+            r for r in candidates
+            if _strip_punct(r.text).lower() == target_lower
+        ]
+        if exact_matches:
+            if prefer_largest and len(exact_matches) > 1:
+                return max(exact_matches, key=lambda r: r.bbox[2] * r.bbox[3])
+            return exact_matches[0]
 
         # Strategy 2: Substring match
         # Strip surrounding punctuation before comparing — OCR sometimes reads subtitle
@@ -290,14 +311,17 @@ class OCREngine:
         # at least 6 chars — short tokens like "in", "with", "for" appear everywhere
         # in body text and produce false positives.
         MIN_SUBSTR_LEN = 8
+        substr_matches = []
         for r in candidates:
             r_clean = _strip_punct(r.text).lower()
             if not r_clean:
                 continue
-            if target_lower in r_clean:
-                return r
-            if r_clean in target_lower and len(r_clean) >= MIN_SUBSTR_LEN:
-                return r
+            if target_lower in r_clean or (r_clean in target_lower and len(r_clean) >= MIN_SUBSTR_LEN):
+                substr_matches.append(r)
+        if substr_matches:
+            if prefer_largest and len(substr_matches) > 1:
+                return max(substr_matches, key=lambda r: r.bbox[2] * r.bbox[3])
+            return substr_matches[0]
 
         # Strategy 3: Fuzzy match (SequenceMatcher, > 0.7 ratio)
         # Use punctuation-stripped text so "'Continue'" scores as "Continue".

@@ -140,6 +140,7 @@ class ElementLocator:
                     screen_width=self._screen_width,
                     screen_height=self._screen_height,
                     min_confidence=self._ocr_confidence_threshold,
+                    target_role=target_role,
                 )
                 if match:
                     logger.info(

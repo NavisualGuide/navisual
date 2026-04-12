@@ -33,7 +33,6 @@ from src.input.chat_input import ChatInputHandler
 from src.input.voice_input import VoiceInput
 from src.input.screen_capture import (
     capture_for_guidance,
-    capture_screenshot_raw,
     image_to_bytes,
 )
 from src.input.screen_monitor import ScreenChangeEvent, ScreenMonitor
@@ -212,6 +211,9 @@ class GuidanceEngine(QObject):
             # advance() is synchronous so state changes before the next event fires.
             next_step = self._step_sequencer.advance()
             if next_step:
+                # Refresh OCR cache from asyncio thread (mss is not safe to call
+                # from the Qt main thread while asyncio thread also uses it).
+                self._run_async(self._refresh_ocr_cache())
                 self.response_ready.emit(self._step_sequencer)
             elif self._step_sequencer.is_complete:
                 # Last step just consumed — re-query AI
@@ -445,6 +447,22 @@ class GuidanceEngine(QObject):
             self.processing_finished.emit()
             self.error_occurred.emit(f"Correction failed: {e}")
 
+    async def _refresh_ocr_cache(self) -> None:
+        """Capture a fresh screenshot and submit for OCR pre-caching.
+
+        Called from the asyncio thread (safe — that's where all mss captures
+        happen).  Refreshes stale OCR results when mid-sequence steps advance
+        without a full API round-trip.
+        """
+        from src.input.screen_capture import capture_screenshot_raw
+        try:
+            img = capture_screenshot_raw()
+            self._last_screenshot_size = (img.width, img.height)
+            self._element_locator.start_ocr_precache(image_to_bytes(img))
+            logger.debug("OCR cache refreshed (%dx%d)", img.width, img.height)
+        except Exception as e:
+            logger.debug("OCR cache refresh failed (non-fatal): %s", e)
+
     def _process_response(self, session: Session, response: NavigateStepResponse) -> None:
         """Process an AI response: update state, load steps, emit signal."""
         # If the AI needs to see the full desktop next turn, set the flag.
@@ -496,9 +514,6 @@ class GuidanceEngine(QObject):
         """(width, height) of the most recently captured screenshot (post-resize)."""
         return self._last_screenshot_size
 
-    @last_screenshot_size.setter
-    def last_screenshot_size(self, value: tuple[int, int]) -> None:
-        self._last_screenshot_size = value
 
 
 class Application:
@@ -794,22 +809,8 @@ class Application:
                 "system", f"Copied to clipboard: {step.clipboard}"
             )
 
-        # Refresh OCR with a live screenshot.  Multi-step sequences can outlive
-        # the pre-call OCR cache (which was taken before the API call, possibly
-        # 2-3 screen changes ago), causing "element not found" on later steps.
-        # Windows OCR finishes in ~10ms so results are usually ready by the time
-        # processEvents() returns below.
-        try:
-            fresh_img = capture_screenshot_raw()
-            self._engine.last_screenshot_size = (fresh_img.width, fresh_img.height)
-            self._engine.element_locator.start_ocr_precache(image_to_bytes(fresh_img))
-        except Exception:
-            pass  # non-fatal; stale cache is better than crashing
-
-        # Flush pending Qt repaints AND give Windows OCR a moment to finish.
-        # Calling processEvents() twice with a yield gives ~10-20ms gap which
-        # is enough for the OCR worker to drain its result queue.
-        QApplication.processEvents()
+        # Flush pending Qt repaints NOW so the instruction text appears in the
+        # panel before locate() runs (up to ~200ms for A11y slow path).
         QApplication.processEvents()
 
         # Locate element and show overlay.
