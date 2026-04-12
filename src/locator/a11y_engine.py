@@ -172,22 +172,29 @@ class A11yEngine:
         control_type_name: Optional[str],
         auto,
     ) -> Optional[A11yResult]:
-        """Search for element by exact name using uiautomation's Control() search."""
+        """Search for element by exact name using uiautomation's Control() search.
+
+        Uses RegexName (case-insensitive) for both the role-specific and generic
+        searches.  The old Name= approach was case-sensitive, so "continue" never
+        matched "Continue" and the role-specific branch was always skipped.
+        """
+        import re
+        pattern = "(?i)^" + re.escape(target_lower) + "$"
         try:
-            # uiautomation uses Control(Name=...) style, not COM PropertyCondition
-            kwargs = {"searchDepth": 10, "Name": target_lower}
+            # Pass 1: role-specific with case-insensitive regex
             if control_type_name:
-                # e.g. root.ButtonControl(Name=...) via getattr
                 finder = getattr(root, control_type_name, None)
                 if finder:
-                    element = finder(**{"searchDepth": 10, "Name": target_lower})
+                    element = finder(searchDepth=10, RegexName=pattern)
                     if element and element.Exists(0):
                         result = self._element_to_result(element, auto)
                         if result:
                             return result
-            # Generic Control search (case-insensitive via RegexName)
-            import re
-            pattern = "(?i)^" + re.escape(target_lower) + "$"
+
+            # Pass 2: generic Control search (catches wrong-role elements, e.g.
+            # TurboTax "Continue" as HyperlinkControl instead of ButtonControl).
+            # _validate_element enforces the role when control_type_name is set,
+            # so this only returns a mis-roled element as a last resort.
             element = root.Control(searchDepth=10, RegexName=pattern)
             if element and element.Exists(0):
                 if self._validate_element(element, control_type_name, auto):
@@ -258,6 +265,10 @@ class A11yEngine:
         deadline = _time.monotonic() + 0.20
         try:
             children = self._get_all_controls(root, auto, max_depth=8, deadline=deadline)
+            # Prefer an element whose role matches the requested role.
+            # Keep a role-agnostic fallback (some apps use unexpected UIA roles).
+            role_match = None
+            role_agnostic_match = None
             for control in children:
                 try:
                     name = control.Name
@@ -270,10 +281,18 @@ class A11yEngine:
                     if len(name) > len(target_lower) * 4:
                         continue
                     if target_lower in name_lower or name_lower in target_lower:
-                        if self._validate_element(control, None, auto):  # role-agnostic
-                            return self._element_to_result(control, auto)
+                        if control_type_name and self._validate_element(control, control_type_name, auto):
+                            role_match = control
+                            break  # exact role match — use immediately
+                        elif role_agnostic_match is None and self._validate_element(control, None, auto):
+                            role_agnostic_match = control
+                            if not control_type_name:
+                                break  # no role preference — first valid match wins
                 except Exception:
                     continue
+            candidate = role_match or role_agnostic_match
+            if candidate:
+                return self._element_to_result(candidate, auto)
         except Exception:
             pass
         return None

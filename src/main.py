@@ -33,6 +33,7 @@ from src.input.chat_input import ChatInputHandler
 from src.input.voice_input import VoiceInput
 from src.input.screen_capture import (
     capture_for_guidance,
+    capture_screenshot_raw,
     image_to_bytes,
 )
 from src.input.screen_monitor import ScreenChangeEvent, ScreenMonitor
@@ -100,6 +101,7 @@ class GuidanceEngine(QObject):
         self._screen_change_requery_cooldown_sec: float = 2.0
         self._last_screenshot_size: tuple[int, int] = (0, 0)  # (width, height) of last captured image
         self._next_turn_full_screen: bool = False  # Set when AI requests full desktop screenshot
+        self._had_screen_change_since_step: bool = False  # True once a real diff event arrives after step loaded
         # Callback to get the AI Navigator window geometry (set by Application after init)
         # Returns a string like "AI Navigator window: top-left corner, 600x750px" or None
         self._get_window_context: Optional[callable] = None
@@ -185,15 +187,25 @@ class GuidanceEngine(QObject):
         if session is None:
             return
 
+        # Track real screen changes (diff events with nonzero change) so the idle
+        # branch below can tell whether the user actually did something.
+        if event.source == "diff" and event.change_pct > 0:
+            self._had_screen_change_since_step = True
+
         if self._step_sequencer.is_at_checkpoint:
-            # Checkpoint step: auto-complete only when the feature is enabled AND the
-            # screen change is large enough (page navigation, new dialog, etc.).
-            # Small changes (radio ticks, focus rings, tooltips) always require → Next.
+            # Checkpoint step: auto-complete when the feature is enabled AND either:
+            #   a) a large pixel change occurred (page navigation, new dialog), OR
+            #   b) the idle timer fired AND a real screen change was seen since the step
+            #      loaded (small interaction settled) — user completed a small action.
+            # Idle without any prior change = user hasn't touched anything → do NOT advance.
+            # Small transient changes (radio ticks, focus rings) still require → Next.
             if not self._config.checkpoint_auto_advance:
                 return
-            if event.change_pct <= self._config.checkpoint_auto_advance_threshold:
+            is_large = event.change_pct > self._config.checkpoint_auto_advance_threshold
+            is_idle  = event.source == "idle" and self._had_screen_change_since_step
+            if not is_large and not is_idle:
                 return
-            # Large change + feature enabled → fall through and advance below.
+            # Large change OR idle-after-interaction → fall through and advance below.
 
         if not self._step_sequencer.is_complete:
             # Mid-sequence non-checkpoint step: screen changed → auto-advance.
@@ -446,7 +458,8 @@ class GuidanceEngine(QObject):
             instruction_text = response.steps[0].instruction
             session.add_turn(role="assistant", content=instruction_text)
 
-        # Load steps into sequencer
+        # Load steps into sequencer; reset change flag so idle won't fire until user acts
+        self._had_screen_change_since_step = False
         self._step_sequencer.load_steps(response.steps)
 
         # Save session
@@ -482,6 +495,10 @@ class GuidanceEngine(QObject):
     def last_screenshot_size(self) -> tuple[int, int]:
         """(width, height) of the most recently captured screenshot (post-resize)."""
         return self._last_screenshot_size
+
+    @last_screenshot_size.setter
+    def last_screenshot_size(self, value: tuple[int, int]) -> None:
+        self._last_screenshot_size = value
 
 
 class Application:
@@ -776,6 +793,24 @@ class Application:
             self._panel.add_message(
                 "system", f"Copied to clipboard: {step.clipboard}"
             )
+
+        # Refresh OCR with a live screenshot.  Multi-step sequences can outlive
+        # the pre-call OCR cache (which was taken before the API call, possibly
+        # 2-3 screen changes ago), causing "element not found" on later steps.
+        # Windows OCR finishes in ~10ms so results are usually ready by the time
+        # processEvents() returns below.
+        try:
+            fresh_img = capture_screenshot_raw()
+            self._engine.last_screenshot_size = (fresh_img.width, fresh_img.height)
+            self._engine.element_locator.start_ocr_precache(image_to_bytes(fresh_img))
+        except Exception:
+            pass  # non-fatal; stale cache is better than crashing
+
+        # Flush pending Qt repaints AND give Windows OCR a moment to finish.
+        # Calling processEvents() twice with a yield gives ~10-20ms gap which
+        # is enough for the OCR worker to drain its result queue.
+        QApplication.processEvents()
+        QApplication.processEvents()
 
         # Locate element and show overlay.
         # Enforce the 1–5 word limit on target_text regardless of what the model

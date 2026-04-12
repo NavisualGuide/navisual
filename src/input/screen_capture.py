@@ -125,17 +125,29 @@ def capture_screenshot_raw() -> Image.Image:
     return Image.frombytes("RGB", (raw.width, raw.height), raw.rgb)
 
 
+# Last foreground window rect that belonged to a different process.
+# Used so that when AI Navigator itself is focused (user typed / clicked → Next),
+# we still crop to the target app instead of sending the full virtual desktop.
+_last_target_window_rect: Optional[tuple[int, int, int, int]] = None
+
+
 def get_foreground_window_rect() -> Optional[tuple[int, int, int, int]]:
     """Return the foreground window bounds in virtual-desktop physical pixels (x, y, w, h).
 
     Uses DwmGetWindowAttribute with DWMWA_EXTENDED_FRAME_BOUNDS to get the
     precise window rect, excluding the invisible drop-shadow region.
     Falls back to GetWindowRect if DWM fails.
-    Returns None if no foreground window, bounds are invalid, or the foreground
-    window belongs to our own process (AI Navigator is focused — skip crop so the
-    AI sees the full desktop, not just our own UI).
+
+    When AI Navigator is the foreground window (user clicked the panel or typed
+    into the input box), returns the LAST known target-app rect so the AI still
+    sees the target app rather than the full virtual desktop (which would show a
+    black WDA_EXCLUDEFROMCAPTURE rectangle where AI Navigator sits).
+
+    Returns None only if no target window has been seen yet or bounds are invalid.
     Windows only — returns None on other platforms.
     """
+    global _last_target_window_rect
+
     if sys.platform != "win32":
         return None
 
@@ -145,15 +157,14 @@ def get_foreground_window_rect() -> Optional[tuple[int, int, int, int]]:
 
     hwnd = ctypes.windll.user32.GetForegroundWindow()
     if not hwnd:
-        return None
+        return _last_target_window_rect
 
-    # If the foreground window is our own process, skip the crop.
-    # This happens when the user types into AI Navigator — we want the AI to see
-    # the full desktop (including the target app), not just our own window.
+    # If the foreground window is our own process, reuse the last known target
+    # rect so the AI always sees the target app, never our own panel.
     pid = ctypes.c_ulong(0)
     ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     if pid.value == os.getpid():
-        return None
+        return _last_target_window_rect
 
     class _RECT(ctypes.Structure):
         _fields_ = [
@@ -174,8 +185,11 @@ def get_foreground_window_rect() -> Optional[tuple[int, int, int, int]]:
     w = rect.right - rect.left
     h = rect.bottom - rect.top
     if w <= 0 or h <= 0:
-        return None
-    return (x, y, w, h)
+        return _last_target_window_rect
+
+    result = (x, y, w, h)
+    _last_target_window_rect = result
+    return result
 
 
 def prepare_api_image(
