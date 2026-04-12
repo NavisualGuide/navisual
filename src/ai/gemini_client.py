@@ -70,6 +70,16 @@ GEMINI_NAVIGATE_STEP_FUNCTION = {
                             ],
                             "description": "Rough screen region to narrow the search.",
                         },
+                        "target_nearby_text": {
+                            "type": "string",
+                            "description": (
+                                "Short unique text visible adjacent to the target element. "
+                                "Set this when target_text appears more than once on screen "
+                                "(e.g. multiple Fix or Delete buttons in a list). "
+                                "The locator picks the instance closest to this text. "
+                                "Also mention it in the instruction."
+                            ),
+                        },
                         "overlay_type": {
                             "type": "string",
                             "enum": ["arrow", "highlight", "circle", "none"],

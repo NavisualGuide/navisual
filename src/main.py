@@ -835,6 +835,7 @@ class Application:
                     target_text=target_text,
                     target_role=step.target_role.value if step.target_role else None,
                     target_region=step.target_region.value if step.target_region else None,
+                    nearby_text=step.target_nearby_text or None,
                 )
 
                 if result.bbox:

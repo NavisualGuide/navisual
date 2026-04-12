@@ -60,6 +60,15 @@ class NavigateStep(BaseModel):
         default=None,
         description="Rough screen region to narrow search.",
     )
+    target_nearby_text: Optional[str] = Field(
+        default=None,
+        description=(
+            "A short unique string visible near the target element, used to "
+            "disambiguate when target_text appears multiple times on screen "
+            "(e.g. multiple Fix or Delete buttons in a list). "
+            "Also mention it in the instruction so the user knows which one to click."
+        ),
+    )
     overlay_type: OverlayType = Field(
         default=OverlayType.ARROW,
         description="Type of visual overlay to draw.",
@@ -133,6 +142,16 @@ NAVIGATE_STEP_TOOL = {
                             "type": "string",
                             "enum": [r.value for r in TargetRegion],
                             "description": "Rough screen region to narrow search.",
+                        },
+                        "target_nearby_text": {
+                            "type": "string",
+                            "description": (
+                                "Short unique text visible adjacent to the target element. "
+                                "Set this when target_text appears more than once on screen "
+                                "(e.g. multiple Fix or Delete buttons in a list). "
+                                "The locator will pick the instance closest to this text. "
+                                "Also mention it in the instruction so the user knows which one."
+                            ),
                         },
                         "overlay_type": {
                             "type": "string",

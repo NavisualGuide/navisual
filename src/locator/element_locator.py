@@ -95,6 +95,7 @@ class ElementLocator:
         target_text: str,
         target_role: Optional[str] = None,
         target_region: Optional[str] = None,
+        nearby_text: Optional[str] = None,
     ) -> LocatorResult:
         """Find a UI element on screen using the A11y → OCR fallback chain.
 
@@ -102,6 +103,8 @@ class ElementLocator:
             target_text: Exact text label to find (from AI response).
             target_role: UI role (button, tab, link, etc.) for A11y filtering.
             target_region: Rough screen region hint for OCR filtering.
+            nearby_text: Short unique string adjacent to the target; used by OCR
+                         to disambiguate when target_text appears multiple times.
 
         Returns:
             LocatorResult with bbox (or None if not found).
@@ -141,6 +144,7 @@ class ElementLocator:
                     screen_height=self._screen_height,
                     min_confidence=self._ocr_confidence_threshold,
                     target_role=target_role,
+                    nearby_text=nearby_text,
                 )
                 if match:
                     logger.info(

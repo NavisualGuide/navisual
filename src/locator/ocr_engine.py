@@ -260,6 +260,7 @@ class OCREngine:
         screen_height: int = 1080,
         min_confidence: float = 0.5,
         target_role: Optional[str] = None,
+        nearby_text: Optional[str] = None,
     ) -> Optional[OCRResult]:
         """Find the best match for target_text in OCR results.
 
@@ -269,12 +270,56 @@ class OCREngine:
         exact matches exist, prefers the one with the largest bounding box.
         Buttons are visually larger than inline text that happens to share the
         same word (e.g. TurboTax "Click a Fix button" vs the blue Fix button).
+
+        When nearby_text is provided, all candidates are re-ranked by proximity
+        to the nearest OCR result that matches nearby_text. This lets the locator
+        pick the right element when target_text appears multiple times on screen
+        (e.g. multiple Fix buttons in an error list).
         """
         if not ocr_results or not target_text:
             return None
 
         target_lower = target_text.lower().strip()
         prefer_largest = target_role in OCREngine._BUTTON_LIKE_ROLES
+
+        # Pre-compute the anchor position for proximity scoring.
+        # Find the OCR result whose text best matches nearby_text; its centre
+        # becomes the "anchor" — we'll pick the target candidate closest to it.
+        anchor_cx: Optional[float] = None
+        anchor_cy: Optional[float] = None
+        if nearby_text:
+            nearby_lower = nearby_text.lower().strip()
+            best_ratio = 0.0
+            for r in ocr_results:
+                r_clean = _strip_punct(r.text).lower()
+                if not r_clean:
+                    continue
+                # Accept substring or fuzzy match for the nearby anchor
+                if nearby_lower in r_clean or r_clean in nearby_lower:
+                    ratio = 1.0
+                else:
+                    ratio = SequenceMatcher(None, nearby_lower, r_clean).ratio()
+                if ratio > best_ratio and ratio > 0.5:
+                    best_ratio = ratio
+                    bx, by, bw, bh = r.bbox
+                    anchor_cx = bx + bw / 2
+                    anchor_cy = by + bh / 2
+
+        def _proximity_score(r: "OCRResult") -> float:
+            """Euclidean distance from r's centre to the anchor (lower = better)."""
+            if anchor_cx is None:
+                return 0.0
+            rx, ry, rw, rh = r.bbox
+            cx, cy = rx + rw / 2, ry + rh / 2
+            return (cx - anchor_cx) ** 2 + (cy - anchor_cy) ** 2
+
+        def _best_candidate(pool: list) -> "OCRResult":
+            """Pick from pool: proximity if anchor found, else largest-bbox or first."""
+            if anchor_cx is not None:
+                return min(pool, key=_proximity_score)
+            if prefer_largest and len(pool) > 1:
+                return max(pool, key=lambda r: r.bbox[2] * r.bbox[3])
+            return pool[0]
 
         # Filter by confidence
         candidates = [r for r in ocr_results if r.confidence >= min_confidence]
@@ -291,17 +336,16 @@ class OCREngine:
             candidates = _filter_by_region(candidates, region_hint, screen_width, screen_height)
 
         # Strategy 1: Exact match (case-insensitive, punctuation-stripped).
-        # Collect ALL exact matches; when target_role is button-like, pick the
-        # largest bounding box — buttons are bigger than inline text that shares
-        # the same word (e.g. "Fix" in a sentence vs the blue Fix button).
+        # When multiple exact matches exist, _best_candidate picks by:
+        #   1. Proximity to nearby_text anchor (if provided) — most precise
+        #   2. Largest bounding box for button-like roles — buttons > inline text
+        #   3. First in reading order (fallback)
         exact_matches = [
             r for r in candidates
             if _strip_punct(r.text).lower() == target_lower
         ]
         if exact_matches:
-            if prefer_largest and len(exact_matches) > 1:
-                return max(exact_matches, key=lambda r: r.bbox[2] * r.bbox[3])
-            return exact_matches[0]
+            return _best_candidate(exact_matches)
 
         # Strategy 2: Substring match
         # Strip surrounding punctuation before comparing — OCR sometimes reads subtitle
@@ -319,9 +363,7 @@ class OCREngine:
             if target_lower in r_clean or (r_clean in target_lower and len(r_clean) >= MIN_SUBSTR_LEN):
                 substr_matches.append(r)
         if substr_matches:
-            if prefer_largest and len(substr_matches) > 1:
-                return max(substr_matches, key=lambda r: r.bbox[2] * r.bbox[3])
-            return substr_matches[0]
+            return _best_candidate(substr_matches)
 
         # Strategy 3: Fuzzy match (SequenceMatcher, > 0.7 ratio)
         # Use punctuation-stripped text so "'Continue'" scores as "Continue".

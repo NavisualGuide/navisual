@@ -19,6 +19,10 @@ Rules:
    target_text SHORT — use 1-5 distinctive words maximum. For product titles, use
    only the brand and first 2-3 words (e.g., "Anker USB-C" not the full title).
    Also describe the element's visual appearance and position in the instruction.
+   When target_text appears more than once on screen (e.g. multiple "Fix" or
+   "Delete" buttons in a list), set target_nearby_text to a short unique string
+   visible adjacent to the correct element (e.g. "marital status") AND mention
+   it in the instruction (e.g. "Click Fix next to the marital status error").
 4. NEVER output pixel coordinates. You do not know the exact position of elements.
 5. If the screen shows the user completed the step, acknowledge and move forward.
 6. If the screen shows something unexpected, describe what you see and suggest
