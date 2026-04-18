@@ -35,9 +35,6 @@ dependencies = [
     "winrt-Windows.Foundation>=2.0.0",
     "winrt-Windows.Foundation.Collections>=2.0.0",
     "winrt-Windows.Globalization>=2.0.0",
-    # PaddleOCR (fallback OCR for non-Windows platforms)
-    "paddleocr>=2.7.0",         # FALLBACK: Local OCR (used only when Windows OCR unavailable)
-    "paddlepaddle>=2.5.0",      # PaddleOCR backend (CPU-only, no CUDA needed)
     "httpx>=0.25.0",            # Async HTTP client
     "pydantic>=2.0.0",          # Data validation
     "python-dotenv>=1.0.0",     # Environment config
@@ -59,6 +56,14 @@ dev = [
 gemini = [
     # No extra dependencies: uses httpx (already in core) + Google AI Studio REST API
     # Get a free API key at https://aistudio.google.com/apikey
+]
+
+paddle = [
+    # PaddleOCR fallback — only needed on non-Windows (macOS/Linux, v1.x).
+    # Windows 11 uses the built-in Windows.Media.Ocr; these are never imported there.
+    # WARNING: PaddlePaddle 3.x has a PIR+OneDNN bug on Windows — don't install on Windows.
+    "paddleocr>=2.7.0",
+    "paddlepaddle>=2.5.0",
 ]
 
 ollama = [

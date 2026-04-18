@@ -132,7 +132,7 @@ class Config(BaseSettings):
 
     # --- Element Locator ---
     enable_a11y: bool = Field(default=True, description="Use OS Accessibility API as primary locator")
-    enable_ocr: bool = Field(default=True, description="Use PaddleOCR as fallback locator")
+    enable_ocr: bool = Field(default=True, description="Use OCR as fallback locator (Windows.Media.Ocr on Windows, PaddleOCR on other platforms)")
     a11y_timeout_ms: int = Field(default=100, description="Max time for A11y query in ms")
 
     # --- Overlay ---
