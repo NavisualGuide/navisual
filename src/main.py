@@ -22,11 +22,11 @@ from typing import Optional
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
-from src.ai.api_router import APIRouter, BudgetExceededError
+from src.ai.api_router import APIRouter, BudgetExceededError, ManagedCreditExhaustedError
 from src.ai.tool_schemas import NavigateStepResponse
 from src.config import Config, get_config, setup_logging
 from src.core.correction import CorrectionHandler
-from src.core.cost_tracker import CostTracker
+from src.core.cost_tracker import CostTracker, ManagedCredit
 from src.core.session import Session, SessionManager
 from src.core.step_sequencer import StepSequencer
 from src.input.chat_input import ChatInputHandler
@@ -74,8 +74,16 @@ class GuidanceEngine(QObject):
             safety_margin=config.cost_safety_margin,
             storage_path=config.token_usage_file,
         )
+        self._managed_credit: Optional[ManagedCredit] = (
+            ManagedCredit(cap=config.managed_token_cap, storage_path=config.managed_credit_file)
+            if config.managed_api_key else None
+        )
         self._session_manager = SessionManager(session_dir=config.session_dir)
-        self._api_router = APIRouter(config=config, cost_tracker=self._cost_tracker)
+        self._api_router = APIRouter(
+            config=config,
+            cost_tracker=self._cost_tracker,
+            managed_credit=self._managed_credit,
+        )
         self._step_sequencer = StepSequencer()
         self._correction_handler = CorrectionHandler(api_router=self._api_router)
         self._chat_input = ChatInputHandler()
@@ -315,7 +323,7 @@ class GuidanceEngine(QObject):
             self.processing_finished.emit()
             self._process_response(session, response)
 
-        except BudgetExceededError as e:
+        except (BudgetExceededError, ManagedCreditExhaustedError) as e:
             self._is_processing = False
             self.processing_finished.emit()
             self.error_occurred.emit(str(e))
@@ -365,7 +373,7 @@ class GuidanceEngine(QObject):
             self.processing_finished.emit()
             self._process_response(session, response)
 
-        except BudgetExceededError as e:
+        except (BudgetExceededError, ManagedCreditExhaustedError) as e:
             self._is_processing = False
             self.processing_finished.emit()
             self.error_occurred.emit(str(e))
@@ -508,6 +516,10 @@ class GuidanceEngine(QObject):
     @property
     def cost_tracker(self) -> CostTracker:
         return self._cost_tracker
+
+    @property
+    def api_router(self) -> APIRouter:
+        return self._api_router
 
     @property
     def screen_monitor(self) -> ScreenMonitor:
@@ -970,10 +982,14 @@ class Application:
         else:
             self._overlay.show_subtitle(step.instruction, auto_hide_ms=self._subtitle_auto_hide_ms())
 
-        # Update token display
+        # Update token display (managed credit takes priority when active)
         session = self._engine.session_manager.current_session
+        managed_remaining = self._engine.api_router.managed_credit_remaining
         if session:
-            self._panel.update_token_display(session.total_tokens)
+            self._panel.update_token_display(
+                session.total_tokens,
+                managed_remaining=managed_remaining,
+            )
 
     @Slot(str)
     def _on_error(self, message: str) -> None:
@@ -1079,7 +1095,10 @@ class Application:
     def _on_settings(self) -> None:
         """Open the settings dialog (singleton — reuse if already open)."""
         if self._settings_win is None:
-            self._settings_win = SettingsWindow(self._panel)
+            self._settings_win = SettingsWindow(
+                self._panel,
+                managed_remaining=self._engine.api_router.managed_credit_remaining,
+            )
             self._settings_win.applied.connect(self._on_settings_applied)
         self._settings_win.show()
         self._settings_win.raise_()
@@ -1112,9 +1131,10 @@ class Application:
         """Start the application and enter the event loop."""
         logger.info("AI Navigator starting...")
 
-        # Check API availability
-        router = self._engine._api_router
-        if not router.is_available:
+        # Check API availability (managed key counts as available)
+        router = self._engine.api_router
+        managed_remaining = router.managed_credit_remaining
+        if not router.is_available and router._managed_client is None:
             provider = self._config.api_provider
             if provider == "gemini":
                 hint = "Set GEMINI_API_KEY in .env. Free key at https://aistudio.google.com/apikey"
@@ -1127,6 +1147,20 @@ class Application:
             else:
                 hint = "Set ANTHROPIC_API_KEY in .env."
             self._panel.add_message("system", f"Warning: {hint}")
+        elif managed_remaining is not None and not router.is_available:
+            # Using managed (free trial) key
+            if managed_remaining > 0:
+                self._panel.add_message(
+                    "system",
+                    f"AI Navigator ready — free trial ({managed_remaining:,} tokens remaining)\n"
+                    "Type a task description to get started.\n"
+                    "Add your own API key in Settings → Provider to remove the limit."
+                )
+            else:
+                self._panel.add_message(
+                    "system",
+                    "Free trial complete. Add your API key in Settings → Provider to continue."
+                )
         else:
             self._panel.add_message(
                 "system",

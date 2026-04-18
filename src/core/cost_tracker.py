@@ -136,3 +136,53 @@ class CostTracker:
             "monthly_cap": self.monthly_cap,
             "monthly_pct": round(self.monthly_total / self.monthly_cap * 100, 1) if self.monthly_cap else 0,
         }
+
+
+class ManagedCredit:
+    """Lifetime token credit for the embedded managed API key.
+
+    Unlike CostTracker, this does NOT reset daily or monthly — the credit
+    is a one-time allocation per device. Once exhausted the user must add
+    their own API key in Settings.
+    """
+
+    def __init__(self, cap: int, storage_path: Path | None = None) -> None:
+        self.cap = cap
+        self._storage_path = storage_path
+        self._used: int = 0
+        self._load()
+
+    def _load(self) -> None:
+        if self._storage_path and self._storage_path.exists():
+            try:
+                data = json.loads(self._storage_path.read_text(encoding="utf-8"))
+                self._used = int(data.get("tokens_used", 0))
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                logger.warning("Failed to load managed credit data, starting fresh: %s", e)
+
+    def _save(self) -> None:
+        if self._storage_path:
+            self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+            self._storage_path.write_text(
+                json.dumps({"tokens_used": self._used}, indent=2),
+                encoding="utf-8",
+            )
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.cap - self._used)
+
+    @property
+    def is_exhausted(self) -> bool:
+        return self._used >= self.cap
+
+    def can_spend(self, estimated_tokens: int) -> bool:
+        return self._used + estimated_tokens <= self.cap
+
+    def record_usage(self, input_tokens: int, output_tokens: int) -> None:
+        self._used += input_tokens + output_tokens
+        self._save()
+        logger.debug(
+            "Managed credit: %d used / %d cap (%d remaining)",
+            self._used, self.cap, self.remaining,
+        )

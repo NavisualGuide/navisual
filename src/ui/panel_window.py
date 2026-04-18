@@ -460,8 +460,18 @@ class ConsolidatedPanel(QWidget):
     def show_status(self, text: str) -> None:
         self._step_lbl.setText(text)
 
-    def update_token_display(self, total_tokens: int) -> None:
-        if total_tokens > 0:
+    def update_token_display(
+        self,
+        total_tokens: int,
+        managed_remaining: Optional[int] = None,
+    ) -> None:
+        if managed_remaining is not None:
+            if managed_remaining > 0:
+                self._token_lbl.setText(f"Free trial: {managed_remaining:,}t left")
+            else:
+                self._token_lbl.setText("Free trial complete")
+                self._token_lbl.setToolTip("Add your API key in Settings → Provider")
+        elif total_tokens > 0:
             self._token_lbl.setText(f"{total_tokens:,}t")
 
     def set_processing(self, is_processing: bool) -> None:

@@ -159,8 +159,13 @@ class SettingsWindow(QDialog):
     # Emitted after Apply — carries the freshly loaded Config.
     applied = Signal(object)
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        managed_remaining: Optional[int] = None,
+    ) -> None:
         super().__init__(parent)
+        self._managed_remaining = managed_remaining
         self.setWindowTitle("AI Navigator — Settings")
         self.setFixedSize(500, 580)
         self.setModal(True)
@@ -259,6 +264,24 @@ class SettingsWindow(QDialog):
         inner = QWidget()
         inner.setStyleSheet(f"background:{_BG};")
         form = QFormLayout(inner)
+
+        # Free-trial credit banner (only shown when a managed key is configured)
+        if self._managed_remaining is not None:
+            if self._managed_remaining > 0:
+                banner_text = f"Free trial: {self._managed_remaining:,} tokens remaining"
+                banner_color = _ORANGE
+            else:
+                banner_text = "Free trial complete — add your API key below to continue."
+                banner_color = "#EF5350"
+            banner = QLabel(banner_text)
+            banner.setFont(QFont("Segoe UI", 9))
+            banner.setWordWrap(True)
+            banner.setStyleSheet(
+                f"color:{banner_color}; background:{_BG_MID}; "
+                f"border:1px solid {banner_color}; border-radius:4px; padding:6px 8px;"
+            )
+            form.addRow(banner)
+
         form.setContentsMargins(12, 10, 12, 10)
         form.setSpacing(6)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)

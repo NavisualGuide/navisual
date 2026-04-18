@@ -27,7 +27,7 @@ from src.ai.prompts import (
 )
 from src.ai.tool_schemas import NavigateStepResponse
 from src.config import Config
-from src.core.cost_tracker import CostTracker
+from src.core.cost_tracker import CostTracker, ManagedCredit
 
 if TYPE_CHECKING:
     from src.core.session import Session
@@ -49,15 +49,23 @@ class APIRouter:
     - Token cost tracking
     """
 
-    def __init__(self, config: Config, cost_tracker: CostTracker) -> None:
+    def __init__(
+        self,
+        config: Config,
+        cost_tracker: CostTracker,
+        managed_credit: Optional[ManagedCredit] = None,
+    ) -> None:
         self._config = config
         self._cost_tracker = cost_tracker
+        self._managed_credit = managed_credit
         self._anthropic_client: Optional[AnthropicClient] = None
         self._gemini_client: Optional[GeminiClient] = None
         self._ollama_client: Optional[OllamaClient] = None
         self._openai_client: Optional[OpenAIClient] = None
+        self._managed_client: Optional[AnthropicClient | GeminiClient] = None
 
         self._init_clients()
+        self._init_managed_client()
 
     def _init_clients(self) -> None:
         """Initialize the appropriate API client based on config."""
@@ -123,6 +131,50 @@ class APIRouter:
         else:
             logger.error("API Router: Unknown provider '%s'", provider)
 
+    def _init_managed_client(self) -> None:
+        """Initialize the managed (embedded) API client if a managed key is configured."""
+        if not self._config.managed_api_key:
+            return
+        mp = self._config.managed_provider
+        if mp == "gemini":
+            self._managed_client = GeminiClient(
+                api_key=self._config.managed_api_key,
+                model=self._config.gemini_model,
+                timeout_sec=self._config.api_timeout_sec,
+                max_retries=self._config.api_max_retries,
+            )
+        elif mp == "anthropic":
+            self._managed_client = AnthropicClient(
+                api_key=self._config.managed_api_key,
+                model=self._config.anthropic_model,
+                timeout_sec=self._config.api_timeout_sec,
+                max_retries=self._config.api_max_retries,
+            )
+        else:
+            logger.error("Managed key: unknown provider '%s'", mp)
+            return
+        logger.info("Managed free-trial client ready (provider=%s, cap=%d tokens)", mp, self._config.managed_token_cap)
+
+    def _has_user_client(self) -> bool:
+        """Return True if the user has configured their own key for the active provider."""
+        p = self._config.api_provider
+        if p == "anthropic":
+            return self._anthropic_client is not None
+        if p == "gemini":
+            return self._gemini_client is not None
+        if p == "ollama":
+            return True  # Ollama never needs a key
+        if p == "openai":
+            return self._openai_client is not None
+        return False
+
+    @property
+    def managed_credit_remaining(self) -> Optional[int]:
+        """Remaining managed credit in tokens, or None if no managed key is configured."""
+        if self._managed_credit is None or self._config.managed_api_key is None:
+            return None
+        return self._managed_credit.remaining
+
     @property
     def is_available(self) -> bool:
         """Whether an API client is configured and available."""
@@ -176,10 +228,22 @@ class APIRouter:
             RuntimeError: If no API client is available.
         """
         provider = self._config.api_provider
+        estimated_total = ESTIMATED_INPUT_TOKENS + ESTIMATED_OUTPUT_TOKENS
 
-        # Budget pre-check (skip for Ollama — it's free/local)
-        if provider != "ollama":
-            estimated_total = ESTIMATED_INPUT_TOKENS + ESTIMATED_OUTPUT_TOKENS
+        # Determine whether to use managed key (no user key configured)
+        use_managed = not self._has_user_client() and self._managed_client is not None
+        if use_managed:
+            if self._managed_credit and self._managed_credit.is_exhausted:
+                raise ManagedCreditExhaustedError(
+                    "Your free trial is complete. Add your API key in Settings → Provider."
+                )
+            if self._managed_credit and not self._managed_credit.can_spend(estimated_total):
+                raise ManagedCreditExhaustedError(
+                    "Your free trial is complete. Add your API key in Settings → Provider."
+                )
+
+        # Budget pre-check for user key (skip for Ollama — it's free/local)
+        if not use_managed and provider != "ollama":
             if not self._cost_tracker.can_spend(estimated_total):
                 raise BudgetExceededError(
                     "Token budget would be exceeded. "
@@ -189,8 +253,44 @@ class APIRouter:
 
         conversation_history = session.get_conversation_for_api() if session else []
 
-        # Route to provider
-        if provider == "anthropic" and self._anthropic_client:
+        # Route to provider (managed key takes over when no user key is set)
+        if use_managed and self._managed_client:
+            mp = self._config.managed_provider
+            if mp == "gemini" and isinstance(self._managed_client, GeminiClient):
+                messages = build_gemini_messages(
+                    user_text=user_text,
+                    screenshot_b64=screenshot_b64,
+                    state_summary=state_summary,
+                    conversation_history=conversation_history,
+                )
+                model_override = self._config.gemini_fast_model if use_fast_model else None
+                try:
+                    response, in_tokens, out_tokens = await self._managed_client.send_message(
+                        messages=messages,
+                        screenshot_b64=screenshot_b64,
+                        system_prompt=SYSTEM_PROMPT,
+                        on_text_chunk=on_text_chunk,
+                        model_override=model_override,
+                    )
+                except GeminiAPIError as e:
+                    raise RuntimeError(f"Managed Gemini error: {e}") from e
+            elif mp == "anthropic" and isinstance(self._managed_client, AnthropicClient):
+                messages = build_messages(
+                    user_text=user_text,
+                    screenshot_b64=screenshot_b64,
+                    state_summary=state_summary,
+                    conversation_history=conversation_history,
+                )
+                response, in_tokens, out_tokens = await self._managed_client.send_message(
+                    messages=messages,
+                    screenshot_b64=screenshot_b64,
+                    system_prompt=SYSTEM_PROMPT,
+                    on_text_chunk=on_text_chunk,
+                )
+            else:
+                raise RuntimeError(f"Managed client type mismatch for provider '{mp}'")
+
+        elif provider == "anthropic" and self._anthropic_client:
             messages = build_messages(
                 user_text=user_text,
                 screenshot_b64=screenshot_b64,
@@ -267,8 +367,11 @@ class APIRouter:
                 "Check your API key configuration in .env"
             )
 
-        # Record usage (Ollama tokens are local so no financial cost)
-        self._cost_tracker.record_usage(in_tokens, out_tokens)
+        # Record usage against the appropriate tracker
+        if use_managed and self._managed_credit:
+            self._managed_credit.record_usage(in_tokens, out_tokens)
+        else:
+            self._cost_tracker.record_usage(in_tokens, out_tokens)
         if session:
             session.record_tokens(in_tokens, out_tokens)
 
@@ -323,4 +426,9 @@ class APIRouter:
 
 class BudgetExceededError(Exception):
     """Raised when a request would exceed the token budget."""
+    pass
+
+
+class ManagedCreditExhaustedError(Exception):
+    """Raised when the embedded free-trial credit is fully consumed."""
     pass

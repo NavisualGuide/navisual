@@ -146,6 +146,25 @@ class Config(BaseSettings):
         description="Subtitle display duration in seconds. 0 = auto (persists until next instruction).",
     )
 
+    # --- Managed Key (embedded free-trial credit) ---
+    # Set MANAGED_API_KEY at build time to give new users a free trial.
+    # The app uses this key automatically when no user key is configured.
+    # Credit is tracked lifetime (never resets) in managed_credit_file.
+    managed_api_key: Optional[str] = Field(default=None, alias="MANAGED_API_KEY")
+    managed_provider: str = Field(
+        default="gemini",
+        description="Provider for the embedded managed key: gemini | anthropic",
+    )
+    managed_token_cap: int = Field(
+        default=500_000,
+        description="Lifetime token cap for the managed key (~$0.05 at Gemini Flash pricing). "
+                    "Raise to give users more credit.",
+    )
+    managed_credit_file: Path = Field(
+        default_factory=lambda: Path.home() / ".ai-navigator" / "managed_credit.json",
+        description="Persistent lifetime credit file (does not reset daily/monthly)",
+    )
+
     # --- Token Budget ---
     daily_token_cap: int = Field(default=100_000, description="Daily token cap")
     monthly_token_cap: int = Field(default=5_000_000, description="Monthly token cap")
