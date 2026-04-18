@@ -41,13 +41,6 @@ venv\Scripts\activate
 pip install -e .
 ```
 
-> **If the install stalls or fails on PaddleOCR/PaddlePaddle** (they are large ~1 GB downloads and only used as a non-Windows fallback — Windows 11 uses its built-in OCR), skip them:
->
-> ```
-> pip install -e . --no-deps
-> pip install pyside6 mss imagehash uiautomation httpx pydantic python-dotenv pyperclip keyboard "winrt-runtime>=2.0.0" "winrt-Windows.Media.Ocr>=2.0.0" "winrt-Windows.Graphics.Imaging>=2.0.0" "winrt-Windows.Storage.Streams>=2.0.0" "winrt-Windows.Foundation>=2.0.0" "winrt-Windows.Foundation.Collections>=2.0.0" "winrt-Windows.Globalization>=2.0.0"
-> ```
-
 ### 5. Configure your API key
 
 ```
@@ -107,7 +100,6 @@ Click the gear icon in the panel to open Settings. You can change your API provi
 
 | Issue | Fix |
 |-------|-----|
-| PaddleOCR install stalls or errors | Use the `--no-deps` workaround in step 4 |
 | Panel not visible after launch | Look for a small orange dot — click it to expand |
 | No spoken instructions | Add `ENABLE_TTS=true` to `.env` |
 | `keyboard` raises PermissionError | Run as a normal user, not as Administrator |
