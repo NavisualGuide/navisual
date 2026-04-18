@@ -69,6 +69,14 @@ class NavigateStep(BaseModel):
             "Also mention it in the instruction so the user knows which one to click."
         ),
     )
+    target_zone_x: Optional[int] = Field(
+        default=None,
+        description="Column (0-15) of the 16×9 grid cell containing the target element.",
+    )
+    target_zone_y: Optional[int] = Field(
+        default=None,
+        description="Row (0-8) of the 16×9 grid cell containing the target element.",
+    )
     overlay_type: OverlayType = Field(
         default=OverlayType.ARROW,
         description="Type of visual overlay to draw.",
@@ -151,6 +159,20 @@ NAVIGATE_STEP_TOOL = {
                                 "(e.g. multiple Fix or Delete buttons in a list). "
                                 "The locator will pick the instance closest to this text. "
                                 "Also mention it in the instruction so the user knows which one."
+                            ),
+                        },
+                        "target_zone_x": {
+                            "type": "integer",
+                            "description": (
+                                "Column (0–15) of the 16×9 grid cell where the target element sits. "
+                                "0 = left edge, 15 = right edge. Always set this together with target_zone_y."
+                            ),
+                        },
+                        "target_zone_y": {
+                            "type": "integer",
+                            "description": (
+                                "Row (0–8) of the 16×9 grid cell where the target element sits. "
+                                "0 = top edge, 8 = bottom edge. Always set this together with target_zone_x."
                             ),
                         },
                         "overlay_type": {

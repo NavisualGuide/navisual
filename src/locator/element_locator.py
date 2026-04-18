@@ -11,12 +11,13 @@ If all strategies fail, returns None — the overlay shows subtitle-only.
 """
 
 import logging
+from difflib import SequenceMatcher
 from typing import Optional
 
 from pydantic import BaseModel
 
 from src.locator.a11y_engine import A11yEngine
-from src.locator.ocr_engine import OCREngine, OCRResult, OCRWorker
+from src.locator.ocr_engine import OCREngine, OCRResult, OCRWorker, WindowsOCREngine
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,11 @@ class ElementLocator:
         self._a11y_timeout_ms = a11y_timeout_ms
         self._screen_width = 1920
         self._screen_height = 1080
+        # Synchronous OCR engine for fresh-screenshot fallback (last-resort only).
+        # Only initialised on Windows where Windows.Media.Ocr is available.
+        self._sync_ocr: Optional[WindowsOCREngine] = (
+            WindowsOCREngine() if WindowsOCREngine.is_available() else None
+        )
 
     def start(self) -> None:
         """Start background workers (OCR process)."""
@@ -96,6 +102,9 @@ class ElementLocator:
         target_role: Optional[str] = None,
         target_region: Optional[str] = None,
         nearby_text: Optional[str] = None,
+        zone_x: Optional[int] = None,
+        zone_y: Optional[int] = None,
+        screenshot_bytes: Optional[bytes] = None,
     ) -> LocatorResult:
         """Find a UI element on screen using the A11y → OCR fallback chain.
 
@@ -105,6 +114,8 @@ class ElementLocator:
             target_region: Rough screen region hint for OCR filtering.
             nearby_text: Short unique string adjacent to the target; used by OCR
                          to disambiguate when target_text appears multiple times.
+            zone_x: Column (0-15) of the 16×9 grid cell reported by the AI.
+            zone_y: Row (0-8) of the 16×9 grid cell reported by the AI.
 
         Returns:
             LocatorResult with bbox (or None if not found).
@@ -120,6 +131,26 @@ class ElementLocator:
                 timeout_ms=self._a11y_timeout_ms,
             )
             if a11y_result:
+                # Zone sanity check: if AI provided a zone, verify the A11y result
+                # lands within ±2 cells of it.  Browser chrome elements (tab strip,
+                # toolbar) can have the same A11y name as web-content elements and
+                # appear first in the UIA tree.  Rejecting a zone-mismatched A11y
+                # result lets OCR (which does filter by zone) find the right one.
+                if zone_x is not None and zone_y is not None:
+                    cell_w = self._screen_width  / 16
+                    cell_h = self._screen_height / 9
+                    cx = a11y_result.bbox[0] + a11y_result.bbox[2] / 2
+                    cy = a11y_result.bbox[1] + a11y_result.bbox[3] / 2
+                    result_zx = int(cx / cell_w)
+                    result_zy = int(cy / cell_h)
+                    if abs(result_zx - zone_x) > 2 or abs(result_zy - zone_y) > 2:
+                        logger.info(
+                            "A11y result '%s' at zone (%d,%d) rejected — expected zone (%d,%d); trying OCR",
+                            a11y_result.name, result_zx, result_zy, zone_x, zone_y,
+                        )
+                        a11y_result = None
+
+            if a11y_result:
                 logger.info(
                     "Element found via A11y: '%s' at %s",
                     a11y_result.name, a11y_result.bbox,
@@ -133,32 +164,72 @@ class ElementLocator:
             logger.info("A11y miss for '%s' (role=%s), trying OCR fallback", target_text, target_role)
 
         # Strategy 2: OCR fallback (pre-cached results)
+        def _ocr_search(ocr_results: list[OCRResult], label: str) -> Optional[LocatorResult]:
+            match = OCREngine.find_text(
+                target_text=target_text,
+                ocr_results=ocr_results,
+                region_hint=target_region,
+                screen_width=self._screen_width,
+                screen_height=self._screen_height,
+                min_confidence=self._ocr_confidence_threshold,
+                target_role=target_role,
+                nearby_text=nearby_text,
+                zone_x=zone_x,
+                zone_y=zone_y,
+            )
+            if match:
+                logger.info(
+                    "Element found via %s OCR: '%s' at %s (confidence: %.2f)",
+                    label, match.text, match.bbox, match.confidence,
+                )
+                return LocatorResult(
+                    bbox=match.bbox,
+                    method="ocr",
+                    confidence=match.confidence,
+                    element_name=match.text,
+                )
+            # Diagnostic: log the 5 closest candidates so we can see what OCR found
+            if ocr_results:
+                tl = target_text.lower()
+                ranked = sorted(
+                    ocr_results,
+                    key=lambda r: SequenceMatcher(None, tl, r.text.lower()).ratio(),
+                    reverse=True,
+                )[:5]
+                logger.debug(
+                    "%s OCR miss for '%s' — closest candidates: %s",
+                    label,
+                    target_text,
+                    [(r.text, round(SequenceMatcher(None, tl, r.text.lower()).ratio(), 2))
+                     for r in ranked],
+                )
+            return None
+
         if self._ocr_worker:
             ocr_results = self._ocr_worker.get_results()
             if ocr_results:
-                match = OCREngine.find_text(
-                    target_text=target_text,
-                    ocr_results=ocr_results,
-                    region_hint=target_region,
-                    screen_width=self._screen_width,
-                    screen_height=self._screen_height,
-                    min_confidence=self._ocr_confidence_threshold,
-                    target_role=target_role,
-                    nearby_text=nearby_text,
-                )
-                if match:
-                    logger.info(
-                        "Element found via OCR: '%s' at %s (confidence: %.2f)",
-                        match.text, match.bbox, match.confidence,
-                    )
-                    return LocatorResult(
-                        bbox=match.bbox,
-                        method="ocr",
-                        confidence=match.confidence,
-                        element_name=match.text,
-                    )
+                result = _ocr_search(ocr_results, "cached")
+                if result:
+                    return result
             logger.info("OCR miss for '%s'", target_text)
 
-        # Strategy 3: Not found — overlay will use subtitle-only
+        # Strategy 3: Fresh synchronous OCR (last resort — handles stale cache).
+        # Triggered when cached OCR misses AND caller provided a recent screenshot.
+        # Windows.Media.Ocr runs in ~10 ms so blocking briefly here is acceptable.
+        if screenshot_bytes and self._sync_ocr is not None:
+            try:
+                fresh_results = self._sync_ocr.process_screenshot(screenshot_bytes)
+                result = _ocr_search(fresh_results, "fresh-sync")
+                if result:
+                    # Also update the worker cache so the next locate() within the
+                    # same step doesn't repeat the stale-cache miss.
+                    if self._ocr_worker:
+                        self._ocr_worker.submit(screenshot_bytes)
+                    return result
+                logger.info("Fresh-sync OCR also miss for '%s'", target_text)
+            except Exception as e:
+                logger.debug("Fresh-sync OCR error: %s", e)
+
+        # Strategy 4: Not found — overlay will use subtitle-only
         logger.info("Element not found: '%s' — falling back to subtitle", target_text)
         return LocatorResult()

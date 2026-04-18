@@ -73,8 +73,12 @@ class Config(BaseSettings):
         description="Ollama request timeout (longer than cloud APIs — local inference is slower)",
     )
 
-    # OpenAI (v0.2)
+    # OpenAI (stub — basic support, v0.4 full implementation)
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
+    openai_model: str = Field(
+        default="gpt-4o",
+        description="OpenAI model ID. Options: gpt-4o (default), gpt-4o-mini, gpt-4-turbo",
+    )
 
     # Shared API settings
     api_timeout_sec: int = Field(default=30, description="Cloud API request timeout in seconds")
@@ -90,8 +94,10 @@ class Config(BaseSettings):
     max_screenshot_height: int = Field(default=1080)
     # API-send image is downscaled separately from the local OCR capture.
     # 768×432 = 2 Gemini/Claude tiles (~3,200 tokens vs 12,800 at 1920×1080 — 75% reduction).
-    max_api_screenshot_width: int = Field(default=768, description="Max width sent to AI API (token optimization)")
-    max_api_screenshot_height: int = Field(default=432, description="Max height sent to AI API (token optimization)")
+    max_api_screenshot_width: int = Field(default=768, description="Max width sent to AI API for normal requests (token optimization)")
+    max_api_screenshot_height: int = Field(default=432, description="Max height sent to AI API for normal requests (token optimization)")
+    max_api_full_screenshot_width: int = Field(default=1280, description="Max width for force_full requests (Start Menu, taskbar, system dialogs). Higher than normal cap since full-desktop context matters more than token savings in these rare cases.")
+    max_api_full_screenshot_height: int = Field(default=720, description="Max height for force_full requests.")
     enable_active_window_crop: bool = Field(
         default=True,
         description="Crop API screenshot to the foreground window before sending (reduces tokens ~80%)",
@@ -103,11 +109,12 @@ class Config(BaseSettings):
     phash_threshold: int = Field(default=5, description="pHash Hamming distance threshold")
     idle_timeout_sec: int = Field(default=10, description="Seconds before idle fallback check")
     checkpoint_auto_advance: bool = Field(
-        default=True,
+        default=False,
         description=(
             "Auto-complete checkpoint steps when a large screen change is detected "
-            "(e.g. page navigation). When False, every step requires the → Next button. "
-            "Disable to reduce interruptions or save tokens on slow connections."
+            "(e.g. page navigation). When False (default), every step requires the "
+            "→ Next button — the AI only re-queries when you ask. Enable for fully "
+            "guided walkthroughs where you want continuous step-by-step guidance."
         ),
     )
     checkpoint_auto_advance_threshold: float = Field(
@@ -134,6 +141,10 @@ class Config(BaseSettings):
     overlay_thickness: int = Field(default=4, description="Overlay inner stroke thickness (white outline is 2x+2)")
     subtitle_font_size: int = Field(default=18, description="Subtitle text font size")
     subtitle_bg_opacity: int = Field(default=180, description="Subtitle background opacity (0-255)")
+    subtitle_duration_sec: int = Field(
+        default=0,
+        description="Subtitle display duration in seconds. 0 = auto (persists until next instruction).",
+    )
 
     # --- Token Budget ---
     daily_token_cap: int = Field(default=100_000, description="Daily token cap")
@@ -141,10 +152,12 @@ class Config(BaseSettings):
     cost_safety_margin: float = Field(default=2.5, description="Cost estimate multiplier (reduce as optimizations mature)")
 
     # --- Hotkeys ---
-    correction_hotkey: str = Field(default="ctrl+shift+x", description="Trigger re-analysis")
-    pause_hotkey: str = Field(default="ctrl+shift+p", description="Pause/resume screen capture")
-    next_step_hotkey: str = Field(default="ctrl+shift+n", description="Advance to next step")
-    floating_window_hotkey: str = Field(default="ctrl+shift+space", description="Toggle floating window")
+    correction_hotkey: str = Field(default="alt+e", description="Trigger re-analysis (Alt+E = rEtry/Error)")
+    pause_hotkey: str = Field(default="alt+s", description="Pause/resume screen capture (Alt+S = Stop/Start)")
+    next_step_hotkey: str = Field(default="alt+`", description="Advance to next step (Alt+` = leftmost key, easy pinky)")
+    floating_window_hotkey: str = Field(default="alt+q", description="Toggle floating panel (Alt+Q = Quit/show)")
+    talk_hotkey: str = Field(default="alt+a", description="Push-to-talk voice input (Alt+A = Ask/Audio)")
+    reread_hotkey: str = Field(default="alt+r", description="Re-read last instruction via TTS (Alt+R = Read/Replay)")
 
     # --- Paths ---
     session_dir: Path = Field(

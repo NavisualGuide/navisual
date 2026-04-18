@@ -245,13 +245,20 @@ class OCREngine:
         """Run OCR on a screenshot and return all detected text with bounding boxes."""
         return self._backend.process_screenshot(image_bytes)
 
-    @staticmethod
-    # Roles that are typically rendered as visually distinct, larger elements.
-    # When target_role matches one of these, prefer larger bounding-box matches.
-    _BUTTON_LIKE_ROLES: frozenset[str] = frozenset({
-        "button", "link", "tab", "menuitem", "checkbox", "radio",
+    # Roles rendered as visually large/prominent elements: prefer larger bbox so
+    # a real button wins over the same word appearing in surrounding body text.
+    _PREFER_LARGEST_ROLES: frozenset[str] = frozenset({
+        "button", "tab", "menuitem", "checkbox", "radio",
     })
 
+    # Roles where the target is typically smaller-font than surrounding headings
+    # that may share the same word.  For these, prefer the smallest bbox so a
+    # breadcrumb link (small) beats a heading (large) with the same word.
+    _PREFER_SMALLEST_ROLES: frozenset[str] = frozenset({
+        "link",
+    })
+
+    @staticmethod
     def find_text(
         target_text: str,
         ocr_results: list[OCRResult],
@@ -261,6 +268,8 @@ class OCREngine:
         min_confidence: float = 0.5,
         target_role: Optional[str] = None,
         nearby_text: Optional[str] = None,
+        zone_x: Optional[int] = None,
+        zone_y: Optional[int] = None,
     ) -> Optional[OCRResult]:
         """Find the best match for target_text in OCR results.
 
@@ -280,7 +289,8 @@ class OCREngine:
             return None
 
         target_lower = target_text.lower().strip()
-        prefer_largest = target_role in OCREngine._BUTTON_LIKE_ROLES
+        prefer_largest  = target_role in OCREngine._PREFER_LARGEST_ROLES
+        prefer_smallest = target_role in OCREngine._PREFER_SMALLEST_ROLES
 
         # Pre-compute the anchor position for proximity scoring.
         # Find the OCR result whose text best matches nearby_text; its centre
@@ -313,12 +323,36 @@ class OCREngine:
             cx, cy = rx + rw / 2, ry + rh / 2
             return (cx - anchor_cx) ** 2 + (cy - anchor_cy) ** 2
 
+        # Plausible interactive-element text-height ceiling.
+        # Real buttons / tabs / menuitems rarely have text taller than ~4% of
+        # screen height — even big hero CTAs top out around 28–40px on 1080p.
+        # Heading / display text is typically 5–8%+ of screen height.
+        # Capping at 4% (min 40px for low-res captures) lets us exclude the
+        # word "Download" inside a 60–80px H1 heading from button matches,
+        # while still admitting any realistic button.
+        button_height_cap = max(40, int(screen_height * 0.04))
+
         def _best_candidate(pool: list) -> "OCRResult":
-            """Pick from pool: proximity if anchor found, else largest-bbox or first."""
+            """Pick from pool: proximity if anchor found, else size preference or first.
+
+            Size preference when multiple identical matches exist:
+            - prefer_largest (button, tab…): real buttons are bigger than inline
+              body text, but NOT bigger than large heading/display text that may
+              contain the same word. First filter out implausibly tall candidates
+              (likely headings), then pick the largest among the rest.
+            - prefer_smallest (link…): breadcrumb/nav links are smaller-font than
+              headings that may contain the same word.
+            - Neither: return first match in reading order (top-to-bottom).
+            """
             if anchor_cx is not None:
                 return min(pool, key=_proximity_score)
-            if prefer_largest and len(pool) > 1:
-                return max(pool, key=lambda r: r.bbox[2] * r.bbox[3])
+            if len(pool) > 1:
+                if prefer_largest:
+                    plausible = [r for r in pool if r.bbox[3] <= button_height_cap]
+                    chosen_pool = plausible if plausible else pool
+                    return max(chosen_pool, key=lambda r: r.bbox[2] * r.bbox[3])
+                if prefer_smallest:
+                    return min(pool, key=lambda r: r.bbox[2] * r.bbox[3])
             return pool[0]
 
         # Filter by confidence
@@ -334,6 +368,28 @@ class OCREngine:
         # Filter by region if hint provided
         if region_hint:
             candidates = _filter_by_region(candidates, region_hint, screen_width, screen_height)
+
+        # Filter by 16×9 zone (±1 cell tolerance).  If the AI reported a zone,
+        # restrict candidates to that cell ± 1 in each axis.  Fall back to the
+        # full candidate list if nothing survives the filter.
+        if zone_x is not None and zone_y is not None:
+            cell_w = screen_width  / 16
+            cell_h = screen_height / 9
+            x0 = max(0, (zone_x - 1) * cell_w)
+            x1 = min(screen_width,  (zone_x + 2) * cell_w)
+            y0 = max(0, (zone_y - 1) * cell_h)
+            y1 = min(screen_height, (zone_y + 2) * cell_h)
+            zone_filtered = [
+                r for r in candidates
+                if x0 <= r.bbox[0] + r.bbox[2] / 2 <= x1
+                and y0 <= r.bbox[1] + r.bbox[3] / 2 <= y1
+            ]
+            if zone_filtered:
+                candidates = zone_filtered
+                logger.debug(
+                    "Zone filter (%d,%d) kept %d/%d candidates",
+                    zone_x, zone_y, len(candidates), len(zone_filtered),
+                )
 
         # Strategy 1: Exact match (case-insensitive, punctuation-stripped).
         # When multiple exact matches exist, _best_candidate picks by:

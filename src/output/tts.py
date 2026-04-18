@@ -8,8 +8,11 @@ Runs in a dedicated daemon thread so speech never blocks the Qt event loop.
 Enable with ENABLE_TTS=true in .env.
 """
 
+import ctypes
+import ctypes.wintypes
 import logging
 import queue
+import sys
 import threading
 import time
 from typing import Optional
@@ -20,6 +23,35 @@ logger = logging.getLogger(__name__)
 _SVSFlagsAsync = 1
 _SVSFPurgeBeforeSpeak = 2
 _SpeechRunStateSpeaking = 2
+
+_PM_REMOVE = 0x0001
+
+
+def _pump_messages() -> None:
+    """Pump pending Windows messages on the calling thread.
+
+    SAPI5 COM objects live in an STA apartment and need their host thread to
+    pump messages so internal callbacks (word-boundary, end-stream, etc.) are
+    dispatched locally.  Without pumping, COM routes these through the nearest
+    STA that IS pumping — typically Qt's main-thread message loop — which
+    causes the Qt UI to freeze while audio is playing.
+
+    Calling this in the TTS polling loop keeps SAPI's callbacks on the TTS
+    thread and away from Qt.
+
+    No-op on non-Windows platforms.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        msg = ctypes.wintypes.MSG()
+        while ctypes.windll.user32.PeekMessageW(
+            ctypes.byref(msg), None, 0, 0, _PM_REMOVE
+        ):
+            ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
+            ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
+    except Exception:
+        pass
 
 
 class TTSEngine:
@@ -97,17 +129,16 @@ class TTSEngine:
         logger.info("TTSEngine stopped")
 
     def _run_loop(self) -> None:
-        """Background thread: process the speech queue via SAPI5 comtypes.
-
-        Creates one SAPI5 SpVoice COM object for the lifetime of the thread
-        (COM STA — must be created and used in the same thread). Speaks
-        asynchronously and polls for completion so stop() can interrupt
-        mid-utterance without blocking.
-        """
+        """Background thread: process the speech queue via SAPI5 comtypes."""
         try:
             import comtypes
             import comtypes.client
-            comtypes.CoInitialize()  # STA for this thread
+            # COINIT_MULTITHREADED (0x0): COM callbacks go through COM's internal
+            # thread pool rather than the calling thread's message queue. This
+            # prevents SAPI5 callbacks from being marshalled into Qt's main-thread
+            # STA (which is what caused the UI freeze with CoInitialize/STA).
+            _COINIT_MULTITHREADED = 0x0
+            ctypes.windll.ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
         except Exception as e:
             logger.error("TTSEngine: COM init failed: %s", e)
             self._available = False
@@ -135,7 +166,9 @@ class TTSEngine:
                 self._stop_event.clear()
                 voice.Speak(text, _SVSFlagsAsync)
 
-                # Poll until speech finishes or stop() is called
+                # Poll until speech finishes or stop() is called.
+                # With COINIT_MULTITHREADED, SAPI runs via proxy in COM's thread
+                # pool — no message pumping needed on this thread.
                 while True:
                     try:
                         if voice.Status.RunningState != _SpeechRunStateSpeaking:

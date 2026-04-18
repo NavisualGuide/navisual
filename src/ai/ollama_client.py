@@ -32,6 +32,8 @@ You MUST respond with a single valid JSON object matching this exact schema:
       "target_text": "string or null — exact UI element text to locate",
       "target_role": "button|tab|link|textbox|menuitem|checkbox|radio|combobox|slider|image|heading|other or null",
       "target_region": "top-left|top-center|top-right|center-left|center|center-right|bottom-left|bottom-center|bottom-right or null",
+      "target_zone_x": "integer 0-15 or null — column of 16x9 grid cell (0=left, 15=right)",
+      "target_zone_y": "integer 0-8 or null — row of 16x9 grid cell (0=top, 8=bottom)",
       "overlay_type": "arrow|highlight|circle|none",
       "clipboard": "string or null — text to copy to clipboard",
       "checkpoint": true

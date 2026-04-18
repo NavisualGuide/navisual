@@ -9,10 +9,10 @@ appears in screenshots sent to the AI.
 """
 
 import logging
-import sys
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
+from src.config import Config, get_config
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -88,8 +88,10 @@ class ConsolidatedPanel(QWidget):
     pause_toggled        = Signal()
     next_step_requested  = Signal()
     mic_pressed          = Signal()
-    new_session_requested  = Signal()
-    save_session_requested = Signal()
+    new_session_requested    = Signal()
+    save_session_requested   = Signal()
+    settings_requested       = Signal()
+    overlay_dismiss_requested = Signal()  # Esc — hides subtitle/overlay
 
     # ── Construction ──────────────────────────────────────────────────────────
 
@@ -102,7 +104,6 @@ class ConsolidatedPanel(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        self._affinity_set   = False
         self._in_panel_mode  = True
         self._dragging       = False
         self._drag_offset    = None
@@ -112,6 +113,12 @@ class ConsolidatedPanel(QWidget):
         # Streaming state
         self._streaming_text   = ""
         self._streaming_active = False
+
+        # Thinking animation (shown while waiting for API, before streaming starts)
+        self._thinking_dots = 0
+        self._thinking_timer = QTimer(self)
+        self._thinking_timer.setInterval(500)
+        self._thinking_timer.timeout.connect(self._tick_thinking)
 
         self._build_ui()
         self._add_shortcuts()
@@ -216,6 +223,11 @@ class ConsolidatedPanel(QWidget):
 
         h.addStretch()
 
+        gear_btn = _icon_btn("⚙")
+        gear_btn.setToolTip("Settings")
+        gear_btn.clicked.connect(self.settings_requested.emit)
+        h.addWidget(gear_btn)
+
         new_btn = _icon_btn("＋")
         new_btn.setToolTip("New session (Ctrl+N)")
         new_btn.clicked.connect(self.new_session_requested.emit)
@@ -258,10 +270,23 @@ class ConsolidatedPanel(QWidget):
         v.setContentsMargins(10, 5, 8, 5)
         v.setSpacing(2)
 
+        hdr_row = QHBoxLayout()
+        hdr_row.setContentsMargins(0, 0, 0, 0)
+        hdr_row.setSpacing(0)
+
         hdr = QLabel("Latest instruction")
         hdr.setFont(QFont("Segoe UI", 7))
         hdr.setStyleSheet(f"color:{_TEXT_DIM}; background:transparent; border:none;")
-        v.addWidget(hdr)
+        hdr_row.addWidget(hdr)
+
+        hdr_row.addStretch()
+
+        self._step_lbl = QLabel("")
+        self._step_lbl.setFont(QFont("Segoe UI", 7))
+        self._step_lbl.setStyleSheet(f"color:{_TEXT_DIM}; background:transparent; border:none;")
+        hdr_row.addWidget(self._step_lbl)
+
+        v.addLayout(hdr_row)
 
         self._latest_lbl = QLabel("Waiting for task…")
         self._latest_lbl.setWordWrap(True)
@@ -323,10 +348,11 @@ class ConsolidatedPanel(QWidget):
         h.setContentsMargins(6, 0, 6, 6)
         h.setSpacing(4)
 
-        self._next_btn  = _btn("→ Next",   _GREEN, _GREEN_DARK, "Next step (Ctrl+Shift+N)")
-        self._wrong_btn = _btn("✗ Wrong",  _RED,   _RED_DARK,   "Re-analyze (Ctrl+Shift+X)")
-        self._pause_btn = _btn("⏸ Pause",  _AMBER, _AMBER_DARK, "Pause capture (Ctrl+Shift+P)")
-        self._mic_btn   = _btn("🎤 Speak", _BLUE,  _BLUE_DARK,  "Push to talk")
+        cfg = get_config()
+        self._next_btn  = _btn("→ Next",   _GREEN, _GREEN_DARK, f"Next step ({cfg.next_step_hotkey})")
+        self._wrong_btn = _btn("✗ Wrong",  _RED,   _RED_DARK,   f"Re-analyze ({cfg.correction_hotkey})")
+        self._pause_btn = _btn("⏸ Pause",  _AMBER, _AMBER_DARK, f"Pause capture ({cfg.pause_hotkey})")
+        self._mic_btn   = _btn("🎤 Speak", _BLUE,  _BLUE_DARK,  f"Push to talk ({cfg.talk_hotkey})")
 
         self._next_btn.clicked.connect(self.next_step_requested.emit)
         self._wrong_btn.clicked.connect(self.correction_requested.emit)
@@ -342,18 +368,29 @@ class ConsolidatedPanel(QWidget):
         return row
 
     def _build_shortcut_legend(self) -> QWidget:
-        lbl = QLabel("Ctrl+Shift:  N = Next   X = Wrong   P = Pause   Space = Icon")
-        lbl.setFont(QFont("Segoe UI", 8))
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet(
+        cfg = get_config()
+        self._legend_lbl = QLabel(self._legend_text(cfg))
+        self._legend_lbl.setFont(QFont("Segoe UI", 8))
+        self._legend_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._legend_lbl.setStyleSheet(
             f"QLabel {{ color:{_TEXT_DIM}; background:{_BG_TITLE}; padding:3px 8px;"
             "  border-bottom-left-radius:8px; border-bottom-right-radius:8px; }}"
         )
-        return lbl
+        return self._legend_lbl
+
+    @staticmethod
+    def _legend_text(cfg: Config) -> str:
+        return (
+            f"{cfg.next_step_hotkey} = Next   "
+            f"{cfg.correction_hotkey} = Wrong   "
+            f"{cfg.pause_hotkey} = Pause   "
+            f"{cfg.floating_window_hotkey} = Icon"
+        )
 
     def _add_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+N"), self).activated.connect(self.new_session_requested.emit)
         QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.save_session_requested.emit)
+        QShortcut(QKeySequence("Escape"), self).activated.connect(self.overlay_dismiss_requested.emit)
 
     # ── Position ──────────────────────────────────────────────────────────────
 
@@ -421,8 +458,7 @@ class ConsolidatedPanel(QWidget):
             self._latest_lbl.setText(content)
 
     def show_status(self, text: str) -> None:
-        """Show a brief status. Currently reflected in the status dot only."""
-        pass  # Status conveyed by dot colour; no dedicated status bar needed
+        self._step_lbl.setText(text)
 
     def update_token_display(self, total_tokens: int) -> None:
         if total_tokens > 0:
@@ -434,16 +470,29 @@ class ConsolidatedPanel(QWidget):
         style = f"color:{dot}; background:transparent;"
         self._status_dot.setStyleSheet(style)
         self._icon_dot.setStyleSheet(style)
+        if is_processing and not self._streaming_active:
+            self._thinking_dots = 0
+            self._latest_lbl.setText("Thinking…")
+            self._thinking_timer.start()
+        else:
+            self._thinking_timer.stop()
+
+    def _tick_thinking(self) -> None:
+        if not self._streaming_active:
+            self._thinking_dots = (self._thinking_dots + 1) % 4
+            self._latest_lbl.setText("Thinking" + "." * self._thinking_dots)
 
     def begin_streaming_message(self) -> None:
+        self._thinking_timer.stop()
         self._streaming_text = ""
         self._streaming_active = True
         self._latest_lbl.setText("▋")
 
     def append_streaming_chunk(self, text: str) -> None:
-        if self._streaming_active:
-            self._streaming_text += text
-            self._latest_lbl.setText(self._streaming_text + " ▋")
+        if not self._streaming_active:
+            self.begin_streaming_message()
+        self._streaming_text += text
+        self._latest_lbl.setText(self._streaming_text + " ▋")
 
     def end_streaming_message(self) -> None:
         self._streaming_active = False
@@ -455,6 +504,14 @@ class ConsolidatedPanel(QWidget):
         self._chat.clear()
         self._latest_lbl.setText("Waiting for task…")
         self._token_lbl.setText("")
+        self._step_lbl.setText("")
+
+    def update_hotkey_tooltips(self, cfg: Config) -> None:
+        self._next_btn.setToolTip(f"Next step ({cfg.next_step_hotkey})")
+        self._wrong_btn.setToolTip(f"Re-analyze ({cfg.correction_hotkey})")
+        self._pause_btn.setToolTip(f"Pause capture ({cfg.pause_hotkey})")
+        self._mic_btn.setToolTip(f"Push to talk ({cfg.talk_hotkey})")
+        self._legend_lbl.setText(self._legend_text(cfg))
 
     def set_paused(self, paused: bool) -> None:
         self._pause_btn.setText("▶ Resume" if paused else "⏸ Pause")
@@ -500,24 +557,8 @@ class ConsolidatedPanel(QWidget):
         if was_dragging and not drag_moved and not self._in_panel_mode:
             self._to_panel_mode()
 
-    # ── Win32: exclude from screen capture ───────────────────────────────────
-
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if sys.platform == "win32" and not self._affinity_set:
-            try:
-                import ctypes
-                WDA_EXCLUDEFROMCAPTURE = 0x00000011
-                hwnd = int(self.winId())
-                if ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
-                    self._affinity_set = True
-                    logger.debug("Panel excluded from screen capture (WDA_EXCLUDEFROMCAPTURE)")
-                else:
-                    logger.warning(
-                        "SetWindowDisplayAffinity failed — panel may appear in screenshots"
-                    )
-            except Exception as exc:
-                logger.warning("Could not set display affinity: %s", exc)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

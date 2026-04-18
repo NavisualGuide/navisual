@@ -34,6 +34,7 @@ from src.input.voice_input import VoiceInput
 from src.input.screen_capture import (
     capture_for_guidance,
     image_to_bytes,
+    set_panel_hwnd,
 )
 from src.input.screen_monitor import ScreenChangeEvent, ScreenMonitor
 from src.locator.element_locator import ElementLocator
@@ -41,6 +42,7 @@ from src.output.clipboard import copy_to_clipboard
 from src.output.overlay import OverlayWindow
 from src.output.tts import TTSEngine
 from src.ui.panel_window import ConsolidatedPanel
+from src.ui.settings_window import SettingsWindow
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,7 @@ class GuidanceEngine(QObject):
         self._last_api_call_time: float = 0.0  # Debounce re-queries from screen changes
         self._screen_change_requery_cooldown_sec: float = 2.0
         self._last_screenshot_size: tuple[int, int] = (0, 0)  # (width, height) of last captured image
+        self._last_screenshot_bytes: Optional[bytes] = None   # raw bytes of last OCR image
         self._next_turn_full_screen: bool = False  # Set when AI requests full desktop screenshot
         self._had_screen_change_since_step: bool = False  # True once a real diff event arrives after step loaded
         # Callback to get the AI Navigator window geometry (set by Application after init)
@@ -296,7 +299,8 @@ class GuidanceEngine(QObject):
             self._next_turn_full_screen = False
             screenshot_b64, img = capture_for_guidance(force_full=force_full)
             self._last_screenshot_size = (img.width, img.height)
-            self._element_locator.start_ocr_precache(image_to_bytes(img))
+            self._last_screenshot_bytes = image_to_bytes(img)
+            self._element_locator.start_ocr_precache(self._last_screenshot_bytes)
 
             response = await self._api_router.send_initial_request(
                 task_description=task_description,
@@ -334,7 +338,8 @@ class GuidanceEngine(QObject):
             self._next_turn_full_screen = False
             screenshot_b64, img = capture_for_guidance(force_full=force_full)
             self._last_screenshot_size = (img.width, img.height)
-            self._element_locator.start_ocr_precache(image_to_bytes(img))
+            self._last_screenshot_bytes = image_to_bytes(img)
+            self._element_locator.start_ocr_precache(self._last_screenshot_bytes)
 
             state_summary = None
             if session.current_state_summary:
@@ -458,7 +463,8 @@ class GuidanceEngine(QObject):
         try:
             img = capture_screenshot_raw()
             self._last_screenshot_size = (img.width, img.height)
-            self._element_locator.start_ocr_precache(image_to_bytes(img))
+            self._last_screenshot_bytes = image_to_bytes(img)
+            self._element_locator.start_ocr_precache(self._last_screenshot_bytes)
             logger.debug("OCR cache refreshed (%dx%d)", img.width, img.height)
         except Exception as e:
             logger.debug("OCR cache refresh failed (non-fatal): %s", e)
@@ -479,6 +485,12 @@ class GuidanceEngine(QObject):
         # Load steps into sequencer; reset change flag so idle won't fire until user acts
         self._had_screen_change_since_step = False
         self._step_sequencer.load_steps(response.steps)
+        if len(response.steps) > 1:
+            logger.info(
+                "Multi-step response (%d steps): %s",
+                len(response.steps),
+                " → ".join(s.instruction[:60] for s in response.steps),
+            )
 
         # Save session
         try:
@@ -537,6 +549,8 @@ class Application:
         # UI components
         self._panel = ConsolidatedPanel()
         self._overlay = OverlayWindow()
+        self._settings_win: Optional[SettingsWindow] = None
+        self._last_instruction: str = ""  # cached for Alt+R re-read
 
         # TTS engine (optional)
         self._tts = TTSEngine(
@@ -595,24 +609,31 @@ class Application:
         import ctypes.wintypes
         from PySide6.QtCore import QAbstractNativeEventFilter
 
+        MOD_ALT      = 0x0001
         MOD_CONTROL  = 0x0002
         MOD_SHIFT    = 0x0004
         MOD_NOREPEAT = 0x4000
 
-        # Virtual key codes for single-character keys and special keys
-        VK_EXTRA = {"space": 0x20, "f1": 0x70, "f2": 0x71, "f3": 0x72,
-                    "f4": 0x73, "f5": 0x74, "f12": 0x7B}
+        # Virtual key codes for keys that can't be derived from ord().
+        # Backtick (`) is VK_OEM_3 = 0xC0 on US keyboards — ord('`')=96 is wrong.
+        VK_EXTRA = {
+            "space": 0x20,
+            "`":     0xC0,   # backtick / tilde key (VK_OEM_3)
+            "f1": 0x70, "f2": 0x71, "f3": 0x72,
+            "f4": 0x73, "f5": 0x74, "f12": 0x7B,
+        }
 
         def parse(hotkey_str: str) -> tuple[int, int]:
-            """Parse 'ctrl+shift+x' → (modifiers, vk_code)."""
+            """Parse 'alt+`' or 'ctrl+shift+x' → (modifiers, vk_code)."""
             mods = MOD_NOREPEAT
             vk = 0
             for part in hotkey_str.lower().split("+"):
                 part = part.strip()
-                if part == "ctrl":    mods |= MOD_CONTROL
-                elif part == "shift": mods |= MOD_SHIFT
+                if part == "ctrl":     mods |= MOD_CONTROL
+                elif part == "shift":  mods |= MOD_SHIFT
+                elif part == "alt":    mods |= MOD_ALT
                 elif part in VK_EXTRA: vk = VK_EXTRA[part]
-                elif len(part) == 1:  vk = ord(part.upper())
+                elif len(part) == 1:   vk = ord(part.upper())
             return mods, vk
 
         definitions = [
@@ -620,6 +641,8 @@ class Application:
             (2, self._config.pause_hotkey,           self._on_pause_toggle),
             (3, self._config.next_step_hotkey,       self._on_next_step),
             (4, self._config.floating_window_hotkey, self._panel.toggle_visibility),
+            (5, self._config.talk_hotkey,            self._on_talk),
+            (6, self._config.reread_hotkey,          self._on_reread),
         ]
 
         registered: dict[int, object] = {}
@@ -647,9 +670,10 @@ class Application:
         self._registered_hotkey_ids = list(registered.keys())
 
         logger.info(
-            "Hotkeys registered (Win32): correction=%s, pause=%s, next=%s, float=%s",
+            "Hotkeys registered (Win32): correction=%s pause=%s next=%s float=%s talk=%s reread=%s",
             self._config.correction_hotkey, self._config.pause_hotkey,
             self._config.next_step_hotkey, self._config.floating_window_hotkey,
+            self._config.talk_hotkey, self._config.reread_hotkey,
         )
 
     def _get_window_context(self) -> Optional[str]:
@@ -759,6 +783,8 @@ class Application:
         self._panel.mic_pressed.connect(self._on_mic_pressed)
         self._panel.new_session_requested.connect(self._on_new_session)
         self._panel.save_session_requested.connect(self._on_save_session)
+        self._panel.settings_requested.connect(self._on_settings)
+        self._panel.overlay_dismiss_requested.connect(self._overlay.clear)
 
         # Voice input → engine (thread-safe via signal)
         self._engine.voice_transcript.connect(self._on_voice_transcript)
@@ -773,7 +799,8 @@ class Application:
     def _on_processing_started(self) -> None:
         self._panel.set_processing(True)
         self._streaming_active = True
-        self._panel.begin_streaming_message()
+        # begin_streaming_message() is called lazily on the first streaming chunk
+        # so the "Thinking…" animation is visible until text actually arrives.
 
     @Slot()
     def _on_processing_finished(self) -> None:
@@ -792,6 +819,9 @@ class Application:
         # Always write the final instruction via add_message — streaming is
         # visual-only feedback and is removed by end_streaming_message before this.
         self._panel.add_message("assistant", step.instruction)
+
+        # Cache for re-read hotkey (Alt+R replays this via TTS on demand)
+        self._last_instruction = step.instruction
 
         # Speak the instruction if TTS is enabled
         if self._config.enable_tts and self._tts.is_available:
@@ -829,13 +859,16 @@ class Application:
                     "target_text '%s' too short for reliable location — subtitle fallback",
                     target_text,
                 )
-                self._overlay.show_subtitle(step.instruction)
+                self._overlay.show_subtitle(step.instruction, auto_hide_ms=self._subtitle_auto_hide_ms())
             else:
                 result = self._engine.element_locator.locate(
                     target_text=target_text,
                     target_role=step.target_role.value if step.target_role else None,
                     target_region=step.target_region.value if step.target_region else None,
                     nearby_text=step.target_nearby_text or None,
+                    zone_x=step.target_zone_x,
+                    zone_y=step.target_zone_y,
+                    screenshot_bytes=self._engine._last_screenshot_bytes,
                 )
 
                 if result.bbox:
@@ -869,15 +902,73 @@ class Application:
                         "Overlay: method=%s image=%s virtual=%s → logical=%s",
                         result.method, result.bbox, virt_bbox, scaled,
                     )
+                    # OCR returns tight text bounds. For button-like roles, add
+                    # padding so the overlay box covers the full clickable hit-area
+                    # rather than just the bare character bounds.
+                    # Not applied to "link" — link text is usually inline-sized and
+                    # the OCR result is already representative.
+                    if result.method == "ocr" and step.target_role:
+                        if step.target_role.value in ("button", "tab", "menuitem"):
+                            sx2, sy2, sw2, sh2 = scaled
+                            pad_x = max(6, sw2 // 4)
+                            pad_y = max(4, sh2 // 3)
+                            scaled = (
+                                sx2 - pad_x,
+                                sy2 - pad_y,
+                                sw2 + pad_x * 2,
+                                sh2 + pad_y * 2,
+                            )
                     self._overlay.show_overlay(
                         bbox=scaled,
                         overlay_type=step.overlay_type.value,
                         instruction=step.instruction,
+                        auto_hide_ms=self._subtitle_auto_hide_ms(),
+                    )
+                elif step.target_zone_x is not None and step.target_zone_y is not None:
+                    # Zone-only fallback: A11y + OCR both missed but the AI gave a
+                    # grid position.  Show a subtle dashed region so the user has a
+                    # directional hint even without an exact element match.
+                    #
+                    # The AI's zone coords are relative to the API image it saw
+                    # (which may be cropped to the foreground window).  Use the
+                    # recorded crop rect so the zone maps to the correct screen area.
+                    from src.input.screen_capture import get_last_api_crop_rect
+                    crop_rect = get_last_api_crop_rect()
+                    if crop_rect:
+                        cwx, cwy, cww, cwh = crop_rect
+                        cell_w = cww / 16
+                        cell_h = cwh / 9
+                        virt_bbox = (
+                            int(cwx + step.target_zone_x * cell_w),
+                            int(cwy + step.target_zone_y * cell_h),
+                            int(cell_w),
+                            int(cell_h),
+                        )
+                    else:
+                        cell_w = self._vd_width / 16
+                        cell_h = self._vd_height / 9
+                        ox, oy = self._virtual_origin
+                        virt_bbox = (
+                            int(ox + step.target_zone_x * cell_w),
+                            int(oy + step.target_zone_y * cell_h),
+                            int(cell_w),
+                            int(cell_h),
+                        )
+                    scaled = self._scale_to_logical(virt_bbox)
+                    logger.info(
+                        "Zone-hint fallback for '%s': zone=(%d,%d) → logical=%s",
+                        target_text, step.target_zone_x, step.target_zone_y, scaled,
+                    )
+                    self._overlay.show_overlay(
+                        bbox=scaled,
+                        overlay_type="zone_hint",
+                        instruction=step.instruction,
+                        auto_hide_ms=self._subtitle_auto_hide_ms(),
                     )
                 else:
-                    self._overlay.show_subtitle(step.instruction)
+                    self._overlay.show_subtitle(step.instruction, auto_hide_ms=self._subtitle_auto_hide_ms())
         else:
-            self._overlay.show_subtitle(step.instruction)
+            self._overlay.show_subtitle(step.instruction, auto_hide_ms=self._subtitle_auto_hide_ms())
 
         # Update token display
         session = self._engine.session_manager.current_session
@@ -900,10 +991,19 @@ class Application:
 
     @Slot()
     def _on_pause_toggle(self) -> None:
-        """Handle pause toggle."""
-        paused = self._engine.toggle_pause()
-        self._panel.set_paused(paused)
-        if paused:
+        """Handle pause toggle.
+
+        Toggles checkpoint_auto_advance so the panel button always matches the
+        Settings > Capture > Auto-continue checkbox.  The screen monitor keeps
+        running (screen-change detection is needed even in manual mode so that
+        sequence-complete re-queries and non-checkpoint auto-advance still work).
+        """
+        new_auto_advance = not self._config.checkpoint_auto_advance
+        self._config.checkpoint_auto_advance = new_auto_advance
+        self._engine._config = self._config
+        # paused  = auto_advance is OFF
+        self._panel.set_paused(not new_auto_advance)
+        if not new_auto_advance:
             self._overlay.clear()
 
     @Slot()
@@ -911,6 +1011,27 @@ class Application:
         """Handle next step request."""
         self._overlay.clear()
         self._engine.handle_next_step()
+
+    @Slot()
+    def _on_talk(self) -> None:
+        """Global hotkey (Alt+A): trigger push-to-talk voice input."""
+        if not self._voice_input.is_available:
+            return
+        if self._voice_input.is_listening:
+            return  # already recording
+        self._panel.set_listening(True)
+        self._voice_input.listen()
+
+    @Slot()
+    def _on_reread(self) -> None:
+        """Global hotkey (Alt+R): re-read the last instruction via TTS."""
+        if not self._last_instruction or not self._tts.is_available:
+            return
+        # Start TTS thread on demand if it wasn't started at launch
+        # (e.g. ENABLE_TTS=false but user presses Alt+R)
+        if self._tts._thread is None or not self._tts._thread.is_alive():
+            self._tts.start()
+        self._tts.speak(self._last_instruction)
 
     @Slot()
     def _on_mic_pressed(self) -> None:
@@ -948,6 +1069,44 @@ class Application:
             self._panel.add_message("system", f"Session saved: {path.name}")
         else:
             self._panel.add_message("system", "No active session to save")
+
+    def _subtitle_auto_hide_ms(self) -> int:
+        """Return subtitle auto-hide duration in ms, or 0 for 'auto' (manual clear)."""
+        dur = getattr(self._config, "subtitle_duration_sec", 0)
+        return dur * 1000 if dur > 0 else 0
+
+    @Slot()
+    def _on_settings(self) -> None:
+        """Open the settings dialog (singleton — reuse if already open)."""
+        if self._settings_win is None:
+            self._settings_win = SettingsWindow(self._panel)
+            self._settings_win.applied.connect(self._on_settings_applied)
+        self._settings_win.show()
+        self._settings_win.raise_()
+        self._settings_win.activateWindow()
+
+    @Slot(object)
+    def _on_settings_applied(self, config: Config) -> None:
+        """Push live (✅) changes to running components immediately."""
+        self._config = config
+        self._engine._config = config
+
+        # Overlay: color, thickness, subtitle style — live update
+        self._overlay.set_colors(config.overlay_color, config.overlay_thickness)
+        self._overlay.set_subtitle_style(config.subtitle_font_size, config.subtitle_bg_opacity)
+
+        # Sync pause button with the auto-continue setting so the panel
+        # button and Settings > Capture > Auto-continue always agree.
+        self._panel.set_paused(not config.checkpoint_auto_advance)
+
+        # Update button tooltips and legend to reflect any hotkey changes.
+        self._panel.update_hotkey_tooltips(config)
+
+        logger.info(
+            "Settings applied — auto_advance=%s, overlay=%s",
+            config.checkpoint_auto_advance,
+            config.overlay_color,
+        )
 
     def run(self) -> int:
         """Start the application and enter the event loop."""
@@ -993,6 +1152,17 @@ class Application:
 
         # Show panel (starts expanded at bottom-right)
         self._panel.show()
+
+        # Register panel HWND for software-based exclusion from API screenshots.
+        # This replaces WDA_EXCLUDEFROMCAPTURE which caused DWM to flash both
+        # monitors on every mss capture.
+        if sys.platform == "win32":
+            set_panel_hwnd(int(self._panel.winId()))
+
+        # Initialise pause button state to match auto-continue config.
+        # auto_advance=true (guidance on)  → "⏸ Pause"
+        # auto_advance=false (manual mode) → "▶ Resume"
+        self._panel.set_paused(not self._config.checkpoint_auto_advance)
 
         # Run Qt event loop
         try:

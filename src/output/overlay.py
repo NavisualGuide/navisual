@@ -8,8 +8,9 @@ The overlay never intercepts clicks or keystrokes — it is purely visual.
 
 import logging
 import math
-import sys
 from typing import Optional
+
+from src.input.screen_capture import set_overlay_bbox
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Qt
 from PySide6.QtGui import QGuiApplication
@@ -64,32 +65,12 @@ class OverlayWindow(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.clear)
 
-        # Exclude from screen capture so the overlay does not appear in mss
-        # screenshots.  This prevents the screen-change monitor from firing on
-        # overlay updates and prevents OCR from reading subtitle text.
-        # WDA_EXCLUDEFROMCAPTURE (0x11) is available on Windows 10 2004+.
-        self._affinity_set = False
-
-    def showEvent(self, event) -> None:
-        """Apply WDA_EXCLUDEFROMCAPTURE the first time the window is shown.
-
-        The HWND is only guaranteed valid after the OS window is created, which
-        happens on first show. The affinity must be re-applied after any
-        setWindowFlags call that recreates the native window.
-        """
-        super().showEvent(event)
-        if sys.platform == "win32" and not self._affinity_set:
-            try:
-                import ctypes
-                WDA_EXCLUDEFROMCAPTURE = 0x00000011
-                hwnd = int(self.winId())
-                if ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE):
-                    self._affinity_set = True
-                    logger.debug("Overlay excluded from screen capture (WDA_EXCLUDEFROMCAPTURE)")
-                else:
-                    logger.warning("SetWindowDisplayAffinity failed — overlay may appear in screenshots")
-            except Exception as exc:
-                logger.warning("Could not set display affinity: %s", exc)
+        # Keep the overlay permanently visible from startup.
+        # Hiding it releases the DWM compositing surface; the next show() would
+        # re-allocate it and flash both monitors.  Since the window is fully
+        # transparent when empty and is click-through (WindowTransparentForInput),
+        # staying visible is harmless.  All content is erased by clear().
+        QTimer.singleShot(0, self.show)
 
     def _update_geometry(self) -> None:
         """Set overlay geometry to the virtual desktop union of all screens."""
@@ -142,7 +123,7 @@ class OverlayWindow(QWidget):
         self._subtitle_text = instruction
         self._show_subtitle = bool(instruction)
 
-        self.show()
+        set_overlay_bbox(bbox)
         self.update()
 
         if auto_hide_ms > 0:
@@ -155,7 +136,7 @@ class OverlayWindow(QWidget):
         self._subtitle_text = text
         self._show_subtitle = True
 
-        self.show()
+        set_overlay_bbox(None)
         self.update()
 
         if auto_hide_ms > 0:
@@ -168,6 +149,7 @@ class OverlayWindow(QWidget):
         self._subtitle_text = ""
         self._show_subtitle = False
         self._hide_timer.stop()
+        set_overlay_bbox(None)
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -176,6 +158,18 @@ class OverlayWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         try:
+            # Erase the dirty region to fully transparent before drawing.
+            # Without this, WA_TranslucentBackground windows can flash black
+            # on the first repaint because the backing-store buffer is
+            # uninitialised (or retains stale pixel data from a prior paint).
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Clear
+            )
+            painter.fillRect(event.rect(), Qt.GlobalColor.transparent)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver
+            )
+
             if self._bbox and self._overlay_type != "none":
                 x, y, w, h = self._bbox
                 # Adjust for window position (overlay covers full screen from 0,0)
@@ -189,6 +183,8 @@ class OverlayWindow(QWidget):
                     self._draw_highlight(painter, x, y, w, h)
                 elif self._overlay_type == "circle":
                     self._draw_circle(painter, x, y, w, h)
+                elif self._overlay_type == "zone_hint":
+                    self._draw_zone_hint(painter, x, y, w, h)
 
             if self._show_subtitle and self._subtitle_text:
                 self._draw_subtitle(painter, self._subtitle_text)
@@ -301,6 +297,28 @@ class OverlayWindow(QWidget):
 
         painter.setPen(self._make_pen(self._color, self._thickness))
         painter.drawEllipse(QPoint(cx, cy), radius, radius)
+
+    def _draw_zone_hint(self, painter: QPainter, x: int, y: int, w: int, h: int) -> None:
+        """Draw a subtle dashed rounded rectangle for zone-only (approximate) location.
+
+        No solid outline — dashed stroke + faint fill signals 'roughly here, not exact'.
+        """
+        path = QPainterPath()
+        path.addRoundedRect(x, y, w, h, 20, 20)
+
+        fill_color = QColor(self._color)
+        fill_color.setAlpha(28)
+        painter.fillPath(path, QBrush(fill_color))
+
+        dash_color = QColor(self._color)
+        dash_color.setAlpha(150)
+        pen = QPen(dash_color)
+        pen.setWidth(2)
+        pen.setStyle(Qt.PenStyle.CustomDashLine)
+        pen.setDashPattern([10.0, 7.0])
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawPath(path)
 
     def _draw_subtitle(self, painter: QPainter, text: str) -> None:
         """Draw subtitle text at the bottom-center of the active screen."""

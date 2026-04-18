@@ -177,9 +177,17 @@ class A11yEngine:
         Uses RegexName (case-insensitive) for both the role-specific and generic
         searches.  The old Name= approach was case-sensitive, so "continue" never
         matched "Continue" and the role-specific branch was always skipped.
+
+        Pattern allows leading/trailing non-word characters so that accessible
+        names like "← my claims" or "Next →" match targets "my claims" / "next".
+        This is common for breadcrumb links, icon-prefixed buttons, etc.
         """
         import re
-        pattern = "(?i)^" + re.escape(target_lower) + "$"
+        # Allow optional leading/trailing non-word chars (arrows ← →, bullets, quotes…)
+        # but not extra word-content.  Examples:
+        #   target "my claims" matches "← my claims" and "my claims →" but NOT
+        #   "disability benefit claims" (extra word content before target).
+        pattern = r"(?i)^[\W_]*" + re.escape(target_lower) + r"[\W_]*$"
         try:
             # Pass 1: role-specific with case-insensitive regex
             if control_type_name:
@@ -223,9 +231,10 @@ class A11yEngine:
         """
         import re
 
-        # Use anchored exact match — same as fast path — so "Insert" does NOT
-        # match "Insert Space", "Insert Row", etc. (substring false-positives).
-        pattern = "(?i)^" + re.escape(target_lower) + "$"
+        # Allow optional leading/trailing non-word chars (arrows, bullets, quotes…)
+        # so "← my claims" matches target "my claims", while "Insert Space" still
+        # does NOT match target "insert" (the extra word "Space" prevents it).
+        pattern = r"(?i)^[\W_]*" + re.escape(target_lower) + r"[\W_]*$"
 
         def _try_regex(ctype: Optional[str]) -> Optional[A11yResult]:
             """Attempt a RegexName search for the given control type (or any)."""

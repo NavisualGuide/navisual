@@ -122,7 +122,7 @@
    ↓
 9. Wait for:
    - Screen change → loop to step 1
-   - Correction hotkey (Ctrl+Shift+X) → trigger correction handler
+   - Correction hotkey (Alt+E) → trigger correction handler
    - User voice/chat → loop to step 1
    - Next-step hotkey → advance to next step in sequence
 ```
@@ -271,11 +271,37 @@ if __name__ == "__main__":
 - **Token optimization** — API-send screenshot downscaled to 768×432 max (2 vision tiles, ~75% token reduction vs 1920×1080); active-window crop via `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` cuts tokens up to 80% more; self-process exclusion prevents crop to AI Navigator's own window
 - **Extended model tiering** — Gemini Flash Lite for all automated screen-change re-queries; Gemini Flash (full) for initial and user-triggered requests
 - **UI consolidation** — `MainWindow` + `FloatingWindow` replaced by single `ConsolidatedPanel` (`src/ui/panel_window.py`); two states: panel mode (360×540, full UI) and icon mode (56×56 draggable dot); `WDA_EXCLUDEFROMCAPTURE` applied so panel never appears in API screenshots
-- **Checkpoint rework** — Checkpoint steps no longer auto-complete on screen change (too noisy in complex apps like OneNote ribbons). Completion is now explicit: user presses **→ Next** button or Ctrl+Shift+N. Next button re-queries the AI with `[User completed: '...']` context so it advances rather than repeating the same instruction
+- **Checkpoint rework** — Checkpoint steps no longer auto-complete on screen change (too noisy in complex apps like OneNote ribbons). Completion is now explicit: user presses **→ Next** button or Alt+` (next-step hotkey). Next button re-queries the AI with `[User completed: '...']` context so it advances rather than repeating the same instruction
 - **A11y multi-window search** — When AI Navigator is the foreground window (user clicked Next button), the A11y engine now searches all other desktop top-level windows instead of returning nothing. Fixes "arrow missing after Next" issue
 - **A11y false-match fix** — `_search_descendants` regex changed from substring `(?i)Insert` to anchored `(?i)^Insert$`; prevents "Insert" matching "Insert Space", "Insert Row", etc.
 - **Own-window crop exclusion** — `get_foreground_window_rect()` checks PID against `os.getpid()`; if AI Navigator is foreground, returns None so full desktop is sent to API
 - **System prompt rule 13** — Added screen-scope rule: AI can set `request_full_screen=true` when it needs to see beyond the active window crop (Start Menu, taskbar, system dialogs)
+
+### ✅ Completed (v0.3.0-patch — 2026-04-13)
+- **Screen flash fix** — `WDA_EXCLUDEFROMCAPTURE` removed from both panel and overlay. Windows DWM was flashing both monitors on every 10fps mss capture while either window had that flag set. Replaced with software-based blanking in `prepare_api_image()`: panel blanked via `GetWindowRect(_panel_hwnd)`; overlay blanked via `set_overlay_bbox()` registry with 140px padding to cover arrow shaft + arrowhead.
+- **Thinking animation** — Latest-instruction box cycles `Thinking` → `Thinking.` → `Thinking..` → `Thinking...` at 500ms while waiting for API. `begin_streaming_message()` moved to lazy-init on first streaming chunk so animation runs for the full wait duration.
+- **System prompt rule 14 — Scrolling** — AI must emit a dedicated scroll step (no overlay, no target_text) before directing the user to click an element that is not visible on screen.
+- **System prompt rule 15 — Unfamiliar software** — AI must confirm the software name via `needs_input=true` before navigating when the software is unrecognised.
+- **System prompt rule 16 — Webpage install commands** — AI must extract and copy install commands from the current page rather than bouncing between pages.
+- **`ocr_engine.py` syntax fix** — `@staticmethod` decorator was misplaced on `_BUTTON_LIKE_ROLES` class variable instead of `find_text()`, causing a `SyntaxError` on import.
+- **`CHECKPOINT_AUTO_ADVANCE` default `true` → `false`** — auto-continue is now opt-in. Most users prefer on-demand help (ask → follow → ask again). Continuous auto-advance is a power-user setting for fully guided walkthroughs.
+
+### ✅ Completed (v0.3.1-alpha — 2026-04-13)
+- **Settings window** (`src/ui/settings_window.py`, new) — Modal dialog with Provider / Capture / Overlay tabs. Reads current `.env` on open; writes atomically on Apply; clears `@lru_cache` and emits `applied(new_config)` to push live changes. Provider tab: all four providers (Gemini, Anthropic, Ollama, OpenAI) with key fields greyed when inactive. Capture tab: auto-continue toggle + sensitivity slider only. Overlay tab: color picker, thickness/font/opacity sliders, duration spinbox with "auto" special-value.
+- **Overlay black-screen fix (final)** — Changed overlay from show/hide lifecycle to **permanently visible**. Previously the pre-warm did `show()→hide()`, which released the DWM compositing surface; the next `show_overlay()` re-allocated it and flashed both monitors for ~5 s. Overlay now calls `show()` once at startup and stays visible. Since `paintEvent` produces zero output when `_overlay_type="none"` and `_show_subtitle=False`, the window is fully transparent when idle. `clear()` never calls `hide()`.
+- **Esc to dismiss overlay** — `ConsolidatedPanel` gained `overlay_dismiss_requested = Signal()` wired to an Esc `QShortcut`. Connected to `overlay.clear()` in `Application._connect_signals()`. Users can dismiss a subtitle that covers content.
+- **A11y regex fix — arrow-prefixed links** (`a11y_engine.py`) — Regex changed from anchored exact `(?i)^target$` to `(?i)^[\W_]*target[\W_]*$`. Allows optional leading/trailing non-word characters (Unicode arrows ←→, bullets, chevrons) so "← my claims" matches target "my claims". "Insert Space" still correctly rejected — "Space" is a word char and blocks `[\W_]*$`.
+- **OCR link disambiguation** (`ocr_engine.py`) — Split `_BUTTON_LIKE_ROLES` into `_PREFER_LARGEST_ROLES` (`button`, `tab`, `menuitem`, `checkbox`, `radio`) and `_PREFER_SMALLEST_ROLES` (`link`). Real buttons are visually larger than inline text → prefer largest. Breadcrumb/nav links are smaller-font than headings sharing the same word → prefer smallest. Fixes overlay pointing at heading text instead of a navigation link.
+- **OCR bbox padding** (`main.py`) — When OCR locates a `button`, `tab`, or `menuitem`, adds proportional padding (±25% width, ±33% height) so the overlay box covers the full clickable hit-area, not bare character bounds. Not applied to `link` (inline-sized, padding unhelpful).
+- **OpenAI settings** (`settings_window.py`, `config.py`) — Added OpenAI section to Provider tab: API key password field + model dropdown (gpt-4o default, editable). Added `openai_model: str` field to `Config`. OpenAI support remains a stub in the engine; settings UI is complete.
+- **Settings UX improvements** — Sensitivity label renamed "Trigger threshold" with plain-language tooltip (Low/Medium/High examples). Duration tooltip clarifies "auto = persists until next instruction or Esc".
+- **Single-screen picker removed** — The `CAPTURE_SCREEN` config field and monitor selector UI were removed. With active-window crop enabled (default), the API image is already cropped to the foreground window regardless of monitor count — a per-monitor filter provides no cost or quality benefit.
+- **force_full resolution raised** — `force_full` requests (Start Menu, taskbar, system dialogs) now cap at 1280×720 instead of 768×432. On a 2-monitor setup the old cap produced a 768×216 panoramic strip; 1280×720 gives readable quality for these rare requests (0–2 per session).
+- **`capture_screen` config field removed** (`config.py`) — Field existed but `screen_capture.py` always captured `monitors[0]` (all monitors). Removed dead code.
+- **Hotkeys redesigned — Alt+key** — All 6 hotkeys switched from Ctrl+Shift combos to single-modifier Alt+key for easy one-handed left-hand use (right hand on mouse). New defaults: Next=`alt+\``, Re-analyze=`alt+e`, Pause=`alt+s`, Toggle panel=`alt+q`, Talk=`alt+a`, Re-read=`alt+r`. Parser extended with `MOD_ALT` and `VK_OEM_3` (0xC0) for backtick.
+- **Two new hotkeys: Talk + Re-read** — Talk (`alt+a`) triggers push-to-talk voice input globally (same as mic button in panel). Re-read (`alt+r`) replays the last instruction via TTS; starts TTS thread on demand even if `ENABLE_TTS=false`.
+- **Hotkeys settings tab shipped** (`settings_window.py`) — All 6 hotkeys configurable in-app. Plain QLineEdit fields, all marked 🔄 restart-required. Adds `TALK_HOTKEY` and `REREAD_HOTKEY` env vars.
+- **Zone-hint coordinate fix** (`screen_capture.py`, `main.py`) — Zone-hint overlay was placed at the wrong screen position when active-window crop is enabled. Root cause: the AI's zone coordinates are relative to the cropped API image (e.g., the VS Code window), but the zone-hint code computed positions using `_vd_width/_vd_height` (the full virtual desktop). Fix: `prepare_api_image()` now records `_last_api_crop_rect` (actual crop rect in virtual-desktop physical pixels) exposed via `get_last_api_crop_rect()`; the zone-hint calculation uses the crop rect dimensions so `zone=(10,0)` correctly maps inside the cropped window instead of across the full desktop.
 
 ### 🚧 Next: v0.3.1 / v0.4
 
@@ -283,12 +309,9 @@ if __name__ == "__main__":
 
 ```
 v0.3.1 — Remaining v0.3 items (Python, Windows):
-  1. Single screen mode: user picks one screen to capture
-  2. Settings window: in-app UI for API provider + key (no more .env editing) — see [settings.md](docs/settings.md)
-  3. PyPI packaging: pip install ai-navigator
-  4. Subtitle persistence fix (overlay subtitle lingers too long)
-
-v0.4 — Distribution (Windows):
+  1. Settings window: in-app UI for API provider + key (no more .env editing) ✅ — see [settings.md](docs/settings.md)
+  2. PyPI packaging: pip install ai-navigator
+  Note: single-screen picker was evaluated and removed — active-window crop makes it redundant.
 
 v0.4 — Distribution (Windows):
   1. Signed Windows installer: embedded Python + NSIS/WiX + OV cert (~$100/yr)
@@ -343,7 +366,7 @@ v1.x — Platform Expansion (post-public-launch):
 | OS Accessibility API (UIA) | ✓ | **Primary** element locator (< 5ms for browsers) |
 | Local OCR fallback (PaddleOCR) | ✓ | Fallback when A11y tree unavailable |
 | Overlay arrows | ✓ | Positioned by A11y (primary) or OCR (fallback) |
-| Correction hotkey | ✓ | Ctrl+Shift+X → re-analysis |
+| Correction hotkey | ✓ | Alt+E → re-analysis |
 | Session persistence | ✓ | Save/resume sessions |
 | Clipboard commands | ✓ | For CLI tasks |
 | TTS | ✓ | pyttsx3/Windows SAPI, `ENABLE_TTS=true` |
@@ -438,9 +461,12 @@ class Config:
     safety_margin: float = 2.5
 
     # Hotkeys
-    correction_hotkey: str = "ctrl+shift+x"
-    pause_hotkey: str = "ctrl+shift+p"
-    next_step_hotkey: str = "ctrl+shift+n"
+    next_step_hotkey: str = "alt+`"
+    correction_hotkey: str = "alt+e"
+    pause_hotkey: str = "alt+s"
+    floating_window_hotkey: str = "alt+q"
+    talk_hotkey: str = "alt+a"
+    reread_hotkey: str = "alt+r"
 ```
 
 ---
@@ -643,4 +669,4 @@ python -m src.main
 
 ---
 
-*Last updated: 2026-04-11*
+*Last updated: 2026-04-13*

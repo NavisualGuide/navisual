@@ -80,6 +80,20 @@ GEMINI_NAVIGATE_STEP_FUNCTION = {
                                 "Also mention it in the instruction."
                             ),
                         },
+                        "target_zone_x": {
+                            "type": "integer",
+                            "description": (
+                                "Column (0–15) of the 16×9 grid cell where the target element sits. "
+                                "0 = left edge, 15 = right edge. Always set together with target_zone_y."
+                            ),
+                        },
+                        "target_zone_y": {
+                            "type": "integer",
+                            "description": (
+                                "Row (0–8) of the 16×9 grid cell where the target element sits. "
+                                "0 = top edge, 8 = bottom edge. Always set together with target_zone_x."
+                            ),
+                        },
                         "overlay_type": {
                             "type": "string",
                             "enum": ["arrow", "highlight", "circle", "none"],

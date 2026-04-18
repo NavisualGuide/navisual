@@ -130,6 +130,83 @@ def capture_screenshot_raw() -> Image.Image:
 # we still crop to the target app instead of sending the full virtual desktop.
 _last_target_window_rect: Optional[tuple[int, int, int, int]] = None
 
+# The actual crop rect used in the most recent prepare_api_image() call,
+# in virtual-desktop physical pixels (x, y, w, h).  None when not cropped.
+# Zone-hint overlay uses this to map AI zone coords (relative to the cropped
+# API image) back to real screen positions.
+_last_api_crop_rect: Optional[tuple[int, int, int, int]] = None
+
+
+def get_last_api_crop_rect() -> Optional[tuple[int, int, int, int]]:
+    """Return the crop rect used in the last prepare_api_image() call.
+
+    Returns (x, y, w, h) in virtual-desktop physical pixels, or None if the
+    last API image was not cropped (full virtual desktop was sent).
+    """
+    return _last_api_crop_rect
+
+# HWND of the AI Navigator panel window.
+# When set, prepare_api_image() blacks out that rect in the captured image so
+# the panel never appears in screenshots sent to the AI — without needing
+# WDA_EXCLUDEFROMCAPTURE, which causes DWM to flash both monitors on every capture.
+_panel_hwnd: Optional[int] = None
+
+# Current overlay bbox (x, y, w, h) in virtual-desktop physical pixels.
+# Set by the overlay when it shows/clears so prepare_api_image() can blank it.
+_overlay_bbox: Optional[tuple[int, int, int, int]] = None
+
+
+def set_panel_hwnd(hwnd: int) -> None:
+    """Register the AI Navigator panel's HWND for software-based exclusion from API images."""
+    global _panel_hwnd
+    _panel_hwnd = hwnd
+
+
+def set_overlay_bbox(bbox: Optional[tuple[int, int, int, int]]) -> None:
+    """Register (or clear) the current overlay bbox for software-based exclusion from API images."""
+    global _overlay_bbox
+    _overlay_bbox = bbox
+
+
+def _get_panel_rect_in_image(img: Image.Image) -> Optional[tuple[int, int, int, int]]:
+    """Return the panel's bounding box in image-local pixel coords, or None."""
+    if _panel_hwnd is None or sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        class _RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long),
+            ]
+
+        rect = _RECT()
+        ctypes.windll.user32.GetWindowRect(_panel_hwnd, ctypes.byref(rect))
+        x, y = rect.left, rect.top
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        if w <= 0 or h <= 0:
+            return None
+        # Convert virtual coords to image-local coords
+        sct = _get_sct()
+        ox = sct.monitors[0]["left"]
+        oy = sct.monitors[0]["top"]
+        ix = x - ox
+        iy = y - oy
+        ix2 = ix + w
+        iy2 = iy + h
+        # Clamp to image bounds
+        ix = max(0, min(ix, img.width))
+        iy = max(0, min(iy, img.height))
+        ix2 = max(0, min(ix2, img.width))
+        iy2 = max(0, min(iy2, img.height))
+        if ix2 > ix and iy2 > iy:
+            return (ix, iy, ix2, iy2)
+    except Exception:
+        pass
+    return None
+
 
 def get_foreground_window_rect() -> Optional[tuple[int, int, int, int]]:
     """Return the foreground window bounds in virtual-desktop physical pixels (x, y, w, h).
@@ -217,6 +294,32 @@ def prepare_api_image(
     config = get_config()
     img = raw_img
 
+    # Black out the AI Navigator panel and overlay before any cropping so they
+    # never appear in API images — software approach that avoids DWM flash from
+    # WDA_EXCLUDEFROMCAPTURE.
+    panel_rect = _get_panel_rect_in_image(img)
+    if panel_rect or _overlay_bbox:
+        img = img.copy()
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        if panel_rect:
+            draw.rectangle(panel_rect, fill=(0, 0, 0))
+        if _overlay_bbox:
+            # Expand slightly to cover arrow shaft and arrowhead drawn outside bbox
+            ox, oy, ow, oh = _overlay_bbox
+            sct = _get_sct()
+            origin_x = sct.monitors[0]["left"]
+            origin_y = sct.monitors[0]["top"]
+            pad = 140  # arrow offset is 130px; add margin
+            ix  = max(0, ox - origin_x - pad)
+            iy  = max(0, oy - origin_y - pad)
+            ix2 = min(img.width,  ox - origin_x + ow + pad)
+            iy2 = min(img.height, oy - origin_y + oh + pad)
+            if ix2 > ix and iy2 > iy:
+                draw.rectangle((ix, iy, ix2, iy2), fill=(0, 0, 0))
+        del draw
+
+    global _last_api_crop_rect
     cropped = False
     if config.enable_active_window_crop and not force_full:
         win_rect = get_foreground_window_rect()
@@ -239,10 +342,23 @@ def prepare_api_image(
             if ix2 > ix and iy2 > iy:
                 img = img.crop((ix, iy, ix2, iy2))
                 cropped = True
+                # Record the actual crop rect in virtual-desktop coords so
+                # zone-hint overlay can map AI zone coords back to screen.
+                _last_api_crop_rect = (ox + ix, oy + iy, ix2 - ix, iy2 - iy)
 
-    # Downscale to API max dimensions (separate from OCR capture dimensions)
-    max_w = config.max_api_screenshot_width
-    max_h = config.max_api_screenshot_height
+    if not cropped:
+        _last_api_crop_rect = None
+
+    # Downscale to API max dimensions.
+    # force_full requests (Start Menu, taskbar, system dialogs) get a larger cap
+    # because the full-desktop context matters more than token savings, and these
+    # requests are rare (typically 0–2 per session on browser tasks).
+    if force_full:
+        max_w = config.max_api_full_screenshot_width
+        max_h = config.max_api_full_screenshot_height
+    else:
+        max_w = config.max_api_screenshot_width
+        max_h = config.max_api_screenshot_height
     pre_w, pre_h = img.width, img.height
     if img.width > max_w or img.height > max_h:
         img = img.copy()  # thumbnail() is in-place — avoid mutating raw_img
