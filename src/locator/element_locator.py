@@ -143,7 +143,7 @@ class ElementLocator:
                     cy = a11y_result.bbox[1] + a11y_result.bbox[3] / 2
                     result_zx = int(cx / cell_w)
                     result_zy = int(cy / cell_h)
-                    if abs(result_zx - zone_x) > 2 or abs(result_zy - zone_y) > 2:
+                    if abs(result_zx - zone_x) > 3 or abs(result_zy - zone_y) > 3:
                         logger.info(
                             "A11y result '%s' at zone (%d,%d) rejected — expected zone (%d,%d); trying OCR",
                             a11y_result.name, result_zx, result_zy, zone_x, zone_y,

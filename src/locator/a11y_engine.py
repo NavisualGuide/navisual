@@ -10,12 +10,21 @@ On Linux (v0.4+): will use AT-SPI2.
 
 import logging
 import os
+import re
 import sys
 from typing import Optional
 
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# Unicode dashes that apps embed in accessible names (em-dash, en-dash, figure dash…)
+_DASH_RE = re.compile(r"[\u2010-\u2015\u2212\u2500]")
+
+
+def _norm_dashes(text: str) -> str:
+    """Normalize Unicode dashes to ASCII hyphen so 'A — B' matches 'A - B'."""
+    return _DASH_RE.sub("-", text)
 
 # Role mapping from our schema to UIA ControlType names
 _ROLE_TO_CONTROL_TYPE: dict[str, str] = {
@@ -183,11 +192,14 @@ class A11yEngine:
         This is common for breadcrumb links, icon-prefixed buttons, etc.
         """
         import re
+        # Normalize Unicode dashes so "OpenClaw — Personal AI" matches
+        # a link whose UIA name is "OpenClaw — Personal AI Assistant".
+        target_norm = _norm_dashes(target_lower)
         # Allow optional leading/trailing non-word chars (arrows ← →, bullets, quotes…)
         # but not extra word-content.  Examples:
         #   target "my claims" matches "← my claims" and "my claims →" but NOT
         #   "disability benefit claims" (extra word content before target).
-        pattern = r"(?i)^[\W_]*" + re.escape(target_lower) + r"[\W_]*$"
+        pattern = r"(?i)^[\W_]*" + re.escape(target_norm) + r"[\W_]*$"
         try:
             # Pass 1: role-specific with case-insensitive regex
             if control_type_name:
@@ -231,10 +243,12 @@ class A11yEngine:
         """
         import re
 
+        # Normalize Unicode dashes before regex and substring comparisons.
+        target_norm = _norm_dashes(target_lower)
         # Allow optional leading/trailing non-word chars (arrows, bullets, quotes…)
         # so "← my claims" matches target "my claims", while "Insert Space" still
         # does NOT match target "insert" (the extra word "Space" prevents it).
-        pattern = r"(?i)^[\W_]*" + re.escape(target_lower) + r"[\W_]*$"
+        pattern = r"(?i)^[\W_]*" + re.escape(target_norm) + r"[\W_]*$"
 
         def _try_regex(ctype: Optional[str]) -> Optional[A11yResult]:
             """Attempt a RegexName search for the given control type (or any)."""
@@ -283,13 +297,13 @@ class A11yEngine:
                     name = control.Name
                     if not name:
                         continue
-                    name_lower = name.lower()
+                    name_norm = _norm_dashes(name.lower())
                     # Skip elements whose name is much longer than target — these are
                     # container titles (e.g. browser tab "Amazon.ca: USB-C Cable...") that
                     # happen to contain the target as a substring but are not the real element.
-                    if len(name) > len(target_lower) * 4:
+                    if len(name) > len(target_norm) * 4:
                         continue
-                    if target_lower in name_lower or name_lower in target_lower:
+                    if target_norm in name_norm or name_norm in target_norm:
                         if control_type_name and self._validate_element(control, control_type_name, auto):
                             role_match = control
                             break  # exact role match — use immediately
