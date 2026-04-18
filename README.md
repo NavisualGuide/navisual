@@ -2,214 +2,206 @@
 
 **The AI guides, never overrides.**
 
-AI Navigator is a cross-platform desktop application that guides users through computer tasks by observing their screen and providing real-time navigation instructions via audio and on-screen overlays. Unlike AI agents that take control, AI Navigator keeps the user in command — every click, keystroke, and decision is theirs.
+AI Navigator is a Windows desktop app that guides you through computer tasks by watching your screen and giving real-time step-by-step instructions via on-screen overlays and audio. The AI never clicks, types, or takes control — every action is yours.
 
-## Features
+**Status:** v0.3.1-alpha — actively developed, suitable for developer testing.
 
-- 👁️ **Observes, never acts** — Reads your screen but never moves the mouse or types
-- 🗣️ **Real-time guidance** — Audio instructions + visual overlays adapted to what's on screen
-- 🎯 **Smart element detection** — Local OCR + accessibility APIs find UI elements accurately
-- 📋 **Multi-step sequences** — Reduce API calls by grouping sequential actions
-- 💾 **Session persistence** — Save and resume tasks across sessions
-- 🔐 **Privacy-first** — User controls capture; no heuristic detection of sensitive screens
-- 🌍 **Cross-platform** — Windows (MVP), macOS/Linux (v0.3+)
+---
 
-## Quick Start
+## Tester Setup (Windows 11)
 
-### Requirements
+### 1. Install Python 3.11+
 
-- Python 3.11+
-- Windows 10+ (macOS/Linux in v0.3+)
+Download from [python.org](https://www.python.org/downloads/). During install, check **"Add Python to PATH"**.
 
-### Installation
+Verify:
+```
+python --version   # must be 3.11 or higher
+```
 
-```bash
-# Clone
+### 2. Get the code
+
+```
 git clone https://github.com/stevefu-ops/ai-navigator.git
 cd ai-navigator
-
-# Create venv
-python -m venv venv
-source venv/Scripts/activate  # Windows: venv\Scripts\activate
-
-# Install
-pip install -e ".[dev]"
-
-# Configure
-cp .env.example .env
-# Edit .env with your Anthropic API key
 ```
 
-### Run
+Or download the ZIP from GitHub and extract it.
 
-```bash
+### 3. Create a virtual environment
+
+```
+python -m venv venv
+venv\Scripts\activate
+```
+
+### 4. Install dependencies
+
+```
+pip install -e .
+```
+
+> **If the install stalls or fails on PaddleOCR/PaddlePaddle** (they are large ~1 GB downloads and only used as a non-Windows fallback — Windows 11 uses its built-in OCR), skip them:
+>
+> ```
+> pip install -e . --no-deps
+> pip install pyside6 mss imagehash uiautomation httpx pydantic python-dotenv pyperclip keyboard "winrt-runtime>=2.0.0" "winrt-Windows.Media.Ocr>=2.0.0" "winrt-Windows.Graphics.Imaging>=2.0.0" "winrt-Windows.Storage.Streams>=2.0.0" "winrt-Windows.Foundation>=2.0.0" "winrt-Windows.Foundation.Collections>=2.0.0" "winrt-Windows.Globalization>=2.0.0"
+> ```
+
+### 5. Configure your API key
+
+```
+copy .env.example .env
+```
+
+Open `.env` and set your provider. **Gemini is the easiest for testers — free, no credit card:**
+
+```env
+API_PROVIDER=gemini
+GEMINI_API_KEY=AIza-xxx        # Free key: https://aistudio.google.com/apikey
+DAILY_TOKEN_CAP=1000000        # Raise the cap — default 100k is tight for testing
+```
+
+Alternatively, use Anthropic (Claude):
+
+```env
+API_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-xxx
+DAILY_TOKEN_CAP=1000000
+```
+
+### 6. Run
+
+```
 python -m src.main
 ```
+
+Run as a **regular user** (not admin) — global hotkeys work without elevation on Windows 11.
+
+---
+
+## Using AI Navigator
+
+The panel starts as a small draggable dot (icon mode). Click it to expand. Type your task in the input box, then follow the on-screen arrows and subtitles.
+
+### Hotkeys
+
+| Key | Action |
+|-----|--------|
+| `Alt+\`` | Next step / confirm completed |
+| `Alt+E` | Wrong — re-analyze the current screen |
+| `Alt+S` | Pause / resume capture |
+| `Alt+Q` | Show / hide the panel |
+| `Alt+A` | Push-to-talk voice input |
+| `Alt+R` | Re-read last instruction aloud |
+
+All hotkeys are configurable in **Settings → Hotkeys**.
+
+### Settings
+
+Click the gear icon in the panel to open Settings. You can change your API provider and key, adjust overlay appearance, and remap hotkeys — no `.env` editing required.
+
+---
+
+## Known Issues / Friction Points
+
+| Issue | Fix |
+|-------|-----|
+| PaddleOCR install stalls or errors | Use the `--no-deps` workaround in step 4 |
+| Panel not visible after launch | Look for a small orange dot — click it to expand |
+| No spoken instructions | Add `ENABLE_TTS=true` to `.env` |
+| `keyboard` raises PermissionError | Run as a normal user, not as Administrator |
+| Arrow points to wrong place | Use `Alt+E` (Wrong) to trigger a re-analysis |
+
+---
+
+## Features (v0.3.1-alpha)
+
+- **Observe, never act** — reads your screen, never moves the mouse or types
+- **Real-time overlay arrows** — points at the exact UI element to click
+- **Audio narration** — optional TTS via Windows SAPI
+- **Voice input** — push-to-talk via Google Web Speech API
+- **Multi-provider AI** — Gemini (free), Anthropic (Claude), Ollama (local), OpenAI
+- **Multi-step sequences** — groups sequential actions to reduce API calls
+- **Windows UI Automation** — primary element locator, < 5ms for browsers
+- **Windows OCR** — built-in fallback, zero model downloads
+- **Active-window crop** — sends only the relevant window to the AI (~80% token reduction)
+- **Session persistence** — save and resume tasks
+- **In-app settings** — configure provider, overlay, and hotkeys without editing `.env`
+- **Correction hotkey** — `Alt+E` to re-analyze when the AI gets it wrong
+
+---
 
 ## Project Structure
 
 ```
 ai-navigator/
 ├── src/
-│   ├── core/           # Business logic (session, state, cost tracking)
-│   ├── input/          # Screen capture, event detection, user input
-│   ├── ai/             # API clients, tool schemas
-│   ├── locator/        # Element locator (OCR + accessibility API)
-│   ├── output/         # Overlay, TTS, clipboard
-│   ├── ui/             # PySide6 UI windows
-│   ├── main.py         # Entry point
-│   └── config.py       # Configuration
-├── tests/              # Unit & integration tests
-├── docs/               # Documentation
-├── AI-Navigator-Design-Document.md  # Full design spec
-└── CLAUDE.md           # Project guide for Claude Code
+│   ├── main.py            # Entry point
+│   ├── config.py          # Configuration
+│   ├── core/              # Session, state, cost tracking
+│   ├── input/             # Screen capture, event detection
+│   ├── ai/                # API clients (Gemini, Anthropic, Ollama, OpenAI)
+│   ├── locator/           # Element locator (A11y + OCR)
+│   ├── output/            # Overlay, TTS, clipboard
+│   └── ui/                # PySide6 windows
+├── docs/
+│   ├── AI-Navigator-Design-Document.md   # Full design spec
+│   ├── settings.md                        # Settings reference
+│   └── nav-packs.md                       # Nav-Pack format spec
+├── .env.example           # Config template
+└── CLAUDE.md              # Developer / project guide
 ```
 
-## Status
-
-**v0.1.0-alpha** — Scaffolding complete, MVP implementation starting.
-
-### MVP Timeline (12 weeks)
-
-| Weeks | Milestone |
-|-------|-----------|
-| 1–2 | Screen capture + event detection + chat UI |
-| 3–4 | Anthropic API + multi-step sequences + state summarization |
-| 5–6 | OCR integration + Element Locator + overlay rendering |
-| 7–8 | Correction hotkey + session persistence + clipboard |
-| 9–10 | End-to-end testing with browser tasks |
-| 11 | Internal demo + feedback |
-| 12 | v0.1 alpha release |
-
-### MVP Scope
-
-✅ **In scope:**
-- Event-driven screen capture
-- Text chat input
-- Anthropic API with tool_use (structured output)
-- Multi-step sequences with checkpoints
-- Local OCR-based element locator
-- On-screen overlay arrows & subtitles
-- Correction hotkey (Ctrl+Shift+X)
-- Session persistence (save/resume)
-- Clipboard commands for CLI tasks
-- Browser tasks only, Windows only
-
-❌ **Not in v0.1:**
-- TTS / voice input (v0.2)
-- macOS / Linux (v0.3+)
-- Complex apps like Blender (v0.3+)
-- Nav-Packs (v0.3+)
-
-## Configuration
-
-Copy `.env.example` to `.env` and set your API keys:
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-See [CLAUDE.md](CLAUDE.md) for detailed configuration options.
-
-## Architecture
-
-AI Navigator uses a six-layer model:
-
-1. **Input** — Screen capture, event detection, user input
-2. **Core Engine** — Session management, state, cost control, API routing
-3. **Element Locator** — OCR + accessibility APIs find UI elements locally
-4. **Output** — Overlay rendering, TTS, clipboard
-5. **AI Backend** — Anthropic, OpenAI, or local models
-6. **Platform Layer** — OS-specific APIs (screen capture, overlays, hotkeys)
-
-Read [CLAUDE.md](CLAUDE.md) for detailed architecture, conventions, and status.
+---
 
 ## Development
 
-### Running Tests
-
 ```bash
-pytest                    # All tests
-pytest -v --cov         # Verbose + coverage
-pytest tests/test_ocr.py # Specific test
-```
-
-### Code Quality
-
-```bash
-black src/              # Format
-ruff check src/         # Lint
-mypy src/               # Type check
-```
-
-### Building
-
-```bash
+# Install with dev extras
 pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Lint / format / type check
+ruff check src/
+black src/
+mypy src/
 ```
 
-For production (v1.0+), we'll use PyInstaller:
-
-```bash
-pyinstaller --onefile src/main.py
-```
-
-## Privacy & Security
-
-- **No screenshot persistence** — Images stay in RAM, never written to disk
-- **User-controlled capture** — Pause/resume hotkey, app/URL blocklists
-- **Encrypted API keys** — Stored in OS keychain
-- **Local-first option** — Works fully offline with local models + Whisper
-- **Input-transparent overlay** — Cannot intercept clicks or keystrokes
-
-## Business Model
-
-- **Community (Free)** — Own API key or local model
-- **Personal Pro ($25–30/mo)** — Managed keys, full overlay, voice, session persistence, Nav-Packs
-- **Enterprise (Custom)** — Custom Nav-Packs, SSO, audit logs, on-prem option
-
-## Contributing
-
-This is an early-stage project. Contributions welcome!
-
-- **Issues:** [GitHub Issues](https://github.com/stevefu-ops/ai-navigator/issues)
-- **Design discussions:** [GitHub Discussions](https://github.com/stevefu-ops/ai-navigator/discussions)
-
-## License
-
-FSL-1.1-Apache-2.0 (Functional Source License) — see LICENSE file. Source-available with a 2-year non-compete clause. Each version converts to Apache 2.0 two years after release.
-
-## Design & Research
-
-The full design document is available at [AI-Navigator-Design-Document.md](AI-Navigator-Design-Document.md). It covers:
-
-- Detailed architecture & data flow
-- Cost modeling & optimization strategies
-- Token budget system with safety margins
-- Privacy & security measures
-- UI/UX design principles
-- MVP plan & post-MVP roadmap
-- Business model & pricing tiers
-
-For developers and contributors, read [CLAUDE.md](CLAUDE.md) for a project guide.
+---
 
 ## Roadmap
 
 ```
-v0.1 (week 12)  MVP: browser tasks, Windows, text/overlay guidance (pip install)
-v0.2 (month 5)  TTS + voice input, prompt caching, accessibility APIs
-v0.3 (month 8)  Tauri/Rust rewrite, complex apps (Blender), macOS, Nav-Packs
-v0.4 (month 10) Linux, plugin system, accessibility UX pass
-v1.0 (month 12) MSIX packaging, native installer, public launch
+v0.3.1  Settings window + hotkeys redesign + bug fixes     ← current
+v0.4    Signed Windows installer (embedded Python, no setup required)
+v0.5    Template matching + Nav-Packs (Blender, SolidWorks)
+v1.0    Microsoft Store + enterprise features + public launch
+v1.x    macOS port + Linux port
 ```
-
-## Questions?
-
-- **GitHub Issues:** [Feature requests, bug reports](https://github.com/stevefu-ops/ai-navigator/issues)
-- **Discussions:** [Design questions, ideas](https://github.com/stevefu-ops/ai-navigator/discussions)
 
 ---
 
-**Status:** 🚧 Early-stage development. Not for production use yet.
+## Privacy
 
-**Last updated:** 2026-04-05
+- Screenshots are processed in RAM and never written to disk
+- The AI receives only the active window crop (not your full desktop by default)
+- Use `Alt+S` (Pause) to stop capture at any time
+- Run fully offline with Ollama — no data leaves your machine
+
+---
+
+## License
+
+[FSL-1.1-Apache-2.0](https://fsl.software/) — source-available with a 2-year non-compete clause. Each version converts to Apache 2.0 two years after release.
+
+---
+
+## Links
+
+- **Issues / bugs:** [GitHub Issues](https://github.com/stevefu-ops/ai-navigator/issues)
+- **Design doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md)
+- **Settings reference:** [settings.md](docs/settings.md)
+- **Free Gemini key:** https://aistudio.google.com/apikey
