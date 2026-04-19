@@ -19,6 +19,20 @@
   let captureResult = $state<CaptureResult | null>(null);
   let captureError = $state("");
 
+  type LocateResult = {
+    bbox: { x: number; y: number; width: number; height: number };
+    name: string;
+    role: string;
+    confidence: number;
+  };
+
+  let locateText = $state("");
+  let locateRole = $state("");
+  let locateStatus = $state<"idle" | "locating" | "ok" | "notfound" | "error">("idle");
+  let locateResult = $state<LocateResult | null>(null);
+  let locateError = $state("");
+  let locateElapsed = $state(0);
+
   async function ping() {
     status = "pinging";
     reply = "";
@@ -36,6 +50,31 @@
       echoReply = await invoke<string>("sidecar_echo", { text: echoInput });
     } catch (e) {
       echoReply = String(e);
+    }
+  }
+
+  async function locate() {
+    if (!locateText.trim()) return;
+    locateStatus = "locating";
+    locateResult = null;
+    locateError = "";
+    const start = performance.now();
+    try {
+      const res = await invoke<LocateResult | null>("locate_a11y", {
+        text: locateText,
+        role: locateRole.trim() || null,
+        timeoutMs: 300,
+      });
+      locateElapsed = Math.round(performance.now() - start);
+      if (res) {
+        locateResult = res;
+        locateStatus = "ok";
+      } else {
+        locateStatus = "notfound";
+      }
+    } catch (e) {
+      locateError = String(e);
+      locateStatus = "error";
     }
   }
 
@@ -126,6 +165,40 @@
     {/if}
     {#if captureError}
       <pre class="reply error">{captureError}</pre>
+    {/if}
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <span class="label">Locate (A11y)</span>
+      <span class="status status-{locateStatus === 'ok' ? 'ok' : locateStatus === 'notfound' ? 'error' : locateStatus === 'locating' ? 'capturing' : locateStatus === 'error' ? 'error' : 'idle'}">
+        {#if locateStatus === "idle"}ready{/if}
+        {#if locateStatus === "locating"}searching…{/if}
+        {#if locateStatus === "ok"}found · {locateElapsed} ms{/if}
+        {#if locateStatus === "notfound"}not found · {locateElapsed} ms{/if}
+        {#if locateStatus === "error"}error{/if}
+      </span>
+    </div>
+
+    <input bind:value={locateText} placeholder="Target text (e.g. File, Save, Continue)" />
+    <input bind:value={locateRole} placeholder="Optional role (button, tab, link, menuitem…)" />
+
+    <div class="button-row">
+      <button class="primary" onclick={locate} disabled={locateStatus === "locating" || !locateText.trim()}>
+        Locate
+      </button>
+    </div>
+
+    {#if locateResult}
+      <div class="capture-meta">
+        <span>{locateResult.role}</span>
+        <span>x={locateResult.bbox.x} y={locateResult.bbox.y}</span>
+        <span>{locateResult.bbox.width}×{locateResult.bbox.height}</span>
+      </div>
+      <pre class="reply">name: {locateResult.name}</pre>
+    {/if}
+    {#if locateError}
+      <pre class="reply error">{locateError}</pre>
     {/if}
   </section>
 

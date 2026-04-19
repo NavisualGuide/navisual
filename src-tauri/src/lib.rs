@@ -1,6 +1,7 @@
 //! AI Navigator — Rust/Tauri backend entry point.
 
 mod capture;
+mod locator;
 mod sidecar;
 
 use sidecar::Sidecar;
@@ -76,6 +77,31 @@ async fn capture_screen(quality: Option<u8>) -> Result<CaptureResult, String> {
     })
 }
 
+/// Locate a UI element by text label via Windows UI Automation. Returns
+/// None if not found. `role` is one of our schema roles (button, tab, link…).
+#[tauri::command]
+async fn locate_a11y(
+    text: String,
+    role: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<Option<locator::LocateResult>, String> {
+    #[cfg(windows)]
+    {
+        let timeout = timeout_ms.unwrap_or(100);
+        tokio::task::spawn_blocking(move || {
+            locator::a11y::find_element(&text, role.as_deref(), timeout)
+        })
+        .await
+        .map_err(|e| format!("task join: {e}"))?
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (text, role, timeout_ms);
+        Err("A11y only implemented for Windows".to_string())
+    }
+}
+
 /// Capture the active foreground window (DWM extended frame bounds).
 #[tauri::command]
 async fn capture_active_window(quality: Option<u8>) -> Result<CaptureResult, String> {
@@ -128,6 +154,7 @@ pub fn run() {
             sidecar_echo,
             capture_screen,
             capture_active_window,
+            locate_a11y,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
