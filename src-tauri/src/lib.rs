@@ -102,6 +102,40 @@ async fn locate_a11y(
     }
 }
 
+/// Locate a UI element — A11y first, OCR fallback. Returns None on miss.
+#[tauri::command]
+async fn locate_element(
+    text: String,
+    role: Option<String>,
+    nearby_text: Option<String>,
+    zone_x: Option<u32>,
+    zone_y: Option<u32>,
+    timeout_ms: Option<u64>,
+) -> Result<Option<locator::LocateResult>, String> {
+    #[cfg(windows)]
+    {
+        let opts = locator::orchestrator::LocateOptions {
+            role,
+            nearby_text,
+            zone: match (zone_x, zone_y) {
+                (Some(x), Some(y)) => Some((x, y)),
+                _ => None,
+            },
+            a11y_timeout_ms: timeout_ms.unwrap_or(150),
+            min_confidence: 0.5,
+        };
+        tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts))
+            .await
+            .map_err(|e| format!("task join: {e}"))?
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (text, role, nearby_text, zone_x, zone_y, timeout_ms);
+        Err("locate_element only implemented for Windows".to_string())
+    }
+}
+
 /// Capture the active foreground window (DWM extended frame bounds).
 #[tauri::command]
 async fn capture_active_window(quality: Option<u8>) -> Result<CaptureResult, String> {
@@ -155,6 +189,7 @@ pub fn run() {
             capture_screen,
             capture_active_window,
             locate_a11y,
+            locate_element,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

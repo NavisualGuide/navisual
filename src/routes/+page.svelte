@@ -33,6 +33,11 @@
   let locateError = $state("");
   let locateElapsed = $state(0);
 
+  let elementResult = $state<LocateResult | null>(null);
+  let elementStatus = $state<"idle" | "locating" | "ok" | "notfound" | "error">("idle");
+  let elementError = $state("");
+  let elementElapsed = $state(0);
+
   async function ping() {
     status = "pinging";
     reply = "";
@@ -75,6 +80,34 @@
     } catch (e) {
       locateError = String(e);
       locateStatus = "error";
+    }
+  }
+
+  async function locateFull() {
+    if (!locateText.trim()) return;
+    elementStatus = "locating";
+    elementResult = null;
+    elementError = "";
+    const start = performance.now();
+    try {
+      const res = await invoke<LocateResult | null>("locate_element", {
+        text: locateText,
+        role: locateRole.trim() || null,
+        nearbyText: null,
+        zoneX: null,
+        zoneY: null,
+        timeoutMs: 300,
+      });
+      elementElapsed = Math.round(performance.now() - start);
+      if (res) {
+        elementResult = res;
+        elementStatus = "ok";
+      } else {
+        elementStatus = "notfound";
+      }
+    } catch (e) {
+      elementError = String(e);
+      elementStatus = "error";
     }
   }
 
@@ -185,12 +218,16 @@
 
     <div class="button-row">
       <button class="primary" onclick={locate} disabled={locateStatus === "locating" || !locateText.trim()}>
-        Locate
+        A11y only
+      </button>
+      <button class="ghost" onclick={locateFull} disabled={elementStatus === "locating" || !locateText.trim()}>
+        A11y → OCR
       </button>
     </div>
 
     {#if locateResult}
       <div class="capture-meta">
+        <span class="label-sm">a11y</span>
         <span>{locateResult.role}</span>
         <span>x={locateResult.bbox.x} y={locateResult.bbox.y}</span>
         <span>{locateResult.bbox.width}×{locateResult.bbox.height}</span>
@@ -199,6 +236,23 @@
     {/if}
     {#if locateError}
       <pre class="reply error">{locateError}</pre>
+    {/if}
+
+    {#if elementResult}
+      <div class="capture-meta">
+        <span class="label-sm">orch</span>
+        <span>{elementResult.role}</span>
+        <span>x={elementResult.bbox.x} y={elementResult.bbox.y}</span>
+        <span>{elementResult.bbox.width}×{elementResult.bbox.height}</span>
+        <span>{elementElapsed} ms</span>
+      </div>
+      <pre class="reply">name: {elementResult.name} (conf {elementResult.confidence.toFixed(2)})</pre>
+    {/if}
+    {#if elementStatus === "notfound"}
+      <pre class="reply">orch: not found ({elementElapsed} ms)</pre>
+    {/if}
+    {#if elementError}
+      <pre class="reply error">{elementError}</pre>
     {/if}
   </section>
 

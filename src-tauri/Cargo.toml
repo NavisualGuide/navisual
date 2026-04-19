@@ -40,6 +40,11 @@ windows = { version = "0.62", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
+  # Phase C.3 — Windows.Media.Ocr
+  "Foundation_Collections",
+  "Media_Ocr",
+  "Graphics_Imaging",
+  "Storage_Streams",
 ] }
 uiautomation = { version = "0.24.4", features = ["process"] }
 

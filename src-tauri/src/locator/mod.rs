@@ -10,6 +10,12 @@
 #[cfg(windows)]
 pub mod a11y;
 
+#[cfg(windows)]
+pub mod ocr;
+
+#[cfg(windows)]
+pub mod orchestrator;
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LocateResult {
     /// Bounding box in physical pixels, virtual-desktop coords.
