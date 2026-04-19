@@ -27,3 +27,16 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 log = "0.4"
 
+# Phase C — screen capture + Windows APIs
+xcap = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+] }
+
