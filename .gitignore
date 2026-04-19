@@ -1,88 +1,27 @@
-# Byte-compiled / optimized / DLL files
+.DS_Store
+node_modules
+/build
+/.svelte-kit
+/package
+.env
+.env.*
+!.env.example
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Rust / Tauri
+src-tauri/target/
+
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
+venv*/
 .pytest_cache/
+htmlcov/
+.coverage
 
-# Virtual environments
-venv/
-env/
-ENV/
-env.bak/
-venv.bak/
-
-# IDEs
+# IDE / local
 .vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
+.claude/scheduled_tasks.lock
 
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Logs
-*.log
-logs/
-
-# Session files (local storage)
-sessions/
-*.json.bak
-
-# Build artifacts
-dist/
-build/
-*.whl
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.code-workspace
