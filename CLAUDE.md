@@ -1,7 +1,7 @@
 # AI Navigator — Project Guide
 
-**Version:** 0.3.0
-**Status:** v0.3 complete. Token optimization, active-window crop, UI consolidation (ConsolidatedPanel), checkpoint rework, multi-window A11y.
+**Version:** 0.4.0-alpha
+**Status:** v0.4 Phases A–C complete (Tauri scaffold, Python sidecar, Rust screen capture + A11y + OCR + locator orchestrator). Phase D.1 overlay wiring in progress.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
 **Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md)
 **Settings:** [settings.md](docs/settings.md)
@@ -302,6 +302,25 @@ if __name__ == "__main__":
 - **Two new hotkeys: Talk + Re-read** — Talk (`alt+a`) triggers push-to-talk voice input globally (same as mic button in panel). Re-read (`alt+r`) replays the last instruction via TTS; starts TTS thread on demand even if `ENABLE_TTS=false`.
 - **Hotkeys settings tab shipped** (`settings_window.py`) — All 6 hotkeys configurable in-app. Plain QLineEdit fields, all marked 🔄 restart-required. Adds `TALK_HOTKEY` and `REREAD_HOTKEY` env vars.
 - **Zone-hint coordinate fix** (`screen_capture.py`, `main.py`) — Zone-hint overlay was placed at the wrong screen position when active-window crop is enabled. Root cause: the AI's zone coordinates are relative to the cropped API image (e.g., the VS Code window), but the zone-hint code computed positions using `_vd_width/_vd_height` (the full virtual desktop). Fix: `prepare_api_image()` now records `_last_api_crop_rect` (actual crop rect in virtual-desktop physical pixels) exposed via `get_last_api_crop_rect()`; the zone-hint calculation uses the crop rect dimensions so `zone=(10,0)` correctly maps inside the cropped window instead of across the full desktop.
+
+### ✅ Completed (v0.4-alpha Phases A–C — 2026-04-19)
+
+- **Phase A — scaffold** (commit e7e406f) — Tauri v2 + SvelteKit 5 + Rust backend + Python sidecar skeleton. Panel window spawns, invokes Rust commands.
+- **Phase B — sidecar IPC** (commit 997f300) — Python AI layer (`ai/`, `core/`) migrated into `sidecar/`. JSON-lines protocol over stdin/stdout. Rust `Sidecar` type spawns the Python process and round-trips requests. `ping`, `echo`, `cost_report` dispatchers.
+- **Phase C.1 — screen capture in Rust** (commit 2d4300d) — `xcap` crate for per-monitor capture, `image` crate for JPEG encoding, DWM `EXTENDED_FRAME_BOUNDS` for active-window crop. Tauri commands `capture_screen`, `capture_active_window`.
+- **Phase C.2 — A11y locator in Rust** (commit 03859f7 + hardening this round) — `uiautomation` 0.24 crate. Same semantics as v0.3 Python: dash normalisation, anchored `^[\W_]*target[\W_]*$` regex (rejects "Insert Space" for target "Insert"), container-role rejection, off-screen guard. Multi-window search: z-order enumeration via `GetTopWindow`/`GetWindow(GW_HWNDNEXT)` with class-name blocklist (`Progman`, `WorkerW`, `Shell_TrayWnd`, IME classes…) skips shell and self; `collect_visible_top_windows(our_pid, 8)` caps at 8 real candidates so per-root timeout doesn't get diluted. `match_in_subtree` filter_fn swallows `get_name()` errors (was propagating, causing UIMatcher to abort on transient `E_ELEMENTNOTAVAILABLE`). Tauri command `locate_a11y`.
+- **Phase C.3 — OCR + orchestrator** (commit 594484f) — `Windows.Media.Ocr` via the `windows` crate (`WriteBytes`/`StoreAsync`/`FlushAsync`/`BitmapDecoder`/`RecognizeAsync`). Line-level + word-level bboxes emitted so single-word targets get a tight box. `find_text` ported from v0.3 Python with identical strategies: exact → substring (MIN_SUBSTR_LEN=8) → fuzzy LCS ratio >0.7, 4%-screen-height button cap, 16×9 zone filter, nearby-text anchor. `LocateOptions` propagates role / nearby_text / zone / timeout. Orchestrator = A11y first, OCR fallback on captured active window. Tauri command `locate_element`.
+- **Phase C hardening** (this commit) — Capture self-exclusion: `get_foreground_frame_rect()` checks PID; when our panel is foreground it walks z-order and returns the first non-self, non-shell window. Fixes the case where the user clicks the locate button (panel becomes foreground) and the OCR path would otherwise capture the panel's own contents instead of Task Manager / the target app. Also bumped A11y default timeouts: `locate_a11y` 100 → 1500 ms, `locate_element` A11y phase 150 → 500 ms; frontend `timeoutMs` 300 → 2000 / 300 → 800 so the backend default isn't overridden.
+
+### 🚧 Next: v0.4 Phase D.1 — overlay wiring
+
+- `src-tauri/src/overlay.rs` (scaffold, unwired) — virtual-desktop rect helper, `configure()` for click-through styles (`WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`), `emit_update()` Tauri event push, `OverlayKind` (Arrow / Box / Subtitle / None).
+- `src/routes/overlay/+page.svelte` — stub route so Tauri has a URL to load; canvas renderer not yet written.
+- `src-tauri/tauri.conf.json` — overlay window defined, `visible: false` until `configure()` is called in `setup()` and WS_EX_* styles are applied (otherwise the frameless fullscreen window freezes a monitor by catching all clicks).
+
+**Known OCR limitation — Task Manager / high-DPI primary.** Windows.Media.Ocr wants ~30 px text for reliable reads; small-font nav items (Task Manager sidebar ~12–14 physical px) are at the reliability floor. The capture self-exclusion fix removes noise (only the target window is OCR'd), but the text pixel size is what it is. A 2× bilinear upscale of captures with width <1280 before OCR is the planned follow-up if Task Manager / other compact-UI apps miss too often in practice.
+
+**Known A11y limitation.** Chromium-based webviews (Outlook PWA, Teams, some Electron apps) lazy-load accessibility trees; virtualised list items (e.g. email subject lines) are often absent from the UIA tree until focused. No clean fix — documented as expected.
 
 ### 🚧 Next: v0.3.1 / v0.4
 
@@ -669,4 +688,4 @@ python -m src.main
 
 ---
 
-*Last updated: 2026-04-13*
+*Last updated: 2026-04-19*

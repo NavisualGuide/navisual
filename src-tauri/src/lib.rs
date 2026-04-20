@@ -87,7 +87,7 @@ async fn locate_a11y(
 ) -> Result<Option<locator::LocateResult>, String> {
     #[cfg(windows)]
     {
-        let timeout = timeout_ms.unwrap_or(100);
+        let timeout = timeout_ms.unwrap_or(1500);
         tokio::task::spawn_blocking(move || {
             locator::a11y::find_element(&text, role.as_deref(), timeout)
         })
@@ -121,7 +121,7 @@ async fn locate_element(
                 (Some(x), Some(y)) => Some((x, y)),
                 _ => None,
             },
-            a11y_timeout_ms: timeout_ms.unwrap_or(150),
+            a11y_timeout_ms: timeout_ms.unwrap_or(500),
             min_confidence: 0.5,
         };
         tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts))

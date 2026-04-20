@@ -68,7 +68,7 @@
       const res = await invoke<LocateResult | null>("locate_a11y", {
         text: locateText,
         role: locateRole.trim() || null,
-        timeoutMs: 300,
+        timeoutMs: 2000,
       });
       locateElapsed = Math.round(performance.now() - start);
       if (res) {
@@ -96,7 +96,7 @@
         nearbyText: null,
         zoneX: null,
         zoneY: null,
-        timeoutMs: 300,
+        timeoutMs: 800,
       });
       elementElapsed = Math.round(performance.now() - start);
       if (res) {

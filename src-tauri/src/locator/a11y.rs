@@ -23,8 +23,11 @@ use std::time::{Duration, Instant};
 use uiautomation::controls::ControlType;
 use uiautomation::types::TreeScope;
 use uiautomation::{UIAutomation, UIElement};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetTopWindow, GetWindow, GetWindowRect, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, GW_HWNDNEXT,
+};
 
 /// Map our schema roles → UIA ControlType. `None` means "any role".
 fn role_to_control_type(role: &str) -> Option<ControlType> {
@@ -95,6 +98,57 @@ fn foreground_pid() -> (HWND, u32) {
     }
 }
 
+/// Enumerate visible, non-minimised, reasonably-sized top-level windows
+/// in z-order (topmost first). Excludes AI Navigator's own windows, system
+/// shell windows, and overlay-style utility windows.
+fn collect_visible_top_windows(our_pid: u32, max: usize) -> Vec<HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    // Class-name blocklist for system shell / IME / overlay windows.
+    const SKIP_CLASSES: &[&str] = &[
+        "Progman",              // Desktop window
+        "WorkerW",              // Desktop worker
+        "Shell_TrayWnd",        // Taskbar
+        "Shell_SecondaryTrayWnd",
+        "NotifyIconOverflowWindow",
+        "Windows.UI.Core.CoreWindow", // IME, Xaml islands
+        "IME",
+        "MSCTFIME UI",
+        "Default IME",
+    ];
+
+    let mut out = Vec::new();
+    unsafe {
+        let mut hwnd = GetTopWindow(None).unwrap_or(HWND(std::ptr::null_mut()));
+        while !hwnd.0.is_null() && out.len() < max {
+            if IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
+                let mut pid: u32 = 0;
+                let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
+                if pid != 0 && pid != our_pid {
+                    let mut rect = RECT::default();
+                    if GetWindowRect(hwnd, &mut rect).is_ok() {
+                        let w = rect.right - rect.left;
+                        let h = rect.bottom - rect.top;
+                        if w > 100 && h > 100 {
+                            // Class-name filter.
+                            let mut buf = [0u16; 128];
+                            let n = GetClassNameW(hwnd, &mut buf);
+                            let class = String::from_utf16_lossy(&buf[..n as usize]);
+                            if !SKIP_CLASSES.iter().any(|c| *c == class) {
+                                out.push(hwnd);
+                            }
+                        }
+                    }
+                }
+            }
+            match GetWindow(hwnd, GW_HWNDNEXT) {
+                Ok(next) => hwnd = next,
+                Err(_) => break,
+            }
+        }
+    }
+    out
+}
+
 /// Convert a UIA element to LocateResult, filtering out containers + off-screen.
 fn element_to_result(el: &UIElement) -> Option<LocateResult> {
     let ct = el.get_control_type().ok()?;
@@ -153,29 +207,14 @@ pub fn find_element(
         }
     } else {
         // Our panel is focused (or we couldn't get a foreground PID).
-        // Walk the desktop's top-level windows and take every one that
-        // belongs to a different process.
-        let desktop = automation
-            .get_root_element()
-            .map_err(|e| anyhow!("get_root_element: {e}"))?;
-        let walker = automation
-            .create_tree_walker()
-            .map_err(|e| anyhow!("create_tree_walker: {e}"))?;
-        let mut roots = Vec::new();
-        if let Ok(mut child) = walker.get_first_child(&desktop) {
-            loop {
-                if let Ok(pid) = child.get_process_id() {
-                    if pid != our_pid {
-                        roots.push(child.clone());
-                    }
-                }
-                match walker.get_next_sibling(&child) {
-                    Ok(next) => child = next,
-                    Err(_) => break,
-                }
-            }
-        }
-        roots
+        // Walk the top-level windows in z-order (topmost first) and keep only
+        // visible, reasonably-sized ones owned by other processes. This puts
+        // the app the user was actually looking at at the front of the list.
+        let hwnds = collect_visible_top_windows(our_pid, 8);
+        hwnds
+            .into_iter()
+            .filter_map(|h| automation.element_from_handle(h.into()).ok())
+            .collect()
     };
 
     if search_roots.is_empty() {
@@ -183,20 +222,23 @@ pub fn find_element(
     }
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    // Give each root a fair slice so we don't burn the whole budget on the
+    // first window. Floor at 250 ms so UIMatcher has time to walk.
+    let per_root_ms = ((timeout_ms / search_roots.len() as u64).max(250)).min(timeout_ms);
 
     for root in &search_roots {
         if Instant::now() > deadline {
             break;
         }
         // Pass 1: regex filter with role constraint (fast path via UIMatcher).
-        if let Some(res) = match_in_subtree(&automation, root, &name_re, desired_ct, timeout_ms)? {
+        if let Some(res) = match_in_subtree(&automation, root, &name_re, desired_ct, per_root_ms)? {
             return Ok(Some(res));
         }
         // Pass 2: regex filter with no role constraint, relying on
         // element_to_result to reject containers. Catches "Continue" labelled
         // as Hyperlink instead of Button, etc.
         if desired_ct.is_some() {
-            if let Some(res) = match_in_subtree(&automation, root, &name_re, None, timeout_ms)? {
+            if let Some(res) = match_in_subtree(&automation, root, &name_re, None, per_root_ms)? {
                 return Ok(Some(res));
             }
         }
@@ -229,13 +271,13 @@ fn match_in_subtree(
     let mut matcher = automation
         .create_matcher()
         .from_ref(root)
-        .depth(12)
+        .depth(15)
         .timeout(timeout_ms)
         .filter_fn(Box::new(move |el: &UIElement| {
-            let name = match el.get_name() {
-                Ok(n) => n,
-                Err(e) => return Err(e),
-            };
+            // Swallow per-element errors so a single transient failure
+            // (E_ELEMENTNOTAVAILABLE during dynamic-UI walks) doesn't abort
+            // the whole matcher with not-found.
+            let name = el.get_name().unwrap_or_default();
             if name.is_empty() {
                 return Ok(false);
             }
