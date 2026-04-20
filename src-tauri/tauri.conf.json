@@ -21,6 +21,22 @@
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": false
+      },
+      {
+        "label": "overlay",
+        "url": "/overlay",
+        "width": 1920,
+        "height": 1080,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "visible": false,
+        "shadow": false,
+        "x": 0,
+        "y": 0
       }
     ],
     "security": {
