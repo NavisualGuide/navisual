@@ -786,12 +786,17 @@ def print_summary(preds: list[Prediction]) -> None:
 # ---------------------------------------------------------------------------
 
 def _sanity_check_helpers() -> None:
-    """Cheap checks — fail fast at startup if a helper is broken."""
+    """Cheap checks — fail fast at startup if a helper is broken.
+
+    Expected values account for the 5% left gutter in grid_draw.GUTTER_FRAC:
+    on a 1000×1000 image gutter=50px, active_w=950px, cell_w=95px.
+    """
     r = grid_cell_rect("A1", 1000, 1000)
-    assert r == (0, 0, 100, 100), r
+    assert r == (50, 0, 95, 100), r          # col 1 starts after gutter
     r = grid_cell_rect("J10", 1000, 1000)
     assert r[0] + r[2] == 1000 and r[1] + r[3] == 1000, r
-    assert bbox_to_cell((500, 500, 10, 10), 1000, 1000) == "F6", bbox_to_cell((500, 500, 10, 10), 1000, 1000)
+    # centre (505,505): cx_active=455, col=int(455*10/950)=4 → col5, row=5 → F
+    assert bbox_to_cell((500, 500, 10, 10), 1000, 1000) == "F5", bbox_to_cell((500, 500, 10, 10), 1000, 1000)
     assert "A1" in cell_neighbours("A1")
 
 
