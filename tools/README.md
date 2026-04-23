@@ -107,7 +107,7 @@ A compact summary prints on stdout after the run completes.
 
 ```
 --claude-model claude-sonnet-4-6         # default
---gemini-model gemini-2.0-flash          # default
+--gemini-model gemini-2.5-flash          # default
 ```
 
 ## Gotchas

@@ -183,6 +183,10 @@ ROW_LABELS = "ABCDEFGHIJ"  # 10 rows
 COL_LABELS = [str(i) for i in range(1, 11)]  # 10 cols
 
 
+# Must match grid_draw.GUTTER_FRAC — column 1 starts after this fraction of the width.
+_GUTTER_FRAC: float = 0.05
+
+
 def grid_cell_rect(
     cell: str,
     image_width: int,
@@ -193,6 +197,7 @@ def grid_cell_rect(
     """Convert a 2-char cell label like ``"D4"`` into its pixel rect.
 
     Rows are A..J (top→bottom); columns are 1..10 (left→right).
+    Column 1 starts after the left gutter (GUTTER_FRAC of image width).
     """
     label = cell.strip().upper()
     if len(label) < 2 or label[0] not in ROW_LABELS:
@@ -205,12 +210,14 @@ def grid_cell_rect(
     if not (0 <= row_idx < rows) or not (0 <= col_idx < cols):
         raise ValueError(f"cell out of range: {cell!r}")
 
-    cell_w = image_width / cols
+    gutter = max(16, int(round(image_width * _GUTTER_FRAC)))
+    active_w = image_width - gutter
+    cell_w = active_w / cols
     cell_h = image_height / rows
-    x = int(round(col_idx * cell_w))
+    x = gutter + int(round(col_idx * cell_w))
     y = int(round(row_idx * cell_h))
-    w = int(round((col_idx + 1) * cell_w)) - x
-    h = int(round((row_idx + 1) * cell_h)) - y
+    w = int(round((col_idx + 1) * cell_w)) - int(round(col_idx * cell_w))
+    h = int(round((row_idx + 1) * cell_h)) - int(round(row_idx * cell_h))
     return (x, y, w, h)
 
 
@@ -221,9 +228,16 @@ def bbox_to_cell(
     rows: int = 10,
     cols: int = 10,
 ) -> str:
-    """Return the grid cell label containing the bbox centre."""
+    """Return the grid cell label containing the bbox centre.
+
+    Column boundaries account for the left gutter (matches grid_draw.GUTTER_FRAC).
+    """
     cx, cy = centre(bbox)
-    col_idx = max(0, min(cols - 1, int(cx * cols / image_width)))
+    gutter = max(16, int(round(image_width * _GUTTER_FRAC)))
+    active_w = image_width - gutter
+    # Clamp cx into the active area; anything inside the gutter maps to col 1.
+    cx_active = max(0.0, cx - gutter)
+    col_idx = max(0, min(cols - 1, int(cx_active * cols / active_w)))
     row_idx = max(0, min(rows - 1, int(cy * rows / image_height)))
     return f"{ROW_LABELS[row_idx]}{col_idx + 1}"
 

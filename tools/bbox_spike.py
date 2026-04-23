@@ -76,7 +76,7 @@ RAW_DIR = OUTPUT_DIR / "raw"
 CSV_PATH = OUTPUT_DIR / "results.csv"
 
 CLAUDE_MODEL_DEFAULT = "claude-sonnet-4-6"
-GEMINI_MODEL_DEFAULT = "gemini-2.0-flash"
+GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
 
 # Valid grid-cell labels: A..J (rows) + 1..10 (cols).
 CELL_RE = re.compile(r"[A-J](?:10|[1-9])")

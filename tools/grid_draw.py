@@ -43,6 +43,10 @@ LINE_COLOR_WHITE = (255, 255, 255, LINE_ALPHA)
 TILE_BG = (255, 255, 255, 235)  # nearly opaque white
 TILE_FG = (0, 0, 0, 255)         # black text
 
+# Left gutter for row labels — keeps them out of column 1's content area so
+# Claude doesn't count the label tile as a separate column.
+GUTTER_FRAC: float = 0.05   # 5% of image width
+
 
 def _load_font(pixels: int) -> ImageFont.ImageFont:
     """Try to load a TTF font at the requested pixel size; fall back to default.
@@ -83,28 +87,22 @@ def draw_grid(
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     drw = ImageDraw.Draw(overlay)
 
-    # --- faint grid lines (two-pass: white then black 1-px for edge contrast)
-    for c in range(1, cols):
-        x = int(round(c * w / cols))
-        drw.line([(x, 0), (x, h)], fill=LINE_COLOR_BLACK, width=1)
-    for r in range(1, rows):
-        y = int(round(r * h / rows))
-        drw.line([(0, y), (w, y)], fill=LINE_COLOR_BLACK, width=1)
+    # Left gutter — row labels live here so they don't overlap column 1.
+    gutter = max(16, int(round(w * GUTTER_FRAC)))
 
-    # --- opaque label tiles along the top (cols) and left (rows)
-    # Tile size scales with image; at 768×432 a 22×18 tile is readable.
-    tile_w = max(18, int(round(w / cols * 0.28)))
-    tile_h = max(14, int(round(h / rows * 0.28)))
-    # Cap tile dims so they don't swallow a cell.
-    tile_w = min(tile_w, int(round(w / cols * 0.6)))
-    tile_h = min(tile_h, int(round(h / rows * 0.6)))
+    # --- opaque label tiles: size based on cell dims inside the active area.
+    cell_w = (w - gutter) / cols
+    cell_h = h / rows
+    tile_w = max(14, int(round(cell_w * 0.30)))
+    tile_h = max(12, int(round(cell_h * 0.30)))
+    tile_w = min(tile_w, int(round(cell_w * 0.60)))
+    tile_h = min(tile_h, int(round(cell_h * 0.60)))
 
-    font_pixels = max(10, min(tile_h - 4, int(round(tile_h * 0.85))))
+    font_pixels = max(9, min(tile_h - 3, int(round(tile_h * 0.85))))
     font = _load_font(font_pixels)
 
     def _draw_tile(x: int, y: int, tw: int, th: int, text: str) -> None:
         drw.rectangle((x, y, x + tw, y + th), fill=TILE_BG)
-        # Measure the text so we can centre it in the tile.
         try:
             bbox = drw.textbbox((0, 0), text, font=font)
             text_w = bbox[2] - bbox[0]
@@ -118,17 +116,27 @@ def draw_grid(
         ty = y + (th - text_h) // 2 - offset_y
         drw.text((tx, ty), text, fill=TILE_FG, font=font)
 
-    # Column label tiles — centred horizontally within each column, hugging top edge
-    for c_idx in range(cols):
-        col_centre_x = int(round((c_idx + 0.5) * w / cols))
-        tx = col_centre_x - tile_w // 2
-        _draw_tile(tx, 0, tile_w, tile_h, str(c_idx + 1))
+    # --- faint grid lines (columns start at gutter; rows span full width)
+    for c in range(cols + 1):
+        x = gutter + int(round(c * (w - gutter) / cols))
+        drw.line([(x, 0), (x, h)], fill=LINE_COLOR_BLACK, width=1)
+    for r in range(1, rows):
+        y = int(round(r * h / rows))
+        drw.line([(0, y), (w, y)], fill=LINE_COLOR_BLACK, width=1)
 
-    # Row label tiles — centred vertically within each row, hugging left edge
+    # Row label tiles — in the left gutter, centred vertically per row
     for r_idx in range(rows):
         row_centre_y = int(round((r_idx + 0.5) * h / rows))
         ty = row_centre_y - tile_h // 2
-        _draw_tile(0, ty, tile_w, tile_h, ROW_LABELS[r_idx])
+        _draw_tile(0, ty, gutter - 2, tile_h, ROW_LABELS[r_idx])
+
+    # Column label tiles — centred within each column (after gutter), top edge
+    for c_idx in range(cols):
+        col_left = gutter + int(round(c_idx * (w - gutter) / cols))
+        col_right = gutter + int(round((c_idx + 1) * (w - gutter) / cols))
+        col_centre_x = (col_left + col_right) // 2
+        tx = col_centre_x - tile_w // 2
+        _draw_tile(tx, 0, tile_w, tile_h, str(c_idx + 1))
 
     out = Image.alpha_composite(base, overlay).convert("RGB")
     return out
