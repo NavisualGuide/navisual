@@ -28,8 +28,18 @@ impl Sidecar {
     /// `../../sidecar/main.py` relative to the backend crate root. In a bundled
     /// build this will be replaced by the Tauri-managed external binary path.
     pub async fn spawn(python_script: PathBuf) -> Result<Self> {
+        // Set CWD to the project root (parent of src-tauri) so Python's
+        // pydantic-settings finds `.env` via a relative path regardless of how
+        // Tauri launches the process.
+        let project_root = python_script
+            .parent()   // sidecar/
+            .and_then(|p| p.parent())  // project root
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
         let mut child = Command::new("python")
             .arg(&python_script)
+            .current_dir(&project_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

@@ -1,7 +1,7 @@
 # AI Navigator — Project Guide
 
 **Version:** 0.4.0-alpha
-**Status:** v0.4 Phases A–C complete (Tauri scaffold, Python sidecar, Rust screen capture + A11y + OCR + locator orchestrator). Phase D.1 overlay wiring in progress.
+**Status:** v0.4 Phases A–D.3 complete (Tauri scaffold, Python sidecar, Rust screen capture + A11y + OCR + locator orchestrator, overlay canvas renderer, guidance loop + chat UI, global hotkeys, TTS via Windows SAPI, window position tracker). Next: Phase E — signed installer / packaging.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
 **Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md)
 **Settings:** [settings.md](docs/settings.md)
@@ -312,11 +312,25 @@ if __name__ == "__main__":
 - **Phase C.3 — OCR + orchestrator** (commit 594484f) — `Windows.Media.Ocr` via the `windows` crate (`WriteBytes`/`StoreAsync`/`FlushAsync`/`BitmapDecoder`/`RecognizeAsync`). Line-level + word-level bboxes emitted so single-word targets get a tight box. `find_text` ported from v0.3 Python with identical strategies: exact → substring (MIN_SUBSTR_LEN=8) → fuzzy LCS ratio >0.7, 4%-screen-height button cap, 16×9 zone filter, nearby-text anchor. `LocateOptions` propagates role / nearby_text / zone / timeout. Orchestrator = A11y first, OCR fallback on captured active window. Tauri command `locate_element`.
 - **Phase C hardening** (this commit) — Capture self-exclusion: `get_foreground_frame_rect()` checks PID; when our panel is foreground it walks z-order and returns the first non-self, non-shell window. Fixes the case where the user clicks the locate button (panel becomes foreground) and the OCR path would otherwise capture the panel's own contents instead of Task Manager / the target app. Also bumped A11y default timeouts: `locate_a11y` 100 → 1500 ms, `locate_element` A11y phase 150 → 500 ms; frontend `timeoutMs` 300 → 2000 / 300 → 800 so the backend default isn't overridden.
 
-### 🚧 Next: v0.4 Phase D.1 — overlay wiring
+### ✅ Completed (v0.4 Phase D.1–D.2 — 2026-04-23)
 
-- `src-tauri/src/overlay.rs` (scaffold, unwired) — virtual-desktop rect helper, `configure()` for click-through styles (`WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`), `emit_update()` Tauri event push, `OverlayKind` (Arrow / Box / Subtitle / None).
-- `src/routes/overlay/+page.svelte` — stub route so Tauri has a URL to load; canvas renderer not yet written.
-- `src-tauri/tauri.conf.json` — overlay window defined, `visible: false` until `configure()` is called in `setup()` and WS_EX_* styles are applied (otherwise the frameless fullscreen window freezes a monitor by catching all clicks).
+- **Phase D.1 — overlay wiring**: `overlay.rs` configure() + emit_update() pipeline; `set_ignore_cursor_events(true)` for click-through (raw `SetWindowLongPtrW` does not propagate to WebView2 child HWND); Tauri capability updated to cover `"overlay"` window; canvas renderer in `overlay/+page.svelte` (box + arrow + subtitle).
+- **Phase D.2 — guidance loop + chat UI**: `guide`, `next_step`, `send_correction` Tauri commands; GuidanceState in AppState; panel replaced with task input / instruction panel / Next→ / ✗ Wrong flow; OCR fuzzy threshold raised from 0.7 → 0.85 (prevented "Status"↔"Startup" false match).
+
+### ✅ Completed (v0.4 Phase D.3 — 2026-04-24)
+
+- **Global hotkeys** — `tauri-plugin-global-shortcut` registered from Svelte `onMount`: Alt+` (next step), Alt+E (correction), Alt+S (cancel/pause). Request-token pattern prevents stale AI responses from overwriting a cancelled state.
+- **TTS — Windows SAPI** — `src-tauri/src/tts.rs`; `ISpVoice` COM object on a dedicated STA thread; `SPF_ASYNC | SPF_PURGEBEFORESPEAK` flags so each new instruction instantly cancels the previous one. `speak("")` silences on cancel. No Python dependency.
+- **Window position tracker** — `src-tauri/src/track.rs`; 200 ms polling thread uses `WindowFromPoint` + `GetAncestor(GA_ROOT)` to find the containing HWND, stores element-relative bbox, re-emits overlay on window move/resize, clears on `IsIconic` (minimize), restores on un-minimize.
+- **App close / quit** — `on_window_event(Destroyed)` on the panel window calls `std::process::exit(0)` so closing the window terminates the overlay and Python sidecar. `core:window:allow-close` capability added; capability windows fixed from `"main"` → `"panel"`.
+- **Sidecar CWD fix** — sidecar spawn sets `current_dir` to the project root so `pydantic-settings` always finds `.env` regardless of how Tauri launches.
+- **90 s AI timeout** — `tokio::time::timeout` wraps `send_guidance` and `trigger_correction` sidecar calls; hangs now surface as a user-visible error instead of blocking forever.
+- **Cancel button** — replaces "Guide me" while thinking; drops stale responses via request token; stops TTS and clears overlay immediately.
+
+### 🚧 Next: Phase E — packaging & distribution
+
+- Signed Windows installer (NSIS/WiX + OV cert); embedded Python sidecar via PyInstaller.
+- EV code signing to build SmartScreen reputation.
 
 **Known OCR limitation — Task Manager / high-DPI primary.** Windows.Media.Ocr wants ~30 px text for reliable reads; small-font nav items (Task Manager sidebar ~12–14 physical px) are at the reliability floor. The capture self-exclusion fix removes noise (only the target window is OCR'd), but the text pixel size is what it is. A 2× bilinear upscale of captures with width <1280 before OCR is the planned follow-up if Task Manager / other compact-UI apps miss too often in practice.
 

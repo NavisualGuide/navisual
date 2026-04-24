@@ -74,19 +74,31 @@ fn virtual_desktop_rect() -> Result<Rect> {
 }
 
 /// Size & position the overlay to span the virtual desktop, and apply
-/// click-through window styles. Safe to call multiple times (e.g. on
-/// monitor hot-plug — later).
+/// click-through via Tauri's built-in API (which correctly propagates to
+/// the WebView2 child HWND — raw SetWindowLongPtrW on the outer HWND alone
+/// does not prevent WebView2 from capturing input).
+///
+/// CRITICAL: click-through must succeed before show(). A fullscreen
+/// transparent window that still captures input freezes the desktop.
 pub fn configure(window: &WebviewWindow) -> Result<()> {
-    let rect = virtual_desktop_rect()?;
+    // Use Tauri's API — it handles WebView2's child HWND correctly.
     window
-        .set_position(PhysicalPosition::new(rect.x, rect.y))
-        .map_err(|e| anyhow!("set_position: {e}"))?;
-    window
-        .set_size(PhysicalSize::new(rect.width, rect.height))
-        .map_err(|e| anyhow!("set_size: {e}"))?;
+        .set_ignore_cursor_events(true)
+        .map_err(|e| anyhow!("set_ignore_cursor_events: {e}"))?;
 
-    #[cfg(windows)]
-    apply_click_through(window)?;
+    // Size to virtual desktop — best-effort; failure means overlay is
+    // mispositioned but still click-through and safe to show.
+    match virtual_desktop_rect() {
+        Ok(rect) => {
+            if let Err(e) = window.set_position(PhysicalPosition::new(rect.x, rect.y)) {
+                log::warn!("overlay set_position failed: {e}");
+            }
+            if let Err(e) = window.set_size(PhysicalSize::new(rect.width, rect.height)) {
+                log::warn!("overlay set_size failed: {e}");
+            }
+        }
+        Err(e) => log::warn!("overlay virtual_desktop_rect failed: {e}"),
+    }
 
     Ok(())
 }
@@ -118,26 +130,3 @@ pub fn make_update(
     })
 }
 
-#[cfg(windows)]
-fn apply_click_through(window: &WebviewWindow) -> Result<()> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WINDOW_EX_STYLE, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-    };
-
-    let hwnd_raw = window
-        .hwnd()
-        .map_err(|e| anyhow!("hwnd: {e}"))?;
-    let hwnd = HWND(hwnd_raw.0 as *mut _);
-    unsafe {
-        let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let new_style = WINDOW_EX_STYLE(cur as u32)
-            | WS_EX_TRANSPARENT
-            | WS_EX_LAYERED
-            | WS_EX_TOOLWINDOW
-            | WS_EX_NOACTIVATE;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style.0 as isize);
-    }
-    Ok(())
-}

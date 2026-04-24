@@ -20,9 +20,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 log = "0.4"
@@ -40,11 +41,14 @@ windows = { version = "0.62", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
+  "Win32_System_Com",
   # Phase C.3 — Windows.Media.Ocr
   "Foundation_Collections",
   "Media_Ocr",
   "Graphics_Imaging",
   "Storage_Streams",
+  # Phase D.3 — TTS via Windows SAPI
+  "Win32_Media_Speech",
 ] }
 uiautomation = { version = "0.24.4", features = ["process"] }
 

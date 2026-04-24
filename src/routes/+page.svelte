@@ -1,263 +1,314 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
 
-  type CaptureResult = {
-    jpeg_base64: string;
-    width: number;
-    height: number;
-    crop_rect: { x: number; y: number; width: number; height: number } | null;
-    bytes: number;
-    elapsed_ms: number;
-  };
-
-  let status = $state<"idle" | "pinging" | "ok" | "error">("idle");
-  let reply = $state("");
-  let echoInput = $state("Hello, sidecar!");
-  let echoReply = $state("");
-
-  let captureStatus = $state<"idle" | "capturing" | "ok" | "error">("idle");
-  let captureResult = $state<CaptureResult | null>(null);
-  let captureError = $state("");
+  type Rect = { x: number; y: number; width: number; height: number };
 
   type LocateResult = {
-    bbox: { x: number; y: number; width: number; height: number };
+    bbox: Rect;
     name: string;
     role: string;
     confidence: number;
   };
 
-  let locateText = $state("");
-  let locateRole = $state("");
-  let locateStatus = $state<"idle" | "locating" | "ok" | "notfound" | "error">("idle");
+  type GuidanceStep = {
+    instruction: string;
+    target_text: string | null;
+    target_role: string | null;
+    target_nearby_text: string | null;
+    target_zone_x: number | null;
+    target_zone_y: number | null;
+    overlay_type: string;
+    clipboard: string | null;
+    checkpoint: boolean;
+  };
+
+  type GuideResponse = {
+    ok: boolean;
+    session_id: string;
+    steps: GuidanceStep[];
+    step_index: number;
+    instruction: string;
+    located: LocateResult | null;
+    needs_input: boolean;
+    provider: string;
+    error: string | null;
+  };
+
+  type AppPhase =
+    | "idle"
+    | "thinking"
+    | "guiding"
+    | "needs_input"
+    | "error";
+
+  let task = $state("");
+  let phase = $state<AppPhase>("idle");
+  let errorMsg = $state("");
+
+  let steps = $state<GuidanceStep[]>([]);
+  let stepIndex = $state(0);
+  let currentInstruction = $state("");
   let locateResult = $state<LocateResult | null>(null);
-  let locateError = $state("");
-  let locateElapsed = $state(0);
+  let sessionId = $state("");
+  let provider = $state("");
 
-  let elementResult = $state<LocateResult | null>(null);
-  let elementStatus = $state<"idle" | "locating" | "ok" | "notfound" | "error">("idle");
-  let elementError = $state("");
-  let elementElapsed = $state(0);
+  let elapsedMs = $state(0);
+  let elapsedTimer: ReturnType<typeof setInterval> | null = null;
+  let elapsedStart = 0;
 
-  async function ping() {
-    status = "pinging";
-    reply = "";
-    try {
-      reply = await invoke<string>("ping_sidecar");
-      status = "ok";
-    } catch (e) {
-      reply = String(e);
-      status = "error";
+  // Monotonically incrementing token; any response whose token doesn't match
+  // the current one was generated after the user cancelled — ignore it.
+  let requestToken = 0;
+
+  function startTimer() {
+    elapsedStart = performance.now();
+    if (elapsedTimer) clearInterval(elapsedTimer);
+    elapsedTimer = setInterval(() => {
+      elapsedMs = Math.round(performance.now() - elapsedStart);
+    }, 200);
+  }
+
+  function stopTimer() {
+    if (elapsedTimer) {
+      clearInterval(elapsedTimer);
+      elapsedTimer = null;
     }
   }
 
-  async function echo() {
-    try {
-      echoReply = await invoke<string>("sidecar_echo", { text: echoInput });
-    } catch (e) {
-      echoReply = String(e);
-    }
+  function cancelRequest() {
+    requestToken++;           // invalidate any in-flight response
+    stopTimer();
+    invoke("clear_overlay").catch(() => {});
+    invoke("speak", { text: "" }).catch(() => {}); // stop TTS
+    phase = "idle";
   }
 
-  async function locate() {
-    if (!locateText.trim()) return;
-    locateStatus = "locating";
-    locateResult = null;
-    locateError = "";
-    const start = performance.now();
+  function closeWindow() {
+    getCurrentWindow().close();
+  }
+
+  function applyResponse(res: GuideResponse, idx: number, token: number) {
+    if (token !== requestToken) return; // stale — user cancelled
+    steps = res.steps;
+    stepIndex = idx;
+    currentInstruction = res.instruction;
+    locateResult = res.located;
+    sessionId = res.session_id;
+    if (res.provider) provider = res.provider;
+    phase = res.needs_input ? "needs_input" : "guiding";
+    if (res.instruction) invoke("speak", { text: res.instruction }).catch(() => {});
+  }
+
+  async function guide() {
+    if (!task.trim()) return;
+    phase = "thinking";
+    errorMsg = "";
+    startTimer();
+    const token = ++requestToken;
     try {
-      const res = await invoke<LocateResult | null>("locate_a11y", {
-        text: locateText,
-        role: locateRole.trim() || null,
-        timeoutMs: 2000,
-      });
-      locateElapsed = Math.round(performance.now() - start);
-      if (res) {
-        locateResult = res;
-        locateStatus = "ok";
-      } else {
-        locateStatus = "notfound";
+      const res = await invoke<GuideResponse>("guide", { task: task.trim() });
+      stopTimer();
+      if (token !== requestToken) return;
+      if (!res.ok) {
+        phase = "error";
+        errorMsg = res.error ?? "guide failed";
+        return;
       }
+      applyResponse(res, 0, token);
     } catch (e) {
-      locateError = String(e);
-      locateStatus = "error";
+      stopTimer();
+      if (token !== requestToken) return;
+      phase = "error";
+      errorMsg = String(e);
     }
   }
 
-  async function locateFull() {
-    if (!locateText.trim()) return;
-    elementStatus = "locating";
-    elementResult = null;
-    elementError = "";
-    const start = performance.now();
-    try {
-      const res = await invoke<LocateResult | null>("locate_element", {
-        text: locateText,
-        role: locateRole.trim() || null,
-        nearbyText: null,
-        zoneX: null,
-        zoneY: null,
-        timeoutMs: 800,
-      });
-      elementElapsed = Math.round(performance.now() - start);
-      if (res) {
-        elementResult = res;
-        elementStatus = "ok";
-      } else {
-        elementStatus = "notfound";
+  async function nextStep() {
+    const nextIdx = stepIndex + 1;
+    if (nextIdx >= steps.length) {
+      task = "";
+      phase = "thinking";
+      errorMsg = "";
+      startTimer();
+      const token = ++requestToken;
+      try {
+        const res = await invoke<GuideResponse>("guide", { task: "" });
+        stopTimer();
+        if (token !== requestToken) return;
+        if (!res.ok) {
+          phase = "error";
+          errorMsg = res.error ?? "re-query failed";
+          return;
+        }
+        applyResponse(res, 0, token);
+      } catch (e) {
+        stopTimer();
+        if (token !== requestToken) return;
+        phase = "error";
+        errorMsg = String(e);
       }
+      return;
+    }
+
+    phase = "thinking";
+    startTimer();
+    const token = ++requestToken;
+    try {
+      const res = await invoke<GuideResponse>("next_step", { stepIndex: nextIdx });
+      stopTimer();
+      if (token !== requestToken) return;
+      applyResponse(res, nextIdx, token);
     } catch (e) {
-      elementError = String(e);
-      elementStatus = "error";
+      stopTimer();
+      if (token !== requestToken) return;
+      phase = "error";
+      errorMsg = String(e);
     }
   }
 
-  async function capture(mode: "screen" | "active") {
-    captureStatus = "capturing";
-    captureError = "";
-    captureResult = null;
+  async function correction() {
+    phase = "thinking";
+    errorMsg = "";
+    startTimer();
+    const token = ++requestToken;
     try {
-      const cmd = mode === "screen" ? "capture_screen" : "capture_active_window";
-      captureResult = await invoke<CaptureResult>(cmd, { quality: 80 });
-      captureStatus = "ok";
+      const res = await invoke<GuideResponse>("send_correction");
+      stopTimer();
+      if (token !== requestToken) return;
+      if (!res.ok) {
+        phase = "error";
+        errorMsg = res.error ?? "correction failed";
+        return;
+      }
+      applyResponse(res, 0, token);
     } catch (e) {
-      captureError = String(e);
-      captureStatus = "error";
+      stopTimer();
+      if (token !== requestToken) return;
+      phase = "error";
+      errorMsg = String(e);
     }
   }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey && phase === "idle") {
+      e.preventDefault();
+      guide();
+    }
+  }
+
+  let statusLabel = $derived(
+    phase === "idle" ? "idle"
+    : phase === "thinking" ? `thinking · ${(elapsedMs / 1000).toFixed(1)}s`
+    : phase === "guiding" ? "guiding"
+    : phase === "needs_input" ? "needs input"
+    : "error"
+  );
+
+  onMount(async () => {
+    try {
+      // Alt+` — advance to next step
+      await register("Alt+Backquote", () => {
+        if (phase === "guiding" || phase === "needs_input") nextStep();
+      });
+      // Alt+E — report wrong / correction
+      await register("Alt+KeyE", () => {
+        if (phase === "guiding" || phase === "needs_input") correction();
+      });
+      // Alt+S — pause: cancel any in-flight request and return to idle
+      await register("Alt+KeyS", () => {
+        if (phase === "guiding" || phase === "needs_input" || phase === "thinking") {
+          cancelRequest();
+        }
+      });
+    } catch (e) {
+      console.warn("global shortcut registration failed:", e);
+    }
+  });
+
+  onDestroy(async () => {
+    await unregisterAll().catch(() => {});
+  });
 </script>
 
 <main>
   <header>
     <span class="dot"></span>
     <h1>AI Navigator</h1>
-    <span class="tag">v0.4.0-alpha · Phase C.1</span>
+    <span class="tag">v0.4.0-alpha{provider ? ` · ${provider}` : ""}</span>
+    <button class="close-btn" onclick={closeWindow} title="Close">✕</button>
   </header>
 
-  <section class="card">
-    <div class="row">
-      <span class="label">Sidecar</span>
-      <span class="status status-{status}">
-        {#if status === "idle"}not pinged yet{/if}
-        {#if status === "pinging"}pinging…{/if}
-        {#if status === "ok"}online{/if}
-        {#if status === "error"}error{/if}
-      </span>
-    </div>
-
-    <div class="button-row">
-      <button class="primary" onclick={ping} disabled={status === "pinging"}>
-        Ping
+  <section class="card task-card">
+    <textarea
+      bind:value={task}
+      onkeydown={handleKeydown}
+      placeholder="What do you need help with?"
+      rows={3}
+      disabled={phase === "thinking"}
+    ></textarea>
+    {#if phase === "thinking"}
+      <button class="ghost full-width" onclick={cancelRequest}>Cancel</button>
+    {:else}
+      <button
+        class="primary full-width"
+        onclick={guide}
+        disabled={!task.trim()}
+      >
+        Guide me
       </button>
-      <button class="ghost" onclick={echo}>Echo</button>
-    </div>
-
-    <input bind:value={echoInput} placeholder="Echo text…" />
-
-    {#if reply}
-      <pre class="reply">{reply}</pre>
-    {/if}
-    {#if echoReply}
-      <pre class="reply">{echoReply}</pre>
     {/if}
   </section>
 
-  <section class="card">
-    <div class="row">
-      <span class="label">Capture</span>
-      <span class="status status-{captureStatus}">
-        {#if captureStatus === "idle"}ready{/if}
-        {#if captureStatus === "capturing"}capturing…{/if}
-        {#if captureStatus === "ok"}ok{/if}
-        {#if captureStatus === "error"}error{/if}
-      </span>
-    </div>
+  {#if phase === "guiding" || phase === "needs_input" || phase === "thinking"}
+    {#if steps.length > 0 && currentInstruction}
+      <section class="card instruction-card">
+        <div class="step-counter">Step {stepIndex + 1} of {steps.length}</div>
+        <p class="instruction-text">{currentInstruction}</p>
 
-    <div class="button-row">
-      <button class="primary" onclick={() => capture("screen")} disabled={captureStatus === "capturing"}>
-        Full screen
-      </button>
-      <button class="ghost" onclick={() => capture("active")} disabled={captureStatus === "capturing"}>
-        Active window
-      </button>
-    </div>
+        {#if locateResult}
+          <div class="locate-meta">
+            <span class="badge {locateResult.role === 'Ocr' ? 'badge-warn' : 'badge-ok'}">
+              {locateResult.role}
+            </span>
+            <span class="conf">{(locateResult.confidence * 100).toFixed(0)}% · {locateResult.name}</span>
+          </div>
+        {:else if steps[stepIndex]?.target_text}
+          <div class="locate-meta">
+            <span class="badge badge-miss">not located</span>
+            <span class="conf">{steps[stepIndex].target_text}</span>
+          </div>
+        {/if}
 
-    {#if captureResult}
-      <div class="capture-meta">
-        <span>{captureResult.width}×{captureResult.height}</span>
-        <span>{(captureResult.bytes / 1024).toFixed(1)} KB</span>
-        <span>{captureResult.elapsed_ms} ms</span>
-      </div>
-      {#if captureResult.crop_rect}
-        <div class="capture-meta">
-          <span class="label-sm">crop</span>
-          <span>x={captureResult.crop_rect.x} y={captureResult.crop_rect.y}</span>
-          <span>{captureResult.crop_rect.width}×{captureResult.crop_rect.height}</span>
+        <div class="action-row">
+          <button class="primary" onclick={nextStep} disabled={phase === "thinking"}>
+            Next →
+          </button>
+          <button class="danger" onclick={correction} disabled={phase === "thinking"}>
+            ✗ Wrong
+          </button>
         </div>
-      {/if}
-      <img class="preview" src={`data:image/jpeg;base64,${captureResult.jpeg_base64}`} alt="capture" />
+      </section>
     {/if}
-    {#if captureError}
-      <pre class="reply error">{captureError}</pre>
-    {/if}
-  </section>
+  {/if}
 
-  <section class="card">
-    <div class="row">
-      <span class="label">Locate (A11y)</span>
-      <span class="status status-{locateStatus === 'ok' ? 'ok' : locateStatus === 'notfound' ? 'error' : locateStatus === 'locating' ? 'capturing' : locateStatus === 'error' ? 'error' : 'idle'}">
-        {#if locateStatus === "idle"}ready{/if}
-        {#if locateStatus === "locating"}searching…{/if}
-        {#if locateStatus === "ok"}found · {locateElapsed} ms{/if}
-        {#if locateStatus === "notfound"}not found · {locateElapsed} ms{/if}
-        {#if locateStatus === "error"}error{/if}
-      </span>
-    </div>
-
-    <input bind:value={locateText} placeholder="Target text (e.g. File, Save, Continue)" />
-    <input bind:value={locateRole} placeholder="Optional role (button, tab, link, menuitem…)" />
-
-    <div class="button-row">
-      <button class="primary" onclick={locate} disabled={locateStatus === "locating" || !locateText.trim()}>
-        A11y only
+  {#if phase === "error"}
+    <section class="card error-card">
+      <p class="error-text">{errorMsg}</p>
+      <button class="ghost" onclick={() => { phase = "idle"; errorMsg = ""; }}>
+        Dismiss
       </button>
-      <button class="ghost" onclick={locateFull} disabled={elementStatus === "locating" || !locateText.trim()}>
-        A11y → OCR
-      </button>
-    </div>
-
-    {#if locateResult}
-      <div class="capture-meta">
-        <span class="label-sm">a11y</span>
-        <span>{locateResult.role}</span>
-        <span>x={locateResult.bbox.x} y={locateResult.bbox.y}</span>
-        <span>{locateResult.bbox.width}×{locateResult.bbox.height}</span>
-      </div>
-      <pre class="reply">name: {locateResult.name}</pre>
-    {/if}
-    {#if locateError}
-      <pre class="reply error">{locateError}</pre>
-    {/if}
-
-    {#if elementResult}
-      <div class="capture-meta">
-        <span class="label-sm">orch</span>
-        <span>{elementResult.role}</span>
-        <span>x={elementResult.bbox.x} y={elementResult.bbox.y}</span>
-        <span>{elementResult.bbox.width}×{elementResult.bbox.height}</span>
-        <span>{elementElapsed} ms</span>
-      </div>
-      <pre class="reply">name: {elementResult.name} (conf {elementResult.confidence.toFixed(2)})</pre>
-    {/if}
-    {#if elementStatus === "notfound"}
-      <pre class="reply">orch: not found ({elementElapsed} ms)</pre>
-    {/if}
-    {#if elementError}
-      <pre class="reply error">{elementError}</pre>
-    {/if}
-  </section>
+    </section>
+  {/if}
 
   <footer>
-    Svelte → Rust → Python — capture via xcap + DWM.
+    <span class="status-dot status-{phase}"></span>
+    <span class="status-label">{statusLabel}</span>
+    {#if sessionId}
+      <span class="session-id">{sessionId.slice(0, 8)}</span>
+    {/if}
   </footer>
 </main>
 
@@ -299,7 +350,6 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
-    overflow-y: auto;
   }
 
   header {
@@ -308,6 +358,7 @@
     gap: 10px;
     padding-bottom: 12px;
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
 
   h1 {
@@ -323,6 +374,7 @@
     border-radius: 50%;
     background: var(--accent-500);
     box-shadow: 0 0 12px rgba(255, 107, 53, 0.5);
+    flex-shrink: 0;
   }
 
   .tag {
@@ -331,6 +383,27 @@
     font-weight: 500;
     color: var(--text-tertiary);
     font-family: "JetBrains Mono", ui-monospace, monospace;
+    white-space: nowrap;
+  }
+
+  .close-btn {
+    margin-left: 8px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 11px;
+    background: transparent;
+    color: var(--text-tertiary);
+    border: none;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .close-btn:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--danger);
   }
 
   .card {
@@ -343,44 +416,160 @@
     gap: 10px;
   }
 
-  .row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+  .task-card {
+    flex-shrink: 0;
   }
 
-  .button-row {
-    display: flex;
-    gap: 8px;
+  .instruction-card {
+    flex: 1;
+    overflow: hidden;
   }
-  .button-row button { flex: 1; }
 
-  .label {
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+  .error-card {
+    border-color: rgba(239, 68, 68, 0.3);
+    background: rgba(239, 68, 68, 0.06);
+    flex-shrink: 0;
   }
-  .label-sm {
-    font-size: 10px;
-    font-weight: 500;
+
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+    padding: 10px;
+    border-radius: 8px;
+    background: var(--surface-1);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    outline: none;
+    resize: none;
+    line-height: 1.5;
+    transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
+  }
+
+  textarea:focus {
+    border-color: var(--accent-500);
+    box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.18);
+  }
+
+  textarea:disabled {
+    opacity: 0.5;
+  }
+
+  .step-counter {
+    font-size: 11px;
+    font-weight: 600;
     color: var(--text-tertiary);
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.08em;
   }
 
-  .status {
-    font-size: 12px;
+  .instruction-text {
+    font-size: 16px;
     font-weight: 500;
-    padding: 2px 8px;
-    border-radius: 9999px;
-    background: var(--surface-3);
-    color: var(--text-secondary);
+    line-height: 1.55;
+    color: var(--text-primary);
+    margin: 0;
+    flex: 1;
   }
-  .status-ok { color: var(--success); background: rgba(34, 197, 94, 0.12); }
-  .status-error { color: var(--danger); background: rgba(239, 68, 68, 0.12); }
-  .status-pinging, .status-capturing { color: var(--warning); background: rgba(245, 158, 11, 0.12); }
+
+  .locate-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 9999px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .badge-ok {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--success);
+  }
+
+  .badge-warn {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--warning);
+  }
+
+  .badge-miss {
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--danger);
+  }
+
+  .conf {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .action-row {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+  }
+
+  .action-row button {
+    flex: 1;
+  }
+
+  .error-text {
+    font-size: 13px;
+    color: var(--danger);
+    margin: 0;
+    word-break: break-word;
+  }
+
+  footer {
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--text-tertiary);
+  }
+
+  .status-dot.status-idle { background: var(--text-tertiary); }
+  .status-dot.status-thinking { background: var(--warning); animation: pulse 1s ease-in-out infinite; }
+  .status-dot.status-guiding { background: var(--success); }
+  .status-dot.status-needs_input { background: var(--accent-500); }
+  .status-dot.status-error { background: var(--danger); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .status-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  .session-id {
+    margin-left: auto;
+    font-size: 10px;
+    color: var(--text-tertiary);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    opacity: 0.6;
+  }
 
   button {
     font-family: inherit;
@@ -401,69 +590,22 @@
   button.primary:active { background: var(--accent-600); }
   button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  button.danger {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+  button.danger:hover { background: rgba(239, 68, 68, 0.25); }
+  button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
   button.ghost {
     background: var(--surface-3);
     color: var(--text-primary);
     border-color: var(--border);
   }
   button.ghost:hover { background: #2d2d33; }
-  button.ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  input {
-    font-family: inherit;
-    font-size: 13px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: var(--surface-1);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    outline: none;
-    transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
-  }
-  input:focus {
-    border-color: var(--accent-500);
-    box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.18);
-  }
-
-  .reply {
-    margin: 0;
-    padding: 8px 10px;
-    background: var(--surface-1);
-    border: 1px solid var(--border);
-    border-left: 2px solid var(--accent-500);
-    border-radius: 8px;
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 11px;
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    word-break: break-all;
-    max-height: 90px;
-    overflow-y: auto;
-  }
-  .reply.error { border-left-color: var(--danger); color: var(--danger); }
-
-  .capture-meta {
-    display: flex;
-    gap: 10px;
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 10px;
-    color: var(--text-tertiary);
-  }
-
-  .preview {
+  .full-width {
     width: 100%;
-    height: auto;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--surface-0);
-  }
-
-  footer {
-    margin-top: auto;
-    font-size: 11px;
-    color: var(--text-tertiary);
-    text-align: center;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
   }
 </style>

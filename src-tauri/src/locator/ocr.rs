@@ -360,9 +360,10 @@ pub fn find_text<'a>(
         return Some(r);
     }
 
-    // Strategy 3: fuzzy SequenceMatcher > 0.7.
+    // Strategy 3: fuzzy SequenceMatcher > 0.85.
+    // 0.7 was too loose — "Status" matched "Startup" at 0.77.
     let mut best: Option<&OcrResult> = None;
-    let mut best_ratio = 0.7f32;
+    let mut best_ratio = 0.85f32;
     for r in &candidates {
         let rc = strip_punct(&r.text).to_ascii_lowercase();
         if rc.is_empty() {
