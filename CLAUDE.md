@@ -327,10 +327,62 @@ if __name__ == "__main__":
 - **90 s AI timeout** — `tokio::time::timeout` wraps `send_guidance` and `trigger_correction` sidecar calls; hangs now surface as a user-visible error instead of blocking forever.
 - **Cancel button** — replaces "Guide me" while thinking; drops stale responses via request token; stops TTS and clears overlay immediately.
 
-### 🚧 Next: Phase E — packaging & distribution
+### 🚧 Next: Phase E — UI overhaul + feature parity with v0.3
 
-- Signed Windows installer (NSIS/WiX + OV cert); embedded Python sidecar via PyInstaller.
-- EV code signing to build SmartScreen reputation.
+Feature gap analysis (v0.3 Python → v0.4 Tauri) revealed these missing user-facing features.
+Prioritized order:
+
+#### E.1 — UI overhaul (panel redesign)
+The current Svelte panel is a bare MVP. Needs full redesign to match v0.3 ConsolidatedPanel:
+- **Draggable** — title bar drag to move the frameless window anywhere on screen.
+- **Collapse/minimize** — ⊟ button collapses panel to a small 56×56 orange dot (icon mode);
+  clicking the dot restores the panel. Matches v0.3 `_to_icon_mode` / `_to_panel_mode`.
+- **Instruction history** — scrollable chat log below the latest-instruction box; color-coded by
+  role (user=orange, AI=teal, correction=amber, system=gray). Matches v0.3 `_build_chat_history`.
+- **Latest-instruction box** — prominent orange-tinted top area with orange left border showing
+  current instruction in larger text + step counter. Always visible even during thinking.
+- **Action row** — four buttons always visible: → Next (green), ✗ Wrong (red), ⏸ Pause (amber),
+  🎤 Speak (blue, hidden until voice enabled). Matches v0.3 `_build_action_row`.
+- **Shortcut legend** — fixed bottom bar: `Alt+\` = Next   Alt+E = Wrong   Alt+S = Pause   Alt+Q = Icon`.
+- **Title bar** — 🧭 icon, "AI Navigator" title, status dot, token count, ⚙ Settings, ＋ New, × Quit.
+- **Initial position** — bottom-right of primary screen (matches v0.3 `_position_bottom_right`).
+
+#### E.2 — Streaming responses
+Currently the UI shows "Thinking…" for the full API round-trip then renders the complete text.
+v0.3 had word-by-word streaming. Approach: sidecar already streams via `on_text_chunk` callback;
+wire a `stream_chunk` sidecar dispatcher event → Rust emits `guidance:chunk` Tauri event →
+Svelte updates the latest-instruction box in real time.
+
+#### E.3 — Screen change detection + auto-advance
+v0.3 monitored pixel-diff at 10fps and auto-advanced to the next step when the screen changed
+significantly (non-checkpoint steps). In v0.4, user must manually click Next after every action.
+Approach: Rust background task captures the active window every 500ms, computes pHash distance
+vs last-step snapshot; if distance > threshold and current step is non-checkpoint → auto-call
+`next_step`. Controlled by `CHECKPOINT_AUTO_ADVANCE` setting (default false).
+
+#### E.4 — Clipboard handling
+The `clipboard` field in `GuidanceStep` is parsed from the AI response but never acted on.
+When non-null, write the value to the system clipboard so the user can paste CLI commands etc.
+Rust: `arboard` crate (already a Tauri dependency). One-liner in `execute_step`.
+
+#### E.5 — `needs_input` text field
+When AI sets `needs_input=true`, the current UI shows the question as an instruction but
+provides no way to type a reply. Fix: when `phase === "needs_input"`, render a single-line
+text input + Send button above the action row; submitting it calls `guide({ task: reply })`.
+
+#### E.6 — Settings UI
+Users currently edit `.env` manually to change provider, API key, or model.
+Build a Svelte settings modal (⚙ button in title bar) with tabs:
+- **Provider** — radio for Anthropic/Gemini/Ollama/OpenAI + key fields + model dropdowns.
+- **Overlay** — color picker, thickness, duration.
+- **Hotkeys** — display current bindings (read-only for now; editable in later pass).
+On Apply: invoke a `save_settings` Rust command that writes the `.env` atomically and
+re-initializes the sidecar (restart sidecar process with new config).
+
+#### E.7 — Voice input
+Alt+A push-to-talk: record microphone via `tauri-plugin-microphone` or a JS `MediaRecorder`,
+send audio to Google Web Speech API (free, same as v0.3), receive transcript, submit as task.
+The 🎤 Speak button in the action row triggers this.
 
 **Known OCR limitation — Task Manager / high-DPI primary.** Windows.Media.Ocr wants ~30 px text for reliable reads; small-font nav items (Task Manager sidebar ~12–14 physical px) are at the reliability floor. The capture self-exclusion fix removes noise (only the target window is OCR'd), but the text pixel size is what it is. A 2× bilinear upscale of captures with width <1280 before OCR is the planned follow-up if Task Manager / other compact-UI apps miss too often in practice.
 
