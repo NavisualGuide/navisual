@@ -178,23 +178,22 @@ async fn guide(
         let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
     };
 
-    let resp = if task.is_empty() {
+    let (resp, sent_user_prompt) = if task.is_empty() {
         let summary = {
             let g = state.guidance.lock().unwrap();
             g.state_summary.clone()
         };
-        router.send_resume_request(&summary, Some(&screenshot_b64), on_chunk).await
+        let prompt = crate::ai::prompts::session_resume_template(&summary);
+        (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
     } else if is_reply {
         let summary = {
             let g = state.guidance.lock().unwrap();
             g.state_summary.clone()
         };
-        if let Some(session) = &mut router.session_manager.current_session {
-            session.add_turn("user", task.clone(), None);
-        }
-        router.send_resume_request(&summary, Some(&screenshot_b64), on_chunk).await
+        (router.send_guidance_request(&task, Some(&screenshot_b64), Some(&summary), on_chunk).await, task.clone())
     } else {
-        router.send_initial_request(&task, Some(&screenshot_b64), on_chunk).await
+        let prompt = crate::ai::prompts::initial_context_template(&task);
+        (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
     };
 
     let response = match resp {
@@ -221,6 +220,7 @@ async fn guide(
 
     if let Some(session) = &mut router.session_manager.current_session {
         session.update_state(state_summary.clone());
+        session.add_turn("user", sent_user_prompt, None);
         let content = steps.iter().map(|s| s.instruction.clone()).collect::<Vec<_>>().join("\n");
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
@@ -349,6 +349,7 @@ async fn send_correction(
 
     if let Some(session) = &mut router.session_manager.current_session {
         session.update_state(state_summary.clone());
+        session.add_turn("user", user_text.to_string(), None);
         let content = steps.iter().map(|s| s.instruction.clone()).collect::<Vec<_>>().join("\n");
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);

@@ -179,10 +179,11 @@
     }
 
     if (!u.bbox) return;
-    const bx = u.bbox.x - ox;
-    const by = u.bbox.y - oy;
-    const bw = u.bbox.width;
-    const bh = u.bbox.height;
+    const padding = 6;
+    const bx = u.bbox.x - ox - padding;
+    const by = u.bbox.y - oy - padding;
+    const bw = u.bbox.width + padding * 2;
+    const bh = u.bbox.height + padding * 2;
 
     if (u.kind === "arrow") drawArrow(ctx, bx, by, bw, bh, t);
     else drawBox(ctx, bx, by, bw, bh, t);
