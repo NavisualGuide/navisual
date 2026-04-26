@@ -1,0 +1,60 @@
+{
+  "id": "c08df6ea-5681-42ce-b72a-4b2a552610b1",
+  "task_description": "where is it?",
+  "conversation": [
+    {
+      "role": "assistant",
+      "content": "Look for the \"Income summary\" tab on the left side of the screen. It is currently selected.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:44:12.968235600-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click the \"Continue\" button at the bottom right of the screen.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:44:36.437246-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click the \"Continue\" button.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:44:47.684940200-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click the \"Continue\" button.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:44:55.773427-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click the \"Continue\" button on the bottom right of the screen.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:45:01.263353-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click the \"Continue\" button, which is a blue button located at the bottom right of the screen.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:45:14.562807500-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click the \"Yes\" button to use the RRSP Wizard.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:45:28.551779600-07:00"
+    }
+  ],
+  "current_state_summary": {
+    "summary_text": "The user is on the RRSP wizard page. The question is \"Would you like to use the RRSP Wizard to determine your optimal RRSP contribution?\". The user needs to click \"Yes\" or \"No\".",
+    "turn_index": 6
+  },
+  "current_step_sequence": [],
+  "current_step_index": 0,
+  "token_usage": {
+    "input": 14563,
+    "output": 844
+  },
+  "started_at": "2026-04-25T20:44:10.965218300-07:00",
+  "last_active_at": "2026-04-25T20:45:28.551805200-07:00"
+}

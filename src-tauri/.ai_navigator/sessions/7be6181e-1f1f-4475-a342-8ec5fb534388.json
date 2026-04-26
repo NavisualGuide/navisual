@@ -1,0 +1,24 @@
+{
+  "id": "7be6181e-1f1f-4475-a342-8ec5fb534388",
+  "task_description": "already done. what's next?",
+  "conversation": [
+    {
+      "role": "assistant",
+      "content": "The task is already done. Please let me know what you would like to do next.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:47:58.015198900-07:00"
+    }
+  ],
+  "current_state_summary": {
+    "summary_text": "The user has indicated that the task is complete and is asking for the next step. The current screen shows a Microsoft Word document with the ribbon visible, including formatting and editing options. There is also a prompt to \"Describe what you'd like to draft with Copilot.\"",
+    "turn_index": 0
+  },
+  "current_step_sequence": [],
+  "current_step_index": 0,
+  "token_usage": {
+    "input": 2003,
+    "output": 108
+  },
+  "started_at": "2026-04-25T20:47:55.104411400-07:00",
+  "last_active_at": "2026-04-25T20:47:58.015228300-07:00"
+}

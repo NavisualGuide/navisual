@@ -169,11 +169,12 @@
     const taskText = task.trim();
     await addToHistory("user", taskText);
     currentInstruction = "";
+    const isReply = phase === "needs_input";
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("guide", { task: taskText });
+      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply });
       stopTimer();
       if (token !== requestToken) return;
       if (!res.ok) {
@@ -198,7 +199,7 @@
       startTimer();
       const token = ++requestToken;
       try {
-        const res = await invoke<GuideResponse>("guide", { task: "" });
+        const res = await invoke<GuideResponse>("guide", { task: "", isReply: false });
         stopTimer();
         if (token !== requestToken) return;
         if (!res.ok) {

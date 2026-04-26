@@ -136,8 +136,9 @@ async fn guide(
     app: AppHandle,
     state: State<'_, AppState>,
     task: String,
+    is_reply: bool,
 ) -> Result<GuideResponse, String> {
-    if !task.is_empty() {
+    if !task.is_empty() && !is_reply {
         let mut g = state.guidance.lock().unwrap();
         g.session_id = None;
         g.steps = vec![];
@@ -146,7 +147,7 @@ async fn guide(
 
     let session_id = {
         let mut router = state.ai_router.lock().await;
-        if task.is_empty() {
+        if task.is_empty() || is_reply {
             if let Some(session) = &router.session_manager.current_session {
                 session.id.to_string()
             } else {
@@ -182,6 +183,15 @@ async fn guide(
             let g = state.guidance.lock().unwrap();
             g.state_summary.clone()
         };
+        router.send_resume_request(&summary, Some(&screenshot_b64), on_chunk).await
+    } else if is_reply {
+        let summary = {
+            let g = state.guidance.lock().unwrap();
+            g.state_summary.clone()
+        };
+        if let Some(session) = &mut router.session_manager.current_session {
+            session.add_turn("user", task.clone(), None);
+        }
         router.send_resume_request(&summary, Some(&screenshot_b64), on_chunk).await
     } else {
         router.send_initial_request(&task, Some(&screenshot_b64), on_chunk).await
@@ -536,31 +546,16 @@ pub fn run() {
             let overlay_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(2000)).await;
-                let build = tauri::WebviewWindowBuilder::new(
-                    &overlay_handle,
-                    "overlay",
-                    tauri::WebviewUrl::App(std::path::PathBuf::from("overlay")),
-                )
-                .title("AI Navigator Overlay")
-                .resizable(false)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .focused(false)
-                .visible(false)
-                .build();
-                match build {
-                    Ok(win) => match overlay::configure(&win) {
+                if let Some(win) = overlay_handle.get_webview_window("overlay") {
+                    match overlay::configure(&win) {
                         Ok(()) => {
                             let _ = win.show();
-                            log::info!("overlay window created and shown");
+                            log::info!("overlay window configured and shown");
                         }
-                        Err(e) => log::error!(
-                            "overlay configure failed — NOT showing (would freeze input): {e}"
-                        ),
-                    },
-                    Err(e) => log::error!("overlay window creation failed: {e}"),
+                        Err(e) => log::error!("overlay configure failed — NOT showing: {e}"),
+                    }
+                } else {
+                    log::error!("overlay window not found from tauri.conf.json!");
                 }
             });
 

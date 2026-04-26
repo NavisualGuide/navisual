@@ -1,0 +1,24 @@
+{
+  "id": "8d5aa9e2-0c66-4218-b784-3b63844ef8eb",
+  "task_description": "help me with dong tax return using turbotax desktop.",
+  "conversation": [
+    {
+      "role": "assistant",
+      "content": "To begin your tax return, open your browser and navigate to the TurboTax website.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T20:41:42.165161900-07:00"
+    }
+  ],
+  "current_state_summary": {
+    "summary_text": "The user wants to do their tax return using TurboTax desktop.",
+    "turn_index": 0
+  },
+  "current_step_sequence": [],
+  "current_step_index": 0,
+  "token_usage": {
+    "input": 2007,
+    "output": 64
+  },
+  "started_at": "2026-04-25T20:41:38.918843300-07:00",
+  "last_active_at": "2026-04-25T20:41:42.165183100-07:00"
+}
