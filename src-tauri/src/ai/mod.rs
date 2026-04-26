@@ -7,6 +7,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod ollama;
 pub mod router;
+pub mod streaming;
 
 pub use router::AiRouter;
 pub use config::Config;

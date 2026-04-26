@@ -4,6 +4,7 @@
   import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
+  import { listen } from "@tauri-apps/api/event";
 
   type Rect = { x: number; y: number; width: number; height: number };
   type LocateResult = { bbox: Rect; name: string; role: string; confidence: number };
@@ -167,6 +168,7 @@
     if (!task.trim()) return;
     const taskText = task.trim();
     await addToHistory("user", taskText);
+    currentInstruction = "";
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -191,6 +193,7 @@
   async function nextStep() {
     const nextIdx = stepIndex + 1;
     if (nextIdx >= steps.length) {
+      currentInstruction = "";
       phase = "thinking";
       startTimer();
       const token = ++requestToken;
@@ -231,6 +234,7 @@
 
   async function correction() {
     addToHistory("correction", "Marked wrong — re-analysing…");
+    currentInstruction = "";
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -283,6 +287,12 @@
       );
       await getCurrentWindow().show();
     } catch (_) {}
+
+    listen<{ delta: string }>("stream_chunk", (event) => {
+      if (phase === "thinking" || phase === "guiding") {
+        currentInstruction += event.payload.delta;
+      }
+    });
 
     // Unregister any stale shortcuts from a previous mount (e.g. HMR).
     await unregisterAll().catch(() => {});

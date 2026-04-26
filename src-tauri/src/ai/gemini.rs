@@ -39,6 +39,7 @@ impl GeminiClient {
         &self,
         messages: Vec<Value>,
         model_override: Option<&str>,
+        on_chunk: &mut impl FnMut(&str),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
         
@@ -98,7 +99,8 @@ impl GeminiClient {
             }
         });
 
-        let url = format!("{}/{}:generateContent?key={}", GEMINI_API_BASE, effective_model, self.api_key);
+        // Use streamGenerateContent with SSE (alt=sse)
+        let url = format!("{}/{}:streamGenerateContent?alt=sse&key={}", GEMINI_API_BASE, effective_model, self.api_key);
         
         let response = self.client.post(&url)
             .json(&payload)
@@ -106,34 +108,83 @@ impl GeminiClient {
             .await?;
 
         let status = response.status();
-        let body_text = response.text().await?;
-
         if !status.is_success() {
+            let body_text = response.text().await?;
             bail!("Gemini API error ({}): {}", status, body_text);
         }
 
-        let data: Value = serde_json::from_str(&body_text)?;
-        
-        let usage = data.get("usageMetadata");
-        let input_tokens = usage.and_then(|u| u.get("promptTokenCount")).and_then(|t| t.as_u64()).unwrap_or(0);
-        let output_tokens = usage.and_then(|u| u.get("candidatesTokenCount")).and_then(|t| t.as_u64()).unwrap_or(0);
+        use eventsource_stream::Eventsource;
+        use futures_util::StreamExt;
 
-        let candidates = data.get("candidates").and_then(|c| c.as_array()).ok_or_else(|| anyhow!("Missing candidates array"))?;
+        let mut stream = response.bytes_stream().eventsource();
         
-        if let Some(first_candidate) = candidates.first() {
-            let parts = first_candidate.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()).ok_or_else(|| anyhow!("Missing parts array"))?;
-            for part in parts {
-                if let Some(fn_call) = part.get("functionCall") {
-                    if fn_call.get("name").and_then(|n| n.as_str()) == Some("navigate_step") {
-                        let args = fn_call.get("args").ok_or_else(|| anyhow!("Missing function args"))?;
-                        let step_response: NavigateStepResponse = serde_json::from_value(args.clone())?;
-                        return Ok((step_response, input_tokens, output_tokens));
+        let mut accumulated_json = String::new();
+        let mut input_tokens = 0;
+        let mut output_tokens = 0;
+        let mut in_instruction = false;
+        let mut emitted_instruction_len = 0;
+
+        while let Some(event_result) = stream.next().await {
+            let event = event_result?;
+            
+            // Gemini sends data events
+            let data_str = event.data;
+            if data_str.is_empty() { continue; }
+            
+            let data: Value = serde_json::from_str(&data_str).unwrap_or_default();
+            
+            // Extract usage if present
+            if let Some(usage) = data.get("usageMetadata") {
+                input_tokens = usage.get("promptTokenCount").and_then(|t| t.as_u64()).unwrap_or(input_tokens);
+                output_tokens = usage.get("candidatesTokenCount").and_then(|t| t.as_u64()).unwrap_or(output_tokens);
+            }
+            
+            if let Some(candidates) = data.get("candidates").and_then(|c| c.as_array()) {
+                if let Some(first_candidate) = candidates.first() {
+                    if let Some(parts) = first_candidate.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+                        for part in parts {
+                            if let Some(fn_call) = part.get("functionCall") {
+                                if fn_call.get("name").and_then(|n| n.as_str()) == Some("navigate_step") {
+                                    if let Some(args) = fn_call.get("args") {
+                                        // Gemini might stream partial args as JSON object or a string fragment?
+                                        // Wait, Gemini function calling streaming behaviour: it returns partial args!
+                                        // But the args might be partially constructed JSON object.
+                                        // Wait, actually Gemini streamGenerateContent with tools returns the full args object 
+                                        // progressively in chunks. Let's just convert it to string to extract the instruction.
+                                        let partial = serde_json::to_string(args).unwrap_or_default();
+                                        
+                                        // We just replace accumulated_json with the latest `args` state
+                                        // because Gemini sends the cumulative args so far, not diffs!
+                                        accumulated_json = partial;
+                                        
+                                        let instruction_prefix = r#""instruction":""#;
+                                        let instruction_prefix_spaced = r#""instruction": ""#;
+                                        
+                                        if !in_instruction && (accumulated_json.contains(instruction_prefix) || accumulated_json.contains(instruction_prefix_spaced)) {
+                                            in_instruction = true;
+                                        }
+                                        
+                                        if in_instruction {
+                                            let visible = crate::ai::streaming::extract_visible_instruction(&accumulated_json);
+                                            if visible.len() > emitted_instruction_len {
+                                                let new_text = &visible[emitted_instruction_len..];
+                                                on_chunk(new_text);
+                                                emitted_instruction_len = visible.len();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        bail!("No navigate_step function call in response")
+        let step_response: NavigateStepResponse = serde_json::from_str(&accumulated_json)
+            .map_err(|e| anyhow!("Failed to parse Gemini tool JSON: {e}\n{accumulated_json}"))?;
+            
+        Ok((step_response, input_tokens, output_tokens))
     }
 }
 

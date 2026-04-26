@@ -16,7 +16,7 @@ use ai::types::{GuidanceStep, OverlayType};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, Emitter};
 use tokio::time::{timeout, Duration};
 
 #[derive(serde::Serialize)]
@@ -126,6 +126,11 @@ struct GuideResponse {
     error: Option<String>,
 }
 
+#[derive(serde::Serialize, Clone)]
+struct StreamChunkPayload {
+    delta: String,
+}
+
 #[tauri::command]
 async fn guide(
     app: AppHandle,
@@ -166,14 +171,20 @@ async fn guide(
     .map_err(|e| format!("capture task join: {e}"))?;
 
     let mut router = state.ai_router.lock().await;
+    
+    let app_clone = app.clone();
+    let on_chunk = move |chunk: &str| {
+        let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
+    };
+
     let resp = if task.is_empty() {
         let summary = {
             let g = state.guidance.lock().unwrap();
             g.state_summary.clone()
         };
-        router.send_resume_request(&summary, Some(&screenshot_b64)).await
+        router.send_resume_request(&summary, Some(&screenshot_b64), on_chunk).await
     } else {
-        router.send_initial_request(&task, Some(&screenshot_b64)).await
+        router.send_initial_request(&task, Some(&screenshot_b64), on_chunk).await
     };
 
     let response = match resp {
@@ -309,7 +320,12 @@ async fn send_correction(
 
     let user_text = crate::ai::prompts::CORRECTION_CONTEXT;
     
-    let resp = router.send_guidance_request(user_text, Some(&screenshot_b64), Some(&summary)).await;
+    let app_clone = app.clone();
+    let on_chunk = move |chunk: &str| {
+        let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
+    };
+    
+    let resp = router.send_guidance_request(user_text, Some(&screenshot_b64), Some(&summary), on_chunk).await;
 
     let response = match resp {
         Ok(r) => r,

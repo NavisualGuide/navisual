@@ -69,6 +69,7 @@ impl AiRouter {
         user_text: &str,
         screenshot_b64: Option<&str>,
         state_summary: Option<&str>,
+        mut on_chunk: impl FnMut(&str),
     ) -> Result<NavigateStepResponse> {
         // Pre-check budget
         let estimated_total = 3000; // rough estimate
@@ -85,11 +86,11 @@ impl AiRouter {
         let result = match &self.client {
             Some(ApiClient::Anthropic(c)) => {
                 let msgs = build_anthropic(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, None).await?
+                c.send_message(msgs, None, &mut on_chunk).await?
             }
             Some(ApiClient::Gemini(c)) => {
                 let msgs = build_gemini(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, None).await?
+                c.send_message(msgs, None, &mut on_chunk).await?
             }
             None => {
                 bail!("No API client configured for provider '{}'", self.config.api_provider);
@@ -111,17 +112,19 @@ impl AiRouter {
         &mut self,
         task_description: &str,
         screenshot_b64: Option<&str>,
+        on_chunk: impl FnMut(&str),
     ) -> Result<NavigateStepResponse> {
         let user_text = initial_context_template(task_description);
-        self.send_guidance_request(&user_text, screenshot_b64, None).await
+        self.send_guidance_request(&user_text, screenshot_b64, None, on_chunk).await
     }
 
     pub async fn send_resume_request(
         &mut self,
         state_summary: &str,
         screenshot_b64: Option<&str>,
+        on_chunk: impl FnMut(&str),
     ) -> Result<NavigateStepResponse> {
         let user_text = session_resume_template(state_summary);
-        self.send_guidance_request(&user_text, screenshot_b64, None).await
+        self.send_guidance_request(&user_text, screenshot_b64, None, on_chunk).await
     }
 }

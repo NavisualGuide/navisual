@@ -43,6 +43,7 @@ impl AnthropicClient {
         &self,
         messages: Vec<Value>,
         model_override: Option<&str>,
+        on_chunk: &mut impl FnMut(&str),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
         
@@ -92,6 +93,7 @@ impl AnthropicClient {
         let payload = json!({
             "model": effective_model,
             "max_tokens": 1024,
+            "stream": true,
             "system": [
                 {
                     "type": "text",
@@ -110,32 +112,70 @@ impl AnthropicClient {
             .await?;
 
         let status = response.status();
-        let body_text = response.text().await?;
-
         if !status.is_success() {
+            let body_text = response.text().await?;
             bail!("Anthropic API error ({}): {}", status, body_text);
         }
 
-        let data: Value = serde_json::from_str(&body_text)?;
-        
-        let usage = data.get("usage");
-        let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(|t| t.as_u64()).unwrap_or(0);
-        let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(|t| t.as_u64()).unwrap_or(0);
+        use eventsource_stream::Eventsource;
+        use futures_util::StreamExt;
 
-        let content = data.get("content").and_then(|c| c.as_array()).ok_or_else(|| anyhow!("Missing content array"))?;
+        let mut stream = response.bytes_stream().eventsource();
         
-        for block in content {
-            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") && 
-               block.get("name").and_then(|n| n.as_str()) == Some("navigate_step") {
-                
-                let input = block.get("input").ok_or_else(|| anyhow!("Missing tool input"))?;
-                let step_response: NavigateStepResponse = serde_json::from_value(input.clone())?;
-                return Ok((step_response, input_tokens, output_tokens));
+        let mut accumulated_json = String::new();
+        let mut input_tokens = 0;
+        let mut output_tokens = 0;
+        let mut in_instruction = false;
+        let mut emitted_instruction_len = 0;
+
+        while let Some(event_result) = stream.next().await {
+            let event = event_result?;
+            if event.event == "content_block_delta" {
+                let data: Value = serde_json::from_str(&event.data).unwrap_or_default();
+                if let Some(delta) = data.get("delta") {
+                    if delta.get("type").and_then(|t| t.as_str()) == Some("input_json_delta") {
+                        if let Some(partial) = delta.get("partial_json").and_then(|p| p.as_str()) {
+                            accumulated_json.push_str(partial);
+                            
+                            let instruction_prefix = r#""instruction":""#;
+                            let instruction_prefix_spaced = r#""instruction": ""#;
+                            
+                            if !in_instruction && (accumulated_json.contains(instruction_prefix) || accumulated_json.contains(instruction_prefix_spaced)) {
+                                in_instruction = true;
+                            }
+                            
+                            if in_instruction {
+                                let visible = crate::ai::streaming::extract_visible_instruction(&accumulated_json);
+                                if visible.len() > emitted_instruction_len {
+                                    let new_text = &visible[emitted_instruction_len..];
+                                    on_chunk(new_text);
+                                    emitted_instruction_len = visible.len();
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if event.event == "message_start" {
+                let data: Value = serde_json::from_str(&event.data).unwrap_or_default();
+                if let Some(msg) = data.get("message") {
+                    if let Some(usage) = msg.get("usage") {
+                        input_tokens = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    }
+                }
+            } else if event.event == "message_delta" {
+                let data: Value = serde_json::from_str(&event.data).unwrap_or_default();
+                if let Some(usage) = data.get("usage") {
+                    output_tokens = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(output_tokens);
+                }
             }
         }
 
-        bail!("No navigate_step tool_use block in response")
+        let step_response: NavigateStepResponse = serde_json::from_str(&accumulated_json)
+            .map_err(|e| anyhow!("Failed to parse tool JSON: {e}\n{accumulated_json}"))?;
+            
+        Ok((step_response, input_tokens, output_tokens))
     }
+
 }
 
 pub fn build_messages(
