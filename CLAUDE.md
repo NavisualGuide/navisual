@@ -3,7 +3,7 @@
 **Version:** 0.4.0-alpha
 **Status:** v0.4 Phases A–D.3 complete (Tauri scaffold, Python sidecar, Rust screen capture + A11y + OCR + locator orchestrator, overlay canvas renderer, guidance loop + chat UI, global hotkeys, TTS via Windows SAPI, window position tracker). Next: Phase E — signed installer / packaging.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
-**Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md)
+**Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md) *(Note: This SDD is the main source of truth for future changes. Always update `CLAUDE.md` to sync with the SDD).*
 **Settings:** [settings.md](docs/settings.md)
 **Nav-Packs:** [nav-packs.md](docs/nav-packs.md)
 **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
@@ -305,7 +305,7 @@ if __name__ == "__main__":
 
 ### ✅ Completed (v0.4-alpha Phases A–C — 2026-04-19)
 
-- **Phase A — scaffold** (commit e7e406f) — Tauri v2 + SvelteKit 5 + Rust backend + Python sidecar skeleton. Panel window spawns, invokes Rust commands.
+- **Phase A — scaffold** (commit e7e406f) — Tauri v2 + Svelte 5 (Vite SPA) + Rust backend + Python sidecar skeleton. Panel window spawns, invokes Rust commands.
 - **Phase B — sidecar IPC** (commit 997f300) — Python AI layer (`ai/`, `core/`) migrated into `sidecar/`. JSON-lines protocol over stdin/stdout. Rust `Sidecar` type spawns the Python process and round-trips requests. `ping`, `echo`, `cost_report` dispatchers.
 - **Phase C.1 — screen capture in Rust** (commit 2d4300d) — `xcap` crate for per-monitor capture, `image` crate for JPEG encoding, DWM `EXTENDED_FRAME_BOUNDS` for active-window crop. Tauri commands `capture_screen`, `capture_active_window`.
 - **Phase C.2 — A11y locator in Rust** (commit 03859f7 + hardening this round) — `uiautomation` 0.24 crate. Same semantics as v0.3 Python: dash normalisation, anchored `^[\W_]*target[\W_]*$` regex (rejects "Insert Space" for target "Insert"), container-role rejection, off-screen guard. Multi-window search: z-order enumeration via `GetTopWindow`/`GetWindow(GW_HWNDNEXT)` with class-name blocklist (`Progman`, `WorkerW`, `Shell_TrayWnd`, IME classes…) skips shell and self; `collect_visible_top_windows(our_pid, 8)` caps at 8 real candidates so per-root timeout doesn't get diluted. `match_in_subtree` filter_fn swallows `get_name()` errors (was propagating, causing UIMatcher to abort on transient `E_ELEMENTNOTAVAILABLE`). Tauri command `locate_a11y`.
@@ -314,7 +314,7 @@ if __name__ == "__main__":
 
 ### ✅ Completed (v0.4 Phase D.1–D.2 — 2026-04-23)
 
-- **Phase D.1 — overlay wiring**: `overlay.rs` configure() + emit_update() pipeline; `set_ignore_cursor_events(true)` for click-through (raw `SetWindowLongPtrW` does not propagate to WebView2 child HWND); Tauri capability updated to cover `"overlay"` window; canvas renderer in `overlay/+page.svelte` (box + arrow + subtitle).
+- **Phase D.1 — overlay wiring**: `overlay.rs` configure() + emit_update() pipeline; `set_ignore_cursor_events(true)` for click-through (raw `SetWindowLongPtrW` does not propagate to WebView2 child HWND); Tauri capability updated to cover `"overlay"` window; canvas renderer in `src/Overlay.svelte` (box + arrow + subtitle).
 - **Phase D.2 — guidance loop + chat UI**: `guide`, `next_step`, `send_correction` Tauri commands; GuidanceState in AppState; panel replaced with task input / instruction panel / Next→ / ✗ Wrong flow; OCR fuzzy threshold raised from 0.7 → 0.85 (prevented "Status"↔"Startup" false match).
 
 ### ✅ Completed (v0.4 Phase D.3 — 2026-04-24)
@@ -327,25 +327,16 @@ if __name__ == "__main__":
 - **90 s AI timeout** — `tokio::time::timeout` wraps `send_guidance` and `trigger_correction` sidecar calls; hangs now surface as a user-visible error instead of blocking forever.
 - **Cancel button** — replaces "Guide me" while thinking; drops stale responses via request token; stops TTS and clears overlay immediately.
 
-### 🚧 Next: Phase E — UI overhaul + feature parity with v0.3
+### ✅ Completed (v0.4 Phase D.4 — 2026-04-25)
 
-Feature gap analysis (v0.3 Python → v0.4 Tauri) revealed these missing user-facing features.
-Prioritized order:
+- **Svelte SPA Migration**: Stripped out SvelteKit and migrated the frontend to a pure Vite + Svelte SPA multi-page setup (`index.html` and `overlay.html`). This completely eliminates the 40+ second SSR warmup delay during development, reducing Vite startup to ~1 second while retaining all functionality.
+- **E.1 UI Overhaul**: Redesigned Svelte panel to match the v0.3 ConsolidatedPanel design language.
 
-#### E.1 — UI overhaul (panel redesign)
-The current Svelte panel is a bare MVP. Needs full redesign to match v0.3 ConsolidatedPanel:
-- **Draggable** — title bar drag to move the frameless window anywhere on screen.
-- **Collapse/minimize** — ⊟ button collapses panel to a small 56×56 orange dot (icon mode);
-  clicking the dot restores the panel. Matches v0.3 `_to_icon_mode` / `_to_panel_mode`.
-- **Instruction history** — scrollable chat log below the latest-instruction box; color-coded by
-  role (user=orange, AI=teal, correction=amber, system=gray). Matches v0.3 `_build_chat_history`.
-- **Latest-instruction box** — prominent orange-tinted top area with orange left border showing
-  current instruction in larger text + step counter. Always visible even during thinking.
-- **Action row** — four buttons always visible: → Next (green), ✗ Wrong (red), ⏸ Pause (amber),
-  🎤 Speak (blue, hidden until voice enabled). Matches v0.3 `_build_action_row`.
-- **Shortcut legend** — fixed bottom bar: `Alt+\` = Next   Alt+E = Wrong   Alt+S = Pause   Alt+Q = Icon`.
-- **Title bar** — 🧭 icon, "AI Navigator" title, status dot, token count, ⚙ Settings, ＋ New, × Quit.
-- **Initial position** — bottom-right of primary screen (matches v0.3 `_position_bottom_right`).
+### ✅ Completed (v0.4 Phase E.0 — 2026-04-26)
+
+- **E.0 Rust Sidecar Rewrite**: Ported the Python sidecar logic to Rust. Removed the `sidecar/` directory, moving AI routing, Anthropic, Gemini, cost tracking, and session logic directly into `src-tauri/src/ai/`. This eliminates the need for Python as a runtime dependency.
+
+### 🚧 Next: Phase E — Production Readiness
 
 #### E.2 — Streaming responses
 Currently the UI shows "Thinking…" for the full API round-trip then renders the complete text.

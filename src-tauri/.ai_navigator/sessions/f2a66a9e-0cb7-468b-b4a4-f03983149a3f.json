@@ -1,0 +1,24 @@
+{
+  "id": "f2a66a9e-0cb7-468b-b4a4-f03983149a3f",
+  "task_description": "I use turbotax desktop.",
+  "conversation": [
+    {
+      "role": "assistant",
+      "content": "Click the \"File\" menu button in the top-left corner of the application.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T19:23:51.453983600-07:00"
+    }
+  ],
+  "current_state_summary": {
+    "summary_text": "The user is on the main screen of the application, which appears to be a code editor or IDE. The top menu bar has options like File, Edit, Selection, View, Go, Run, Terminal, and Help. There are also file explorer, search, and other panes visible.",
+    "turn_index": 0
+  },
+  "current_step_sequence": [],
+  "current_step_index": 0,
+  "token_usage": {
+    "input": 2002,
+    "output": 144
+  },
+  "started_at": "2026-04-25T19:23:49.049992400-07:00",
+  "last_active_at": "2026-04-25T19:23:51.453995200-07:00"
+}

@@ -12,6 +12,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 use crate::capture::Rect;
@@ -45,8 +47,25 @@ pub struct OverlayUpdate {
     pub virtual_size: (u32, u32),
 }
 
-/// Compute the union rect of all monitors (virtual desktop) in physical px.
+struct CachedVd {
+    rect: Rect,
+    at: Instant,
+}
+
+static VD_CACHE: OnceLock<Mutex<Option<CachedVd>>> = OnceLock::new();
+
+/// Compute the union rect of all monitors, cached for 30 s.
+/// Monitor topology changes are extremely rare; re-enumerating on every
+/// 200 ms window-tracker tick (xcap::Monitor::all syscall) adds ~2–5 ms
+/// per call unnecessarily.
 fn virtual_desktop_rect() -> Result<Rect> {
+    let cache = VD_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap();
+    if let Some(ref c) = *guard {
+        if c.at.elapsed() < Duration::from_secs(30) {
+            return Ok(c.rect.clone());
+        }
+    }
     let monitors = xcap::Monitor::all().context("enumerate monitors")?;
     if monitors.is_empty() {
         return Err(anyhow!("no monitors found"));
@@ -65,12 +84,14 @@ fn virtual_desktop_rect() -> Result<Rect> {
         max_x = max_x.max(x + w);
         max_y = max_y.max(y + h);
     }
-    Ok(Rect {
+    let rect = Rect {
         x: min_x,
         y: min_y,
         width: (max_x - min_x).max(0) as u32,
         height: (max_y - min_y).max(0) as u32,
-    })
+    };
+    *guard = Some(CachedVd { rect: rect.clone(), at: Instant::now() });
+    Ok(rect)
 }
 
 /// Size & position the overlay to span the virtual desktop, and apply

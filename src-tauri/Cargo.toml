@@ -24,6 +24,9 @@ tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt-multi-thread", "time"] }
+reqwest = { version = "0.12", features = ["json"] }
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 log = "0.4"
@@ -51,4 +54,20 @@ windows = { version = "0.62", features = [
   "Win32_Media_Speech",
 ] }
 uiautomation = { version = "0.24.4", features = ["process"] }
+
+# Faster dev iteration: line-level debug info only (saves link time + PDB size).
+# Full symbols (debug = true) are rarely needed during rapid iteration.
+[profile.dev]
+debug = 1
+
+# Optimize heavy deps in dev builds — they never need to be debugged,
+# and their code runs at every keypress (OCR, A11y, window tracking).
+[profile.dev.package."windows"]
+opt-level = 2
+[profile.dev.package."uiautomation"]
+opt-level = 2
+[profile.dev.package."xcap"]
+opt-level = 2
+[profile.dev.package."image"]
+opt-level = 2
 

@@ -3,13 +3,19 @@
 mod capture;
 mod locator;
 mod overlay;
-mod sidecar;
+mod ai;
 mod tts;
 mod track;
 
-use sidecar::Sidecar;
+use ai::router::AiRouter;
+use ai::config::Config;
+use ai::cost_tracker::CostTracker;
+use ai::session::SessionManager;
+use ai::types::{GuidanceStep, OverlayType};
+
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 use tokio::time::{timeout, Duration};
 
@@ -23,19 +29,6 @@ struct CaptureResult {
     elapsed_ms: u128,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct GuidanceStep {
-    instruction: String,
-    target_text: Option<String>,
-    target_role: Option<String>,
-    target_nearby_text: Option<String>,
-    target_zone_x: Option<i64>,
-    target_zone_y: Option<i64>,
-    overlay_type: String,
-    clipboard: Option<String>,
-    checkpoint: bool,
-}
-
 #[derive(Debug, Default)]
 struct GuidanceState {
     session_id: Option<String>,
@@ -47,27 +40,17 @@ struct GuidanceState {
 
 /// Shared app state.
 struct AppState {
-    sidecar: Arc<Sidecar>,
-    guidance: Mutex<GuidanceState>,
+    ai_router: Mutex<AiRouter>,
+    guidance: std::sync::Mutex<GuidanceState>,
     tts: tts::TtsEngine,
     tracker: track::WindowTracker,
 }
 
-/// Locate the sidecar script. In dev, it's at `<project-root>/sidecar/main.py`.
-fn resolve_sidecar_script() -> PathBuf {
-    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    crate_dir
-        .parent()
-        .map(|p| p.join("sidecar").join("main.py"))
-        .unwrap_or_else(|| PathBuf::from("../sidecar/main.py"))
-}
-
-fn overlay_kind_for_step(overlay_type: &str) -> overlay::OverlayKind {
+fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
     match overlay_type {
-        "arrow" => overlay::OverlayKind::Arrow,
-        "highlight" | "box" | "circle" => overlay::OverlayKind::Box,
-        "subtitle" => overlay::OverlayKind::Subtitle,
-        _ => overlay::OverlayKind::None,
+        OverlayType::Arrow => overlay::OverlayKind::Arrow,
+        OverlayType::Highlight | OverlayType::Circle => overlay::OverlayKind::Box,
+        OverlayType::None => overlay::OverlayKind::None,
     }
 }
 
@@ -80,7 +63,7 @@ fn execute_step(
         #[cfg(windows)]
         {
             let opts = locator::orchestrator::LocateOptions {
-                role: step.target_role.clone(),
+                role: step.target_role.as_ref().map(|r| format!("{:?}", r).to_lowercase()),
                 nearby_text: step.target_nearby_text.clone(),
                 zone: match (step.target_zone_x, step.target_zone_y) {
                     (Some(x), Some(y)) => Some((x as u32, y as u32)),
@@ -149,38 +132,25 @@ async fn guide(
     state: State<'_, AppState>,
     task: String,
 ) -> Result<GuideResponse, String> {
-    let sidecar = state.sidecar.clone();
+    if !task.is_empty() {
+        let mut g = state.guidance.lock().unwrap();
+        g.session_id = None;
+        g.steps = vec![];
+        g.state_summary = String::new();
+    }
 
     let session_id = {
-        let g = state.guidance.lock().unwrap();
-        g.session_id.clone()
-    };
-
-    let session_id = if let Some(sid) = session_id {
-        sid
-    } else {
-        let resp = sidecar
-            .request("start_session", serde_json::json!({ "task": task }))
-            .await
-            .map_err(|e| e.to_string())?;
-        let sid = resp
-            .payload
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .ok_or("start_session: no session_id")?
-            .to_string();
-        let provider = resp
-            .payload
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        {
-            let mut g = state.guidance.lock().unwrap();
-            g.session_id = Some(sid.clone());
-            g.provider = provider;
+        let mut router = state.ai_router.lock().await;
+        if task.is_empty() {
+            if let Some(session) = &router.session_manager.current_session {
+                session.id.to_string()
+            } else {
+                return Err("No active session to continue".to_string());
+            }
+        } else {
+            let session = router.session_manager.create_session(task.clone());
+            session.id.to_string()
         }
-        sid
     };
 
     let screenshot_b64 = tokio::task::spawn_blocking(|| {
@@ -195,73 +165,53 @@ async fn guide(
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
-    let user_text = if task.is_empty() { "continue".to_string() } else { task };
-
-    let resp = timeout(
-        Duration::from_secs(90),
-        sidecar.request(
-            "send_guidance",
-            serde_json::json!({
-                "session_id": session_id,
-                "user_text": user_text,
-                "screenshot_b64": screenshot_b64,
-            }),
-        ),
-    )
-    .await
-    .map_err(|_| "AI request timed out (90 s)".to_string())?
-    .map_err(|e| e.to_string())?;
-
-    if !resp.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let err = resp
-            .payload
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("send_guidance failed")
-            .to_string();
-        return Ok(GuideResponse {
-            ok: false,
-            session_id,
-            steps: vec![],
-            step_index: 0,
-            instruction: String::new(),
-            located: None,
-            needs_input: false,
-            provider: String::new(),
-            error: Some(err),
-        });
-    }
-
-    let response_val = resp
-        .payload
-        .get("response")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-
-    let steps: Vec<GuidanceStep> = response_val
-        .get("steps")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let state_summary = response_val
-        .get("state_summary")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let needs_input = response_val
-        .get("needs_input")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let provider = {
-        let g = state.guidance.lock().unwrap();
-        g.provider.clone()
+    let mut router = state.ai_router.lock().await;
+    let resp = if task.is_empty() {
+        let summary = {
+            let g = state.guidance.lock().unwrap();
+            g.state_summary.clone()
+        };
+        router.send_resume_request(&summary, Some(&screenshot_b64)).await
+    } else {
+        router.send_initial_request(&task, Some(&screenshot_b64)).await
     };
+
+    let response = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(GuideResponse {
+                ok: false,
+                session_id,
+                steps: vec![],
+                step_index: 0,
+                instruction: String::new(),
+                located: None,
+                needs_input: false,
+                provider: router.config.api_provider.clone(),
+                error: Some(e.to_string()),
+            });
+        }
+    };
+
+    let steps = response.steps;
+    let state_summary = response.state_summary;
+    let needs_input = response.needs_input;
+    let provider = router.config.api_provider.clone();
+
+    if let Some(session) = &mut router.session_manager.current_session {
+        session.update_state(state_summary.clone());
+        let content = steps.iter().map(|s| s.instruction.clone()).collect::<Vec<_>>().join("\n");
+        session.add_turn("assistant", content, Some("...".to_string()));
+        router.session_manager.save_session(None);
+    }
 
     {
         let mut g = state.guidance.lock().unwrap();
+        g.session_id = Some(session_id.clone());
         g.steps = steps.clone();
         g.state_summary = state_summary;
         g.needs_input = needs_input;
+        g.provider = provider.clone();
     }
 
     if steps.is_empty() {
@@ -333,8 +283,6 @@ async fn send_correction(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<GuideResponse, String> {
-    let sidecar = state.sidecar.clone();
-
     let session_id = {
         let g = state.guidance.lock().unwrap();
         g.session_id.clone()
@@ -353,54 +301,32 @@ async fn send_correction(
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
-    let resp = timeout(
-        Duration::from_secs(90),
-        sidecar.request(
-            "trigger_correction",
-            serde_json::json!({
-                "session_id": session_id,
-                "screenshot_b64": screenshot_b64,
-            }),
-        ),
-    )
-    .await
-    .map_err(|_| "AI request timed out (90 s)".to_string())?
-    .map_err(|e| e.to_string())?;
-
-    if !resp.payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let err = resp
-            .payload
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("correction failed")
-            .to_string();
-        return Err(err);
-    }
-
-    let response_val = resp
-        .payload
-        .get("response")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-
-    let steps: Vec<GuidanceStep> = response_val
-        .get("steps")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let state_summary = response_val
-        .get("state_summary")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let needs_input = response_val
-        .get("needs_input")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let provider = {
+    let mut router = state.ai_router.lock().await;
+    let summary = {
         let g = state.guidance.lock().unwrap();
-        g.provider.clone()
+        g.state_summary.clone()
     };
+
+    let user_text = crate::ai::prompts::CORRECTION_CONTEXT;
+    
+    let resp = router.send_guidance_request(user_text, Some(&screenshot_b64), Some(&summary)).await;
+
+    let response = match resp {
+        Ok(r) => r,
+        Err(e) => return Err(e.to_string()),
+    };
+
+    let steps = response.steps;
+    let state_summary = response.state_summary;
+    let needs_input = response.needs_input;
+    let provider = router.config.api_provider.clone();
+
+    if let Some(session) = &mut router.session_manager.current_session {
+        session.update_state(state_summary.clone());
+        let content = steps.iter().map(|s| s.instruction.clone()).collect::<Vec<_>>().join("\n");
+        session.add_turn("assistant", content, Some("...".to_string()));
+        router.session_manager.save_session(None);
+    }
 
     {
         let mut g = state.guidance.lock().unwrap();
@@ -453,23 +379,13 @@ async fn clear_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 }
 
 #[tauri::command]
-async fn ping_sidecar(state: State<'_, AppState>) -> Result<String, String> {
-    let resp = state
-        .sidecar
-        .request("ping", serde_json::json!({}))
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(resp.payload.to_string())
+async fn ping_sidecar(_state: State<'_, AppState>) -> Result<String, String> {
+    Ok("pong".to_string())
 }
 
 #[tauri::command]
-async fn sidecar_echo(text: String, state: State<'_, AppState>) -> Result<String, String> {
-    let resp = state
-        .sidecar
-        .request("echo", serde_json::json!({ "text": text }))
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(resp.payload.to_string())
+async fn sidecar_echo(text: String, _state: State<'_, AppState>) -> Result<String, String> {
+    Ok(text)
 }
 
 #[tauri::command]
@@ -601,46 +517,77 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            let script = resolve_sidecar_script();
-            log::info!("spawning sidecar: {}", script.display());
-
-            if let Some(overlay_win) = app.get_webview_window("overlay") {
-                match overlay::configure(&overlay_win) {
-                    Ok(()) => {
-                        let _ = overlay_win.show();
-                        log::info!("overlay window configured and shown");
-                    }
-                    Err(e) => {
-                        log::error!("overlay configure failed — NOT showing (would freeze input): {e}");
-                    }
+            let overlay_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+                let build = tauri::WebviewWindowBuilder::new(
+                    &overlay_handle,
+                    "overlay",
+                    tauri::WebviewUrl::App(std::path::PathBuf::from("overlay")),
+                )
+                .title("AI Navigator Overlay")
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .visible(false)
+                .build();
+                match build {
+                    Ok(win) => match overlay::configure(&win) {
+                        Ok(()) => {
+                            let _ = win.show();
+                            log::info!("overlay window created and shown");
+                        }
+                        Err(e) => log::error!(
+                            "overlay configure failed — NOT showing (would freeze input): {e}"
+                        ),
+                    },
+                    Err(e) => log::error!("overlay window creation failed: {e}"),
                 }
-            }
+            });
 
             let handle = app.handle().clone();
             let tts = tts::TtsEngine::new();
             let tracker = track::WindowTracker::new();
-            tauri::async_runtime::spawn(async move {
-                match Sidecar::spawn(script).await {
-                    Ok(sc) => {
-                        handle.manage(AppState {
-                            sidecar: Arc::new(sc),
-                            guidance: Mutex::new(GuidanceState::default()),
-                            tts,
-                            tracker,
-                        });
-                        log::info!("sidecar ready");
-                    }
-                    Err(e) => {
-                        log::error!("sidecar spawn failed: {e}");
-                    }
+
+            // Init AI Router
+            let config = Config::load();
+            let cost_tracker = CostTracker::new(
+                config.daily_token_cap,
+                config.monthly_token_cap,
+                config.cost_safety_margin,
+                Some(PathBuf::from(".ai_navigator/usage.json")),
+            );
+            let session_manager = SessionManager::new(PathBuf::from(".ai_navigator/sessions"));
+            
+            match AiRouter::new(config, cost_tracker, session_manager) {
+                Ok(router) => {
+                    handle.manage(AppState {
+                        ai_router: tokio::sync::Mutex::new(router),
+                        guidance: std::sync::Mutex::new(GuidanceState::default()),
+                        tts,
+                        tracker,
+                    });
+                    log::info!("AiRouter ready");
                 }
-            });
+                Err(e) => {
+                    log::error!("AiRouter init failed: {e}");
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Closing the panel quits the whole app. Use app_handle().exit()
+            // rather than std::process::exit() so Tauri can close all windows
+            // (including the overlay) and WebView2 gets time to release its
+            // user data folder lock — preventing the 30–40 s stale-lock delay
+            // on the next launch.
             if window.label() == "panel" {
-                if let tauri::WindowEvent::Destroyed = event {
-                    std::process::exit(0);
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    window.app_handle().exit(0);
                 }
             }
         })

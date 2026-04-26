@@ -1,0 +1,24 @@
+{
+  "id": "e99af12a-6ef5-4818-a86d-d57cea15f929",
+  "task_description": "help me with my tax return.",
+  "conversation": [
+    {
+      "role": "assistant",
+      "content": "To start your tax return, click on the 'File' menu at the top of the application window.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-25T19:22:42.748291500-07:00"
+    }
+  ],
+  "current_state_summary": {
+    "summary_text": "The user is on the main application screen. The task is to help with their tax return.",
+    "turn_index": 0
+  },
+  "current_step_sequence": [],
+  "current_step_index": 0,
+  "token_usage": {
+    "input": 2002,
+    "output": 110
+  },
+  "started_at": "2026-04-25T19:22:39.770487-07:00",
+  "last_active_at": "2026-04-25T19:22:42.748305300-07:00"
+}

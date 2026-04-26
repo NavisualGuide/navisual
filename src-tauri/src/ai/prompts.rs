@@ -1,10 +1,4 @@
-"""System prompts and prompt templates for AI Navigator.
-
-Contains the core system prompt, correction context, and session resume templates.
-"""
-
-SYSTEM_PROMPT = """\
-You are AI Navigator, a real-time guidance assistant. You observe the user's
+pub const SYSTEM_PROMPT: &str = r#"You are AI Navigator, a real-time guidance assistant. You observe the user's
 screen and provide step-by-step navigation instructions. You NEVER perform
 actions — the user does everything.
 
@@ -60,7 +54,7 @@ Rules:
     you do not recognise with confidence, set needs_input=true and ask the user
     to confirm the full name or provide the official website before navigating
     anywhere. Do not guess or pick the first search result.
-15. WEBPAGE COMMANDS & INSTALL STEPS: When the user's task is to find an install
+16. WEBPAGE COMMANDS & INSTALL STEPS: When the user's task is to find an install
     command, code snippet, or configuration step on a webpage, read the current
     page carefully before navigating anywhere. Once you can see the relevant
     command or step on screen, put the exact command text in the clipboard field
@@ -80,25 +74,31 @@ Rules:
     preventing false matches from text that appears elsewhere (e.g. a page heading
     that repeats the same word as a nav button).
 
-Use the navigate_step tool for all responses."""
+Use the navigate_step tool for all responses."#;
 
-CORRECTION_CONTEXT = (
-    "The user pressed the 'wrong' button, indicating the previous instruction was "
-    "incorrect or they cannot find the element. Analyze the current screen carefully "
-    "and provide a corrected instruction. Describe the target element differently — "
-    "use different identifying features (color, position, size, nearby elements) "
-    "than the previous attempt."
-)
+pub const CORRECTION_CONTEXT: &str = "The user pressed the 'wrong' button, indicating the previous instruction was \
+incorrect or they cannot find the element. Analyze the current screen carefully \
+and provide a corrected instruction. Describe the target element differently — \
+use different identifying features (color, position, size, nearby elements) \
+than the previous attempt.";
 
-SESSION_RESUME_TEMPLATE = (
-    "Resuming session. Last known state: {state_summary}. "
-    "Here is the current screen. Assess whether the state is still valid "
-    "and provide the next instruction."
-)
+pub fn session_resume_template(state_summary: &str) -> String {
+    format!(
+        "Resuming session. Last known state: {}. \
+        Here is the current screen. Assess whether the state is still valid \
+        and provide the next instruction.",
+        state_summary
+    )
+}
 
-INITIAL_CONTEXT_TEMPLATE = (
-    "The user wants help with the following task: {task_description}\n\n"
-    "Here is their current screen. Analyze it and provide the first navigation instruction."
-)
+pub fn initial_context_template(task_description: &str) -> String {
+    format!(
+        "The user wants help with the following task: {}\n\n\
+        Here is their current screen. Analyze it and provide the first navigation instruction.",
+        task_description
+    )
+}
 
-STATE_CONTEXT_TEMPLATE = "Previous state: {state_summary}"
+pub fn state_context_template(state_summary: &str) -> String {
+    format!("Previous state: {}", state_summary)
+}
