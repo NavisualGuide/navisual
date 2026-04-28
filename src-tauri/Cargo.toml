@@ -38,6 +38,7 @@ base64 = "0.22"
 regex = "1"
 eventsource-stream = "0.2.3"
 futures-util = "0.3.32"
+arboard = "3"
 
 [target.'cfg(windows)'.dependencies]
 # Match uiautomation 0.24.x's windows version to avoid duplicate native bindings.

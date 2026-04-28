@@ -37,6 +37,8 @@
 
   // Core state
   let task = $state("");
+  let replyText = $state("");   // E.5 — separate input for needs_input replies
+  let lastCompletedInstruction = $state("");  // passed to AI on Next re-query
   let phase = $state<AppPhase>("idle");
 
   let steps = $state<GuidanceStep[]>([]);
@@ -81,11 +83,16 @@
     if (historyEl) historyEl.scrollTop = historyEl.scrollHeight;
   }
 
+  // Auto-advance enabled flag — Pause button sets this to false.
+  // Starting a new guide() call or nextStep() re-enables it.
+  let autoAdvancePaused = $state(false);
+
   function cancelRequest() {
     requestToken++;
     stopTimer();
     invoke("clear_overlay").catch(() => {});
     invoke("speak", { text: "" }).catch(() => {});
+    autoAdvancePaused = true;  // Pause disables auto-advance
     phase = "idle";
   }
 
@@ -152,6 +159,7 @@
     sessionId = res.session_id;
     if (res.provider) provider = res.provider;
     phase = res.needs_input ? "needs_input" : "guiding";
+    autoAdvancePaused = false;  // A fresh AI response re-enables auto-advance
     if (res.instruction) {
       let meta: string | undefined;
       if (res.located) {
@@ -169,12 +177,12 @@
     const taskText = task.trim();
     await addToHistory("user", taskText);
     currentInstruction = "";
-    const isReply = phase === "needs_input";
+    replyText = "";
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply });
+      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply: false });
       stopTimer();
       if (token !== requestToken) return;
       if (!res.ok) {
@@ -191,15 +199,49 @@
     }
   }
 
+  // E.5 — send a reply when the AI needs clarification.
+  async function reply() {
+    const text = replyText.trim();
+    if (!text) return;
+    await addToHistory("user", text);
+    replyText = "";
+    currentInstruction = "";
+    phase = "thinking";
+    startTimer();
+    const token = ++requestToken;
+    try {
+      const res = await invoke<GuideResponse>("guide", { task: text, isReply: true });
+      stopTimer();
+      if (token !== requestToken) return;
+      if (!res.ok) {
+        phase = "error";
+        addToHistory("error", res.error ?? "reply failed");
+        return;
+      }
+      applyResponse(res, 0, token);
+    } catch (e) {
+      stopTimer();
+      if (token !== requestToken) return;
+      phase = "error";
+      addToHistory("error", String(e));
+    }
+  }
+
   async function nextStep() {
     const nextIdx = stepIndex + 1;
     if (nextIdx >= steps.length) {
+      // Re-query AI — tell it what was just completed so it doesn't repeat.
+      const completed = currentInstruction || lastCompletedInstruction;
+      lastCompletedInstruction = completed;
       currentInstruction = "";
       phase = "thinking";
       startTimer();
       const token = ++requestToken;
       try {
-        const res = await invoke<GuideResponse>("guide", { task: "", isReply: false });
+        const res = await invoke<GuideResponse>("guide", {
+          task: completed ? `[User completed: "${completed}"]` : "",
+          isReply: false,
+        });
         stopTimer();
         if (token !== requestToken) return;
         if (!res.ok) {
@@ -217,6 +259,7 @@
       return;
     }
 
+    lastCompletedInstruction = currentInstruction;
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -258,21 +301,34 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey && (phase === "idle" || phase === "needs_input")) {
+    if (e.key === "Enter" && !e.shiftKey && phase === "idle") {
       e.preventDefault();
       guide();
     }
   }
 
+  function handleReplyKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      reply();
+    }
+  }
+
+  // "paused" means the session is still live but auto-advance is off.
+  // The user can still click Next/Wrong manually.
+  let isPaused = $derived(autoAdvancePaused && phase === "idle" && steps.length > 0);
+
   let statusLabel = $derived(
-    phase === "idle"        ? "idle"
+    isPaused              ? `paused · step ${stepIndex + 1}/${steps.length}`
+    : phase === "idle"    ? "idle"
     : phase === "thinking"  ? `thinking · ${(elapsedMs / 1000).toFixed(1)}s`
     : phase === "guiding"   ? `step ${stepIndex + 1}/${steps.length}`
     : phase === "needs_input" ? "needs input"
     : "error"
   );
 
-  let actionDisabled = $derived(phase !== "guiding" && phase !== "needs_input");
+  // Next/Wrong enabled while guiding OR paused (session is still live)
+  let actionDisabled = $derived(!isPaused && phase !== "guiding" && phase !== "needs_input");
   let isThinking = $derived(phase === "thinking");
 
   onMount(async () => {
@@ -293,6 +349,28 @@
       if (phase === "thinking" || phase === "guiding") {
         currentInstruction += event.payload.delta;
       }
+    });
+
+    // E.3 — Screen change detection + auto-advance.
+    // Guards:
+    //   - Must be in "guiding" phase (not thinking / idle / error)
+    //   - Must NOT be paused (user clicked Pause)
+    //   - 5s debounce prevents rapid-fire AI calls
+    let screenChangeDebounce = 0;
+    listen<{ distance: number }>("screen_changed", (_event) => {
+      const now = Date.now();
+      // Hard debounce: ignore events that arrive within 5s of the last auto-advance.
+      if (now - screenChangeDebounce < 5000) return;
+      // Only act when actively guiding and not already processing.
+      if (phase !== "guiding") return;
+      // Respect the Pause button — don't re-engage automatically.
+      if (autoAdvancePaused) return;
+      screenChangeDebounce = now;
+
+      const currentStep = steps[stepIndex];
+      if (!currentStep) return;
+      addToHistory("system", "Screen changed — checking next step…");
+      nextStep();
     });
 
     // Unregister any stale shortcuts from a previous mount (e.g. HMR).
@@ -358,6 +436,9 @@
       <section class="latest-box">
         <div class="latest-header">
           <span class="step-counter">Step {stepIndex + 1} of {steps.length}</span>
+          {#if steps[stepIndex]?.clipboard}
+            <span class="badge badge-clip" title="Text copied to clipboard">📋 copied</span>
+          {/if}
           {#if locateResult}
             <span class="badge badge-{locateResult.role === 'Ocr' ? 'warn' : 'ok'}">
               {locateResult.role}
@@ -403,18 +484,34 @@
       <textarea
         bind:value={task}
         onkeydown={handleKeydown}
-        placeholder={phase === "needs_input" ? "Type your reply…" : "What do you need help with?"}
+        placeholder="What do you need help with?"
         rows={2}
-        disabled={isThinking}
+        disabled={isThinking || phase === "needs_input" || phase === "guiding"}
       ></textarea>
       {#if isThinking}
         <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
-      {:else if phase === "needs_input"}
-        <button class="btn-primary btn-full" onclick={guide} disabled={!task.trim()}>↩ Reply</button>
       {:else}
-        <button class="btn-primary btn-full" onclick={guide} disabled={!task.trim() || isThinking}>Guide me</button>
+        <button class="btn-primary btn-full" onclick={guide} disabled={!task.trim() || isThinking || phase === "guiding" || phase === "needs_input"}>Guide me</button>
       {/if}
     </section>
+
+    <!-- E.5 — Inline reply box: appears above action row when AI needs clarification -->
+    {#if phase === "needs_input"}
+      <section class="reply-section">
+        <div class="reply-question">💬 The AI needs your input:</div>
+        <div class="reply-row">
+          <input
+            class="reply-input"
+            type="text"
+            bind:value={replyText}
+            onkeydown={handleReplyKeydown}
+            placeholder="Type your answer…"
+            autofocus
+          />
+          <button class="btn-reply" onclick={reply} disabled={!replyText.trim()}>↩ Send</button>
+        </div>
+      </section>
+    {/if}
 
     <!-- Action row (always visible) -->
     <div class="action-row">
@@ -424,9 +521,15 @@
       <button class="btn-action btn-wrong" onclick={correction} disabled={actionDisabled} title="Alt+E">
         ✗ Wrong
       </button>
-      <button class="btn-action btn-pause" onclick={cancelRequest} disabled={phase === "idle"} title="Alt+S">
-        ⏸ Pause
-      </button>
+      {#if isPaused}
+        <button class="btn-action btn-resume" onclick={() => { autoAdvancePaused = false; phase = steps.length > 0 ? "guiding" : "idle"; }} title="Alt+S">
+          ▶ Resume
+        </button>
+      {:else}
+        <button class="btn-action btn-pause" onclick={cancelRequest} disabled={phase === "idle" && !isPaused} title="Alt+S">
+          ⏸ Pause
+        </button>
+      {/if}
     </div>
 
     <!-- Status + shortcut legend -->
@@ -743,6 +846,74 @@
 
   /* ── Task input ──────────────────────────────────── */
 
+  /* ── Badge variants ──────────────────────────────── */
+  .badge-clip {
+    background: rgba(14, 165, 233, 0.15);
+    color: var(--info);
+    border: 1px solid rgba(14, 165, 233, 0.25);
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  /* ── E.5 Reply section ───────────────────────────── */
+  .reply-section {
+    padding: 8px 12px;
+    border-top: 1px solid rgba(14, 165, 233, 0.2);
+    background: rgba(14, 165, 233, 0.04);
+    flex-shrink: 0;
+  }
+
+  .reply-question {
+    font-size: 11px;
+    color: var(--info);
+    font-weight: 600;
+    margin-bottom: 6px;
+    letter-spacing: 0.02em;
+  }
+
+  .reply-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .reply-input {
+    flex: 1;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 7px 10px;
+    border-radius: 7px;
+    background: var(--surface-2);
+    color: var(--text-primary);
+    border: 1px solid rgba(14, 165, 233, 0.35);
+    outline: none;
+    transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
+    min-width: 0;
+  }
+  .reply-input:focus {
+    border-color: var(--info);
+    box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.15);
+  }
+
+  .btn-reply {
+    padding: 7px 12px;
+    border-radius: 7px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    border: 1px solid rgba(14, 165, 233, 0.35);
+    background: rgba(14, 165, 233, 0.15);
+    color: var(--info);
+    flex-shrink: 0;
+    transition: background 120ms ease-out;
+  }
+  .btn-reply:not(:disabled):hover { background: rgba(14, 165, 233, 0.28); }
+  .btn-reply:disabled { opacity: 0.35; cursor: not-allowed; }
+
   .task-section {
     padding: 8px 12px;
     display: flex;
@@ -810,6 +981,13 @@
     border-color: rgba(245, 158, 11, 0.22);
   }
   .btn-pause:not(:disabled):hover { background: rgba(245, 158, 11, 0.22); }
+
+  .btn-resume {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--success);
+    border-color: rgba(34, 197, 94, 0.25);
+  }
+  .btn-resume:hover { background: rgba(34, 197, 94, 0.25); }
 
   /* ── Footer ──────────────────────────────────────── */
 

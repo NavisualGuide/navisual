@@ -183,34 +183,38 @@ fn element_to_result(el: &UIElement) -> Option<LocateResult> {
 /// manual-walk fallback.
 pub fn find_element(
     target_text: &str,
-    target_role: Option<&str>,
-    timeout_ms: u64,
+    opts: &super::orchestrator::LocateOptions,
 ) -> Result<Option<LocateResult>> {
     if target_text.trim().is_empty() {
         return Ok(None);
     }
 
+    let timeout_ms = if opts.a11y_timeout_ms == 0 { 150 } else { opts.a11y_timeout_ms };
     let automation = UIAutomation::new().map_err(|e| anyhow!("UIAutomation init: {e}"))?;
     let name_re = Arc::new(build_name_regex(target_text)?);
     let target_norm_len = norm_dashes(target_text).chars().count();
-    let desired_ct = target_role.and_then(role_to_control_type);
+    let desired_ct = opts.role.as_deref().and_then(role_to_control_type);
 
     // Decide which top-level window(s) to search.
     let (fg_hwnd, fg_pid) = foreground_pid();
     let our_pid = own_pid();
+    
+    // Compute window rect for zone scoring
+    let mut win_rect = RECT::default();
+    if !fg_hwnd.0.is_null() {
+        unsafe { let _ = GetWindowRect(fg_hwnd, &mut win_rect); }
+    }
 
     let search_roots: Vec<UIElement> = if fg_pid != 0 && fg_pid != our_pid {
-        // Normal case — just the foreground window.
         match automation.element_from_handle(fg_hwnd.into()) {
             Ok(el) => vec![el],
             Err(_) => Vec::new(),
         }
     } else {
-        // Our panel is focused (or we couldn't get a foreground PID).
-        // Walk the top-level windows in z-order (topmost first) and keep only
-        // visible, reasonably-sized ones owned by other processes. This puts
-        // the app the user was actually looking at at the front of the list.
         let hwnds = collect_visible_top_windows(our_pid, 8);
+        if let Some(&first) = hwnds.first() {
+            unsafe { let _ = GetWindowRect(first, &mut win_rect); }
+        }
         hwnds
             .into_iter()
             .filter_map(|h| automation.element_from_handle(h.into()).ok())
@@ -222,51 +226,66 @@ pub fn find_element(
     }
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    // Give each root a fair slice so we don't burn the whole budget on the
-    // first window. Floor at 250 ms so UIMatcher has time to walk.
     let per_root_ms = ((timeout_ms / search_roots.len() as u64).max(250)).min(timeout_ms);
+
+    let mut candidates = Vec::new();
 
     for root in &search_roots {
         if Instant::now() > deadline {
             break;
         }
-        // Pass 1: regex filter with role constraint (fast path via UIMatcher).
-        if let Some(res) = match_in_subtree(&automation, root, &name_re, desired_ct, per_root_ms)? {
-            return Ok(Some(res));
-        }
-        // Pass 2: regex filter with no role constraint, relying on
-        // element_to_result to reject containers. Catches "Continue" labelled
-        // as Hyperlink instead of Button, etc.
+        // Pass 1
+        candidates.extend(match_in_subtree_all(&automation, root, &name_re, desired_ct, per_root_ms)?);
+        if Instant::now() > deadline { break; }
+        // Pass 2
         if desired_ct.is_some() {
-            if let Some(res) = match_in_subtree(&automation, root, &name_re, None, per_root_ms)? {
-                return Ok(Some(res));
-            }
+            candidates.extend(match_in_subtree_all(&automation, root, &name_re, None, per_root_ms)?);
         }
-        // Pass 3: slow manual walk with substring match — catches edges the
-        // regex misses (e.g. accessible names with stray whitespace).
-        if let Some(res) = manual_walk(
+        if Instant::now() > deadline { break; }
+        // Pass 3
+        candidates.extend(manual_walk_all(
             root,
             &norm_dashes(&target_text.to_ascii_lowercase()),
             target_norm_len,
             desired_ct,
             deadline,
-        ) {
-            return Ok(Some(res));
-        }
+        ));
     }
 
-    Ok(None)
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    // Sort by grid proximity if zone is provided
+    if let Some((zx, zy)) = opts.zone {
+        let w = (win_rect.right - win_rect.left).max(1) as f32;
+        let h = (win_rect.bottom - win_rect.top).max(1) as f32;
+        let cw = w / 16.0;
+        let ch = h / 9.0;
+        let target_x = win_rect.left as f32 + (zx as f32 + 0.5) * cw;
+        let target_y = win_rect.top as f32 + (zy as f32 + 0.5) * ch;
+
+        candidates.sort_by(|a, b| {
+            let acx = a.bbox.x as f32 + a.bbox.width as f32 / 2.0;
+            let acy = a.bbox.y as f32 + a.bbox.height as f32 / 2.0;
+            let bcx = b.bbox.x as f32 + b.bbox.width as f32 / 2.0;
+            let bcy = b.bbox.y as f32 + b.bbox.height as f32 / 2.0;
+            let da = (acx - target_x).powi(2) + (acy - target_y).powi(2);
+            let db = (bcx - target_x).powi(2) + (bcy - target_y).powi(2);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    Ok(candidates.into_iter().next())
 }
 
-/// Use UIMatcher with a regex-based filter_fn (+ optional ControlType) to
-/// find the first match within `root`'s subtree.
-fn match_in_subtree(
+fn match_in_subtree_all(
     automation: &UIAutomation,
     root: &UIElement,
     name_re: &Arc<Regex>,
     control_type: Option<ControlType>,
     timeout_ms: u64,
-) -> Result<Option<LocateResult>> {
+) -> Result<Vec<LocateResult>> {
     let re = name_re.clone();
     let mut matcher = automation
         .create_matcher()
@@ -274,9 +293,6 @@ fn match_in_subtree(
         .depth(15)
         .timeout(timeout_ms)
         .filter_fn(Box::new(move |el: &UIElement| {
-            // Swallow per-element errors so a single transient failure
-            // (E_ELEMENTNOTAVAILABLE during dynamic-UI walks) doesn't abort
-            // the whole matcher with not-found.
             let name = el.get_name().unwrap_or_default();
             if name.is_empty() {
                 return Ok(false);
@@ -287,24 +303,20 @@ fn match_in_subtree(
     if let Some(ct) = control_type {
         matcher = matcher.control_type(ct);
     }
-    match matcher.find_first() {
-        Ok(el) => Ok(element_to_result(&el)),
-        Err(_) => Ok(None), // not-found is the common case, not an error
+    match matcher.find_all() {
+        Ok(els) => Ok(els.into_iter().filter_map(|e| element_to_result(&e)).collect()),
+        Err(_) => Ok(Vec::new()),
     }
 }
 
-/// Manual tree walk capped at `deadline`. Mirrors the v0.3
-/// `_search_descendants` slow path: substring match either direction, with
-/// the 4×-length container filter and an optional role preference.
-fn manual_walk(
+fn manual_walk_all(
     root: &UIElement,
     target_norm_lower: &str,
     target_len: usize,
     desired_ct: Option<ControlType>,
     deadline: Instant,
-) -> Option<LocateResult> {
-    let mut role_match: Option<UIElement> = None;
-    let mut role_agnostic_match: Option<UIElement> = None;
+) -> Vec<LocateResult> {
+    let mut candidates = Vec::new();
     walk_recursive(
         root,
         0,
@@ -313,11 +325,9 @@ fn manual_walk(
         target_norm_lower,
         target_len,
         desired_ct,
-        &mut role_match,
-        &mut role_agnostic_match,
+        &mut candidates,
     );
-    let candidate = role_match.or(role_agnostic_match)?;
-    element_to_result(&candidate)
+    candidates.into_iter().filter_map(|e| element_to_result(&e)).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -329,32 +339,38 @@ fn walk_recursive(
     target_norm_lower: &str,
     target_len: usize,
     desired_ct: Option<ControlType>,
-    role_match: &mut Option<UIElement>,
-    role_agnostic_match: &mut Option<UIElement>,
+    candidates: &mut Vec<UIElement>,
 ) {
-    if depth >= max_depth || Instant::now() > deadline || role_match.is_some() {
+    if depth >= max_depth || Instant::now() > deadline {
         return;
     }
 
-    // Check this element.
     if let Ok(name) = element.get_name() {
         if !name.is_empty() {
             let name_norm = norm_dashes(&name).to_ascii_lowercase();
-            // Skip elements whose name is much longer than target — container
-            // titles that happen to contain the target as a substring.
-            if name.chars().count() <= target_len.saturating_mul(4)
-                && (name_norm.contains(target_norm_lower) || target_norm_lower.contains(&name_norm))
-            {
-                if let Ok(ct) = element.get_control_type() {
-                    if !is_container_role(ct) {
-                        if let Some(want) = desired_ct {
-                            if ct == want && role_match.is_none() {
-                                *role_match = Some(element.clone());
-                            } else if role_agnostic_match.is_none() {
-                                *role_agnostic_match = Some(element.clone());
+            if name.chars().count() <= target_len.saturating_mul(4) {
+                let mut is_match = false;
+                if target_norm_lower.contains(&name_norm) {
+                    is_match = true;
+                } else if name_norm.contains(target_norm_lower) {
+                    if target_len >= 4 {
+                        is_match = true;
+                    } else {
+                        is_match = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(target_norm_lower)))
+                            .map(|re| re.is_match(&name_norm))
+                            .unwrap_or(false);
+                    }
+                }
+                if is_match {
+                    if let Ok(ct) = element.get_control_type() {
+                        if !is_container_role(ct) {
+                            if let Some(want) = desired_ct {
+                                if ct == want {
+                                    candidates.push(element.clone());
+                                }
+                            } else {
+                                candidates.push(element.clone());
                             }
-                        } else if role_agnostic_match.is_none() {
-                            *role_agnostic_match = Some(element.clone());
                         }
                     }
                 }
@@ -362,11 +378,6 @@ fn walk_recursive(
         }
     }
 
-    if role_match.is_some() {
-        return;
-    }
-
-    // Recurse via the control-view walker (skips noise elements).
     let automation = match UIAutomation::new() {
         Ok(a) => a,
         Err(_) => return,
@@ -385,10 +396,9 @@ fn walk_recursive(
                 target_norm_lower,
                 target_len,
                 desired_ct,
-                role_match,
-                role_agnostic_match,
+                candidates,
             );
-            if role_match.is_some() || Instant::now() > deadline {
+            if Instant::now() > deadline {
                 break;
             }
             match walker.get_next_sibling(&child) {

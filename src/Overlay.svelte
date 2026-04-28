@@ -179,7 +179,7 @@
     }
 
     if (!u.bbox) return;
-    const padding = 6;
+    const padding = 12;
     const bx = u.bbox.x - ox - padding;
     const by = u.bbox.y - oy - padding;
     const bw = u.bbox.width + padding * 2;

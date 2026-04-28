@@ -25,12 +25,11 @@ pub struct LocateOptions {
 
 pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<Option<LocateResult>> {
     // Pass 1 — A11y.
-    let timeout = if opts.a11y_timeout_ms == 0 {
-        150
-    } else {
-        opts.a11y_timeout_ms
-    };
-    if let Some(hit) = a11y::find_element(target_text, opts.role.as_deref(), timeout)? {
+    let mut a11y_opts = opts.clone();
+    if a11y_opts.a11y_timeout_ms == 0 {
+        a11y_opts.a11y_timeout_ms = 150;
+    }
+    if let Some(hit) = a11y::find_element(target_text, &a11y_opts)? {
         return Ok(Some(hit));
     }
 

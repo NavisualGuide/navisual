@@ -352,8 +352,24 @@ pub fn find_text<'a>(
             if rc.is_empty() {
                 return false;
             }
-            target_lower.contains(&rc) && rc.chars().count() >= MIN_SUBSTR_LEN
-                || rc.contains(&target_lower)
+            // Target contains OCR text (OCR is a substring of target)
+            let target_contains_rc = target_lower.contains(&rc) && rc.chars().count() >= MIN_SUBSTR_LEN;
+            // OCR text contains target
+            let rc_contains_target = if rc.contains(&target_lower) {
+                if target_lower.chars().count() >= 4 {
+                    true
+                } else {
+                    // If target is very short (e.g. "no"), require it to be a distinct word
+                    // so it doesn't match "notice".
+                    let is_word = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&target_lower)))
+                        .map(|re| re.is_match(&rc))
+                        .unwrap_or(false);
+                    is_word
+                }
+            } else {
+                false
+            };
+            target_contains_rc || rc_contains_target
         })
         .collect();
     if let Some(r) = pick_best(&substr) {

@@ -1,0 +1,30 @@
+{
+  "id": "838686ea-b5ae-4d1e-9e96-fdd6a4b06226",
+  "task_description": "help me with inserting a math equation in word.",
+  "conversation": [
+    {
+      "role": "user",
+      "content": "The user wants help with the following task: help me with inserting a math equation in word.\n\nHere is their current screen. Analyze it and provide the first navigation instruction.",
+      "screenshot_hash": null,
+      "timestamp": "2026-04-26T02:21:09.299281800-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "To insert a math equation in Word, first open your browser and navigate to Google.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-26T02:21:09.299311100-07:00"
+    }
+  ],
+  "current_state_summary": {
+    "summary_text": "User is on their desktop, with several application windows open, including a code editor and a preview of a markdown document.",
+    "turn_index": 0
+  },
+  "current_step_sequence": [],
+  "current_step_index": 0,
+  "token_usage": {
+    "input": 2005,
+    "output": 75
+  },
+  "started_at": "2026-04-26T02:21:03.547731-07:00",
+  "last_active_at": "2026-04-26T02:21:09.299315500-07:00"
+}

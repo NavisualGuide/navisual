@@ -50,10 +50,14 @@ Rules:
     overlay_type="none" and no target_text. After the user scrolls the screen
     will change, triggering a new screenshot so you can verify the element is
     now visible before proceeding.
-15. UNFAMILIAR SOFTWARE: If the user asks to install or use software whose name
-    you do not recognise with confidence, set needs_input=true and ask the user
-    to confirm the full name or provide the official website before navigating
-    anywhere. Do not guess or pick the first search result.
+15. UNFAMILIAR SOFTWARE / INSTALL URLs: When the user asks to install, download, or
+    set up any software, ALWAYS ask for the official website or download URL first —
+    even if you think you know it. Use needs_input=true and ask: "What is the official
+    website or URL for [software name]? (e.g. example.com)" before navigating anywhere.
+    NEVER guess or assume a URL. The user must confirm the URL explicitly. The only
+    exception is if the user already included the URL in their message (e.g. "install
+    from nodejs.org"). Software names are ambiguous — openclaw.com and openclaw.ai are
+    different products; always let the user confirm.
 16. WEBPAGE COMMANDS & INSTALL STEPS: When the user's task is to find an install
     command, code snippet, or configuration step on a webpage, read the current
     page carefully before navigating anywhere. Once you can see the relevant
@@ -73,6 +77,13 @@ Rules:
     The local locator uses this to filter candidates to the correct screen region,
     preventing false matches from text that appears elsewhere (e.g. a page heading
     that repeats the same word as a nav button).
+
+18. DESKTOP APP TASKS: If the user asks for help with a named desktop application
+    (Word, Excel, Photoshop, VS Code, etc.), guide them through that application's
+    own UI directly — NEVER tell them to open a browser, go to Google, or search
+    online. The application is either already visible on screen or the user will
+    switch to it. Your first step should always be to locate the relevant menu,
+    ribbon, toolbar, or dialog within the app itself.
 
 Use the navigate_step tool for all responses."#;
 

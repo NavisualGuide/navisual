@@ -1,0 +1,54 @@
+{
+  "id": "0f816f71-3e6b-4759-83db-e79703c4af44",
+  "task_description": "I am on windows.",
+  "conversation": [
+    {
+      "role": "user",
+      "content": "The user wants help with the following task: I am on windows.\n\nHere is their current screen. Analyze it and provide the first navigation instruction.",
+      "screenshot_hash": null,
+      "timestamp": "2026-04-27T18:17:29.998511900-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click on the \"Windows\" tab to select the Windows installation instructions.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-27T18:17:29.998539100-07:00"
+    },
+    {
+      "role": "user",
+      "content": "Resuming session. Last known state: The user is on a webpage with installation instructions. The current view is for macOS. The user wants to see instructions for Windows.. Here is the current screen. Assess whether the state is still valid and provide the next instruction.",
+      "screenshot_hash": null,
+      "timestamp": "2026-04-27T18:17:47.789172700-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click on the \"Windows\" tab to view Windows installation instructions.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-27T18:17:47.789217800-07:00"
+    },
+    {
+      "role": "user",
+      "content": "Resuming session. Last known state: User wants Windows installation instructions. The current page shows macOS instructions. Clicking the \"Windows\" tab will switch to the correct view.. Here is the current screen. Assess whether the state is still valid and provide the next instruction.",
+      "screenshot_hash": null,
+      "timestamp": "2026-04-27T18:17:58.638121600-07:00"
+    },
+    {
+      "role": "assistant",
+      "content": "Click on the \"Windows\" tab to select the Windows installation instructions.",
+      "screenshot_hash": "...",
+      "timestamp": "2026-04-27T18:17:58.638146900-07:00"
+    }
+  ],
+  "current_state_summary": {
+    "summary_text": "User wants Windows installation instructions. Current page shows macOS instructions. Clicking the \"Windows\" tab will switch to the correct view.",
+    "turn_index": 4
+  },
+  "current_step_sequence": [],
+  "current_step_index": 0,
+  "token_usage": {
+    "input": 6539,
+    "output": 346
+  },
+  "started_at": "2026-04-27T18:17:24.118904500-07:00",
+  "last_active_at": "2026-04-27T18:17:58.638149300-07:00"
+}

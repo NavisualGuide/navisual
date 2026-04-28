@@ -344,12 +344,11 @@ v0.3 had word-by-word streaming. Approach: sidecar already streams via `on_text_
 wire a `stream_chunk` sidecar dispatcher event → Rust emits `guidance:chunk` Tauri event →
 Svelte updates the latest-instruction box in real time.
 
-#### E.3 — Screen change detection + auto-advance
-v0.3 monitored pixel-diff at 10fps and auto-advanced to the next step when the screen changed
-significantly (non-checkpoint steps). In v0.4, user must manually click Next after every action.
-Approach: Rust background task captures the active window every 500ms, computes pHash distance
-vs last-step snapshot; if distance > threshold and current step is non-checkpoint → auto-call
-`next_step`. Controlled by `CHECKPOINT_AUTO_ADVANCE` setting (default false).
+#### E.3 — Screen change detection + auto-advance (✅ implemented)
+`screen_watcher.rs`: Background thread captures active window every 500ms at low quality (JPEG q=30),
+computes 8×8 average hash (aHash). Hamming distance between successive hashes compared against
+threshold (6/64 bits). Emits `screen_changed` Tauri event when threshold exceeded. Frontend
+listens: non-checkpoint steps auto-advance; checkpoint steps re-query AI. 1.5s debounce.
 
 #### E.4 — Clipboard handling
 The `clipboard` field in `GuidanceStep` is parsed from the AI response but never acted on.

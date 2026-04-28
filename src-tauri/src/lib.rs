@@ -6,6 +6,7 @@ mod overlay;
 mod ai;
 mod tts;
 mod track;
+mod screen_watcher;
 
 use ai::router::AiRouter;
 use ai::config::Config;
@@ -44,6 +45,8 @@ struct AppState {
     guidance: std::sync::Mutex<GuidanceState>,
     tts: tts::TtsEngine,
     tracker: track::WindowTracker,
+    #[allow(dead_code)]
+    screen_watcher: screen_watcher::ScreenWatcher,
 }
 
 fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
@@ -103,6 +106,15 @@ fn execute_step(
         Err(e) => log::warn!("overlay make_update failed: {e}"),
     }
 
+    // E.4 — Clipboard: if the AI supplied text to copy, write it now so
+    // it's in the clipboard before the user acts on the instruction.
+    if let Some(ref clip_text) = step.clipboard {
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(clip_text.clone())) {
+            Ok(()) => log::info!("clipboard: wrote {} chars", clip_text.len()),
+            Err(e) => log::warn!("clipboard write failed: {e}"),
+        }
+    }
+
     // Start tracking the window so the overlay follows if it moves.
     if let Some(ref b) = bbox {
         tracker.start(b, kind, text_for_overlay, app.clone());
@@ -138,7 +150,9 @@ async fn guide(
     task: String,
     is_reply: bool,
 ) -> Result<GuideResponse, String> {
-    if !task.is_empty() && !is_reply {
+    let is_next_requery = task.starts_with("[User completed:");
+    // Only reset session state for a genuine new task (not resume, not reply, not next-requery).
+    if !task.is_empty() && !is_reply && !is_next_requery {
         let mut g = state.guidance.lock().unwrap();
         g.session_id = None;
         g.steps = vec![];
@@ -147,7 +161,7 @@ async fn guide(
 
     let session_id = {
         let mut router = state.ai_router.lock().await;
-        if task.is_empty() || is_reply {
+        if task.is_empty() || is_reply || is_next_requery {
             if let Some(session) = &router.session_manager.current_session {
                 session.id.to_string()
             } else {
@@ -178,12 +192,24 @@ async fn guide(
         let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
     };
 
-    let (resp, sent_user_prompt) = if task.is_empty() {
+    // A "[User completed: ...]" task is a re-query after Next — treat it like a
+    // resume so the AI gets the session history + state_summary context.
+    let is_next_requery = task.starts_with("[User completed:");
+
+    let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let summary = {
             let g = state.guidance.lock().unwrap();
             g.state_summary.clone()
         };
-        let prompt = crate::ai::prompts::session_resume_template(&summary);
+        let prompt = if task.is_empty() {
+            crate::ai::prompts::session_resume_template(&summary)
+        } else {
+            // Compose: tell the AI what was done + current state + "what's next?"
+            format!(
+                "{task} The previous state summary: {summary}. \
+                Here is the current screen. Please provide the next instruction.",
+            )
+        };
         (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
     } else if is_reply {
         let summary = {
@@ -460,9 +486,15 @@ async fn locate_a11y(
 ) -> Result<Option<locator::LocateResult>, String> {
     #[cfg(windows)]
     {
-        let timeout = timeout_ms.unwrap_or(1500);
+        let opts = locator::orchestrator::LocateOptions {
+            role,
+            nearby_text: None,
+            zone: None,
+            a11y_timeout_ms: timeout_ms.unwrap_or(1500),
+            min_confidence: 0.5,
+        };
         let result = tokio::task::spawn_blocking(move || {
-            locator::a11y::find_element(&text, role.as_deref(), timeout)
+            locator::a11y::find_element(&text, &opts)
         })
         .await
         .map_err(|e| format!("task join: {e}"))?
@@ -563,6 +595,7 @@ pub fn run() {
             let handle = app.handle().clone();
             let tts = tts::TtsEngine::new();
             let tracker = track::WindowTracker::new();
+            let watcher = screen_watcher::ScreenWatcher::start(handle.clone());
 
             // Init AI Router
             let config = Config::load();
@@ -581,6 +614,7 @@ pub fn run() {
                         guidance: std::sync::Mutex::new(GuidanceState::default()),
                         tts,
                         tracker,
+                        screen_watcher: watcher,
                     });
                     log::info!("AiRouter ready");
                 }
