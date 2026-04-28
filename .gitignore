@@ -12,6 +12,9 @@ vite.config.ts.timestamp-*
 # Rust / Tauri
 src-tauri/target/
 
+# Runtime data (sessions, usage logs) — user-specific, not source
+src-tauri/.ai_navigator/
+
 # Python
 __pycache__/
 *.py[cod]
