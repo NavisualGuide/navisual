@@ -6,6 +6,7 @@ pub enum OverlayType {
     Arrow,
     Highlight,
     Circle,
+    Subtitle,
     None,
 }
 

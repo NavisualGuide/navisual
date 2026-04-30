@@ -45,6 +45,40 @@ pub struct OverlayUpdate {
     /// Tauri position API (which may lag behind).
     pub virtual_origin: (i32, i32),
     pub virtual_size: (u32, u32),
+    /// The monitor the target element lives on (virtual-desktop physical pixels).
+    /// Used to confine the subtitle strip to a single screen.
+    pub active_screen: Option<Rect>,
+}
+
+/// Find which monitor contains the centre of `bbox`, falling back to the
+/// monitor nearest the virtual-desktop origin.
+fn active_screen_for_bbox(bbox: Option<&Rect>) -> Option<Rect> {
+    let monitors = xcap::Monitor::all().ok()?;
+    if monitors.is_empty() { return None; }
+
+    if let Some(b) = bbox {
+        let cx = b.x + (b.width as i32) / 2;
+        let cy = b.y + (b.height as i32) / 2;
+        for m in &monitors {
+            let mx = m.x().unwrap_or(0);
+            let my = m.y().unwrap_or(0);
+            let mw = m.width().unwrap_or(0) as i32;
+            let mh = m.height().unwrap_or(0) as i32;
+            if cx >= mx && cx < mx + mw && cy >= my && cy < my + mh {
+                return Some(Rect { x: mx, y: my, width: mw as u32, height: mh as u32 });
+            }
+        }
+    }
+
+    // Fall back to the monitor closest to (0, 0) — typically primary.
+    monitors.iter()
+        .min_by_key(|m| m.x().unwrap_or(0).abs() + m.y().unwrap_or(0).abs())
+        .map(|m| Rect {
+            x: m.x().unwrap_or(0),
+            y: m.y().unwrap_or(0),
+            width: m.width().unwrap_or(1920),
+            height: m.height().unwrap_or(1080),
+        })
 }
 
 struct CachedVd {
@@ -142,12 +176,14 @@ pub fn make_update(
     text: Option<String>,
 ) -> Result<OverlayUpdate> {
     let vd = virtual_desktop_rect()?;
+    let active_screen = active_screen_for_bbox(bbox.as_ref());
     Ok(OverlayUpdate {
         kind,
         bbox,
         text,
         virtual_origin: (vd.x, vd.y),
         virtual_size: (vd.width, vd.height),
+        active_screen,
     })
 }
 

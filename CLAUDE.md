@@ -1,7 +1,7 @@
 # AI Navigator — Project Guide
 
 **Version:** 0.4.0-alpha
-**Status:** v0.4 Phases A–D.3 complete (Tauri scaffold, Python sidecar, Rust screen capture + A11y + OCR + locator orchestrator, overlay canvas renderer, guidance loop + chat UI, global hotkeys, TTS via Windows SAPI, window position tracker). Next: Phase E — signed installer / packaging.
+**Status:** v0.4 Phases A–E.7 complete (Tauri scaffold, full-Rust AI backend, screen capture + A11y + OCR + locator, overlay, guidance loop + chat UI, hotkeys, TTS, screen watcher, streaming, clipboard, needs_input reply UI, settings modal, voice input). Settings stored in %APPDATA%\com.ai-navigator.app\.env. Next: packaging / internal tester distribution.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
 **Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md) *(Note: This SDD is the main source of truth for future changes. Always update `CLAUDE.md` to sync with the SDD).*
 **Settings:** [settings.md](docs/settings.md)
@@ -336,43 +336,31 @@ if __name__ == "__main__":
 
 - **E.0 Rust Sidecar Rewrite**: Ported the Python sidecar logic to Rust. Removed the `sidecar/` directory, moving AI routing, Anthropic, Gemini, cost tracking, and session logic directly into `src-tauri/src/ai/`. This eliminates the need for Python as a runtime dependency.
 
-### 🚧 Next: Phase E — Production Readiness
+### ✅ Completed (v0.4 Phase E.1–E.6 — 2026-04-27)
 
-#### E.2 — Streaming responses
-Currently the UI shows "Thinking…" for the full API round-trip then renders the complete text.
-v0.3 had word-by-word streaming. Approach: sidecar already streams via `on_text_chunk` callback;
-wire a `stream_chunk` sidecar dispatcher event → Rust emits `guidance:chunk` Tauri event →
-Svelte updates the latest-instruction box in real time.
+- **E.1 UI Overhaul** — already noted in Phase D.4 entry above.
+- **E.2 Streaming responses** — Rust AI router streams SSE from Anthropic/Gemini via `reqwest`; `stream_chunk` Tauri event appended to `currentInstruction` in real time. Partial JSON instruction extracted in `ai/streaming.rs`.
+- **E.3 Screen change detection + auto-advance** — `screen_watcher.rs` background thread; aHash 8×8 at JPEG q=30 every 500 ms; Hamming threshold 6/64; `screen_changed` Tauri event; 5 s debounce in Svelte; Pause/Resume guard.
+- **E.4 Clipboard** — `execute_step()` in `lib.rs` writes `step.clipboard` via `arboard`; 📋 badge shown in step header.
+- **E.5 `needs_input` reply UI** — dedicated `replyText` state; blue reply section renders when `phase === "needs_input"`; Enter key + Send button; `isReply: true` flag preserves session in Rust.
+- **E.5b Next button context pass-through** — `lastCompletedInstruction` carried into `[User completed: "..."]` re-query; Rust guard prevents session reset on continuation calls.
+- **E.6 Settings UI** — ⚙ modal with Provider / Screen Guide / Hotkeys / Audio tabs. `get_settings` / `save_settings` Tauri commands. Atomic `.env` write; empty key fields skip overwrite; in-process config reload via `router.reload_config()`. Emits `overlay:theme` event; `Overlay.svelte` re-parameterizes draw colors + line widths live.
 
-#### E.3 — Screen change detection + auto-advance (✅ implemented)
-`screen_watcher.rs`: Background thread captures active window every 500ms at low quality (JPEG q=30),
-computes 8×8 average hash (aHash). Hamming distance between successive hashes compared against
-threshold (6/64 bits). Emits `screen_changed` Tauri event when threshold exceeded. Frontend
-listens: non-checkpoint steps auto-advance; checkpoint steps re-query AI. 1.5s debounce.
+### ✅ Completed (v0.4 Phase E.7 + polish — 2026-04-30)
 
-#### E.4 — Clipboard handling
-The `clipboard` field in `GuidanceStep` is parsed from the AI response but never acted on.
-When non-null, write the value to the system clipboard so the user can paste CLI commands etc.
-Rust: `arboard` crate (already a Tauri dependency). One-liner in `execute_step`.
+- **E.7 Voice input** — 🎤 button in action row + `Alt+A` global hotkey; uses `SpeechRecognition` / `webkitSpeechRecognition` Web Speech API inside WebView2; transcript auto-submitted as task prompt; enabled/disabled via Settings → Audio. Language configurable (9 BCP-47 locales in dropdown).
+- **UI terminology** — "Auto-advance" renamed to **Autopilot**; "Overlay" renamed to **Screen Guide**; "Subtitle" renamed to **Live caption** throughout all UI strings.
+- **Settings: Show/Hide API key** — `get_settings` now returns actual stored API key (was always empty); Show/Hide uses `{#if}` blocks (distinct DOM elements) to reliably unmask password inputs in WebView2.
+- **Settings: model dropdowns** — All provider model fields changed from `<input list="datalist">` to `<select>` so all options are always visible.
+- **Settings: Gemini models updated** — `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite-preview`, `gemini-3-flash-preview`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`.
+- **fast_model confirmed unused** — `anthropic_fast_model` / `gemini_fast_model` exist in `Config` struct but the Rust router never reads them; removed from Settings UI; reserved for future re-query tiering.
+- **Header shows model only** — Title bar `header-provider` span shows the active model ID (e.g., `gemini-2.5-flash`) without the provider prefix.
+- **Caption: fit-to-text + transparent** — `drawSubtitle` in `Overlay.svelte` now measures text width and sizes the strip to fit content (not full screen width); opacity reduced from 0.78 → 0.52.
+- **Clear → Show overlay toggle** — ✕ Clear in quick menu clears screen guide + caption; button changes to 👁 Show which calls `restore_overlay` (new Tauri command) to re-emit the last stored overlay update.
+- **`restore_overlay` Rust command** — `AppState.last_overlay` stores the last non-None `(OverlayKind, bbox, text)` emitted by `execute_step`; `restore_overlay` re-emits from this store.
+- **App data dir for settings** — All persistent files moved to `app.path().app_data_dir()` (Windows: `%APPDATA%\com.ai-navigator.app\`). `Config::load()` now accepts `Option<&Path>`; `save_settings` uses `state.env_path` (stored in `AppState`). Session files and usage.json also moved to the same directory. Fixes write-permission failures when installed to `Program Files`.
 
-#### E.5 — `needs_input` text field
-When AI sets `needs_input=true`, the current UI shows the question as an instruction but
-provides no way to type a reply. Fix: when `phase === "needs_input"`, render a single-line
-text input + Send button above the action row; submitting it calls `guide({ task: reply })`.
-
-#### E.6 — Settings UI
-Users currently edit `.env` manually to change provider, API key, or model.
-Build a Svelte settings modal (⚙ button in title bar) with tabs:
-- **Provider** — radio for Anthropic/Gemini/Ollama/OpenAI + key fields + model dropdowns.
-- **Overlay** — color picker, thickness, duration.
-- **Hotkeys** — display current bindings (read-only for now; editable in later pass).
-On Apply: invoke a `save_settings` Rust command that writes the `.env` atomically and
-re-initializes the sidecar (restart sidecar process with new config).
-
-#### E.7 — Voice input
-Alt+A push-to-talk: record microphone via `tauri-plugin-microphone` or a JS `MediaRecorder`,
-send audio to Google Web Speech API (free, same as v0.3), receive transcript, submit as task.
-The 🎤 Speak button in the action row triggers this.
+### 🚧 Next: packaging / internal tester distribution
 
 **Known OCR limitation — Task Manager / high-DPI primary.** Windows.Media.Ocr wants ~30 px text for reliable reads; small-font nav items (Task Manager sidebar ~12–14 physical px) are at the reliability floor. The capture self-exclusion fix removes noise (only the target window is OCR'd), but the text pixel size is what it is. A 2× bilinear upscale of captures with width <1280 before OCR is the planned follow-up if Task Manager / other compact-UI apps miss too often in practice.
 

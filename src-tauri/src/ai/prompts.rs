@@ -110,6 +110,3 @@ pub fn initial_context_template(task_description: &str) -> String {
     )
 }
 
-pub fn state_context_template(state_summary: &str) -> String {
-    format!("Previous state: {}", state_summary)
-}

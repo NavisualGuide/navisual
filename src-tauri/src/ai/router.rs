@@ -1,14 +1,11 @@
 use anyhow::{Result, bail};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use crate::ai::config::Config;
 use crate::ai::cost_tracker::CostTracker;
-use crate::ai::session::{Session, SessionManager};
+use crate::ai::session::SessionManager;
 use crate::ai::types::NavigateStepResponse;
 use crate::ai::anthropic::{AnthropicClient, build_messages as build_anthropic};
 use crate::ai::gemini::{GeminiClient, build_messages as build_gemini};
-use crate::ai::prompts::{initial_context_template, session_resume_template};
 
 pub enum ApiClient {
     Anthropic(AnthropicClient),
@@ -23,45 +20,52 @@ pub struct AiRouter {
 }
 
 impl AiRouter {
-    pub fn new(config: Config, cost_tracker: CostTracker, session_manager: SessionManager) -> Result<Self> {
+    pub fn new(config: Config, cost_tracker: CostTracker, session_manager: SessionManager) -> Self {
         let mut router = Self {
             config: config.clone(),
             cost_tracker,
             session_manager,
             client: None,
         };
-        router.init_client()?;
-        Ok(router)
+        router.init_client();
+        router
     }
 
-    fn init_client(&mut self) -> Result<()> {
+    pub fn reload_config(&mut self, config: Config) {
+        self.config = config;
+        self.client = None;
+        self.init_client();
+    }
+
+    fn init_client(&mut self) {
         let provider = self.config.api_provider.as_str();
         match provider {
             "anthropic" => {
                 if let Some(key) = &self.config.anthropic_api_key {
-                    let client = AnthropicClient::new(
+                    match AnthropicClient::new(
                         key.clone(),
                         self.config.anthropic_model.clone(),
                         self.config.api_timeout_sec,
-                    )?;
-                    self.client = Some(ApiClient::Anthropic(client));
+                    ) {
+                        Ok(client) => self.client = Some(ApiClient::Anthropic(client)),
+                        Err(e) => log::error!("AnthropicClient init failed: {e}"),
+                    }
                 }
             }
             "gemini" => {
                 if let Some(key) = &self.config.gemini_api_key {
-                    let client = GeminiClient::new(
+                    match GeminiClient::new(
                         key.clone(),
                         self.config.gemini_model.clone(),
                         self.config.api_timeout_sec,
-                    )?;
-                    self.client = Some(ApiClient::Gemini(client));
+                    ) {
+                        Ok(client) => self.client = Some(ApiClient::Gemini(client)),
+                        Err(e) => log::error!("GeminiClient init failed: {e}"),
+                    }
                 }
             }
-            _ => {
-                // Ignore other providers for now during Rust migration
-            }
+            _ => {}
         }
-        Ok(())
     }
 
     pub async fn send_guidance_request(
@@ -108,23 +112,4 @@ impl AiRouter {
         Ok(response)
     }
 
-    pub async fn send_initial_request(
-        &mut self,
-        task_description: &str,
-        screenshot_b64: Option<&str>,
-        on_chunk: impl FnMut(&str),
-    ) -> Result<NavigateStepResponse> {
-        let user_text = initial_context_template(task_description);
-        self.send_guidance_request(&user_text, screenshot_b64, None, on_chunk).await
-    }
-
-    pub async fn send_resume_request(
-        &mut self,
-        state_summary: &str,
-        screenshot_b64: Option<&str>,
-        on_chunk: impl FnMut(&str),
-    ) -> Result<NavigateStepResponse> {
-        let user_text = session_resume_template(state_summary);
-        self.send_guidance_request(&user_text, screenshot_b64, None, on_chunk).await
-    }
 }

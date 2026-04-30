@@ -9,12 +9,23 @@
     text: string | null;
     virtual_origin: [number, number];
     virtual_size: [number, number];
+    active_screen: Rect | null;
   };
+  type OverlayTheme = { color: string; thickness: number; subtitle_enabled: boolean };
 
   let canvas: HTMLCanvasElement;
   let currentUpdate: OverlayUpdate | null = null;
   let animFrame: number | null = null;
   let animStart = 0;
+  // Plain object — NOT $state. drawBox/drawArrow read this in rAF callbacks where
+  // Svelte's reactive getters don't fire; mutating fields in-place ensures every
+  // frame sees the latest values without any signal overhead.
+  let theme: OverlayTheme = { color: "#FF6B35", thickness: 4, subtitle_enabled: true };
+
+  function hexToRgb(hex: string): [number, number, number] {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+    return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 107, 53];
+  }
 
   // Draw the highlight box with a pulsing glow.
   // t = milliseconds elapsed since the box first appeared.
@@ -23,28 +34,30 @@
     bx: number, by: number, bw: number, bh: number,
     t: number,
   ) {
+    const [r, g, b] = hexToRgb(theme.color);
     const pulse = (Math.sin(t / 700) + 1) / 2; // 0→1, ~4.4 s period
+    const lw = Math.max(1, theme.thickness);
 
-    // Subtle orange fill
-    ctx.fillStyle = `rgba(255, 107, 53, ${0.07 + pulse * 0.07})`;
+    // Subtle accent fill
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.07 + pulse * 0.07})`;
     ctx.fillRect(bx, by, bw, bh);
 
     // Dark shadow outline — ensures contrast on any background color
     ctx.shadowBlur = 0;
     ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
-    ctx.lineWidth = 9;
+    ctx.lineWidth = lw * 2.25;
     ctx.lineJoin = "round";
     ctx.strokeRect(bx, by, bw, bh);
 
-    // Pulsing orange border
-    ctx.shadowColor = "#FF6B35";
+    // Pulsing accent border
+    ctx.shadowColor = theme.color;
     ctx.shadowBlur = 8 + pulse * 18;
-    ctx.strokeStyle = "#FF6B35";
-    ctx.lineWidth = 4;
+    ctx.strokeStyle = theme.color;
+    ctx.lineWidth = lw;
     ctx.strokeRect(bx, by, bw, bh);
     ctx.shadowBlur = 0;
 
-    // Corner L-marks: white base layer + orange glow layer
+    // Corner L-marks: white base layer + accent glow layer
     const tick = Math.min(24, Math.max(12, Math.min(bw * 0.35, bh * 0.35)));
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -52,7 +65,7 @@
     function corners(color: string, width: number, glow: number) {
       ctx.strokeStyle = color;
       ctx.lineWidth = width;
-      ctx.shadowColor = glow ? "#FF6B35" : "transparent";
+      ctx.shadowColor = glow ? theme.color : "transparent";
       ctx.shadowBlur = glow;
       // top-left
       ctx.beginPath(); ctx.moveTo(bx, by + tick); ctx.lineTo(bx, by); ctx.lineTo(bx + tick, by); ctx.stroke();
@@ -66,7 +79,7 @@
     }
 
     corners("#FFFFFF", 3.5, 0);
-    corners("#FF6B35", 2.5, 4 + pulse * 10);
+    corners(theme.color, 2.5, 4 + pulse * 10);
   }
 
   function drawArrow(
@@ -85,7 +98,7 @@
     // Shadow
     ctx.shadowColor = "rgba(0,0,0,0.5)";
     ctx.shadowBlur = 8;
-    ctx.fillStyle = "#CC4410";
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
     ctx.beginPath();
     ctx.moveTo(cx, tipY + 2);
     ctx.lineTo(cx - halfBase, shaftTopY + 2);
@@ -94,9 +107,9 @@
     ctx.fill();
 
     // Arrow body with glow
-    ctx.shadowColor = "#FF6B35";
+    ctx.shadowColor = theme.color;
     ctx.shadowBlur = 6 + pulse * 12;
-    ctx.fillStyle = "#FF6B35";
+    ctx.fillStyle = theme.color;
     ctx.beginPath();
     ctx.moveTo(cx, tipY);
     ctx.lineTo(cx - halfBase, shaftTopY);
@@ -106,47 +119,67 @@
     ctx.shadowBlur = 0;
   }
 
-  function drawSubtitle(ctx: CanvasRenderingContext2D, cw: number, ch: number, text: string) {
-    const stripH = 72;
-    const stripY = ch - stripH - 8;
-    const pad = 16;
+  // Draw subtitle strip confined to a single screen.
+  // Strip width fits the text content rather than spanning the full screen.
+  function drawSubtitle(
+    ctx: CanvasRenderingContext2D,
+    canvasW: number, canvasH: number,
+    ox: number, oy: number,
+    activeScreen: Rect | null,
+    text: string,
+  ) {
+    const sx = activeScreen ? (activeScreen.x - ox) : 0;
+    const sy = activeScreen ? (activeScreen.y - oy) : 0;
+    const sw = activeScreen ? activeScreen.width  : canvasW;
+    const sh = activeScreen ? activeScreen.height : canvasH;
+
+    const hPad = 22;
+    const vPad = 12;
     const r = 10;
+    const maxTextW = sw * 0.78;
+    const cx = sx + sw / 2;
 
-    ctx.fillStyle = "rgba(0,0,0,0.78)";
-    ctx.beginPath();
-    ctx.moveTo(pad + r, stripY);
-    ctx.lineTo(cw - pad - r, stripY);
-    ctx.quadraticCurveTo(cw - pad, stripY, cw - pad, stripY + r);
-    ctx.lineTo(cw - pad, stripY + stripH - r);
-    ctx.quadraticCurveTo(cw - pad, stripY + stripH, cw - pad - r, stripY + stripH);
-    ctx.lineTo(pad + r, stripY + stripH);
-    ctx.quadraticCurveTo(pad, stripY + stripH, pad, stripY + stripH - r);
-    ctx.lineTo(pad, stripY + r);
-    ctx.quadraticCurveTo(pad, stripY, pad + r, stripY);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.fillStyle = "#FFFFFF";
+    // Measure text first so strip width can fit the content
     ctx.font = "bold 18px Inter, -apple-system, 'Segoe UI', sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
-    const maxWidth = cw * 0.8;
     const words = text.split(" ");
     const lines: string[] = [];
     let line = "";
     for (const word of words) {
       const test = line ? `${line} ${word}` : word;
-      if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = word; }
+      if (ctx.measureText(test).width > maxTextW && line) { lines.push(line); line = word; }
       else { line = test; }
     }
     if (line) lines.push(line);
 
     const lineH = 22;
-    const totalH = lines.length * lineH;
-    const startY = stripY + stripH / 2 - totalH / 2 + lineH / 2;
+    const maxLineW = Math.max(...lines.map(l => ctx.measureText(l).width));
+    const stripW = Math.min(maxLineW + hPad * 2, maxTextW + hPad * 2);
+    const stripH = lines.length * lineH + vPad * 2;
+    const left   = cx - stripW / 2;
+    const right  = cx + stripW / 2;
+    const stripY = sy + sh - stripH - 10;
+
+    ctx.fillStyle = "rgba(0,0,0,0.52)";
+    ctx.beginPath();
+    ctx.moveTo(left + r, stripY);
+    ctx.lineTo(right - r, stripY);
+    ctx.quadraticCurveTo(right, stripY, right, stripY + r);
+    ctx.lineTo(right, stripY + stripH - r);
+    ctx.quadraticCurveTo(right, stripY + stripH, right - r, stripY + stripH);
+    ctx.lineTo(left + r, stripY + stripH);
+    ctx.quadraticCurveTo(left, stripY + stripH, left, stripY + stripH - r);
+    ctx.lineTo(left, stripY + r);
+    ctx.quadraticCurveTo(left, stripY, left + r, stripY);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "#FFFFFF";
+    const startY = stripY + vPad + lineH / 2;
     for (let i = 0; i < lines.length; i++) {
-      ctx.fillText(lines[i], cw / 2, startY + i * lineH, maxWidth);
+      ctx.fillText(lines[i], cx, startY + i * lineH, maxTextW);
     }
   }
 
@@ -172,13 +205,17 @@
 
     if (u.kind === "none") return; // canvas cleared, stop
 
-    if (u.kind === "subtitle") {
-      drawSubtitle(ctx, vw, vh, u.text ?? "");
-      // Subtitles are static — no need to keep animating
-      return;
+    // Subtitle is drawn alongside every overlay type (arrow, box, subtitle-only).
+    // Rust always passes step.instruction as u.text.
+    if (theme.subtitle_enabled && u.text) {
+      drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.text);
     }
 
-    if (!u.bbox) return;
+    // Subtitle-only step — no bbox to locate, no animation loop needed.
+    if (u.kind === "subtitle") return;
+
+    if (!u.bbox) return; // no element located — subtitle already drawn above
+
     const padding = 12;
     const bx = u.bbox.x - ox - padding;
     const by = u.bbox.y - oy - padding;
@@ -211,6 +248,12 @@
   onMount(async () => {
     await listen<OverlayUpdate>("overlay:update", (event) => {
       startAnimation(event.payload);
+    });
+    await listen<OverlayTheme>("overlay:theme", (event) => {
+      // Mutate fields in-place so all active rAF callbacks immediately see the new values.
+      theme.color = event.payload.color;
+      theme.thickness = event.payload.thickness;
+      theme.subtitle_enabled = event.payload.subtitle_enabled;
     });
   });
 </script>

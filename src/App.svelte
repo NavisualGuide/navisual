@@ -4,7 +4,7 @@
   import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
-  import { listen } from "@tauri-apps/api/event";
+  import { listen, emitTo } from "@tauri-apps/api/event";
 
   type Rect = { x: number; y: number; width: number; height: number };
   type LocateResult = { bbox: Rect; name: string; role: string; confidence: number };
@@ -33,11 +33,34 @@
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string };
-  type SettingsTab = "provider" | "overlay" | "hotkeys";
+  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio";
+  type SettingsPayload = {
+    api_provider: string;
+    anthropic_api_key: string;
+    anthropic_model: string;
+    anthropic_fast_model: string;
+    gemini_api_key: string;
+    gemini_model: string;
+    gemini_fast_model: string;
+    ollama_base_url: string;
+    ollama_model: string;
+    openai_api_key: string;
+    openai_model: string;
+    overlay_color: string;
+    overlay_thickness: number;
+    subtitle_enabled: boolean;
+    auto_advance: boolean;
+    tts_enabled: boolean;
+    voice_input_enabled: boolean;
+    voice_language: string;
+    hotkey_next: string;
+    hotkey_wrong: string;
+    hotkey_pause: string;
+    hotkey_icon: string;
+  };
 
   // Core state
   let task = $state("");
-  let replyText = $state("");   // E.5 — separate input for needs_input replies
   let lastCompletedInstruction = $state("");  // passed to AI on Next re-query
   let phase = $state<AppPhase>("idle");
 
@@ -54,6 +77,33 @@
   let settingsTab = $state<SettingsTab>("provider");
   let history = $state<HistoryEntry[]>([]);
   let historyEl: HTMLElement | null = $state(null);
+
+  // Settings form state
+  const SETTINGS_DEFAULTS: SettingsPayload = {
+    api_provider: "anthropic",
+    anthropic_api_key: "", anthropic_model: "claude-sonnet-4-6", anthropic_fast_model: "claude-haiku-4-5-20251001",
+    gemini_api_key: "", gemini_model: "gemini-2.5-flash", gemini_fast_model: "gemini-2.5-flash-lite",
+    ollama_base_url: "http://localhost:11434", ollama_model: "llama3.2-vision",
+    openai_api_key: "", openai_model: "gpt-4o",
+    overlay_color: "#FF6B35", overlay_thickness: 4,
+    subtitle_enabled: true, auto_advance: false,
+    tts_enabled: true, voice_input_enabled: false, voice_language: "en-US",
+    hotkey_next: "Alt+Backquote", hotkey_wrong: "Alt+KeyE",
+    hotkey_pause: "Alt+KeyS", hotkey_icon: "Alt+KeyQ",
+  };
+  let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
+  let settingsSaving = $state(false);
+  let settingsError = $state<string | null>(null);
+  let settingsSaved = $state(false);
+  let showKeyAnthropic = $state(false);
+  let showKeyGemini = $state(false);
+  let showKeyOpenAI = $state(false);
+  let showQuickMenu = $state(false);
+  let isMuted = $state(false);
+  let isOverlayCleared = $state(false);
+  let isRecording = $state(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let speechRecognition: any = null;
 
   // Timer
   let elapsedMs = $state(0);
@@ -83,16 +133,98 @@
     if (historyEl) historyEl.scrollTop = historyEl.scrollHeight;
   }
 
-  // Auto-advance enabled flag — Pause button sets this to false.
-  // Starting a new guide() call or nextStep() re-enables it.
-  let autoAdvancePaused = $state(false);
+  // Whether the global auto-advance setting is on (loaded from config on mount).
+  let autoAdvanceEnabled = $state(false);
+
+  function toggleMute() {
+    isMuted = !isMuted;
+    settingsForm = { ...settingsForm, tts_enabled: !isMuted };
+    if (isMuted) invoke("speak", { text: "" }).catch(() => {});
+    invoke("save_settings", { payload: settingsForm }).catch(() => {});
+    showQuickMenu = false;
+  }
+
+  function toggleVoiceInput() {
+    if (!settingsForm.voice_input_enabled) {
+      addToHistory("error", "Voice input is disabled — enable it in Settings → Audio");
+      showQuickMenu = false;
+      return;
+    }
+    if (isRecording) {
+      stopVoiceInput();
+    } else {
+      startVoiceInput();
+    }
+  }
+
+  function startVoiceInput() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SR = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
+    if (!SR) {
+      addToHistory("error", "Speech recognition is not supported in this environment");
+      return;
+    }
+    speechRecognition = new SR();
+    speechRecognition.continuous = false;
+    speechRecognition.interimResults = false;
+    speechRecognition.lang = settingsForm.voice_language || "en-US";
+    isRecording = true;
+
+    speechRecognition.onresult = (event: any) => {
+      const transcript = (event.results[0][0].transcript as string).trim();
+      isRecording = false;
+      if (transcript) {
+        task = transcript;
+        guide();
+      }
+    };
+    speechRecognition.onerror = () => { isRecording = false; };
+    speechRecognition.onend   = () => { isRecording = false; };
+    speechRecognition.start();
+  }
+
+  function stopVoiceInput() {
+    if (speechRecognition) { speechRecognition.stop(); speechRecognition = null; }
+    isRecording = false;
+  }
+
+  async function quickToggleSubtitle() {
+    settingsForm.subtitle_enabled = !settingsForm.subtitle_enabled;
+    await emitTo("overlay", "overlay:theme", {
+      color: settingsForm.overlay_color,
+      thickness: settingsForm.overlay_thickness,
+      subtitle_enabled: settingsForm.subtitle_enabled,
+    });
+    showQuickMenu = false;
+  }
+
+  async function quickClearScreen() {
+    isOverlayCleared = true;
+    await invoke("clear_overlay").catch(() => {});
+    showQuickMenu = false;
+  }
+
+  async function quickShowScreen() {
+    isOverlayCleared = false;
+    await invoke("restore_overlay").catch(() => {});
+    await emitTo("overlay", "overlay:theme", {
+      color: settingsForm.overlay_color,
+      thickness: settingsForm.overlay_thickness,
+      subtitle_enabled: settingsForm.subtitle_enabled,
+    });
+    showQuickMenu = false;
+  }
+
+  async function wrongAndClose() {
+    showQuickMenu = false;
+    await correction();
+  }
 
   function cancelRequest() {
     requestToken++;
     stopTimer();
     invoke("clear_overlay").catch(() => {});
     invoke("speak", { text: "" }).catch(() => {});
-    autoAdvancePaused = true;  // Pause disables auto-advance
     phase = "idle";
   }
 
@@ -138,6 +270,65 @@
     catch (e) { console.error("expandToPanel:", e); }
   }
 
+  async function openSettings() {
+    settingsError = null;
+    settingsSaved = false;
+    showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false;
+    showSettings = true;
+    try {
+      const data = await invoke<SettingsPayload>("get_settings");
+      // Keep the live auto_advance state — the Pause/Resume button may have
+      // changed it since the last disk save, and the button is the source of truth.
+      settingsForm = { ...data, auto_advance: autoAdvanceEnabled };
+    } catch (e) {
+      settingsError = String(e);
+    }
+  }
+
+  // Re-register global shortcuts. Called on mount and after settings change.
+  async function registerShortcuts(hk: Pick<SettingsPayload, "hotkey_next"|"hotkey_wrong"|"hotkey_pause"|"hotkey_icon">) {
+    await unregisterAll().catch(() => {});
+    function debounced(fn: () => void, ms = 350): () => void {
+      let last = 0;
+      return () => { const now = Date.now(); if (now - last < ms) return; last = now; fn(); };
+    }
+    const pairs: Array<[string, () => void]> = [
+      [hk.hotkey_next,  debounced(() => { if (!actionDisabled) nextStep(); })],
+      [hk.hotkey_wrong, debounced(() => { if (!actionDisabled) correction(); })],
+      [hk.hotkey_pause, debounced(() => cancelRequest())],
+      [hk.hotkey_icon,  debounced(() => { if (iconMode) expandToPanel(); else collapseToIcon(); })],
+    ];
+    const errors: string[] = [];
+    for (const [key, handler] of pairs) {
+      try { await register(key, handler); }
+      catch (e) { errors.push(`${key}: ${e}`); console.warn("shortcut failed:", key, e); }
+    }
+    return errors;
+  }
+
+  async function applySettings() {
+    settingsSaving = true;
+    settingsError = null;
+    settingsSaved = false;
+    try {
+      await invoke("save_settings", { payload: settingsForm });
+      provider = settingsForm.api_provider;
+      autoAdvanceEnabled = settingsForm.auto_advance;
+      isMuted = !settingsForm.tts_enabled;
+      const hkErrors = await registerShortcuts(settingsForm);
+      if (hkErrors.length) {
+        settingsError = `Saved, but hotkey registration failed: ${hkErrors.join("; ")}`;
+      } else {
+        settingsSaved = true;
+        setTimeout(() => { settingsSaved = false; }, 2000);
+      }
+    } catch (e) {
+      settingsError = String(e);
+    } finally {
+      settingsSaving = false;
+    }
+  }
+
   async function newSession() {
     cancelRequest();
     task = "";
@@ -159,7 +350,6 @@
     sessionId = res.session_id;
     if (res.provider) provider = res.provider;
     phase = res.needs_input ? "needs_input" : "guiding";
-    autoAdvancePaused = false;  // A fresh AI response re-enables auto-advance
     if (res.instruction) {
       let meta: string | undefined;
       if (res.located) {
@@ -168,54 +358,28 @@
         meta = `not located · "${steps[idx].target_text}"`;
       }
       addToHistory("ai", res.instruction, meta);
-      invoke("speak", { text: res.instruction }).catch(() => {});
+      if (!isMuted) invoke("speak", { text: res.instruction }).catch(() => {});
     }
   }
 
   async function guide() {
     if (!task.trim()) return;
     const taskText = task.trim();
+    task = "";
+    // Keep session context when in the middle of a task; start fresh from idle/error.
+    const isReply = phase === "guiding" || phase === "needs_input";
     await addToHistory("user", taskText);
     currentInstruction = "";
-    replyText = "";
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply: false });
+      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply });
       stopTimer();
       if (token !== requestToken) return;
       if (!res.ok) {
         phase = "error";
         addToHistory("error", res.error ?? "guide failed");
-        return;
-      }
-      applyResponse(res, 0, token);
-    } catch (e) {
-      stopTimer();
-      if (token !== requestToken) return;
-      phase = "error";
-      addToHistory("error", String(e));
-    }
-  }
-
-  // E.5 — send a reply when the AI needs clarification.
-  async function reply() {
-    const text = replyText.trim();
-    if (!text) return;
-    await addToHistory("user", text);
-    replyText = "";
-    currentInstruction = "";
-    phase = "thinking";
-    startTimer();
-    const token = ++requestToken;
-    try {
-      const res = await invoke<GuideResponse>("guide", { task: text, isReply: true });
-      stopTimer();
-      if (token !== requestToken) return;
-      if (!res.ok) {
-        phase = "error";
-        addToHistory("error", res.error ?? "reply failed");
         return;
       }
       applyResponse(res, 0, token);
@@ -277,13 +441,15 @@
   }
 
   async function correction() {
-    addToHistory("correction", "Marked wrong — re-analysing…");
+    const note = task.trim();
+    if (note) task = "";
+    addToHistory("correction", note ? `Wrong — ${note}` : "Marked wrong — re-analysing…");
     currentInstruction = "";
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("send_correction");
+      const res = await invoke<GuideResponse>("send_correction", { note: note || null });
       stopTimer();
       if (token !== requestToken) return;
       if (!res.ok) {
@@ -301,22 +467,14 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey && phase === "idle") {
+    if (e.key === "Enter" && !e.shiftKey && !isThinking && task.trim()) {
       e.preventDefault();
       guide();
     }
   }
 
-  function handleReplyKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      reply();
-    }
-  }
-
-  // "paused" means the session is still live but auto-advance is off.
-  // The user can still click Next/Wrong manually.
-  let isPaused = $derived(autoAdvancePaused && phase === "idle" && steps.length > 0);
+  // "paused" = auto-advance is on but we're currently idle with an active session.
+  let isPaused = $derived(autoAdvanceEnabled && phase === "idle" && steps.length > 0);
 
   let statusLabel = $derived(
     isPaused              ? `paused · step ${stepIndex + 1}/${steps.length}`
@@ -327,14 +485,37 @@
     : "error"
   );
 
-  // Next/Wrong enabled while guiding OR paused (session is still live)
-  let actionDisabled = $derived(!isPaused && phase !== "guiding" && phase !== "needs_input");
+  // Next/Wrong enabled whenever there's a live session (guiding, needs_input, or idle with steps).
+  let actionDisabled = $derived(phase === "thinking" || phase === "error" || (phase === "idle" && steps.length === 0));
   let isThinking = $derived(phase === "thinking");
+  let activeModel = $derived(
+    settingsForm.api_provider === "anthropic" ? settingsForm.anthropic_model
+    : settingsForm.api_provider === "gemini" ? settingsForm.gemini_model
+    : settingsForm.api_provider === "ollama" ? settingsForm.ollama_model
+    : settingsForm.openai_model
+  );
+  let headerLabel = $derived(activeModel || provider);
 
   onMount(async () => {
     // Position bottom-right then show — panel starts hidden (visible:false in
     // tauri.conf.json) so the user never sees a blank frame at 0,0 while
     // WebView2 initialises. We show only once the UI is fully painted.
+    // Load initial config so hotkeys, autoAdvance, and provider are correct from startup.
+    let initHotkeys: Pick<SettingsPayload, "hotkey_next"|"hotkey_wrong"|"hotkey_pause"|"hotkey_icon"> = {
+      hotkey_next: SETTINGS_DEFAULTS.hotkey_next,
+      hotkey_wrong: SETTINGS_DEFAULTS.hotkey_wrong,
+      hotkey_pause: SETTINGS_DEFAULTS.hotkey_pause,
+      hotkey_icon: SETTINGS_DEFAULTS.hotkey_icon,
+    };
+    try {
+      const init = await invoke<SettingsPayload>("get_settings");
+      autoAdvanceEnabled = init.auto_advance;
+      isMuted = !init.tts_enabled;
+      if (init.api_provider) provider = init.api_provider;
+      settingsForm = { ...SETTINGS_DEFAULTS, ...init, auto_advance: init.auto_advance };
+      initHotkeys = init;
+    } catch (_) {}
+
     try {
       const sw = window.screen.availWidth;
       const sh = window.screen.availHeight;
@@ -363,8 +544,8 @@
       if (now - screenChangeDebounce < 5000) return;
       // Only act when actively guiding and not already processing.
       if (phase !== "guiding") return;
-      // Respect the Pause button — don't re-engage automatically.
-      if (autoAdvancePaused) return;
+      // Respect the global auto-advance setting.
+      if (!autoAdvanceEnabled) return;
       screenChangeDebounce = now;
 
       const currentStep = steps[stepIndex];
@@ -373,27 +554,12 @@
       nextStep();
     });
 
-    // Unregister any stale shortcuts from a previous mount (e.g. HMR).
-    await unregisterAll().catch(() => {});
+    await registerShortcuts(initHotkeys);
 
-    // Debounce helper — Tauri's RegisterHotKey fires on every keydown repeat,
-    // so without a gate the user gets multiple triggers from one key press.
-    function debounced(fn: () => void, ms = 350): () => void {
-      let last = 0;
-      return () => { const now = Date.now(); if (now - last < ms) return; last = now; fn(); };
-    }
-
-    // Register each shortcut independently so one failure doesn't kill the rest.
-    const shortcuts: Array<[string, () => void]> = [
-      ["Alt+Backquote", debounced(() => { if (!actionDisabled) nextStep(); })],
-      ["Alt+KeyE",      debounced(() => { if (!actionDisabled) correction(); })],
-      ["Alt+KeyS",      debounced(() => { if (phase !== "idle") cancelRequest(); })],
-      ["Alt+KeyQ",      debounced(() => { if (iconMode) expandToPanel(); else collapseToIcon(); })],
-    ];
-    for (const [key, handler] of shortcuts) {
-      try { await register(key, handler); }
-      catch (e) { console.warn(`shortcut ${key} failed:`, e); }
-    }
+    // Alt+A — push-to-talk voice input (E.7)
+    try {
+      await register("Alt+KeyA", () => { toggleVoiceInput(); });
+    } catch (_) {}
 
     await addToHistory("system", "AI Navigator ready");
   });
@@ -420,12 +586,11 @@
     <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
       <span class="header-title">AI Navigator</span>
-      {#if provider}
-        <span class="header-provider">{provider}</span>
+      {#if headerLabel}
+        <span class="header-provider">{headerLabel}</span>
       {/if}
       <div class="header-actions">
-        <button class="hdr-btn" onclick={() => { showSettings = true; }} title="Settings (E.6)">⚙</button>
-        <button class="hdr-btn" onclick={newSession} title="New session">＋</button>
+        <button class="hdr-btn" onclick={openSettings} title="Settings">⚙</button>
         <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to icon (Alt+Q)">⊟</button>
         <button class="hdr-btn hdr-btn-close" onclick={closeWindow} title="Quit">✕</button>
       </div>
@@ -479,57 +644,81 @@
       {/if}
     </div>
 
-    <!-- Task input -->
+    <!-- Task input — always enabled; Enter submits, isReply detected from phase -->
     <section class="task-section">
+      {#if phase === "needs_input"}
+        <div class="input-hint">💬 AI needs your input — type your answer below</div>
+      {:else if phase === "guiding"}
+        <div class="input-hint">Type a follow-up or correction · ＋ for a new task</div>
+      {/if}
       <textarea
         bind:value={task}
         onkeydown={handleKeydown}
-        placeholder="What do you need help with?"
+        placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
         rows={2}
-        disabled={isThinking || phase === "needs_input" || phase === "guiding"}
       ></textarea>
       {#if isThinking}
         <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
       {:else}
-        <button class="btn-primary btn-full" onclick={guide} disabled={!task.trim() || isThinking || phase === "guiding" || phase === "needs_input"}>Guide me</button>
+        <button class="btn-primary btn-full" onclick={guide} disabled={!task.trim()}>
+          {phase === "needs_input" ? "↩ Send answer" : phase === "guiding" ? "↩ Follow up" : "Guide me"}
+        </button>
       {/if}
     </section>
 
-    <!-- E.5 — Inline reply box: appears above action row when AI needs clarification -->
-    {#if phase === "needs_input"}
-      <section class="reply-section">
-        <div class="reply-question">💬 The AI needs your input:</div>
-        <div class="reply-row">
-          <input
-            class="reply-input"
-            type="text"
-            bind:value={replyText}
-            onkeydown={handleReplyKeydown}
-            placeholder="Type your answer…"
-            autofocus
-          />
-          <button class="btn-reply" onclick={reply} disabled={!replyText.trim()}>↩ Send</button>
-        </div>
-      </section>
+    <!-- Quick-action menu (opened by ··· button) -->
+    {#if showQuickMenu}
+      <div class="quick-menu">
+        <button class="qm-btn qm-wrong" onclick={wrongAndClose} disabled={actionDisabled} title="Alt+E">
+          ✗ Wrong
+        </button>
+        <button class="qm-btn" class:qm-active={isMuted} onclick={toggleMute}>
+          {isMuted ? "🔇 Unmute" : "🔊 Mute"}
+        </button>
+        <button class="qm-btn" class:qm-active={settingsForm.subtitle_enabled} onclick={quickToggleSubtitle}>
+          💬 {settingsForm.subtitle_enabled ? "Caption: on" : "Caption: off"}
+        </button>
+        {#if isOverlayCleared}
+          <button class="qm-btn" onclick={quickShowScreen}>
+            👁 Show
+          </button>
+        {:else}
+          <button class="qm-btn" onclick={quickClearScreen}>
+            ✕ Clear
+          </button>
+        {/if}
+      </div>
     {/if}
 
-    <!-- Action row (always visible) -->
+    <!-- Action row: Next · Autopilot · New Task · 🎤 · ··· -->
     <div class="action-row">
-      <button class="btn-action btn-next" onclick={nextStep} disabled={actionDisabled} title="Alt+`">
+      <button class="btn-action btn-next" onclick={nextStep} disabled={actionDisabled} title="Next step (Alt+`)">
         → Next
       </button>
-      <button class="btn-action btn-wrong" onclick={correction} disabled={actionDisabled} title="Alt+E">
-        ✗ Wrong
+      <button class="btn-action {autoAdvanceEnabled ? 'btn-pause' : 'btn-resume'}"
+        disabled={!autoAdvanceEnabled && steps.length === 0}
+        onclick={() => {
+          autoAdvanceEnabled = !autoAdvanceEnabled;
+          settingsForm = { ...settingsForm, auto_advance: autoAdvanceEnabled };
+          invoke("save_settings", { payload: settingsForm }).catch(() => {});
+        }}
+        title={autoAdvanceEnabled ? "Autopilot on — click to turn off" : "Autopilot off — click to turn on"}>
+        {autoAdvanceEnabled ? "⏸ Autopilot" : "✈ Autopilot"}
       </button>
-      {#if isPaused}
-        <button class="btn-action btn-resume" onclick={() => { autoAdvancePaused = false; phase = steps.length > 0 ? "guiding" : "idle"; }} title="Alt+S">
-          ▶ Resume
-        </button>
-      {:else}
-        <button class="btn-action btn-pause" onclick={cancelRequest} disabled={phase === "idle" && !isPaused} title="Alt+S">
-          ⏸ Pause
-        </button>
-      {/if}
+      <button class="btn-action btn-new" onclick={newSession} title="Clear session and start fresh">
+        ＋ New task
+      </button>
+      <button class="btn-action btn-mic" class:btn-mic-active={isRecording}
+        onclick={toggleVoiceInput}
+        disabled={!settingsForm.voice_input_enabled}
+        title={settingsForm.voice_input_enabled ? (isRecording ? "Stop recording (Alt+A)" : "Voice input (Alt+A)") : "Enable voice input in Settings → Audio"}>
+        🎤
+      </button>
+      <button class="btn-action btn-more" class:btn-more-open={showQuickMenu}
+        onclick={() => { showQuickMenu = !showQuickMenu; }}
+        title="More actions">
+        ···
+      </button>
     </div>
 
     <!-- Status + shortcut legend -->
@@ -542,15 +731,15 @@
         {/if}
       </div>
       <div class="shortcut-legend">
-        <span>Alt+` Next</span>
-        <span>Alt+E Wrong</span>
-        <span>Alt+S Pause</span>
-        <span>Alt+Q Icon</span>
+        <span>{settingsForm.hotkey_next} Next</span>
+        <span>{settingsForm.hotkey_wrong} Wrong</span>
+        <span>{settingsForm.hotkey_pause} Pause</span>
+        <span>{settingsForm.hotkey_icon} Icon</span>
       </div>
     </footer>
   </main>
 
-  <!-- Settings modal (stub for E.6) -->
+  <!-- Settings modal (E.6) -->
   {#if showSettings}
     <div
       class="modal-backdrop"
@@ -573,28 +762,225 @@
         </div>
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
-          <button class="tab-btn {settingsTab === 'overlay' ? 'tab-active' : ''}" onclick={() => (settingsTab = "overlay")}>Overlay</button>
+          <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
+          <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
         </div>
+
         <div class="modal-body">
           {#if settingsTab === "provider"}
-            <p class="stub-note">Provider settings coming in Phase E.6.</p>
-            <p class="stub-hint">Configure your API provider and keys in <code>.env</code> for now.</p>
-          {:else if settingsTab === "overlay"}
-            <p class="stub-note">Overlay settings coming in Phase E.6.</p>
-            <p class="stub-hint">Color, opacity, and thickness controls will appear here.</p>
+            <!-- Provider radio group -->
+            <div class="setting-group">
+              <p class="setting-label">Provider</p>
+              <div class="provider-radios">
+                {#each (["anthropic","gemini","ollama","openai"] as const) as p}
+                  <label class="radio-opt" class:radio-active={settingsForm.api_provider === p}>
+                    <input type="radio" name="provider" value={p} bind:group={settingsForm.api_provider} />
+                    {p.charAt(0).toUpperCase() + p.slice(1)}
+                  </label>
+                {/each}
+              </div>
+            </div>
+
+            {#if settingsForm.api_provider === "anthropic"}
+              <div class="setting-group">
+                <label class="setting-label" for="anthropic-key">API Key</label>
+                <div class="key-row">
+                  {#if showKeyAnthropic}
+                    <input id="anthropic-key" class="setting-input" type="text"
+                      bind:value={settingsForm.anthropic_api_key}
+                      placeholder="sk-ant-…" spellcheck="false" />
+                  {:else}
+                    <input id="anthropic-key" class="setting-input" type="password"
+                      bind:value={settingsForm.anthropic_api_key}
+                      placeholder="sk-ant-…" spellcheck="false" />
+                  {/if}
+                  <button class="key-toggle" onclick={() => { showKeyAnthropic = !showKeyAnthropic; }}>
+                    {showKeyAnthropic ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="anthropic-model">Model</label>
+                <select id="anthropic-model" class="setting-select" bind:value={settingsForm.anthropic_model}>
+                  <option value="claude-haiku-4-5-20251001">claude-haiku-4-5</option>
+                  <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+                  <option value="claude-opus-4-7">claude-opus-4-7</option>
+                </select>
+              </div>
+
+            {:else if settingsForm.api_provider === "gemini"}
+              <div class="setting-group">
+                <label class="setting-label" for="gemini-key">API Key</label>
+                <div class="key-row">
+                  {#if showKeyGemini}
+                    <input id="gemini-key" class="setting-input" type="text"
+                      bind:value={settingsForm.gemini_api_key}
+                      placeholder="AIza…" spellcheck="false" />
+                  {:else}
+                    <input id="gemini-key" class="setting-input" type="password"
+                      bind:value={settingsForm.gemini_api_key}
+                      placeholder="AIza…" spellcheck="false" />
+                  {/if}
+                  <button class="key-toggle" onclick={() => { showKeyGemini = !showKeyGemini; }}>
+                    {showKeyGemini ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="gemini-model">Model</label>
+                <select id="gemini-model" class="setting-select" bind:value={settingsForm.gemini_model}>
+                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+                  <option value="gemini-3.1-flash-lite-preview">gemini-3.1-flash-lite-preview</option>
+                  <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+                  <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                  <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                </select>
+              </div>
+
+            {:else if settingsForm.api_provider === "ollama"}
+              <div class="setting-group">
+                <label class="setting-label" for="ollama-url">Base URL</label>
+                <input id="ollama-url" class="setting-input" type="text"
+                  bind:value={settingsForm.ollama_base_url}
+                  placeholder="http://localhost:11434" />
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="ollama-model">Model</label>
+                <input id="ollama-model" class="setting-input" type="text" list="ollama-models"
+                  bind:value={settingsForm.ollama_model} placeholder="llama3.2-vision" />
+                <datalist id="ollama-models">
+                  <option value="llama3.2-vision"></option>
+                  <option value="llava"></option>
+                  <option value="moondream"></option>
+                </datalist>
+              </div>
+
+            {:else if settingsForm.api_provider === "openai"}
+              <div class="setting-group">
+                <label class="setting-label" for="openai-key">API Key</label>
+                <div class="key-row">
+                  {#if showKeyOpenAI}
+                    <input id="openai-key" class="setting-input" type="text"
+                      bind:value={settingsForm.openai_api_key}
+                      placeholder="sk-…" spellcheck="false" />
+                  {:else}
+                    <input id="openai-key" class="setting-input" type="password"
+                      bind:value={settingsForm.openai_api_key}
+                      placeholder="sk-…" spellcheck="false" />
+                  {/if}
+                  <button class="key-toggle" onclick={() => { showKeyOpenAI = !showKeyOpenAI; }}>
+                    {showKeyOpenAI ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="openai-model">Model</label>
+                <select id="openai-model" class="setting-select" bind:value={settingsForm.openai_model}>
+                  <option value="gpt-4o">gpt-4o</option>
+                  <option value="gpt-4o-mini">gpt-4o-mini</option>
+                  <option value="o1">o1</option>
+                  <option value="o3">o3</option>
+                </select>
+              </div>
+            {/if}
+
+          {:else if settingsTab === "screen-guide"}
+            <div class="setting-group">
+              <label class="setting-label" for="overlay-color">Accent color</label>
+              <div class="color-row">
+                <input id="overlay-color" class="color-picker" type="color" bind:value={settingsForm.overlay_color} />
+                <span class="color-hex">{settingsForm.overlay_color}</span>
+                <button class="key-toggle" onclick={() => (settingsForm.overlay_color = "#FF6B35")}>Reset</button>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label" for="overlay-thickness">Border thickness — {settingsForm.overlay_thickness} px</label>
+              <input id="overlay-thickness" class="setting-range" type="range" min="1" max="10"
+                bind:value={settingsForm.overlay_thickness} />
+            </div>
+            <div class="setting-group">
+              <p class="setting-label">Live caption</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.subtitle_enabled} />
+                <span>Show instruction text at bottom of screen</span>
+              </label>
+            </div>
+            <div class="setting-group">
+              <p class="setting-label">Autopilot</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.auto_advance} />
+                <span>Automatically move to the next step when the screen changes</span>
+              </label>
+            </div>
+
+          {:else if settingsTab === "hotkeys"}
+            <p class="stub-hint" style="margin-bottom:10px">Tauri accelerator format: <code>Alt+KeyE</code>, <code>Ctrl+Shift+KeyN</code>, etc. Re-registered immediately on Save — no restart needed.</p>
+            <div class="setting-group">
+              <label class="setting-label" for="hk-next">Next step</label>
+              <input id="hk-next" class="setting-input" type="text" bind:value={settingsForm.hotkey_next} spellcheck="false" />
+            </div>
+            <div class="setting-group">
+              <label class="setting-label" for="hk-wrong">Mark wrong</label>
+              <input id="hk-wrong" class="setting-input" type="text" bind:value={settingsForm.hotkey_wrong} spellcheck="false" />
+            </div>
+            <div class="setting-group">
+              <label class="setting-label" for="hk-pause">Pause / cancel</label>
+              <input id="hk-pause" class="setting-input" type="text" bind:value={settingsForm.hotkey_pause} spellcheck="false" />
+            </div>
+            <div class="setting-group">
+              <label class="setting-label" for="hk-icon">Toggle icon mode</label>
+              <input id="hk-icon" class="setting-input" type="text" bind:value={settingsForm.hotkey_icon} spellcheck="false" />
+            </div>
+
           {:else}
-            <p class="stub-note">Hotkey settings coming in Phase E.6.</p>
-            <div class="hotkey-preview">
-              <div class="hk-row"><kbd>Alt+`</kbd><span>Next step</span></div>
-              <div class="hk-row"><kbd>Alt+E</kbd><span>Mark wrong</span></div>
-              <div class="hk-row"><kbd>Alt+S</kbd><span>Pause / cancel</span></div>
-              <div class="hk-row"><kbd>Alt+Q</kbd><span>Toggle icon mode</span></div>
+            <!-- Audio tab -->
+            <div class="setting-group">
+              <p class="setting-label">Audio output (TTS)</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.tts_enabled} />
+                <span>Enable text-to-speech for instructions</span>
+              </label>
+            </div>
+            <div class="setting-group">
+              <p class="setting-label">Voice input</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.voice_input_enabled} />
+                <span>Enable 🎤 push-to-talk (Alt+A)</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">Uses the browser's built-in speech recognition — requires internet and microphone permission.</p>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label" for="voice-lang">Recognition language</label>
+              <select id="voice-lang" class="setting-input setting-select"
+                bind:value={settingsForm.voice_language}
+                disabled={!settingsForm.voice_input_enabled}>
+                <option value="en-US">English (US)</option>
+                <option value="en-GB">English (UK)</option>
+                <option value="fr-FR">French</option>
+                <option value="de-DE">German</option>
+                <option value="es-ES">Spanish</option>
+                <option value="ja-JP">Japanese</option>
+                <option value="zh-CN">Chinese (Simplified)</option>
+                <option value="ko-KR">Korean</option>
+                <option value="pt-BR">Portuguese (Brazil)</option>
+              </select>
             </div>
           {/if}
         </div>
+
         <div class="modal-footer">
-          <button class="btn-ghost" onclick={() => (showSettings = false)}>Close</button>
+          {#if settingsError}
+            <span class="settings-error">{settingsError}</span>
+          {:else if settingsSaved}
+            <span class="settings-ok">✓ Saved — no restart required</span>
+          {:else}
+            <span class="settings-note">All settings apply on Save</span>
+          {/if}
+          <button class="btn-ghost" onclick={() => (showSettings = false)}>Cancel</button>
+          <button class="btn-primary" onclick={applySettings} disabled={settingsSaving}>
+            {settingsSaving ? "Saving…" : "Apply"}
+          </button>
         </div>
       </div>
     </div>
@@ -723,13 +1109,13 @@
   }
 
   .hdr-btn {
-    width: 24px;
-    height: 24px;
+    width: 28px;
+    height: 28px;
     padding: 0;
-    border-radius: 5px;
-    font-size: 12px;
+    border-radius: 6px;
+    font-size: 13px;
     background: transparent;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     border: none;
     cursor: pointer;
     display: flex;
@@ -858,62 +1244,6 @@
     flex-shrink: 0;
   }
 
-  /* ── E.5 Reply section ───────────────────────────── */
-  .reply-section {
-    padding: 8px 12px;
-    border-top: 1px solid rgba(14, 165, 233, 0.2);
-    background: rgba(14, 165, 233, 0.04);
-    flex-shrink: 0;
-  }
-
-  .reply-question {
-    font-size: 11px;
-    color: var(--info);
-    font-weight: 600;
-    margin-bottom: 6px;
-    letter-spacing: 0.02em;
-  }
-
-  .reply-row {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-  }
-
-  .reply-input {
-    flex: 1;
-    font-family: inherit;
-    font-size: 13px;
-    padding: 7px 10px;
-    border-radius: 7px;
-    background: var(--surface-2);
-    color: var(--text-primary);
-    border: 1px solid rgba(14, 165, 233, 0.35);
-    outline: none;
-    transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
-    min-width: 0;
-  }
-  .reply-input:focus {
-    border-color: var(--info);
-    box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.15);
-  }
-
-  .btn-reply {
-    padding: 7px 12px;
-    border-radius: 7px;
-    font-size: 12px;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    border: 1px solid rgba(14, 165, 233, 0.35);
-    background: rgba(14, 165, 233, 0.15);
-    color: var(--info);
-    flex-shrink: 0;
-    transition: background 120ms ease-out;
-  }
-  .btn-reply:not(:disabled):hover { background: rgba(14, 165, 233, 0.28); }
-  .btn-reply:disabled { opacity: 0.35; cursor: not-allowed; }
-
   .task-section {
     padding: 8px 12px;
     display: flex;
@@ -921,6 +1251,13 @@
     gap: 6px;
     border-top: 1px solid var(--border);
     flex-shrink: 0;
+  }
+
+  .input-hint {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    padding: 2px 0;
+    font-style: italic;
   }
 
   textarea {
@@ -968,12 +1305,37 @@
   }
   .btn-next:not(:disabled):hover { background: rgba(34, 197, 94, 0.25); }
 
-  .btn-wrong {
-    background: rgba(239, 68, 68, 0.12);
-    color: var(--danger);
-    border-color: rgba(239, 68, 68, 0.22);
+  .btn-more {
+    flex: 0 0 32px;
+    padding: 7px 0;
+    background: rgba(161, 161, 170, 0.08);
+    color: var(--text-secondary);
+    border-color: rgba(161, 161, 170, 0.18);
+    letter-spacing: 0.12em;
+    font-size: 11px;
   }
-  .btn-wrong:not(:disabled):hover { background: rgba(239, 68, 68, 0.22); }
+  .btn-more:hover { background: rgba(161, 161, 170, 0.18); color: var(--text-primary); }
+
+  .btn-more-open {
+    background: rgba(161, 161, 170, 0.22) !important;
+    color: var(--text-primary) !important;
+    border-color: rgba(161, 161, 170, 0.35) !important;
+  }
+
+  .btn-mic {
+    flex: 0 0 32px;
+    padding: 7px 0;
+    background: rgba(161, 161, 170, 0.08);
+    color: var(--text-secondary);
+    border-color: rgba(161, 161, 170, 0.18);
+    font-size: 13px;
+  }
+  .btn-mic:hover:not(:disabled) { background: rgba(161, 161, 170, 0.18); color: var(--text-primary); }
+  .btn-mic-active {
+    background: rgba(239, 68, 68, 0.18) !important;
+    border-color: rgba(239, 68, 68, 0.35) !important;
+    animation: pulse 0.9s ease-in-out infinite;
+  }
 
   .btn-pause {
     background: rgba(245, 158, 11, 0.12);
@@ -988,6 +1350,54 @@
     border-color: rgba(34, 197, 94, 0.25);
   }
   .btn-resume:hover { background: rgba(34, 197, 94, 0.25); }
+
+  .btn-new {
+    background: rgba(161, 161, 170, 0.1);
+    color: var(--text-secondary);
+    border-color: rgba(161, 161, 170, 0.2);
+  }
+  .btn-new:hover { background: rgba(161, 161, 170, 0.2); color: var(--text-primary); }
+
+  /* ── Quick-action menu ───────────────────────────── */
+
+  .quick-menu {
+    display: flex;
+    gap: 5px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface-2);
+    flex-shrink: 0;
+  }
+
+  .qm-btn {
+    flex: 1;
+    padding: 6px 4px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--surface-3);
+    color: var(--text-secondary);
+    font-family: inherit;
+    transition: background 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out;
+    white-space: nowrap;
+  }
+  .qm-btn:hover:not(:disabled) { background: #2d2d33; color: var(--text-primary); }
+  .qm-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .qm-wrong {
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.22);
+  }
+  .qm-wrong:not(:disabled):hover { background: rgba(239, 68, 68, 0.25); }
+
+  .qm-active {
+    background: rgba(255, 107, 53, 0.15) !important;
+    border-color: rgba(255, 107, 53, 0.35) !important;
+    color: var(--accent-400) !important;
+  }
 
   /* ── Footer ──────────────────────────────────────── */
 
@@ -1161,54 +1571,184 @@
     overflow-y: auto;
   }
 
-  .stub-note {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin: 0 0 8px 0;
-  }
   .stub-hint {
     font-size: 12px;
     color: var(--text-tertiary);
     margin: 0;
-  }
-  .stub-hint code {
-    background: var(--surface-3);
-    padding: 1px 5px;
-    border-radius: 4px;
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 11px;
-  }
-
-  .hotkey-preview {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: 10px;
-  }
-  .hk-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-  kbd {
-    background: var(--surface-3);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 2px 7px;
-    font-size: 11px;
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    color: var(--text-primary);
-    white-space: nowrap;
-    flex-shrink: 0;
   }
 
   .modal-footer {
     padding: 10px 14px;
     border-top: 1px solid var(--border);
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  /* ── Settings form elements ──────────────────────── */
+
+  .setting-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+  .setting-group:last-child { margin-bottom: 0; }
+
+  .setting-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-tertiary);
+    margin: 0;
+  }
+
+  .setting-input {
+    width: 100%;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 7px 10px;
+    border-radius: 7px;
+    background: var(--surface-2);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    outline: none;
+    box-sizing: border-box;
+    transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
+  }
+  .setting-input:focus { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255, 107, 53, 0.15); }
+  .setting-select {
+    width: 100%; font-family: inherit; font-size: 13px; padding: 7px 10px;
+    border-radius: 7px; background: var(--surface-2); color: var(--text-primary);
+    border: 1px solid var(--border); outline: none; box-sizing: border-box; cursor: pointer;
+    transition: border-color 120ms ease-out;
+    appearance: auto;
+  }
+  .setting-select:focus { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255,107,53,0.15); }
+  .setting-select:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .key-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .key-row .setting-input { flex: 1; width: auto; }
+
+  .key-toggle {
+    padding: 6px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 6px;
+    background: var(--surface-3);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    flex-shrink: 0;
+    font-family: inherit;
+    white-space: nowrap;
+    transition: background 120ms ease-out;
+  }
+  .key-toggle:hover { background: #2d2d33; color: var(--text-primary); }
+
+  .color-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .color-picker {
+    width: 36px;
+    height: 30px;
+    padding: 2px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .color-hex {
+    font-size: 12px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    color: var(--text-secondary);
+    flex: 1;
+  }
+
+  .setting-range {
+    width: 100%;
+    accent-color: var(--accent-500);
+    cursor: pointer;
+  }
+
+  .provider-radios {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .radio-opt {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    transition: background 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+    user-select: none;
+  }
+  .radio-opt input[type="radio"] { display: none; }
+  .radio-opt:hover { background: var(--surface-3); color: var(--text-primary); }
+  .radio-active {
+    background: rgba(255, 107, 53, 0.12) !important;
+    border-color: rgba(255, 107, 53, 0.4) !important;
+    color: var(--accent-400) !important;
+  }
+
+  .settings-error {
+    font-size: 12px;
+    color: var(--danger);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .settings-ok {
+    font-size: 12px;
+    color: var(--success);
+    flex: 1;
+  }
+
+  .settings-note {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    flex: 1;
+    font-style: italic;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    user-select: none;
+  }
+  .toggle-row input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent-500);
+    cursor: pointer;
     flex-shrink: 0;
   }
 </style>
