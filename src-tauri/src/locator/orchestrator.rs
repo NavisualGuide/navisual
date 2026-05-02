@@ -74,15 +74,23 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<Option<LocateRe
         return Ok(None);
     };
 
-    // Translate image-pixel coords back to virtual-desktop coords by adding
-    // the crop origin. When capture_active_window_jpeg was used, crop_rect.x/y
-    // are the origin; when the fallback full-screen path was taken,
-    // they're (0, 0) and no translation is needed.
+    // Translate image-pixel coords back to virtual-desktop coords.
+    // The capture pipeline downscales to 1536×768 max before JPEG encode, so
+    // img_w/img_h may be smaller than crop_rect.width/height. Scale back up
+    // first, then add the crop origin.
+    let (sx, sy) = if img_w > 0 && img_h > 0 && crop_rect.width > 0 && crop_rect.height > 0 {
+        (
+            crop_rect.width  as f32 / img_w as f32,
+            crop_rect.height as f32 / img_h as f32,
+        )
+    } else {
+        (1.0, 1.0)
+    };
     let bbox = Rect {
-        x: hit.bbox.0 + crop_rect.x,
-        y: hit.bbox.1 + crop_rect.y,
-        width: hit.bbox.2,
-        height: hit.bbox.3,
+        x:      (hit.bbox.0 as f32 * sx).round() as i32 + crop_rect.x,
+        y:      (hit.bbox.1 as f32 * sy).round() as i32 + crop_rect.y,
+        width:  (hit.bbox.2 as f32 * sx).round() as u32,
+        height: (hit.bbox.3 as f32 * sy).round() as u32,
     };
 
     Ok(Some(LocateResult {

@@ -54,6 +54,21 @@ struct AppState {
     screen_watcher: screen_watcher::ScreenWatcher,
 }
 
+/// Discard out-of-bounds grid cells before showing them as a badge.
+/// Valid range: rows A–I (9 rows), cols 1–16. The AI occasionally returns
+/// cells like "N3" when it sees a full-screen or ambiguous screenshot.
+fn valid_grid_cell(cell: Option<String>) -> Option<String> {
+    let s = cell?;
+    let mut chars = s.chars();
+    let row = chars.next()?.to_ascii_uppercase();
+    let col: u32 = chars.as_str().trim().parse().ok()?;
+    if row >= 'A' && row <= 'I' && col >= 1 && col <= 16 {
+        Some(s)
+    } else {
+        None
+    }
+}
+
 fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
     match overlay_type {
         OverlayType::Arrow => overlay::OverlayKind::Arrow,
@@ -257,7 +272,7 @@ async fn guide(
 
     let grid_test_enabled = { state.ai_router.lock().await.config.grid_test_enabled };
 
-    let (screenshot_b64, capture_rect_opt) = tokio::task::spawn_blocking(move || {
+    let capture_result = tokio::task::spawn_blocking(move || {
         match capture::capture_active_window_jpeg(75) {
             Ok((bytes, rect)) => {
                 let final_bytes = if grid_test_enabled {
@@ -265,21 +280,34 @@ async fn guide(
                 } else {
                     bytes
                 };
-                (capture::to_base64(&final_bytes), Some(rect))
+                Ok((capture::to_base64(&final_bytes), rect))
             }
-            Err(_) => {
-                let bytes = capture::capture_primary_monitor_jpeg(75).unwrap_or_default();
-                let final_bytes = if grid_test_enabled {
-                    grid::overlay_grid_on_jpeg(&bytes, 75)
-                } else {
-                    bytes
-                };
-                (capture::to_base64(&final_bytes), None)
-            }
+            Err(_) => Err(()),
         }
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
+
+    let (screenshot_b64, capture_rect_opt) = match capture_result {
+        Ok((b64, rect)) => (b64, Some(rect)),
+        Err(()) => {
+            return Ok(GuideResponse {
+                ok: false,
+                session_id,
+                steps: vec![],
+                step_index: 0,
+                instruction: String::new(),
+                located: None,
+                needs_input: false,
+                provider: String::new(),
+                error: Some(
+                    "No application window found. Please click on the program \
+                     you want help with, then try Guide me again.".to_string()
+                ),
+                grid_cell: None,
+            });
+        }
+    };
 
     let mut router = state.ai_router.lock().await;
 
@@ -383,7 +411,7 @@ async fn guide(
 
     let located = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay).unwrap_or(None);
 
-    let grid_cell = steps.get(0).and_then(|s| s.grid_cell.clone());
+    let grid_cell = valid_grid_cell(steps.get(0).and_then(|s| s.grid_cell.clone()));
     if grid_test_enabled {
         if let Ok(vd) = overlay::virtual_desktop_rect() {
             let payload = GridOverlayPayload {
@@ -437,7 +465,7 @@ async fn next_step(
     let grid_test_enabled = { state.ai_router.lock().await.config.grid_test_enabled };
     let located = execute_step(&app, &steps[step_index], &state.tracker, &state.last_overlay).unwrap_or(None);
 
-    let grid_cell = steps.get(step_index).and_then(|s| s.grid_cell.clone());
+    let grid_cell = valid_grid_cell(steps.get(step_index).and_then(|s| s.grid_cell.clone()));
     if grid_test_enabled {
         if let Ok(vd) = overlay::virtual_desktop_rect() {
             let payload = GridOverlayPayload {

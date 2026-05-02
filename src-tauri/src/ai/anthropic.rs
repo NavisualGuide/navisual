@@ -82,7 +82,7 @@ impl AnthropicClient {
                                 "checkpoint": {"type": "boolean"},
                                 "grid_cell": {
                                     "type": "string",
-                                    "description": "Grid test only: cell label (e.g. 'D7') containing the target element. Cols 1-16 left-right, rows A-I top-bottom."
+                                    "description": "Grid test only: cell label (e.g. 'D7') containing the target element. IMPORTANT: rows are A-I ONLY (9 rows, A=top, I=bottom), cols are 1-16 ONLY (1=left, 16=right). Never return a row letter beyond I or a col number beyond 16."
                                 }
                             }
                         }

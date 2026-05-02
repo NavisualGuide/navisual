@@ -10,10 +10,14 @@
 use super::Rect;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    GWL_EXSTYLE, GW_HWNDNEXT, WS_EX_TRANSPARENT,
+    GetAncestor, GetClassNameW, GetForegroundWindow, GetTopWindow, GetWindow,
+    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GA_ROOTOWNER, GWL_EXSTYLE, GW_HWNDNEXT, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -59,6 +63,31 @@ fn frame_rect_of(hwnd: HWND) -> Option<Rect> {
     }
 }
 
+/// Returns true when `pid` belongs to Tauri's embedded WebView2 renderer
+/// (`msedgewebview2.exe`). Used to distinguish that process from a real
+/// Chrome/Edge browser window — both use the `Chrome_WidgetWin_1` class.
+fn is_webview2_renderer(pid: u32) -> bool {
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        if QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok()
+        {
+            let name = String::from_utf16_lossy(&buf[..len as usize]);
+            return name.to_ascii_lowercase().ends_with("msedgewebview2.exe");
+        }
+        false
+    }
+}
+
 /// Is `hwnd` a plausible capture target (visible, not minimised, has an
 /// acceptable class, and is NOT owned by our process)?
 fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
@@ -81,7 +110,16 @@ fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
         let mut buf = [0u16; 128];
         let n = GetClassNameW(hwnd, &mut buf);
         let class = String::from_utf16_lossy(&buf[..n as usize]);
-        !SKIP_CLASSES.iter().any(|c| *c == class)
+        if SKIP_CLASSES.iter().any(|c| *c == class) {
+            return false;
+        }
+        // Skip Tauri's embedded WebView2 renderer. Chrome and Edge use
+        // chrome.exe / msedge.exe, not msedgewebview2.exe, so this only
+        // filters the app's own renderer process.
+        if class == "Chrome_WidgetWin_1" && is_webview2_renderer(pid) {
+            return false;
+        }
+        true
     }
 }
 
@@ -146,16 +184,31 @@ pub fn own_window_rects() -> Vec<Rect> {
     rects
 }
 
-/// Returns the frame rect of the best capture target: foreground window if
-/// owned by another process, else the first suitable window in z-order. None
-/// if nothing on-screen qualifies.
+/// Returns the frame rect of the best capture target.
+///
+/// Strategy: get the foreground window, then walk to its root owner via
+/// `GetAncestor(GA_ROOTOWNER)`. This resolves any owned window — dropdown,
+/// combo popup, confirmation dialog — back to the main application window it
+/// belongs to, regardless of size. A dialog box owned by a slicer app will
+/// correctly yield the slicer's main window, so the screenshot shows the full
+/// app with the dialog visible rather than just the dialog in isolation.
+///
+/// Falls back to z-order walk when the panel is foreground or no suitable
+/// window is found.
 pub fn get_foreground_frame_rect() -> Option<Rect> {
     let our_pid = std::process::id();
     unsafe {
         let fg = GetForegroundWindow();
-        if !fg.0.is_null() && is_target_candidate(fg, our_pid) {
-            if let Some(r) = frame_rect_of(fg) {
-                return Some(r);
+        if !fg.0.is_null() {
+            // Walk the owner chain to reach the root application window.
+            // For a top-level main window GA_ROOTOWNER returns itself.
+            // For an owned dialog/popup it returns the owning main window.
+            let root = GetAncestor(fg, GA_ROOTOWNER);
+            let target = if !root.0.is_null() { root } else { fg };
+            if is_target_candidate(target, our_pid) {
+                if let Some(r) = frame_rect_of(target) {
+                    return Some(r);
+                }
             }
         }
     }
