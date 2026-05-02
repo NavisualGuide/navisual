@@ -8,14 +8,14 @@
 //! panel contents.
 
 use super::Rect;
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassNameW, GetForegroundWindow, GetTopWindow, GetWindow,
+    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetTopWindow, GetWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     GA_ROOTOWNER, GWL_EXSTYLE, GW_HWNDNEXT, WS_EX_TRANSPARENT,
 };
@@ -73,18 +73,18 @@ fn is_webview2_renderer(pid: u32) -> bool {
         };
         let mut buf = [0u16; 512];
         let mut len = buf.len() as u32;
-        if QueryFullProcessImageNameW(
+        let result = QueryFullProcessImageNameW(
             handle,
             PROCESS_NAME_WIN32,
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut len,
         )
         .is_ok()
-        {
-            let name = String::from_utf16_lossy(&buf[..len as usize]);
-            return name.to_ascii_lowercase().ends_with("msedgewebview2.exe");
-        }
-        false
+            && String::from_utf16_lossy(&buf[..len as usize])
+                .to_ascii_lowercase()
+                .ends_with("msedgewebview2.exe");
+        let _ = CloseHandle(handle);
+        result
     }
 }
 
@@ -123,24 +123,31 @@ fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
     }
 }
 
-/// Walk top-level windows in z-order and return the first that passes
-/// `is_target_candidate`. Used when the foreground window is ours.
+/// Find the first top-level window that passes `is_target_candidate` via
+/// `EnumWindows`. More reliable than a manual `GetTopWindow`/`GetWindow` walk
+/// because `GetWindow(GW_HWNDNEXT)` can fail at the topmost→non-topmost
+/// z-order boundary, cutting the walk short before reaching the target app.
 fn first_target_in_z_order(our_pid: u32) -> Option<HWND> {
-    unsafe {
-        let mut hwnd = GetTopWindow(None).ok()?;
-        let mut steps = 0usize;
-        while !hwnd.0.is_null() && steps < 64 {
-            if is_target_candidate(hwnd, our_pid) {
-                return Some(hwnd);
-            }
-            match GetWindow(hwnd, GW_HWNDNEXT) {
-                Ok(next) => hwnd = next,
-                Err(_) => return None,
-            }
-            steps += 1;
-        }
-        None
+    struct State {
+        our_pid: u32,
+        result: Option<HWND>,
     }
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        if is_target_candidate(hwnd, state.our_pid) {
+            state.result = Some(hwnd);
+            FALSE // stop enumeration
+        } else {
+            TRUE // continue enumeration
+        }
+    }
+
+    let mut state = State { our_pid, result: None };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+    state.result
 }
 
 /// Returns rects of all visible, non-minimised top-level windows owned by the
