@@ -13,6 +13,9 @@ use anyhow::{anyhow, Context, Result};
 use image::{codecs::jpeg::JpegEncoder, ColorType, ImageBuffer, Rgba};
 use xcap::Monitor;
 
+const MAX_CAP_W: u32 = 1536;
+const MAX_CAP_H: u32 = 768;
+
 #[cfg(windows)]
 mod win;
 
@@ -31,8 +34,11 @@ pub fn capture_primary_monitor_jpeg(quality: u8) -> Result<Vec<u8>> {
         .into_iter()
         .find(|m| m.is_primary().unwrap_or(false))
         .ok_or_else(|| anyhow!("no primary monitor"))?;
-    let img = primary.capture_image().context("capture primary monitor")?;
-    encode_jpeg(&img, quality)
+    let mx = primary.x().unwrap_or(0);
+    let my = primary.y().unwrap_or(0);
+    let mut img = primary.capture_image().context("capture primary monitor")?;
+    #[cfg(windows)] blank_own_windows(&mut img, mx, my);
+    encode_jpeg(&cap_size(img), quality)
 }
 
 /// Capture just the active foreground window (cropped from the virtual desktop).
@@ -42,8 +48,9 @@ pub fn capture_active_window_jpeg(quality: u8) -> Result<(Vec<u8>, Rect)> {
     {
         let rect = win::get_foreground_frame_rect()
             .ok_or_else(|| anyhow!("no foreground window rect"))?;
-        let img = capture_region(rect)?;
-        let buf = encode_jpeg(&img, quality)?;
+        let mut img = capture_region(rect)?;
+        blank_own_windows(&mut img, rect.x, rect.y);
+        let buf = encode_jpeg(&cap_size(img), quality)?;
         return Ok((buf, rect));
     }
 
@@ -83,6 +90,40 @@ fn capture_region(rect: Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     }
     let cropped = image::imageops::crop_imm(&img, local_x, local_y, w, h).to_image();
     Ok(cropped)
+}
+
+/// Fill the portion of `img` that overlaps any own (non-overlay) window with
+/// neutral grey so the AI does not see the Navigator UI in the screenshot.
+/// `origin_x/y` are the image's top-left corner in virtual-desktop physical pixels.
+#[cfg(windows)]
+fn blank_own_windows(img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>, origin_x: i32, origin_y: i32) {
+    let iw = img.width() as i32;
+    let ih = img.height() as i32;
+    for r in win::own_window_rects() {
+        let x0 = (r.x - origin_x).clamp(0, iw) as u32;
+        let y0 = (r.y - origin_y).clamp(0, ih) as u32;
+        let x1 = (r.x + r.width as i32 - origin_x).clamp(0, iw) as u32;
+        let y1 = (r.y + r.height as i32 - origin_y).clamp(0, ih) as u32;
+        if x0 >= x1 || y0 >= y1 { continue; }
+        for py in y0..y1 {
+            for px in x0..x1 {
+                img.put_pixel(px, py, Rgba([100, 100, 100, 255]));
+            }
+        }
+    }
+}
+
+/// Downscale `img` to fit within MAX_CAP_W × MAX_CAP_H, preserving aspect ratio.
+/// Returns the original unchanged if already within bounds.
+fn cap_size(img: ImageBuffer<Rgba<u8>, Vec<u8>>) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+    let (w, h) = (img.width(), img.height());
+    if w <= MAX_CAP_W && h <= MAX_CAP_H {
+        return img;
+    }
+    let scale = (MAX_CAP_W as f32 / w as f32).min(MAX_CAP_H as f32 / h as f32);
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3)
 }
 
 fn encode_jpeg(img: &ImageBuffer<Rgba<u8>, Vec<u8>>, quality: u8) -> Result<Vec<u8>> {

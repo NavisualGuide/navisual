@@ -59,6 +59,9 @@ pub struct Config {
     pub hotkey_wrong: String,
     pub hotkey_pause: String,
     pub hotkey_icon: String,
+
+    // Developer / testing
+    pub grid_test_enabled: bool,
 }
 
 impl Default for Config {
@@ -89,12 +92,13 @@ impl Default for Config {
             subtitle_enabled: true,
             auto_advance: false,
             tts_enabled: true,
-            voice_input_enabled: false,
+            voice_input_enabled: true,
             voice_language: "en-US".to_string(),
             hotkey_next:  "Alt+Backquote".to_string(),
             hotkey_wrong: "Alt+KeyE".to_string(),
             hotkey_pause: "Alt+KeyS".to_string(),
             hotkey_icon:  "Alt+KeyQ".to_string(),
+            grid_test_enabled: false,
         }
     }
 }
@@ -139,6 +143,7 @@ impl Config {
         if let Ok(v) = env::var("HOTKEY_WRONG") { if !v.is_empty() { config.hotkey_wrong = v; } }
         if let Ok(v) = env::var("HOTKEY_PAUSE") { if !v.is_empty() { config.hotkey_pause = v; } }
         if let Ok(v) = env::var("HOTKEY_ICON")  { if !v.is_empty() { config.hotkey_icon  = v; } }
+        if let Ok(v) = env::var("GRID_TEST_ENABLED") { config.grid_test_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("MANAGED_PROVIDER") { config.managed_provider = v; }
         if let Ok(v) = env::var("MANAGED_TOKEN_CAP") { 
             if let Ok(n) = v.parse() { config.managed_token_cap = n; }

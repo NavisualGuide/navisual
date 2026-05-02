@@ -12,9 +12,18 @@
     active_screen: Rect | null;
   };
   type OverlayTheme = { color: string; thickness: number; subtitle_enabled: boolean };
+  type GridUpdate = {
+    capture_rect: Rect | null;
+    virtual_origin: [number, number];
+    virtual_size: [number, number];
+    highlighted_cell: string | null;
+    cols: number;
+    rows: number;
+  };
 
   let canvas: HTMLCanvasElement;
   let currentUpdate: OverlayUpdate | null = null;
+  let gridUpdate: GridUpdate | null = null;
   let animFrame: number | null = null;
   let animStart = 0;
   // Plain object — NOT $state. drawBox/drawArrow read this in rAF callbacks where
@@ -183,6 +192,60 @@
     }
   }
 
+  function drawGrid(ctx: CanvasRenderingContext2D, g: GridUpdate, canvasW: number, canvasH: number) {
+    const [ox, oy] = g.virtual_origin;
+    const gx = g.capture_rect ? g.capture_rect.x - ox : 0;
+    const gy = g.capture_rect ? g.capture_rect.y - oy : 0;
+    const gw = g.capture_rect ? g.capture_rect.width  : canvasW;
+    const gh = g.capture_rect ? g.capture_rect.height : canvasH;
+    const cellW = gw / g.cols;
+    const cellH = gh / g.rows;
+
+    // Highlight selected cell
+    if (g.highlighted_cell && g.highlighted_cell.length >= 2) {
+      const row = g.highlighted_cell.charCodeAt(0) - "A".charCodeAt(0);
+      const col = parseInt(g.highlighted_cell.slice(1), 10) - 1;
+      if (row >= 0 && row < g.rows && col >= 0 && col < g.cols) {
+        ctx.fillStyle = "rgba(255, 107, 53, 0.30)";
+        ctx.fillRect(gx + col * cellW, gy + row * cellH, cellW, cellH);
+        ctx.strokeStyle = "rgba(255, 107, 53, 0.85)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+        ctx.strokeRect(gx + col * cellW + 1, gy + row * cellH + 1, cellW - 2, cellH - 2);
+      }
+    }
+
+    // Grid lines (dashed white)
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    for (let c = 1; c < g.cols; c++) {
+      const x = gx + c * cellW;
+      ctx.beginPath(); ctx.moveTo(x, gy); ctx.lineTo(x, gy + gh); ctx.stroke();
+    }
+    for (let r = 1; r < g.rows; r++) {
+      const y = gy + r * cellH;
+      ctx.beginPath(); ctx.moveTo(gx, y); ctx.lineTo(gx + gw, y); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // Cell labels (top-left corner of each cell)
+    ctx.font = "bold 10px monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    for (let r = 0; r < g.rows; r++) {
+      for (let c = 0; c < g.cols; c++) {
+        const label = String.fromCharCode("A".charCodeAt(0) + r) + (c + 1);
+        const lx = gx + c * cellW + 2;
+        const ly = gy + r * cellH + 2;
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillText(label, lx + 1, ly + 1);
+        ctx.fillStyle = "rgba(255,255,255,0.75)";
+        ctx.fillText(label, lx, ly);
+      }
+    }
+  }
+
   function renderFrame(timestamp: number) {
     if (!canvas || !currentUpdate) return;
     const ctx = canvas.getContext("2d")!;
@@ -201,9 +264,17 @@
     }
     ctx.clearRect(0, 0, vw, vh);
 
+    // Draw grid test overlay beneath other elements (drawn every frame so it
+    // persists alongside animated arrows/boxes without a separate rAF loop).
+    if (gridUpdate) drawGrid(ctx, gridUpdate, vw, vh);
+
     const t = timestamp - animStart;
 
-    if (u.kind === "none") return; // canvas cleared, stop
+    if (u.kind === "none") {
+      // No regular overlay — keep the rAF alive only if the grid needs redraw.
+      if (gridUpdate) animFrame = requestAnimationFrame(renderFrame);
+      return;
+    }
 
     // Subtitle is drawn alongside every overlay type (arrow, box, subtitle-only).
     // Rust always passes step.instruction as u.text.
@@ -233,10 +304,17 @@
     currentUpdate = update;
 
     if (update.kind === "none") {
-      // Just clear the canvas — no animation needed
       if (canvas) {
         const ctx = canvas.getContext("2d");
-        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          // Re-draw the grid even when the regular overlay is cleared.
+          if (gridUpdate) {
+            const [vw, vh] = gridUpdate.virtual_size;
+            if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
+            drawGrid(ctx, gridUpdate, vw, vh);
+          }
+        }
       }
       return;
     }
@@ -254,6 +332,19 @@
       theme.color = event.payload.color;
       theme.thickness = event.payload.thickness;
       theme.subtitle_enabled = event.payload.subtitle_enabled;
+    });
+    await listen<GridUpdate>("overlay:grid", (event) => {
+      gridUpdate = event.payload;
+      // If no animation loop is running, draw the grid immediately.
+      if (animFrame === null && canvas) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          const [vw, vh] = gridUpdate.virtual_size;
+          if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
+          ctx.clearRect(0, 0, vw, vh);
+          drawGrid(ctx, gridUpdate, vw, vh);
+        }
+      }
     });
   });
 </script>

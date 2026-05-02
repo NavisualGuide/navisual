@@ -11,8 +11,9 @@ use super::Rect;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowRect,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_HWNDNEXT,
+    GetClassNameW, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GWL_EXSTYLE, GW_HWNDNEXT, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -102,6 +103,47 @@ fn first_target_in_z_order(our_pid: u32) -> Option<HWND> {
         }
         None
     }
+}
+
+/// Returns rects of all visible, non-minimised top-level windows owned by the
+/// current process, excluding click-through windows (the overlay, identified
+/// by WS_EX_TRANSPARENT). Used to blank the Navigator UI from screenshots.
+pub fn own_window_rects() -> Vec<Rect> {
+    let our_pid = std::process::id();
+    let mut rects = Vec::new();
+    unsafe {
+        let Ok(mut hwnd) = GetTopWindow(None) else { return rects; };
+        let mut steps = 0usize;
+        while !hwnd.0.is_null() && steps < 64 {
+            let mut pid: u32 = 0;
+            let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == our_pid
+                && IsWindowVisible(hwnd).as_bool()
+                && !IsIconic(hwnd).as_bool()
+            {
+                // WS_EX_TRANSPARENT is set by set_ignore_cursor_events(true) on the
+                // overlay window. Skip it — it's mostly transparent and its rect spans
+                // the entire virtual desktop.
+                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+                if ex & WS_EX_TRANSPARENT.0 == 0 {
+                    let mut wr = RECT::default();
+                    if GetWindowRect(hwnd, &mut wr).is_ok() {
+                        let w = (wr.right - wr.left).max(0) as u32;
+                        let h = (wr.bottom - wr.top).max(0) as u32;
+                        if w > 0 && h > 0 {
+                            rects.push(Rect { x: wr.left, y: wr.top, width: w, height: h });
+                        }
+                    }
+                }
+            }
+            match GetWindow(hwnd, GW_HWNDNEXT) {
+                Ok(next) => hwnd = next,
+                Err(_) => break,
+            }
+            steps += 1;
+        }
+    }
+    rects
 }
 
 /// Returns the frame rect of the best capture target: foreground window if

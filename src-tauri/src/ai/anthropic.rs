@@ -79,7 +79,11 @@ impl AnthropicClient {
                                     "enum": ["arrow", "highlight", "circle", "none"]
                                 },
                                 "clipboard": {"type": "string"},
-                                "checkpoint": {"type": "boolean"}
+                                "checkpoint": {"type": "boolean"},
+                                "grid_cell": {
+                                    "type": "string",
+                                    "description": "Grid test only: cell label (e.g. 'D7') containing the target element. Cols 1-16 left-right, rows A-I top-bottom."
+                                }
                             }
                         }
                     },

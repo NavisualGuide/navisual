@@ -29,6 +29,7 @@
     needs_input: boolean;
     provider: string;
     error: string | null;
+    grid_cell: string | null;
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
@@ -57,6 +58,7 @@
     hotkey_wrong: string;
     hotkey_pause: string;
     hotkey_icon: string;
+    grid_test_enabled: boolean;
   };
 
   // Core state
@@ -70,6 +72,7 @@
   let locateResult = $state<LocateResult | null>(null);
   let sessionId = $state("");
   let provider = $state("");
+  let gridCell = $state<string | null>(null);
 
   // UI state
   let iconMode = $state(false);
@@ -90,6 +93,7 @@
     tts_enabled: true, voice_input_enabled: false, voice_language: "en-US",
     hotkey_next: "Alt+Backquote", hotkey_wrong: "Alt+KeyE",
     hotkey_pause: "Alt+KeyS", hotkey_icon: "Alt+KeyQ",
+    grid_test_enabled: false,
   };
   let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
   let settingsSaving = $state(false);
@@ -348,6 +352,7 @@
     currentInstruction = res.instruction;
     locateResult = res.located;
     sessionId = res.session_id;
+    gridCell = res.grid_cell ?? null;
     if (res.provider) provider = res.provider;
     phase = res.needs_input ? "needs_input" : "guiding";
     if (res.instruction) {
@@ -523,8 +528,8 @@
       await getCurrentWindow().setPosition(
         new LogicalPosition(sw - PANEL_W - margin, sh - PANEL_H - margin)
       );
-      await getCurrentWindow().show();
     } catch (_) {}
+    try { await getCurrentWindow().show(); } catch (_) {}
 
     listen<{ delta: string }>("stream_chunk", (event) => {
       if (phase === "thinking" || phase === "guiding") {
@@ -603,6 +608,9 @@
           <span class="step-counter">Step {stepIndex + 1} of {steps.length}</span>
           {#if steps[stepIndex]?.clipboard}
             <span class="badge badge-clip" title="Text copied to clipboard">📋 copied</span>
+          {/if}
+          {#if settingsForm.grid_test_enabled && gridCell}
+            <span class="badge badge-grid" title="AI-identified grid cell">⊞ {gridCell}</span>
           {/if}
           {#if locateResult}
             <span class="badge badge-{locateResult.role === 'Ocr' ? 'warn' : 'ok'}">
@@ -911,6 +919,13 @@
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.auto_advance} />
                 <span>Automatically move to the next step when the screen changes</span>
+              </label>
+            </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label" style="color:var(--accent)">Developer</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.grid_test_enabled} />
+                <span>Grid test mode — draw 16×9 grid on screenshots and show AI cell label in response</span>
               </label>
             </div>
 
@@ -1505,6 +1520,7 @@
   .badge-ok   { background: rgba(34, 197, 94, 0.15); color: var(--success); }
   .badge-warn { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
   .badge-miss { background: rgba(239, 68, 68, 0.12); color: var(--danger); }
+  .badge-grid { background: rgba(99, 102, 241, 0.18); color: #a5b4fc; font-family: "JetBrains Mono", ui-monospace, monospace; }
   .conf { font-size: 10px; color: var(--text-tertiary); font-family: "JetBrains Mono", ui-monospace, monospace; }
 
   /* ── Settings modal ──────────────────────────────── */

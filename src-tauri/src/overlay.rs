@@ -92,7 +92,7 @@ static VD_CACHE: OnceLock<Mutex<Option<CachedVd>>> = OnceLock::new();
 /// Monitor topology changes are extremely rare; re-enumerating on every
 /// 200 ms window-tracker tick (xcap::Monitor::all syscall) adds ~2–5 ms
 /// per call unnecessarily.
-fn virtual_desktop_rect() -> Result<Rect> {
+pub fn virtual_desktop_rect() -> Result<Rect> {
     let cache = VD_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap();
     if let Some(ref c) = *guard {

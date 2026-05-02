@@ -1,6 +1,7 @@
 //! AI Navigator — Rust/Tauri backend entry point.
 
 mod capture;
+mod grid;
 mod locator;
 mod overlay;
 mod ai;
@@ -145,6 +146,18 @@ struct GuideResponse {
     needs_input: bool,
     provider: String,
     error: Option<String>,
+    /// Grid test mode: cell label the AI identified for the current step.
+    grid_cell: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct GridOverlayPayload {
+    capture_rect: Option<capture::Rect>,
+    virtual_origin: [i32; 2],
+    virtual_size: [u32; 2],
+    highlighted_cell: Option<String>,
+    cols: u32,
+    rows: u32,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -176,6 +189,7 @@ struct SettingsPayload {
     hotkey_wrong: String,
     hotkey_pause: String,
     hotkey_icon: String,
+    grid_test_enabled: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -241,20 +255,45 @@ async fn guide(
         }
     };
 
-    let screenshot_b64 = tokio::task::spawn_blocking(|| {
-        capture::capture_active_window_jpeg(75)
-            .map(|(bytes, _rect)| capture::to_base64(&bytes))
-            .unwrap_or_else(|_| {
-                capture::capture_primary_monitor_jpeg(75)
-                    .map(|bytes| capture::to_base64(&bytes))
-                    .unwrap_or_default()
-            })
+    let grid_test_enabled = { state.ai_router.lock().await.config.grid_test_enabled };
+
+    let (screenshot_b64, capture_rect_opt) = tokio::task::spawn_blocking(move || {
+        match capture::capture_active_window_jpeg(75) {
+            Ok((bytes, rect)) => {
+                let final_bytes = if grid_test_enabled {
+                    grid::overlay_grid_on_jpeg(&bytes, 75)
+                } else {
+                    bytes
+                };
+                (capture::to_base64(&final_bytes), Some(rect))
+            }
+            Err(_) => {
+                let bytes = capture::capture_primary_monitor_jpeg(75).unwrap_or_default();
+                let final_bytes = if grid_test_enabled {
+                    grid::overlay_grid_on_jpeg(&bytes, 75)
+                } else {
+                    bytes
+                };
+                (capture::to_base64(&final_bytes), None)
+            }
+        }
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
     let mut router = state.ai_router.lock().await;
-    
+
+    // Append grid context to the prompt so the AI knows to fill grid_cell.
+    let add_grid = |text: String| -> String {
+        if grid_test_enabled {
+            format!("{text}\n\n[Grid test: the screenshot has a 16×9 grid overlay. \
+                Columns 1-16 left-to-right, rows A-I top-to-bottom. \
+                For the target element fill in the grid_cell field (e.g. \"D7\").]")
+        } else {
+            text
+        }
+    };
+
     let app_clone = app.clone();
     let on_chunk = move |chunk: &str| {
         let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
@@ -265,24 +304,25 @@ async fn guide(
             let g = state.guidance.lock().unwrap();
             g.state_summary.clone()
         };
-        let prompt = if task.is_empty() {
+        let base = if task.is_empty() {
             crate::ai::prompts::session_resume_template(&summary)
         } else {
-            // Compose: tell the AI what was done + current state + "what's next?"
             format!(
                 "{task} The previous state summary: {summary}. \
                 Here is the current screen. Please provide the next instruction.",
             )
         };
+        let prompt = add_grid(base);
         (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
     } else if is_reply {
         let summary = {
             let g = state.guidance.lock().unwrap();
             g.state_summary.clone()
         };
-        (router.send_guidance_request(&task, Some(&screenshot_b64), Some(&summary), on_chunk).await, task.clone())
+        let prompt = add_grid(task.clone());
+        (router.send_guidance_request(&prompt, Some(&screenshot_b64), Some(&summary), on_chunk).await, prompt)
     } else {
-        let prompt = crate::ai::prompts::initial_context_template(&task);
+        let prompt = add_grid(crate::ai::prompts::initial_context_template(&task));
         (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
     };
 
@@ -299,6 +339,7 @@ async fn guide(
                 needs_input: false,
                 provider: router.config.api_provider.clone(),
                 error: Some(e.to_string()),
+                grid_cell: None,
             });
         }
     };
@@ -336,10 +377,28 @@ async fn guide(
             needs_input,
             provider,
             error: None,
+            grid_cell: None,
         });
     }
 
     let located = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay).unwrap_or(None);
+
+    let grid_cell = steps.get(0).and_then(|s| s.grid_cell.clone());
+    if grid_test_enabled {
+        if let Ok(vd) = overlay::virtual_desktop_rect() {
+            let payload = GridOverlayPayload {
+                capture_rect: capture_rect_opt,
+                virtual_origin: [vd.x, vd.y],
+                virtual_size: [vd.width, vd.height],
+                highlighted_cell: grid_cell.clone(),
+                cols: grid::COLS,
+                rows: grid::ROWS,
+            };
+            if let Some(win) = app.get_webview_window("overlay") {
+                let _ = win.emit("overlay:grid", &payload);
+            }
+        }
+    }
 
     Ok(GuideResponse {
         ok: true,
@@ -351,6 +410,7 @@ async fn guide(
         needs_input,
         provider,
         error: None,
+        grid_cell,
     })
 }
 
@@ -374,7 +434,25 @@ async fn next_step(
         return Err(format!("step_index {step_index} out of range ({})", steps.len()));
     }
 
+    let grid_test_enabled = { state.ai_router.lock().await.config.grid_test_enabled };
     let located = execute_step(&app, &steps[step_index], &state.tracker, &state.last_overlay).unwrap_or(None);
+
+    let grid_cell = steps.get(step_index).and_then(|s| s.grid_cell.clone());
+    if grid_test_enabled {
+        if let Ok(vd) = overlay::virtual_desktop_rect() {
+            let payload = GridOverlayPayload {
+                capture_rect: None,
+                virtual_origin: [vd.x, vd.y],
+                virtual_size: [vd.width, vd.height],
+                highlighted_cell: grid_cell.clone(),
+                cols: grid::COLS,
+                rows: grid::ROWS,
+            };
+            if let Some(win) = app.get_webview_window("overlay") {
+                let _ = win.emit("overlay:grid", &payload);
+            }
+        }
+    }
 
     Ok(GuideResponse {
         ok: true,
@@ -386,6 +464,7 @@ async fn next_step(
         needs_input,
         provider,
         error: None,
+        grid_cell,
     })
 }
 
@@ -468,6 +547,7 @@ async fn send_correction(
             needs_input,
             provider,
             error: None,
+            grid_cell: None,
         });
     }
 
@@ -483,6 +563,7 @@ async fn send_correction(
         needs_input,
         provider,
         error: None,
+        grid_cell: steps.get(0).and_then(|s| s.grid_cell.clone()),
     })
 }
 
@@ -678,6 +759,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         hotkey_wrong: c.hotkey_wrong.clone(),
         hotkey_pause: c.hotkey_pause.clone(),
         hotkey_icon:  c.hotkey_icon.clone(),
+        grid_test_enabled: c.grid_test_enabled,
     })
 }
 
@@ -710,6 +792,7 @@ async fn save_settings(
         ("HOTKEY_WRONG".into(),         payload.hotkey_wrong.clone()),
         ("HOTKEY_PAUSE".into(),         payload.hotkey_pause.clone()),
         ("HOTKEY_ICON".into(),          payload.hotkey_icon.clone()),
+        ("GRID_TEST_ENABLED".into(),    payload.grid_test_enabled.to_string()),
     ];
 
     // API keys: only overwrite if the user actually typed something
@@ -755,6 +838,18 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            // Show panel after a short delay — the JS onMount also calls show() once
+            // it has positioned the window, but this Rust fallback ensures the panel
+            // is visible even if the WebView2 JS execution is delayed (production builds).
+            let panel_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if let Some(win) = panel_handle.get_webview_window("panel") {
+                    let _ = win.show();
+                    log::info!("panel window shown from Rust setup");
+                }
+            });
+
             let overlay_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(2000)).await;

@@ -55,6 +55,9 @@ pub struct GuidanceStep {
     pub clipboard: Option<String>,
     #[serde(default = "default_true")]
     pub checkpoint: bool,
+    /// Grid test only: cell label (e.g. "D7") the AI identified as containing
+    /// the target element. Populated when GRID_TEST_ENABLED=true.
+    pub grid_cell: Option<String>,
 }
 
 fn default_overlay() -> OverlayType {
