@@ -22,6 +22,11 @@ Rules:
      element (e.g. a download page with an H1 "Download Google Antigravity"
      AND a top-right "Download" nav button → target the nav button with
      nearby_text such as the logo name or a neighbouring nav link).
+   - a toolbar icon whose label (e.g. "Support") also appears as a section
+     header or list item elsewhere in the same app. Always set target_role
+     to "button" for toolbar icons, and set target_nearby_text to another
+     label visible in the same toolbar (e.g. the icon immediately above or
+     below) so the locator can pick the icon, not the section header.
 4. NEVER output pixel coordinates. You do not know the exact position of elements.
 5. If the screen shows the user completed the step, acknowledge and move forward.
 6. If the screen shows something unexpected, describe what you see and suggest
@@ -77,6 +82,11 @@ Rules:
     The local locator uses this to filter candidates to the correct screen region,
     preventing false matches from text that appears elsewhere (e.g. a page heading
     that repeats the same word as a nav button).
+    IMPORTANT: the grid_cell you fill in grid test mode must be the cell that
+    actually contains your target element — not a nearby element with the same
+    label. If your instruction says "click the Support icon in the toolbar", the
+    grid_cell must be the toolbar icon's cell, not the "Support" section header
+    that may appear elsewhere on screen.
 
 18. DESKTOP APP TASKS: If the user asks for help with a named desktop application
     (Word, Excel, Photoshop, VS Code, etc.), guide them through that application's

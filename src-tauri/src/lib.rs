@@ -95,7 +95,18 @@ fn execute_step(
                 nearby_text: step.target_nearby_text.clone(),
                 zone: match (step.target_zone_x, step.target_zone_y) {
                     (Some(x), Some(y)) => Some((x as u32, y as u32)),
-                    _ => None,
+                    // Fall back to grid_cell when the AI didn't set explicit zone fields.
+                    // Convert grid test coords ("D12") to the 0-indexed 16×9 zone used
+                    // by the OCR filter so we don't match a false "Support" in the wrong
+                    // part of the screen when the same word appears elsewhere.
+                    _ => step.grid_cell.as_ref().and_then(|cell| {
+                        let row = cell.chars().next()?.to_ascii_uppercase();
+                        let col: u32 = cell[1..].trim().parse().ok()?;
+                        if col < 1 || col > 16 { return None; }
+                        let row_idx = (row as u32).checked_sub('A' as u32)?;
+                        if row_idx > 8 { return None; }
+                        Some((col - 1, row_idx)) // grid col 1-16 → zone 0-15; row A-I → 0-8
+                    }),
                 },
                 a11y_timeout_ms: 500,
                 min_confidence: 0.5,
