@@ -38,6 +38,9 @@ struct GuidanceState {
     state_summary: String,
     needs_input: bool,
     provider: String,
+    /// Capture rect from the most recent guide() call — stored so next_step()
+    /// can confine the visual grid overlay to the same app window.
+    capture_rect: Option<capture::Rect>,
 }
 
 /// Shared app state.
@@ -392,6 +395,7 @@ async fn guide(
         g.state_summary = state_summary;
         g.needs_input = needs_input;
         g.provider = provider.clone();
+        g.capture_rect = capture_rect_opt;
     }
 
     if steps.is_empty() {
@@ -448,13 +452,14 @@ async fn next_step(
     state: State<'_, AppState>,
     step_index: usize,
 ) -> Result<GuideResponse, String> {
-    let (steps, session_id, needs_input, provider) = {
+    let (steps, session_id, needs_input, provider, capture_rect) = {
         let g = state.guidance.lock().unwrap();
         (
             g.steps.clone(),
             g.session_id.clone().unwrap_or_default(),
             g.needs_input,
             g.provider.clone(),
+            g.capture_rect,
         )
     };
 
@@ -469,7 +474,7 @@ async fn next_step(
     if grid_test_enabled {
         if let Ok(vd) = overlay::virtual_desktop_rect() {
             let payload = GridOverlayPayload {
-                capture_rect: None,
+                capture_rect,
                 virtual_origin: [vd.x, vd.y],
                 virtual_size: [vd.width, vd.height],
                 highlighted_cell: grid_cell.clone(),
