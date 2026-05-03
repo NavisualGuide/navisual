@@ -87,7 +87,7 @@ impl Drop for ScreenWatcher {
 /// Capture the active window at low quality and compute the average hash.
 fn compute_screen_hash() -> Option<u64> {
     // Use low JPEG quality — we only need a rough thumbnail.
-    let (jpeg, _rect) = capture::capture_active_window_jpeg(30).ok()?;
+    let (jpeg, _rect, _hwnd) = capture::capture_active_window_jpeg(30).ok()?;
     let img = image::load_from_memory(&jpeg).ok()?;
 
     // Resize to 8×8 greyscale.

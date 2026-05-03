@@ -48,15 +48,13 @@ pub struct GuidanceStep {
     pub target_role: Option<TargetRole>,
     pub target_region: Option<TargetRegion>,
     pub target_nearby_text: Option<String>,
-    pub target_zone_x: Option<i32>,
-    pub target_zone_y: Option<i32>,
     #[serde(default = "default_overlay")]
     pub overlay_type: OverlayType,
     pub clipboard: Option<String>,
     #[serde(default = "default_true")]
     pub checkpoint: bool,
-    /// Grid test only: cell label (e.g. "D7") the AI identified as containing
-    /// the target element. Populated when GRID_TEST_ENABLED=true.
+    /// Cell label (e.g. "D7") for the target element: row A–I (top→bottom),
+    /// col 1–16 (left→right). Used by the locator as the zone hint.
     pub grid_cell: Option<String>,
 }
 
@@ -74,8 +72,6 @@ pub struct NavigateStepResponse {
     pub state_summary: String,
     #[serde(default)]
     pub needs_input: bool,
-    #[serde(default)]
-    pub request_full_screen: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

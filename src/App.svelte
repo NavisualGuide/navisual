@@ -13,8 +13,6 @@
     target_text: string | null;
     target_role: string | null;
     target_nearby_text: string | null;
-    target_zone_x: number | null;
-    target_zone_y: number | null;
     overlay_type: string;
     clipboard: string | null;
     checkpoint: boolean;
@@ -73,6 +71,11 @@
   let sessionId = $state("");
   let provider = $state("");
   let gridCell = $state<string | null>(null);
+
+  // Strip AI self-references to grid_cell from instruction text (debug field, not for users).
+  function stripGridRef(text: string): string {
+    return text.replace(/\s*\(grid cell [A-I]\d{1,2}\)\.?/gi, '').trimEnd();
+  }
 
   // UI state
   let iconMode = $state(false);
@@ -349,21 +352,22 @@
     if (token !== requestToken) return;
     steps = res.steps;
     stepIndex = idx;
-    currentInstruction = res.instruction;
+    currentInstruction = stripGridRef(res.instruction);
     locateResult = res.located;
     sessionId = res.session_id;
     gridCell = res.grid_cell ?? null;
     if (res.provider) provider = res.provider;
     phase = res.needs_input ? "needs_input" : "guiding";
     if (res.instruction) {
+      const cleanInstruction = stripGridRef(res.instruction);
       let meta: string | undefined;
       if (res.located) {
         meta = `${res.located.role} · ${(res.located.confidence * 100).toFixed(0)}% · ${res.located.name}`;
       } else if (steps[idx]?.target_text) {
         meta = `not located · "${steps[idx].target_text}"`;
       }
-      addToHistory("ai", res.instruction, meta);
-      if (!isMuted) invoke("speak", { text: res.instruction }).catch(() => {});
+      addToHistory("ai", cleanInstruction, meta);
+      if (!isMuted) invoke("speak", { text: cleanInstruction }).catch(() => {});
     }
   }
 
@@ -621,7 +625,7 @@
             <span class="badge badge-miss">not located</span>
           {/if}
         </div>
-        <p class="latest-text">{currentInstruction}</p>
+        <p class="latest-text">{stripGridRef(currentInstruction)}</p>
       </section>
     {/if}
 

@@ -8,16 +8,24 @@
 //! panel contents.
 
 use super::Rect;
+use anyhow::{anyhow, Result};
+use image::{ImageBuffer, Rgba};
+use std::mem;
 use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject,
+    GetDIBits, GetWindowDC, BITMAPINFO, BITMAPINFOHEADER, ReleaseDC, SelectObject,
+};
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetTopWindow, GetWindow,
-    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    GA_ROOTOWNER, GWL_EXSTYLE, GW_HWNDNEXT, WS_EX_TRANSPARENT,
+    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow,
+    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GA_ROOTOWNER,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -32,6 +40,19 @@ const SKIP_CLASSES: &[&str] = &[
     "MSCTFIME UI",
     "Default IME",
 ];
+
+/// Validate that `hwnd` is still a usable capture target and return its current
+/// DWM frame bounds. Returns None if the window was closed, minimised, or
+/// otherwise unusable. Called by `recapture_window_jpeg` to verify a stored HWND
+/// before attempting PrintWindow.
+pub fn validate_hwnd(hwnd: HWND) -> Option<Rect> {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return None;
+        }
+    }
+    frame_rect_of(hwnd)
+}
 
 /// Returns the DWM extended frame bounds of `hwnd`, or GetWindowRect as a
 /// fallback for classic/non-DWM windows. None if both fail.
@@ -86,6 +107,17 @@ fn is_webview2_renderer(pid: u32) -> bool {
         let _ = CloseHandle(handle);
         result
     }
+}
+
+/// Validates and captures a window by its raw HWND value (stored as `usize`).
+/// Returns the pixel buffer and fresh DWM rect, or an error if the window is
+/// gone/minimised. Used by `recapture_window_jpeg` to skip re-discovery.
+pub fn capture_by_hwnd_raw(hwnd_raw: usize) -> anyhow::Result<(image::ImageBuffer<image::Rgba<u8>, Vec<u8>>, super::Rect)> {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    let rect = validate_hwnd(hwnd)
+        .ok_or_else(|| anyhow::anyhow!("stored window is no longer valid (closed or minimised)"))?;
+    let img = capture_window_pixels(hwnd, &rect)?;
+    Ok((img, rect))
 }
 
 /// Is `hwnd` a plausible capture target (visible, not minimised, has an
@@ -150,59 +182,16 @@ fn first_target_in_z_order(our_pid: u32) -> Option<HWND> {
     state.result
 }
 
-/// Returns rects of all visible, non-minimised top-level windows owned by the
-/// current process, excluding click-through windows (the overlay, identified
-/// by WS_EX_TRANSPARENT). Used to blank the Navigator UI from screenshots.
-pub fn own_window_rects() -> Vec<Rect> {
-    let our_pid = std::process::id();
-    let mut rects = Vec::new();
-    unsafe {
-        let Ok(mut hwnd) = GetTopWindow(None) else { return rects; };
-        let mut steps = 0usize;
-        while !hwnd.0.is_null() && steps < 64 {
-            let mut pid: u32 = 0;
-            let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid == our_pid
-                && IsWindowVisible(hwnd).as_bool()
-                && !IsIconic(hwnd).as_bool()
-            {
-                // WS_EX_TRANSPARENT is set by set_ignore_cursor_events(true) on the
-                // overlay window. Skip it — it's mostly transparent and its rect spans
-                // the entire virtual desktop.
-                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-                if ex & WS_EX_TRANSPARENT.0 == 0 {
-                    let mut wr = RECT::default();
-                    if GetWindowRect(hwnd, &mut wr).is_ok() {
-                        let w = (wr.right - wr.left).max(0) as u32;
-                        let h = (wr.bottom - wr.top).max(0) as u32;
-                        if w > 0 && h > 0 {
-                            rects.push(Rect { x: wr.left, y: wr.top, width: w, height: h });
-                        }
-                    }
-                }
-            }
-            match GetWindow(hwnd, GW_HWNDNEXT) {
-                Ok(next) => hwnd = next,
-                Err(_) => break,
-            }
-            steps += 1;
-        }
-    }
-    rects
-}
-
-/// Returns the frame rect of the best capture target.
+/// Returns the HWND and frame rect of the best capture target.
 ///
-/// Strategy: get the foreground window, then walk to its root owner via
-/// `GetAncestor(GA_ROOTOWNER)`. This resolves any owned window — dropdown,
-/// combo popup, confirmation dialog — back to the main application window it
-/// belongs to, regardless of size. A dialog box owned by a slicer app will
-/// correctly yield the slicer's main window, so the screenshot shows the full
-/// app with the dialog visible rather than just the dialog in isolation.
-///
-/// Falls back to z-order walk when the panel is foreground or no suitable
-/// window is found.
-pub fn get_foreground_frame_rect() -> Option<Rect> {
+/// Strategy:
+/// 1. GetForegroundWindow() → walk owner chain to root. If it's a valid
+///    non-Navigator window, use it directly.
+/// 2. Navigator is foreground (user clicked our button) → z-order walk via
+///    EnumWindows. The window the user was just working in is #2 in z-order
+///    (right behind Navigator), so the walk finds it immediately. PrintWindow
+///    then captures it correctly regardless of monitor position.
+pub fn get_foreground_target() -> Option<(HWND, Rect)> {
     let our_pid = std::process::id();
     unsafe {
         let fg = GetForegroundWindow();
@@ -214,11 +203,126 @@ pub fn get_foreground_frame_rect() -> Option<Rect> {
             let target = if !root.0.is_null() { root } else { fg };
             if is_target_candidate(target, our_pid) {
                 if let Some(r) = frame_rect_of(target) {
-                    return Some(r);
+                    return Some((target, r));
                 }
             }
         }
     }
+    // Navigator is foreground — z-order walk finds the most recently active app.
     let hwnd = first_target_in_z_order(our_pid)?;
-    frame_rect_of(hwnd)
+    frame_rect_of(hwnd).map(|r| (hwnd, r))
+}
+
+// SHELVED — instant foreground tracking via SetWinEventHook.
+// Activate if z-order proves insufficient (e.g. user navigates between apps
+// without directly clicking the target before Guide me).
+//
+// Required: add "Win32_UI_Accessibility" to Cargo.toml windows features,
+// add imports: SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK (Accessibility),
+// DispatchMessageW, GetMessageW, MSG, EVENT_SYSTEM_FOREGROUND,
+// WINEVENT_OUTOFCONTEXT (WindowsAndMessaging),
+// and AtomicUsize/Ordering from std::sync::atomic.
+//
+// static LAST_TARGET_HWND: AtomicUsize = AtomicUsize::new(0);
+//
+// unsafe extern "system" fn on_foreground_change(
+//     _hook: HWINEVENTHOOK, _event: u32, hwnd: HWND,
+//     _id_object: i32, _id_child: i32, _id_event_thread: u32, _event_time: u32,
+// ) {
+//     if hwnd.0.is_null() { return; }
+//     let our_pid = std::process::id();
+//     let root = GetAncestor(hwnd, GA_ROOTOWNER);
+//     let target = if !root.0.is_null() { root } else { hwnd };
+//     if is_target_candidate(target, our_pid) {
+//         LAST_TARGET_HWND.store(target.0 as usize, Ordering::Relaxed);
+//     }
+// }
+//
+// pub fn start_foreground_tracking() {
+//     std::thread::Builder::new().name("foreground-tracker".into())
+//         .spawn(|| unsafe {
+//             let hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+//                 None, Some(on_foreground_change), 0, 0, WINEVENT_OUTOFCONTEXT);
+//             if hook.is_invalid() { return; }
+//             let mut msg = MSG::default();
+//             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+//                 let _ = DispatchMessageW(&msg);
+//             }
+//             let _ = UnhookWinEvent(hook);
+//         }).expect("spawn foreground-tracker");
+// }
+//
+// In get_foreground_target(), after the direct-foreground check fails, add
+// before the z-order walk:
+//   let last = LAST_TARGET_HWND.load(Ordering::Relaxed);
+//   if last != 0 {
+//       let hwnd = HWND(last as *mut _);
+//       unsafe {
+//           if IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
+//               if let Some(r) = frame_rect_of(hwnd) { return Some((hwnd, r)); }
+//           }
+//       }
+//       LAST_TARGET_HWND.store(0, Ordering::Relaxed);
+//   }
+// Call capture::start_foreground_tracking() from lib.rs setup (#[cfg(windows)]).
+// END SHELVED
+
+/// Capture a window's pixels directly using PrintWindow.
+///
+/// Unlike BitBlt from the desktop DC, PrintWindow asks the target window to
+/// render itself into our memory DC — this works for any monitor placement,
+/// including secondary monitors with negative x coordinates (left of primary).
+/// The desktop DC approach fails silently for those monitors on many systems.
+pub fn capture_window_pixels(hwnd: HWND, rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+    let w = rect.width as i32;
+    let h = rect.height as i32;
+    if w <= 0 || h <= 0 {
+        return Err(anyhow!("window has zero dimensions {}×{}", w, h));
+    }
+    unsafe {
+        let hdc_win = GetWindowDC(Some(hwnd));
+        let hdc_mem = CreateCompatibleDC(Some(hdc_win));
+        let h_bmp = CreateCompatibleBitmap(hdc_win, w, h);
+        let prev = SelectObject(hdc_mem, h_bmp.into());
+
+        // PW_RENDERFULLCONTENT=2 covers GPU/D3D-accelerated surfaces (Chrome, Edge, …).
+        // Fall back to PW_CLIENTONLY=1 if the first call fails.
+        if !PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(2)).as_bool() {
+            PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(1));
+        }
+
+        let buf_len = (w * h * 4) as usize;
+        let mut buf = vec![0u8; buf_len];
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // negative = top-down row order
+                biPlanes: 1,
+                biBitCount: 32,
+                biSizeImage: buf_len as u32,
+                biCompression: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        GetDIBits(
+            hdc_mem, h_bmp, 0, h as u32,
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut bmi, DIB_RGB_COLORS,
+        );
+
+        // GDI returns BGRA; swap B↔R to produce RGBA expected by the image crate.
+        for px in buf.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+
+        SelectObject(hdc_mem, prev);
+        DeleteObject(h_bmp.into());
+        DeleteDC(hdc_mem);
+        ReleaseDC(Some(hwnd), hdc_win);
+
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(rect.width, rect.height, buf)
+            .ok_or_else(|| anyhow!("ImageBuffer::from_raw failed"))
+    }
 }

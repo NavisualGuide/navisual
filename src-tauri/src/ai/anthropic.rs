@@ -72,8 +72,6 @@ impl AnthropicClient {
                                     "enum": ["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"]
                                 },
                                 "target_nearby_text": {"type": "string"},
-                                "target_zone_x": {"type": "integer"},
-                                "target_zone_y": {"type": "integer"},
                                 "overlay_type": {
                                     "type": "string",
                                     "enum": ["arrow", "highlight", "circle", "none"]
@@ -82,7 +80,7 @@ impl AnthropicClient {
                                 "checkpoint": {"type": "boolean"},
                                 "grid_cell": {
                                     "type": "string",
-                                    "description": "Grid test only: cell label (e.g. 'D7') containing the target element. IMPORTANT: rows are A-I ONLY (9 rows, A=top, I=bottom), cols are 1-16 ONLY (1=left, 16=right). Never return a row letter beyond I or a col number beyond 16."
+                                    "description": "Cell label for this step's target element (e.g. 'D7'). Rows A-I (A=top, I=bottom), cols 1-16 (1=left, 16=right). Never return a row letter beyond I or a col number beyond 16."
                                 }
                             }
                         }

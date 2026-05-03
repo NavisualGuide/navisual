@@ -39,6 +39,7 @@ regex = "1"
 eventsource-stream = "0.2.3"
 futures-util = "0.3.32"
 arboard = "3"
+font8x8 = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 # Match uiautomation 0.24.x's windows version to avoid duplicate native bindings.
@@ -55,6 +56,9 @@ windows = { version = "0.62", features = [
   "Storage_Streams",
   # Phase D.3 — TTS via Windows SAPI
   "Win32_Media_Speech",
+  # PrintWindow — capture window directly, works on any monitor (incl. left secondary)
+  "Win32_Storage_Xps",
+  "Win32_System_Threading",
 ] }
 uiautomation = { version = "0.24.4", features = ["process"] }
 

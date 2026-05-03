@@ -41,6 +41,11 @@ struct GuidanceState {
     /// Capture rect from the most recent guide() call — stored so next_step()
     /// can confine the visual grid overlay to the same app window.
     capture_rect: Option<capture::Rect>,
+    /// Raw HWND (as usize) of the target app window discovered on first guide().
+    /// Reused on every subsequent call so the program never loses track of the
+    /// target even after git dialogs, credential prompts, or other transient
+    /// windows pop above it in z-order.
+    target_hwnd: Option<usize>,
 }
 
 /// Shared app state.
@@ -93,21 +98,14 @@ fn execute_step(
             let opts = locator::orchestrator::LocateOptions {
                 role: step.target_role.as_ref().map(|r| format!("{:?}", r).to_lowercase()),
                 nearby_text: step.target_nearby_text.clone(),
-                zone: match (step.target_zone_x, step.target_zone_y) {
-                    (Some(x), Some(y)) => Some((x as u32, y as u32)),
-                    // Fall back to grid_cell when the AI didn't set explicit zone fields.
-                    // Convert grid test coords ("D12") to the 0-indexed 16×9 zone used
-                    // by the OCR filter so we don't match a false "Support" in the wrong
-                    // part of the screen when the same word appears elsewhere.
-                    _ => step.grid_cell.as_ref().and_then(|cell| {
-                        let row = cell.chars().next()?.to_ascii_uppercase();
-                        let col: u32 = cell[1..].trim().parse().ok()?;
-                        if col < 1 || col > 16 { return None; }
-                        let row_idx = (row as u32).checked_sub('A' as u32)?;
-                        if row_idx > 8 { return None; }
-                        Some((col - 1, row_idx)) // grid col 1-16 → zone 0-15; row A-I → 0-8
-                    }),
-                },
+                zone: step.grid_cell.as_ref().and_then(|cell| {
+                    let row = cell.chars().next()?.to_ascii_uppercase();
+                    let col: u32 = cell[1..].trim().parse().ok()?;
+                    if col < 1 || col > 16 { return None; }
+                    let row_idx = (row as u32).checked_sub('A' as u32)?;
+                    if row_idx > 8 { return None; }
+                    Some((col - 1, row_idx)) // grid col 1-16 → zone 0-15; row A-I → 0-8
+                }),
                 a11y_timeout_ms: 500,
                 min_confidence: 0.5,
             };
@@ -268,6 +266,7 @@ async fn guide(
         g.session_id = None;
         g.steps = vec![];
         g.state_summary = String::new();
+        g.target_hwnd = None;
     }
 
     let session_id = {
@@ -286,24 +285,43 @@ async fn guide(
 
     let grid_test_enabled = { state.ai_router.lock().await.config.grid_test_enabled };
 
-    let capture_result = tokio::task::spawn_blocking(move || {
-        match capture::capture_active_window_jpeg(75) {
-            Ok((bytes, rect)) => {
-                let final_bytes = if grid_test_enabled {
-                    grid::overlay_grid_on_jpeg(&bytes, 75)
-                } else {
-                    bytes
-                };
-                Ok((capture::to_base64(&final_bytes), rect))
+    let stored_hwnd = {
+        let g = state.guidance.lock().unwrap();
+        g.target_hwnd
+    };
+
+    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>), ()> {
+        let (bytes, rect_opt, hwnd_opt) = if let Some(hwnd_raw) = stored_hwnd {
+            // Reuse the HWND we already discovered — skip z-order walk entirely.
+            match capture::recapture_window_jpeg(hwnd_raw, 75) {
+                Ok((bytes, rect)) => (bytes, Some(rect), Some(hwnd_raw)),
+                Err(_) => {
+                    // Window was closed/minimised — rediscover.
+                    match capture::capture_active_window_jpeg(75) {
+                        Ok((bytes, rect, hwnd)) => (bytes, Some(rect), Some(hwnd)),
+                        Err(_) => return Err(()),
+                    }
+                }
             }
-            Err(_) => Err(()),
-        }
+        } else {
+            // First call for this task — discover the target window.
+            match capture::capture_active_window_jpeg(75) {
+                Ok((bytes, rect, hwnd)) => (bytes, Some(rect), Some(hwnd)),
+                Err(_) => return Err(()),
+            }
+        };
+        let final_bytes = if grid_test_enabled {
+            grid::overlay_grid_on_jpeg(&bytes, 75)
+        } else {
+            bytes
+        };
+        Ok((capture::to_base64(&final_bytes), rect_opt, hwnd_opt))
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
-    let (screenshot_b64, capture_rect_opt) = match capture_result {
-        Ok((b64, rect)) => (b64, Some(rect)),
+    let (screenshot_b64, capture_rect_opt, new_hwnd_opt) = match capture_result {
+        Ok((b64, rect_opt, hwnd_opt)) => (b64, rect_opt, hwnd_opt),
         Err(()) => {
             return Ok(GuideResponse {
                 ok: false,
@@ -315,8 +333,8 @@ async fn guide(
                 needs_input: false,
                 provider: String::new(),
                 error: Some(
-                    "No application window found. Please click on the program \
-                     you want help with, then try Guide me again.".to_string()
+                    "No application window found. Please click on the program you want \
+                     help with to bring it into focus, then try Guide me again.".to_string()
                 ),
                 grid_cell: None,
             });
@@ -407,6 +425,7 @@ async fn guide(
         g.needs_input = needs_input;
         g.provider = provider.clone();
         g.capture_rect = capture_rect_opt;
+        g.target_hwnd = new_hwnd_opt;
     }
 
     if steps.is_empty() {
@@ -518,20 +537,23 @@ async fn send_correction(
     state: State<'_, AppState>,
     note: Option<String>,
 ) -> Result<GuideResponse, String> {
-    let session_id = {
+    let (session_id, stored_hwnd) = {
         let g = state.guidance.lock().unwrap();
-        g.session_id.clone()
-    }
-    .ok_or("no active session")?;
+        (g.session_id.clone(), g.target_hwnd)
+    };
+    let session_id = session_id.ok_or("no active session")?;
 
-    let screenshot_b64 = tokio::task::spawn_blocking(|| {
-        capture::capture_active_window_jpeg(75)
-            .map(|(bytes, _rect)| capture::to_base64(&bytes))
-            .unwrap_or_else(|_| {
-                capture::capture_primary_monitor_jpeg(75)
-                    .map(|bytes| capture::to_base64(&bytes))
-                    .unwrap_or_default()
-            })
+    let screenshot_b64 = tokio::task::spawn_blocking(move || -> String {
+        // Prefer the stored HWND to avoid z-order re-discovery.
+        if let Some(hwnd_raw) = stored_hwnd {
+            if let Ok((bytes, _)) = capture::recapture_window_jpeg(hwnd_raw, 75) {
+                return capture::to_base64(&bytes);
+            }
+        }
+        if let Ok((bytes, _, _)) = capture::capture_active_window_jpeg(75) {
+            return capture::to_base64(&bytes);
+        }
+        String::new()
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
@@ -723,19 +745,23 @@ async fn locate_element(
     text: String,
     role: Option<String>,
     nearby_text: Option<String>,
-    zone_x: Option<u32>,
-    zone_y: Option<u32>,
+    grid_cell: Option<String>,
     timeout_ms: Option<u64>,
 ) -> Result<Option<locator::LocateResult>, String> {
     #[cfg(windows)]
     {
+        let zone = grid_cell.as_deref().and_then(|cell| {
+            let row = cell.chars().next()?.to_ascii_uppercase();
+            let col: u32 = cell[1..].trim().parse().ok()?;
+            if col < 1 || col > 16 { return None; }
+            let row_idx = (row as u32).checked_sub('A' as u32)?;
+            if row_idx > 8 { return None; }
+            Some((col - 1, row_idx))
+        });
         let opts = locator::orchestrator::LocateOptions {
             role,
             nearby_text,
-            zone: match (zone_x, zone_y) {
-                (Some(x), Some(y)) => Some((x, y)),
-                _ => None,
-            },
+            zone,
             a11y_timeout_ms: timeout_ms.unwrap_or(500),
             min_confidence: 0.5,
         };
@@ -750,7 +776,7 @@ async fn locate_element(
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, text, role, nearby_text, zone_x, zone_y, timeout_ms);
+        let _ = (app, text, role, nearby_text, grid_cell, timeout_ms);
         Err("locate_element only implemented for Windows".to_string())
     }
 }
@@ -759,7 +785,7 @@ async fn locate_element(
 async fn capture_active_window(quality: Option<u8>) -> Result<CaptureResult, String> {
     let q = quality.unwrap_or(80);
     let start = std::time::Instant::now();
-    let (bytes, rect) = tokio::task::spawn_blocking(move || capture::capture_active_window_jpeg(q))
+    let (bytes, rect, _hwnd) = tokio::task::spawn_blocking(move || capture::capture_active_window_jpeg(q))
         .await
         .map_err(|e| format!("task join: {e}"))?
         .map_err(|e| e.to_string())?;
