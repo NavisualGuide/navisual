@@ -360,7 +360,7 @@ if __name__ == "__main__":
 - **`restore_overlay` Rust command** — `AppState.last_overlay` stores the last non-None `(OverlayKind, bbox, text)` emitted by `execute_step`; `restore_overlay` re-emits from this store.
 - **App data dir for settings** — All persistent files moved to `app.path().app_data_dir()` (Windows: `%APPDATA%\com.ai-navigator.app\`). `Config::load()` now accepts `Option<&Path>`; `save_settings` uses `state.env_path` (stored in `AppState`). Session files and usage.json also moved to the same directory. Fixes write-permission failures when installed to `Program Files`.
 
-### 🚧 Next: packaging / internal tester distribution
+### 🚧 Next: v0.5 — Server + Monetization
 
 **Known OCR limitation — Task Manager / high-DPI primary.** Windows.Media.Ocr wants ~30 px text for reliable reads; small-font nav items (Task Manager sidebar ~12–14 physical px) are at the reliability floor. The capture self-exclusion fix removes noise (only the target window is OCR'd), but the text pixel size is what it is. A 2× bilinear upscale of captures with width <1280 before OCR is the planned follow-up if Task Manager / other compact-UI apps miss too often in practice.
 
@@ -376,21 +376,24 @@ v0.3.1 — Remaining v0.3 items (Python, Windows):
   2. PyPI packaging: pip install ai-navigator
   Note: single-screen picker was evaluated and removed — active-window crop makes it redundant.
 
-v0.4 — Distribution (Windows):
-  1. Signed Windows installer: embedded Python + NSIS/WiX + OV cert (~$100/yr)
-       — no Python required on user machine; interim before full Tauri rewrite
-  2. EV code signing ($400/yr) — builds SmartScreen reputation
-  3. Tauri/Rust rewrite: Rust backend (screen capture, A11y, hotkeys, tray,
-       overlay via native layered window); Svelte web frontend (chat UI,
-       settings); Python AI layer retained as bundled sidecar (PyInstaller
-       binary) — JSON-lines IPC over stdin/stdout, screenshots via temp file.
-       Single binary ~5MB (Tauri) + ~40MB sidecar. See SDD §2.5.
-  4. Full window-tracking pipeline (Rust): SetWinEventHook tracks window moves;
-       capture scoped to target window only; coordinates become window-relative
-       (no DPR matrix, no virtual origin); IVirtualDesktopManager for virtual
-       desktop detection; IsIconic for minimise/restore handling
+v0.4 — DONE: Tauri/Rust rewrite (Phases A–E.7 + hardening):
+  ✅ Full Rust backend: screen capture (PrintWindow), A11y (UIA), OCR (Windows.Media.Ocr),
+     AI router (Anthropic + Gemini streaming), TTS (Windows SAPI), hotkeys, overlay
+  ✅ Session-level HWND storage — stable window targeting across z-order changes
+  ✅ Option A Set-of-Marks grid with axis-label margin strips (font8x8)
+  ✅ Removed request_full_screen / virtual desktop capture / panel blanking
+  Remaining: signed installer + EV code signing (blocked on server being ready first)
 
-v0.5 — Complex Apps + Nav-Packs:
+v0.5 — Server + Monetization: see [server-plan.md](docs/server-plan.md)
+  S.1 Free trial proxy — Cloudflare Worker + KV; OpenRouter free model (Llama Vision);
+       50 free requests per device; zero-setup for new users
+  S.2 Pay As You Go — Stripe coins ($5 min, 1 coin = $0.20 = ~500 sessions);
+       coin balance in KV; Gemini Flash for paid requests; Billing tab in Settings
+  S.3 Subscriptions — Stripe Subscription ($20/mo, $50/mo); monthly quota reset;
+       upgrade/downgrade + prorated billing; cap-overflow dialog (5 choices)
+  Installer — signed Windows installer + EV code signing once S.1 is deployed
+
+v0.6 — Complex Apps + Nav-Packs:
   1. Template matching: OpenCV matchTemplate for icon-only UI elements
   2. Nav-Packs v1: pack format + loader; built-in packs for Blender + SolidWorks
   3. Community pack submission format (GitHub-based)
@@ -443,8 +446,11 @@ v0.2  DONE — streaming + prompt caching + multi-monitor + model tiering + TTS 
 v0.3  DONE — token optimization + active-window crop + UI consolidation (ConsolidatedPanel)
       + checkpoint rework + multi-window A11y + A11y false-match fix
 v0.3.1  single screen mode + settings window + PyPI packaging + subtitle persistence
-v0.4  Signed Windows installer + EV code signing + Tauri/Rust rewrite
-v0.5  Template matching + Nav-Packs v1 + Blender/SolidWorks + quantized local models
+v0.4  DONE — full Tauri/Rust rewrite (Phases A–E.7 + hardening); stable HWND targeting;
+      SoM grid; removed full-screen capture
+v0.5  Server + monetization: free trial proxy (CF Worker) + PAYG coins + subscriptions
+      + signed installer
+v0.6  Template matching + Nav-Packs v1 + Blender/SolidWorks + quantized local models
 v1.0  MSIX (Microsoft Store) + enterprise (SSO, audit logs) + plugin system + public launch
 v1.x  macOS port + Linux port  (after public launch)
 ```
