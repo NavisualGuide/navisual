@@ -94,10 +94,10 @@ impl Default for Config {
             tts_enabled: true,
             voice_input_enabled: true,
             voice_language: "en-US".to_string(),
-            hotkey_next:  "Alt+Backquote".to_string(),
-            hotkey_wrong: "Alt+KeyE".to_string(),
-            hotkey_pause: "Alt+KeyS".to_string(),
-            hotkey_icon:  "Alt+KeyQ".to_string(),
+            hotkey_next:  "Ctrl+Backquote".to_string(),
+            hotkey_wrong: "Ctrl+KeyE".to_string(),
+            hotkey_pause: "Ctrl+KeyS".to_string(),
+            hotkey_icon:  "Ctrl+KeyQ".to_string(),
             grid_test_enabled: false,
         }
     }

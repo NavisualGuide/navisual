@@ -5,6 +5,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
   import { listen, emitTo } from "@tauri-apps/api/event";
+  import HotkeyInput from "./HotkeyInput.svelte";
 
   type Rect = { x: number; y: number; width: number; height: number };
   type LocateResult = { bbox: Rect; name: string; role: string; confidence: number };
@@ -94,8 +95,8 @@
     overlay_color: "#FF6B35", overlay_thickness: 4,
     subtitle_enabled: true, auto_advance: false,
     tts_enabled: true, voice_input_enabled: false, voice_language: "en-US",
-    hotkey_next: "Alt+Backquote", hotkey_wrong: "Alt+KeyE",
-    hotkey_pause: "Alt+KeyS", hotkey_icon: "Alt+KeyQ",
+    hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
+    hotkey_pause: "Ctrl+KeyS", hotkey_icon: "Ctrl+KeyQ",
     grid_test_enabled: false,
   };
   let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
@@ -565,9 +566,9 @@
 
     await registerShortcuts(initHotkeys);
 
-    // Alt+A — push-to-talk voice input (E.7)
+    // Ctrl+A — push-to-talk voice input (E.7)
     try {
-      await register("Alt+KeyA", () => { toggleVoiceInput(); });
+      await register("Ctrl+KeyA", () => { toggleVoiceInput(); });
     } catch (_) {}
 
     await addToHistory("system", "AI Navigator ready");
@@ -723,7 +724,7 @@
       <button class="btn-action btn-mic" class:btn-mic-active={isRecording}
         onclick={toggleVoiceInput}
         disabled={!settingsForm.voice_input_enabled}
-        title={settingsForm.voice_input_enabled ? (isRecording ? "Stop recording (Alt+A)" : "Voice input (Alt+A)") : "Enable voice input in Settings → Audio"}>
+        title={settingsForm.voice_input_enabled ? (isRecording ? "Stop recording (Ctrl+A)" : "Voice input (Ctrl+A)") : "Enable voice input in Settings → Audio"}>
         🎤
       </button>
       <button class="btn-action btn-more" class:btn-more-open={showQuickMenu}
@@ -934,22 +935,22 @@
             </div>
 
           {:else if settingsTab === "hotkeys"}
-            <p class="stub-hint" style="margin-bottom:10px">Tauri accelerator format: <code>Alt+KeyE</code>, <code>Ctrl+Shift+KeyN</code>, etc. Re-registered immediately on Save — no restart needed.</p>
+            <p class="stub-hint" style="margin-bottom:10px">Click a field then press your shortcut combo. Re-registered immediately on Save — no restart needed.</p>
             <div class="setting-group">
-              <label class="setting-label" for="hk-next">Next step</label>
-              <input id="hk-next" class="setting-input" type="text" bind:value={settingsForm.hotkey_next} spellcheck="false" />
+              <label class="setting-label">Next step</label>
+              <HotkeyInput bind:value={settingsForm.hotkey_next} />
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="hk-wrong">Mark wrong</label>
-              <input id="hk-wrong" class="setting-input" type="text" bind:value={settingsForm.hotkey_wrong} spellcheck="false" />
+              <label class="setting-label">Mark wrong</label>
+              <HotkeyInput bind:value={settingsForm.hotkey_wrong} />
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="hk-pause">Pause / cancel</label>
-              <input id="hk-pause" class="setting-input" type="text" bind:value={settingsForm.hotkey_pause} spellcheck="false" />
+              <label class="setting-label">Pause / cancel</label>
+              <HotkeyInput bind:value={settingsForm.hotkey_pause} />
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="hk-icon">Toggle icon mode</label>
-              <input id="hk-icon" class="setting-input" type="text" bind:value={settingsForm.hotkey_icon} spellcheck="false" />
+              <label class="setting-label">Toggle icon mode</label>
+              <HotkeyInput bind:value={settingsForm.hotkey_icon} />
             </div>
 
           {:else}
@@ -965,7 +966,7 @@
               <p class="setting-label">Voice input</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.voice_input_enabled} />
-                <span>Enable 🎤 push-to-talk (Alt+A)</span>
+                <span>Enable 🎤 push-to-talk (Ctrl+A)</span>
               </label>
               <p class="stub-hint" style="margin-top:4px">Uses the browser's built-in speech recognition — requires internet and microphone permission.</p>
             </div>

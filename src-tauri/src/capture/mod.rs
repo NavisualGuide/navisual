@@ -41,10 +41,12 @@ pub fn capture_primary_monitor_jpeg(quality: u8) -> Result<Vec<u8>> {
     encode_jpeg(&cap_size(img), quality)
 }
 
-/// Capture the active foreground window using PrintWindow.
+/// Capture the active foreground window area as JPEG.
 ///
-/// PrintWindow renders the window directly into a memory DC regardless of
-/// monitor placement — correctly handles secondary monitors at negative x.
+/// Uses BitBlt from a per-monitor screen DC (not PrintWindow), so dialogs
+/// and popups floating above the target window are included in the capture.
+/// `GA_ROOTOWNER` is applied to dialogs so the stored HWND is always the
+/// stable main-window handle, not an owned dialog that may close at any time.
 ///
 /// Returns (jpeg bytes, window rect in physical pixels, raw HWND as usize).
 /// Store the HWND and pass it to `recapture_window_jpeg` on subsequent calls.
@@ -53,7 +55,7 @@ pub fn capture_active_window_jpeg(quality: u8) -> Result<(Vec<u8>, Rect, usize)>
     {
         let (hwnd, rect) = win::get_foreground_target()
             .ok_or_else(|| anyhow!("no foreground window found"))?;
-        let img = win::capture_window_pixels(hwnd, &rect)?;
+        let img = win::capture_desktop_region(&rect)?;
         let buf = encode_jpeg(&cap_size(img), quality)?;
         return Ok((buf, rect, hwnd.0 as usize));
     }
@@ -72,7 +74,9 @@ pub fn capture_active_window_jpeg(quality: u8) -> Result<(Vec<u8>, Rect, usize)>
 pub fn recapture_window_jpeg(hwnd_raw: usize, quality: u8) -> Result<(Vec<u8>, Rect)> {
     #[cfg(windows)]
     {
-        let (img, rect) = win::capture_by_hwnd_raw(hwnd_raw)?;
+        let rect = win::validate_hwnd_raw(hwnd_raw)
+            .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
+        let img = win::capture_desktop_region(&rect)?;
         let buf = encode_jpeg(&cap_size(img), quality)?;
         return Ok((buf, rect));
     }

@@ -11,13 +11,15 @@ use super::Rect;
 use anyhow::{anyhow, Result};
 use image::{ImageBuffer, Rgba};
 use std::mem;
-use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, RECT, TRUE};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, POINT, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleBitmap, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-    GetDIBits, GetWindowDC, BITMAPINFO, BITMAPINFOHEADER, ReleaseDC, SelectObject,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, DeleteDC, DeleteObject,
+    GetDIBits, GetMonitorInfoW, MonitorFromPoint, SelectObject,
+    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST, SRCCOPY,
 };
-use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -43,8 +45,7 @@ const SKIP_CLASSES: &[&str] = &[
 
 /// Validate that `hwnd` is still a usable capture target and return its current
 /// DWM frame bounds. Returns None if the window was closed, minimised, or
-/// otherwise unusable. Called by `recapture_window_jpeg` to verify a stored HWND
-/// before attempting PrintWindow.
+/// otherwise unusable.
 pub fn validate_hwnd(hwnd: HWND) -> Option<Rect> {
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
@@ -52,6 +53,11 @@ pub fn validate_hwnd(hwnd: HWND) -> Option<Rect> {
         }
     }
     frame_rect_of(hwnd)
+}
+
+/// Convenience wrapper: validate a window by raw HWND value (usize).
+pub fn validate_hwnd_raw(hwnd_raw: usize) -> Option<Rect> {
+    validate_hwnd(HWND(hwnd_raw as *mut _))
 }
 
 /// Returns the DWM extended frame bounds of `hwnd`, or GetWindowRect as a
@@ -109,16 +115,6 @@ fn is_webview2_renderer(pid: u32) -> bool {
     }
 }
 
-/// Validates and captures a window by its raw HWND value (stored as `usize`).
-/// Returns the pixel buffer and fresh DWM rect, or an error if the window is
-/// gone/minimised. Used by `recapture_window_jpeg` to skip re-discovery.
-pub fn capture_by_hwnd_raw(hwnd_raw: usize) -> anyhow::Result<(image::ImageBuffer<image::Rgba<u8>, Vec<u8>>, super::Rect)> {
-    let hwnd = HWND(hwnd_raw as *mut _);
-    let rect = validate_hwnd(hwnd)
-        .ok_or_else(|| anyhow::anyhow!("stored window is no longer valid (closed or minimised)"))?;
-    let img = capture_window_pixels(hwnd, &rect)?;
-    Ok((img, rect))
-}
 
 /// Is `hwnd` a plausible capture target (visible, not minimised, has an
 /// acceptable class, and is NOT owned by our process)?
@@ -209,8 +205,21 @@ pub fn get_foreground_target() -> Option<(HWND, Rect)> {
         }
     }
     // Navigator is foreground — z-order walk finds the most recently active app.
+    // If it found an owned dialog (e.g. Word's Phonetic Guide dialog is z=2
+    // while the main Word window is z=3), walk up to GA_ROOTOWNER so we return
+    // the main window HWND. The xcap screen-region crop on the owner rect then
+    // includes the dialog naturally (it's drawn on top of the owner on screen).
     let hwnd = first_target_in_z_order(our_pid)?;
-    frame_rect_of(hwnd).map(|r| (hwnd, r))
+    let root = unsafe { GetAncestor(hwnd, GA_ROOTOWNER) };
+    let target = if !root.0.is_null()
+        && root.0 != hwnd.0
+        && is_target_candidate(root, our_pid)
+    {
+        root
+    } else {
+        hwnd
+    };
+    frame_rect_of(target).map(|r| (target, r))
 }
 
 // SHELVED — instant foreground tracking via SetWinEventHook.
@@ -267,29 +276,65 @@ pub fn get_foreground_target() -> Option<(HWND, Rect)> {
 // Call capture::start_foreground_tracking() from lib.rs setup (#[cfg(windows)]).
 // END SHELVED
 
-/// Capture a window's pixels directly using PrintWindow.
+/// Capture a region of the desktop using a per-monitor device context.
 ///
-/// Unlike BitBlt from the desktop DC, PrintWindow asks the target window to
-/// render itself into our memory DC — this works for any monitor placement,
-/// including secondary monitors with negative x coordinates (left of primary).
-/// The desktop DC approach fails silently for those monitors on many systems.
-pub fn capture_window_pixels(hwnd: HWND, rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+/// Why per-monitor `CreateDCW(L"DISPLAY", deviceName, ...)` instead of
+/// `GetDC(NULL)` or `CreateDCW(L"DISPLAY", NULL, ...)`?
+///   - The "whole virtual desktop" DCs are documented as primary-monitor-only
+///     on many systems and silently fail to capture content from secondary
+///     monitors at negative coordinates (xcap exhibits the same issue).
+///   - A DC scoped to a specific display device works regardless of where the
+///     monitor sits in virtual space — source coords are monitor-relative
+///     (always non-negative), so the negative-x problem disappears entirely.
+///
+/// Why not `PrintWindow`? It renders a single window's surface only — owned
+/// dialogs (separate top-level windows like Word's Phonetic Guide) are
+/// invisible. BitBlt from the screen DC reads the composited image, so any
+/// dialog/popup/tooltip drawn on top of the target window is captured naturally.
+pub fn capture_desktop_region(rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     let w = rect.width as i32;
     let h = rect.height as i32;
     if w <= 0 || h <= 0 {
-        return Err(anyhow!("window has zero dimensions {}×{}", w, h));
+        return Err(anyhow!("zero dimensions {}×{}", w, h));
     }
     unsafe {
-        let hdc_win = GetWindowDC(Some(hwnd));
-        let hdc_mem = CreateCompatibleDC(Some(hdc_win));
-        let h_bmp = CreateCompatibleBitmap(hdc_win, w, h);
+        // Locate the monitor that contains the rect's center point.
+        let center = POINT {
+            x: rect.x + (rect.width as i32) / 2,
+            y: rect.y + (rect.height as i32) / 2,
+        };
+        let hmon = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+        if hmon.is_invalid() {
+            return Err(anyhow!("MonitorFromPoint returned null"));
+        }
+
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = mem::size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(hmon, &mut info.monitorInfo as *mut MONITORINFO).as_bool() {
+            return Err(anyhow!("GetMonitorInfoW failed"));
+        }
+        let mon_left = info.monitorInfo.rcMonitor.left;
+        let mon_top = info.monitorInfo.rcMonitor.top;
+
+        // szDevice is e.g. "\\.\DISPLAY1". Per-monitor DC bypasses the
+        // negative-coord limitation of full-virtual-desktop DCs.
+        let device_name = PCWSTR::from_raw(info.szDevice.as_ptr());
+        let hdc_screen = CreateDCW(w!("DISPLAY"), device_name, PCWSTR::null(), None);
+        if hdc_screen.is_invalid() {
+            return Err(anyhow!("CreateDCW failed for monitor"));
+        }
+
+        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
+        let h_bmp = CreateCompatibleBitmap(hdc_screen, w, h);
         let prev = SelectObject(hdc_mem, h_bmp.into());
 
-        // PW_RENDERFULLCONTENT=2 covers GPU/D3D-accelerated surfaces (Chrome, Edge, …).
-        // Fall back to PW_CLIENTONLY=1 if the first call fails.
-        if !PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(2)).as_bool() {
-            PrintWindow(hwnd, hdc_mem, PRINT_WINDOW_FLAGS(1));
-        }
+        // Source coords are monitor-relative since the DC is per-monitor.
+        let src_x = rect.x - mon_left;
+        let src_y = rect.y - mon_top;
+        let blt_ok = BitBlt(
+            hdc_mem, 0, 0, w, h,
+            Some(hdc_screen), src_x, src_y, SRCCOPY,
+        ).is_ok();
 
         let buf_len = (w * h * 4) as usize;
         let mut buf = vec![0u8; buf_len];
@@ -318,10 +363,13 @@ pub fn capture_window_pixels(hwnd: HWND, rect: &Rect) -> Result<ImageBuffer<Rgba
         }
 
         SelectObject(hdc_mem, prev);
-        DeleteObject(h_bmp.into());
-        DeleteDC(hdc_mem);
-        ReleaseDC(Some(hwnd), hdc_win);
+        let _ = DeleteObject(h_bmp.into());
+        let _ = DeleteDC(hdc_mem);
+        let _ = DeleteDC(hdc_screen);
 
+        if !blt_ok {
+            return Err(anyhow!("BitBlt failed"));
+        }
         ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(rect.width, rect.height, buf)
             .ok_or_else(|| anyhow!("ImageBuffer::from_raw failed"))
     }
