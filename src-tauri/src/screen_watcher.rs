@@ -47,7 +47,7 @@ impl ScreenWatcher {
                         break;
                     }
 
-                    let hash = match compute_screen_hash() {
+                    let hash = match compute_screen_hash(&app) {
                         Some(h) => h,
                         None => continue,
                     };
@@ -85,9 +85,12 @@ impl Drop for ScreenWatcher {
 }
 
 /// Capture the active window at low quality and compute the average hash.
-fn compute_screen_hash() -> Option<u64> {
+/// The panel rect is excluded so its own UI updates (streaming text, etc.)
+/// do not trigger false screen-change events.
+fn compute_screen_hash(app: &AppHandle) -> Option<u64> {
+    let exclude = capture::get_panel_rects();
     // Use low JPEG quality — we only need a rough thumbnail.
-    let (jpeg, _rect, _hwnd) = capture::capture_active_window_jpeg(30).ok()?;
+    let (jpeg, _rect, _hwnd) = capture::capture_active_window_jpeg(30, &exclude).ok()?;
     let img = image::load_from_memory(&jpeg).ok()?;
 
     // Resize to 8×8 greyscale.

@@ -2,15 +2,15 @@
 //!
 //! Two primary entry points:
 //! - `capture_primary_monitor_jpeg()`: full primary monitor, JPEG bytes.
-//! - `capture_active_window_jpeg()`: foreground window using PrintWindow.
-//!   Returns (jpeg, rect, raw_hwnd). Store the HWND and pass it to
-//!   `recapture_window_jpeg` on subsequent calls so the program never loses
-//!   track of the target window across z-order changes.
+//! - `capture_active_window_jpeg(quality, exclude)`: foreground window via
+//!   per-monitor BitBlt. Returns (jpeg, rect, raw_hwnd). Store the HWND and
+//!   pass it to `recapture_window_jpeg` on subsequent calls.
 //!
-//! PrintWindow renders the window into a private memory DC — the image is the
-//! window's own content regardless of what covers it on screen.  No blanking
-//! of the Navigator UI is needed: our panel never appears in a PrintWindow
-//! capture of another process's window.
+//! Unlike the old PrintWindow path, per-monitor BitBlt reads the composited
+//! screen surface — dialogs floating above the target window appear naturally,
+//! BUT so does our own panel if it overlaps. Callers must pass the panel's
+//! current screen rect in `exclude` so it is blanked (neutral grey) before
+//! JPEG encoding.
 
 use anyhow::{anyhow, Context, Result};
 use image::{codecs::jpeg::JpegEncoder, ColorType, ImageBuffer, Rgba};
@@ -43,26 +43,27 @@ pub fn capture_primary_monitor_jpeg(quality: u8) -> Result<Vec<u8>> {
 
 /// Capture the active foreground window area as JPEG.
 ///
-/// Uses BitBlt from a per-monitor screen DC (not PrintWindow), so dialogs
-/// and popups floating above the target window are included in the capture.
+/// `exclude` — screen rects to blank (neutral grey) before encoding. Pass the
+/// panel's current rect so it does not appear in the AI's screenshot.
 /// `GA_ROOTOWNER` is applied to dialogs so the stored HWND is always the
 /// stable main-window handle, not an owned dialog that may close at any time.
 ///
 /// Returns (jpeg bytes, window rect in physical pixels, raw HWND as usize).
 /// Store the HWND and pass it to `recapture_window_jpeg` on subsequent calls.
-pub fn capture_active_window_jpeg(quality: u8) -> Result<(Vec<u8>, Rect, usize)> {
+pub fn capture_active_window_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Vec<u8>, Rect, usize)> {
     #[cfg(windows)]
     {
         let (hwnd, rect) = win::get_foreground_target()
             .ok_or_else(|| anyhow!("no foreground window found"))?;
-        let img = win::capture_desktop_region(&rect)?;
+        let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;
         return Ok((buf, rect, hwnd.0 as usize));
     }
 
     #[cfg(not(windows))]
     {
-        let _ = quality;
+        let _ = (quality, exclude);
         Err(anyhow!("active-window capture only implemented for Windows"))
     }
 }
@@ -71,19 +72,22 @@ pub fn capture_active_window_jpeg(quality: u8) -> Result<(Vec<u8>, Rect, usize)>
 /// Validates the window is still alive and not minimised before capturing.
 /// Returns an error if the window is gone — caller should then call
 /// `capture_active_window_jpeg` to rediscover.
-pub fn recapture_window_jpeg(hwnd_raw: usize, quality: u8) -> Result<(Vec<u8>, Rect)> {
+///
+/// `exclude` — same semantics as `capture_active_window_jpeg`.
+pub fn recapture_window_jpeg(hwnd_raw: usize, quality: u8, exclude: &[Rect]) -> Result<(Vec<u8>, Rect)> {
     #[cfg(windows)]
     {
         let rect = win::validate_hwnd_raw(hwnd_raw)
             .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
-        let img = win::capture_desktop_region(&rect)?;
+        let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;
         return Ok((buf, rect));
     }
 
     #[cfg(not(windows))]
     {
-        let _ = (hwnd_raw, quality);
+        let _ = (hwnd_raw, quality, exclude);
         Err(anyhow!("recapture only implemented for Windows"))
     }
 }
@@ -115,6 +119,26 @@ fn encode_jpeg(img: &ImageBuffer<Rgba<u8>, Vec<u8>>, quality: u8) -> Result<Vec<
     encoder.encode(&rgb, w, h, ColorType::Rgb8.into())
         .context("jpeg encode")?;
     Ok(out)
+}
+
+/// Return the screen rects of all AI Navigator windows that should be blanked
+/// from captures (currently: the panel; the overlay is excluded by size).
+///
+/// Uses EnumWindows by PID + size filter instead of Tauri's `hwnd()` to avoid
+/// windows-rs version conflicts between Tauri's dependency and ours.
+///
+/// BitBlt reads the composited display — the panel appears in screenshots if
+/// it overlaps the target app. Blanking it keeps the AI's image clean and
+/// prevents the panel's own UI updates from triggering false screen-change events.
+pub fn get_panel_rects() -> Vec<Rect> {
+    #[cfg(windows)]
+    {
+        win::own_panel_rects()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
 }
 
 /// Convenience: base64-encode JPEG bytes (suitable for AI API payloads).

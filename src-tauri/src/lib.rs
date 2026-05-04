@@ -252,6 +252,7 @@ fn update_env_file(path: &std::path::Path, updates: &[(&str, &str)]) -> Result<(
     Ok(())
 }
 
+
 #[tauri::command]
 async fn guide(
     app: AppHandle,
@@ -290,14 +291,18 @@ async fn guide(
         g.target_hwnd
     };
 
+    // Get the panel rect before entering spawn_blocking — blanked from the
+    // capture so the AI never sees our own UI chrome in screenshots.
+    let exclude = capture::get_panel_rects();
+
     let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>), ()> {
         let (bytes, rect_opt, hwnd_opt) = if let Some(hwnd_raw) = stored_hwnd {
             // Reuse the HWND we already discovered — skip z-order walk entirely.
-            match capture::recapture_window_jpeg(hwnd_raw, 75) {
+            match capture::recapture_window_jpeg(hwnd_raw, 75, &exclude) {
                 Ok((bytes, rect)) => (bytes, Some(rect), Some(hwnd_raw)),
                 Err(_) => {
                     // Window was closed/minimised — rediscover.
-                    match capture::capture_active_window_jpeg(75) {
+                    match capture::capture_active_window_jpeg(75, &exclude) {
                         Ok((bytes, rect, hwnd)) => (bytes, Some(rect), Some(hwnd)),
                         Err(_) => return Err(()),
                     }
@@ -305,7 +310,7 @@ async fn guide(
             }
         } else {
             // First call for this task — discover the target window.
-            match capture::capture_active_window_jpeg(75) {
+            match capture::capture_active_window_jpeg(75, &exclude) {
                 Ok((bytes, rect, hwnd)) => (bytes, Some(rect), Some(hwnd)),
                 Err(_) => return Err(()),
             }
@@ -543,14 +548,16 @@ async fn send_correction(
     };
     let session_id = session_id.ok_or("no active session")?;
 
+    let exclude = capture::get_panel_rects();
+
     let screenshot_b64 = tokio::task::spawn_blocking(move || -> String {
         // Prefer the stored HWND to avoid z-order re-discovery.
         if let Some(hwnd_raw) = stored_hwnd {
-            if let Ok((bytes, _)) = capture::recapture_window_jpeg(hwnd_raw, 75) {
+            if let Ok((bytes, _)) = capture::recapture_window_jpeg(hwnd_raw, 75, &exclude) {
                 return capture::to_base64(&bytes);
             }
         }
-        if let Ok((bytes, _, _)) = capture::capture_active_window_jpeg(75) {
+        if let Ok((bytes, _, _)) = capture::capture_active_window_jpeg(75, &exclude) {
             return capture::to_base64(&bytes);
         }
         String::new()
@@ -785,7 +792,10 @@ async fn locate_element(
 async fn capture_active_window(quality: Option<u8>) -> Result<CaptureResult, String> {
     let q = quality.unwrap_or(80);
     let start = std::time::Instant::now();
-    let (bytes, rect, _hwnd) = tokio::task::spawn_blocking(move || capture::capture_active_window_jpeg(q))
+    let (bytes, rect, _hwnd) = tokio::task::spawn_blocking(move || {
+        let exclude = capture::get_panel_rects();
+        capture::capture_active_window_jpeg(q, &exclude)
+    })
         .await
         .map_err(|e| format!("task join: {e}"))?
         .map_err(|e| e.to_string())?;

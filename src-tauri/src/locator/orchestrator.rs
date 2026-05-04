@@ -34,7 +34,8 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<Option<LocateRe
     }
 
     // Pass 2 — OCR fallback on the active window.
-    let (jpeg, crop_rect, _hwnd) = match capture::capture_active_window_jpeg(80) {
+    let exclude = capture::get_panel_rects();
+    let (jpeg, crop_rect, _hwnd) = match capture::capture_active_window_jpeg(80, &exclude) {
         Ok(v) => v,
         Err(_) => {
             // If active-window capture fails (e.g. our own panel is

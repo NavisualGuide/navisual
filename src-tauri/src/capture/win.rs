@@ -60,6 +60,82 @@ pub fn validate_hwnd_raw(hwnd_raw: usize) -> Option<Rect> {
     validate_hwnd(HWND(hwnd_raw as *mut _))
 }
 
+/// Return the screen rect of `hwnd` without visibility checks — used to get
+/// the panel's current position so it can be blanked from captures.
+pub fn window_screen_rect(hwnd: HWND) -> Option<Rect> {
+    frame_rect_of(hwnd)
+}
+
+/// Find all visible top-level windows belonging to our own process that are
+/// small enough to be the panel (< 2000 px on either axis — excludes the
+/// always-visible overlay window which spans the virtual desktop).
+/// Returns the DWM extended frame rect of each matched window.
+pub fn own_panel_rects() -> Vec<Rect> {
+    let our_pid = std::process::id();
+
+    struct State {
+        pid: u32,
+        rects: Vec<Rect>,
+    }
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != state.pid {
+            return TRUE;
+        }
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return TRUE;
+        }
+        if let Some(r) = frame_rect_of(hwnd) {
+            // Overlay spans the virtual desktop (thousands of px wide).
+            // The panel is at most a few hundred px in each direction.
+            if r.width < 2000 && r.height < 2000 {
+                state.rects.push(r);
+            }
+        }
+        TRUE
+    }
+
+    let mut state = State { pid: our_pid, rects: Vec::new() };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+    state.rects
+}
+
+/// Overwrite pixels in `img` that fall within any of `exclude_rects`.
+///
+/// `capture_rect` is the screen region that `img` represents (used to convert
+/// from screen coordinates to image-local pixel coordinates). Regions that do
+/// not overlap `capture_rect` are silently skipped.
+pub fn blank_rects(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    capture_rect: &Rect,
+    exclude_rects: &[Rect],
+) {
+    const BLANK: Rgba<u8> = Rgba([220, 220, 220, 255]);
+    for ex in exclude_rects {
+        let ix = ex.x.max(capture_rect.x);
+        let iy = ex.y.max(capture_rect.y);
+        let ir = (ex.x + ex.width as i32).min(capture_rect.x + capture_rect.width as i32);
+        let ib = (ex.y + ex.height as i32).min(capture_rect.y + capture_rect.height as i32);
+        if ir <= ix || ib <= iy {
+            continue;
+        }
+        let px = (ix - capture_rect.x) as u32;
+        let py = (iy - capture_rect.y) as u32;
+        let pw = ((ir - ix) as u32).min(img.width().saturating_sub(px));
+        let ph = ((ib - iy) as u32).min(img.height().saturating_sub(py));
+        for y in py..(py + ph) {
+            for x in px..(px + pw) {
+                img.put_pixel(x, y, BLANK);
+            }
+        }
+    }
+}
+
 /// Returns the DWM extended frame bounds of `hwnd`, or GetWindowRect as a
 /// fallback for classic/non-DWM windows. None if both fail.
 fn frame_rect_of(hwnd: HWND) -> Option<Rect> {
