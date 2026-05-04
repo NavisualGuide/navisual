@@ -385,13 +385,15 @@ v0.4 — DONE: Tauri/Rust rewrite (Phases A–E.7 + hardening):
   Remaining: signed installer + EV code signing (blocked on server being ready first)
 
 v0.5 — Server + Monetization: see [server-plan.md](docs/server-plan.md)
-  S.1 Free trial proxy — Cloudflare Worker + KV; OpenRouter free model (Llama Vision);
-       50 free requests per device; zero-setup for new users
-  S.2 Pay As You Go — Stripe coins ($5 min, 1 coin = $0.20 = ~500 sessions);
-       coin balance in KV; Gemini Flash for paid requests; Billing tab in Settings
+  S.1 Free trial proxy — Supabase Edge Function + Postgres; anonymous auth on first
+       launch (no sign-up required); OpenRouter free Llama Vision; 50 free requests;
+       anonymous session upgrades to real account in-place when user pays (S.2)
+  S.2 Pay As You Go — Google OAuth upgrade + Stripe coins ($5 min, 1 coin = $0.20);
+       Gemini Flash for paid requests; Billing tab in Settings
   S.3 Subscriptions — Stripe Subscription ($20/mo, $50/mo); monthly quota reset;
-       upgrade/downgrade + prorated billing; cap-overflow dialog (5 choices)
+       Stripe Customer Portal for cancel/upgrade; cap-overflow dialog (5 choices)
   Installer — signed Windows installer + EV code signing once S.1 is deployed
+  Infrastructure: Supabase (auth + DB + relay) + Stripe (payments) — 2 parties only
 
 v0.6 — Complex Apps + Nav-Packs:
   1. Template matching: OpenCV matchTemplate for icon-only UI elements
@@ -448,8 +450,8 @@ v0.3  DONE — token optimization + active-window crop + UI consolidation (Conso
 v0.3.1  single screen mode + settings window + PyPI packaging + subtitle persistence
 v0.4  DONE — full Tauri/Rust rewrite (Phases A–E.7 + hardening); stable HWND targeting;
       SoM grid; removed full-screen capture
-v0.5  Server + monetization: free trial proxy (CF Worker) + PAYG coins + subscriptions
-      + signed installer
+v0.5  Server + monetization: Supabase (auth + relay) + Stripe; free trial (anonymous
+      auth, 50 req) + PAYG coins + subscriptions + signed installer
 v0.6  Template matching + Nav-Packs v1 + Blender/SolidWorks + quantized local models
 v1.0  MSIX (Microsoft Store) + enterprise (SSO, audit logs) + plugin system + public launch
 v1.x  macOS port + Linux port  (after public launch)
