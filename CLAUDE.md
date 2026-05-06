@@ -1,18 +1,18 @@
-# AI Navigator — Project Guide
+# Navisual — Project Guide
 
 **Version:** 0.4.0-alpha
-**Status:** v0.4 Phases A–E.7 complete (Tauri scaffold, full-Rust AI backend, screen capture + A11y + OCR + locator, overlay, guidance loop + chat UI, hotkeys, TTS, screen watcher, streaming, clipboard, needs_input reply UI, settings modal, voice input). Settings stored in %APPDATA%\com.ai-navigator.app\.env. Next: packaging / internal tester distribution.
+**Status:** v0.4 Phases A–E.7 complete (Tauri scaffold, full-Rust AI backend, screen capture + A11y + OCR + locator, overlay, guidance loop + chat UI, hotkeys, TTS, screen watcher, streaming, clipboard, needs_input reply UI, settings modal, voice input). Settings stored in %APPDATA%\com.navisual.app\.env. Next: packaging / internal tester distribution.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
-**Design Doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md) *(Note: This SDD is the main source of truth for future changes. Always update `CLAUDE.md` to sync with the SDD).*
+**Design Doc:** [Navisual-Design-Document.md](docs/Navisual-Design-Document.md) *(Note: This SDD is the main source of truth for future changes. Always update `CLAUDE.md` to sync with the SDD).*
 **Settings:** [settings.md](docs/settings.md)
 **Nav-Packs:** [nav-packs.md](docs/nav-packs.md)
-**GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
+**GitHub:** [NavisualGuide/navisual](https://github.com/NavisualGuide/navisual)
 
 ---
 
 ## Quick Summary
 
-**AI Navigator** is a cross-platform desktop app that guides users through computer tasks by observing their screen and providing real-time navigation instructions (via audio/overlay). The user always stays in control — the AI never clicks, types, or acts.
+**Navisual** is a cross-platform desktop app that guides users through computer tasks by observing their screen and providing real-time navigation instructions (via audio/overlay). The user always stays in control — the AI never clicks, types, or acts.
 
 **Slogan:** *The AI guides, never overrides.*
 
@@ -218,7 +218,7 @@ if __name__ == "__main__":
 ### ✅ Completed (v0.1.1)
 - Multi-provider AI: Gemini Flash (free tier) + Ollama (local) + Anthropic
 - System prompt: generic browser language (no Edge/Chrome/Firefox specifics)
-- System prompt: AI Navigator window self-awareness (minimize, not close)
+- System prompt: Navisual window self-awareness (minimize, not close)
 - Input box stays enabled during API calls — messages queue automatically
 - Screen change auto-advance: mid-sequence steps now advance without user prompt
 - Screen change re-query: when sequence complete + screen changes, AI re-queries (debounced 5s)
@@ -260,13 +260,13 @@ if __name__ == "__main__":
 - **Voice input** — push-to-talk via SpeechRecognition + PyAudio + Google Web Speech API; mic button in floating window; `ENABLE_VOICE_INPUT=true`; transcript thread-safe via Qt signal
 
 ### ✅ Completed (v0.3.0)
-- **Token optimization** — API-send screenshot downscaled to 768×432 max (2 vision tiles, ~75% token reduction vs 1920×1080); active-window crop via `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` cuts tokens up to 80% more; self-process exclusion prevents crop to AI Navigator's own window
+- **Token optimization** — API-send screenshot downscaled to 768×432 max (2 vision tiles, ~75% token reduction vs 1920×1080); active-window crop via `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` cuts tokens up to 80% more; self-process exclusion prevents crop to Navisual's own window
 - **Extended model tiering** — Gemini Flash Lite for all automated screen-change re-queries; Gemini Flash (full) for initial and user-triggered requests
 - **UI consolidation** — `MainWindow` + `FloatingWindow` replaced by single `ConsolidatedPanel` (`src/ui/panel_window.py`); two states: panel mode (360×540, full UI) and icon mode (56×56 draggable dot); `WDA_EXCLUDEFROMCAPTURE` applied so panel never appears in API screenshots
 - **Checkpoint rework** — Checkpoint steps no longer auto-complete on screen change (too noisy in complex apps like OneNote ribbons). Completion is now explicit: user presses **→ Next** button or Alt+` (next-step hotkey). Next button re-queries the AI with `[User completed: '...']` context so it advances rather than repeating the same instruction
-- **A11y multi-window search** — When AI Navigator is the foreground window (user clicked Next button), the A11y engine now searches all other desktop top-level windows instead of returning nothing. Fixes "arrow missing after Next" issue
+- **A11y multi-window search** — When Navisual is the foreground window (user clicked Next button), the A11y engine now searches all other desktop top-level windows instead of returning nothing. Fixes "arrow missing after Next" issue
 - **A11y false-match fix** — `_search_descendants` regex changed from substring `(?i)Insert` to anchored `(?i)^Insert$`; prevents "Insert" matching "Insert Space", "Insert Row", etc.
-- **Own-window crop exclusion** — `get_foreground_window_rect()` checks PID against `os.getpid()`; if AI Navigator is foreground, returns None so full desktop is sent to API
+- **Own-window crop exclusion** — `get_foreground_window_rect()` checks PID against `os.getpid()`; if Navisual is foreground, returns None so full desktop is sent to API
 - **System prompt rule 13** — Added screen-scope rule: AI can set `request_full_screen=true` when it needs to see beyond the active window crop (Start Menu, taskbar, system dialogs)
 
 ### ✅ Completed (v0.3.0-patch — 2026-04-13)
@@ -354,7 +354,7 @@ if __name__ == "__main__":
 - **Caption: fit-to-text + transparent** — `drawSubtitle` in `Overlay.svelte` now measures text width and sizes the strip to fit content (not full screen width); opacity reduced from 0.78 → 0.52.
 - **Clear → Show overlay toggle** — ✕ Clear in quick menu clears screen guide + caption; button changes to 👁 Show which calls `restore_overlay` (new Tauri command) to re-emit the last stored overlay update.
 - **`restore_overlay` Rust command** — `AppState.last_overlay` stores the last non-None `(OverlayKind, bbox, text)` emitted by `execute_step`; `restore_overlay` re-emits from this store.
-- **App data dir for settings** — All persistent files moved to `app.path().app_data_dir()` (Windows: `%APPDATA%\com.ai-navigator.app\`). `Config::load()` now accepts `Option<&Path>`; `save_settings` uses `state.env_path` (stored in `AppState`). Session files and usage.json also moved to the same directory. Fixes write-permission failures when installed to `Program Files`.
+- **App data dir for settings** — All persistent files moved to `app.path().app_data_dir()` (Windows: `%APPDATA%\com.navisual.app\`). `Config::load()` now accepts `Option<&Path>`; `save_settings` uses `state.env_path` (stored in `AppState`). Session files and usage.json also moved to the same directory. Fixes write-permission failures when installed to `Program Files`.
 
 ### 🚧 Next: v0.5 — Server + Monetization
 
@@ -369,7 +369,7 @@ if __name__ == "__main__":
 ```
 v0.3.1 — Remaining v0.3 items (Python, Windows):
   1. Settings window: in-app UI for API provider + key (no more .env editing) ✅ — see [settings.md](docs/settings.md)
-  2. PyPI packaging: pip install ai-navigator
+  2. PyPI packaging: pip install navisual
   Note: single-screen picker was evaluated and removed — active-window crop makes it redundant.
 
 v0.4 — DONE: Tauri/Rust rewrite (Phases A–E.7 + hardening):
@@ -569,8 +569,8 @@ tests/
 
 ```bash
 # 1. Clone repo
-git clone https://github.com/stevefu-ops/ai-navigator.git
-cd ai-navigator
+git clone https://github.com/NavisualGuide/navisual.git
+cd navisual
 
 # 2. Create venv
 python -m venv venv
@@ -677,7 +677,7 @@ Longer explanation (wrap at 80 chars):
 
 **Why:** A PyInstaller `.exe` doing screen capture + hotkeys + clipboard = SmartScreen blocks it as malware.
 
-**Decision:** MVP ships as `pip install ai-navigator`. Tauri native binary at v0.3 with EV code signing.
+**Decision:** MVP ships as `pip install navisual`. Tauri native binary at v0.3 with EV code signing.
 
 **Benefit:** Zero SmartScreen issues. MVP testers are developers who have Python.
 
@@ -693,8 +693,8 @@ Longer explanation (wrap at 80 chars):
 
 ## Links & References
 
-- **Design Document:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md) (§1–11 detailed specs)
-- **GitHub:** [stevefu-ops/ai-navigator](https://github.com/stevefu-ops/ai-navigator)
+- **Design Document:** [Navisual-Design-Document.md](docs/Navisual-Design-Document.md) (§1–11 detailed specs)
+- **GitHub:** [NavisualGuide/navisual](https://github.com/NavisualGuide/navisual)
 - **Anthropic API:** https://docs.anthropic.com (tool_use, vision, caching)
 - **PaddleOCR:** https://github.com/PaddlePaddle/PaddleOCR
 - **PySide6:** https://doc.qt.io/qtforpython-6/
@@ -731,8 +731,8 @@ python -m src.main
 
 ## Contact & Questions
 
-- **Issues:** [GitHub Issues](https://github.com/stevefu-ops/ai-navigator/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/stevefu-ops/ai-navigator/discussions)
+- **Issues:** [GitHub Issues](https://github.com/NavisualGuide/navisual/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/NavisualGuide/navisual/discussions)
 
 ---
 

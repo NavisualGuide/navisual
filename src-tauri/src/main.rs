@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    ainav_backend_lib::run()
+    navisual_backend_lib::run()
 }

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI Navigator",
+  "productName": "Navisual",
   "version": "0.4.0",
-  "identifier": "ai.navigator.app",
+  "identifier": "com.navisual.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "panel",
-        "title": "AI Navigator",
+        "title": "Navisual",
         "width": 420,
         "height": 600,
         "resizable": true,

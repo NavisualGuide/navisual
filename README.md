@@ -1,8 +1,8 @@
-# AI Navigator
+# Navisual
 
 **The AI guides, never overrides.**
 
-AI Navigator is a Windows desktop app that guides you through computer tasks by watching your screen and giving real-time step-by-step instructions via on-screen overlays and audio. The AI never clicks, types, or takes control — every action is yours.
+Navisual is a Windows desktop app that guides you through computer tasks by watching your screen and giving real-time step-by-step instructions via on-screen overlays and audio. The AI never clicks, types, or takes control — every action is yours.
 
 **Status:** v0.3.1-alpha — actively developed, suitable for developer testing.
 
@@ -22,8 +22,8 @@ python --version   # must be 3.11 or higher
 ### 2. Get the code
 
 ```
-git clone https://github.com/stevefu-ops/ai-navigator.git
-cd ai-navigator
+git clone https://github.com/NavisualGuide/navisual.git
+cd navisual
 ```
 
 Or download the ZIP from GitHub and extract it.
@@ -73,7 +73,7 @@ Run as a **regular user** (not admin) — global hotkeys work without elevation 
 
 ---
 
-## Using AI Navigator
+## Using Navisual
 
 The panel starts as a small draggable dot (icon mode). Click it to expand. Type your task in the input box, then follow the on-screen arrows and subtitles.
 
@@ -127,7 +127,7 @@ Click the gear icon in the panel to open Settings. You can change your API provi
 ## Project Structure
 
 ```
-ai-navigator/
+navisual/
 ├── src/
 │   ├── main.py            # Entry point
 │   ├── config.py          # Configuration
@@ -138,7 +138,7 @@ ai-navigator/
 │   ├── output/            # Overlay, TTS, clipboard
 │   └── ui/                # PySide6 windows
 ├── docs/
-│   ├── AI-Navigator-Design-Document.md   # Full design spec
+│   ├── Navisual-Design-Document.md   # Full design spec
 │   ├── settings.md                        # Settings reference
 │   └── nav-packs.md                       # Nav-Pack format spec
 ├── .env.example           # Config template
@@ -193,7 +193,7 @@ v1.x    macOS port + Linux port
 
 ## Links
 
-- **Issues / bugs:** [GitHub Issues](https://github.com/stevefu-ops/ai-navigator/issues)
-- **Design doc:** [AI-Navigator-Design-Document.md](docs/AI-Navigator-Design-Document.md)
+- **Issues / bugs:** [GitHub Issues](https://github.com/NavisualGuide/navisual/issues)
+- **Design doc:** [Navisual-Design-Document.md](docs/Navisual-Design-Document.md)
 - **Settings reference:** [settings.md](docs/settings.md)
 - **Free Gemini key:** https://aistudio.google.com/apikey

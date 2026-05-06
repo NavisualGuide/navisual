@@ -612,7 +612,7 @@
       await register("Ctrl+KeyA", () => { toggleVoiceInput(); });
     } catch (_) {}
 
-    await addToHistory("system", "AI Navigator ready");
+    await addToHistory("system", "Navisual ready");
   });
 
   onDestroy(async () => {
@@ -627,7 +627,7 @@
     onclick={handleIconClick}
     onpointerdown={handleIconPointerdown}
     onpointermove={handleIconPointermove}
-    title="Expand AI Navigator (Alt+Q)"
+    title="Expand Navisual (Alt+Q)"
   >
     <span class="icon-glow"></span>
   </button>
@@ -636,7 +636,7 @@
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
     <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
-      <span class="header-title">AI Navigator</span>
+      <span class="header-title">Navisual</span>
       {#if headerLabel}
         <span class="header-provider">{headerLabel}</span>
       {/if}
@@ -703,7 +703,7 @@
       {#if phase === "consent_prompt"}
         <div class="consent-box" style="padding: 8px; font-size: 0.9em; line-height: 1.4; color: var(--fg);">
           <p style="margin: 0 0 8px 0;">🛡️ <strong>Permission Request</strong><br/>
-            The AI needs to look outside your current window to find what you're looking for. Allow AI Navigator to capture your entire screen for this next step?</p>
+            The AI needs to look outside your current window to find what you're looking for. Allow Navisual to capture your entire screen for this next step?</p>
           <div style="display: flex; gap: 8px;">
             <button class="btn-primary" style="flex: 1" onclick={allowFullScreen}>Allow Once</button>
             <button class="btn-ghost" style="flex: 1" onclick={denyFullScreen}>Deny</button>
@@ -1007,7 +1007,7 @@
                 <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
                 <span>Save a copy of every screenshot sent to the AI</span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.ai-navigator.app\debug\</p>
+              <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.navisual.app\debug\</p>
               <button class="btn-ghost" style="margin-top:8px;font-size:12px;padding:5px 10px"
                 onclick={() => invoke("open_debug_folder").catch(() => {})}>
                 📂 Open screenshot folder

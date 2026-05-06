@@ -18,35 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ainav-backend"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "arboard",
- "base64 0.22.1",
- "chrono",
- "dotenvy",
- "eventsource-stream",
- "font8x8",
- "futures-util",
- "image",
- "log",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
- "tokio",
- "uiautomation",
- "uuid",
- "windows 0.62.2",
- "xcap",
-]
-
-[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2725,6 +2696,35 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "navisual-backend"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "base64 0.22.1",
+ "chrono",
+ "dotenvy",
+ "eventsource-stream",
+ "font8x8",
+ "futures-util",
+ "image",
+ "log",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+ "tokio",
+ "uiautomation",
+ "uuid",
+ "windows 0.62.2",
+ "xcap",
 ]
 
 [[package]]

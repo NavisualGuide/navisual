@@ -1,4 +1,4 @@
-//! AI Navigator — Rust/Tauri backend entry point.
+//! Navisual — Rust/Tauri backend entry point.
 
 mod capture;
 mod grid;
