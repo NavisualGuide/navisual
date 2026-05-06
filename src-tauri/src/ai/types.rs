@@ -72,6 +72,8 @@ pub struct NavigateStepResponse {
     pub state_summary: String,
     #[serde(default)]
     pub needs_input: bool,
+    #[serde(default)]
+    pub request_full_screen: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

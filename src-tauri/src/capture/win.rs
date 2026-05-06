@@ -13,12 +13,11 @@ use image::{ImageBuffer, Rgba};
 use std::mem;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, POINT, RECT, TRUE};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, DeleteDC, DeleteObject,
-    GetDIBits, GetMonitorInfoW, MonitorFromPoint, SelectObject,
-    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, MONITORINFO, MONITORINFOEXW,
-    MONITOR_DEFAULTTONEAREST, SRCCOPY,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+    GetDIBits, SelectObject, GetDC, ReleaseDC,
+    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW,
@@ -26,7 +25,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow,
-    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GetWindowTextW,
+    GetWindowLongW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     GA_ROOTOWNER,
 };
 
@@ -37,7 +38,7 @@ const SKIP_CLASSES: &[&str] = &[
     "Shell_TrayWnd",
     "Shell_SecondaryTrayWnd",
     "NotifyIconOverflowWindow",
-    "Windows.UI.Core.CoreWindow",
+    "CEF-OSC-WIDGET",
     "IME",
     "MSCTFIME UI",
     "Default IME",
@@ -60,10 +61,43 @@ pub fn validate_hwnd_raw(hwnd_raw: usize) -> Option<Rect> {
     validate_hwnd(HWND(hwnd_raw as *mut _))
 }
 
+pub fn get_window_info(hwnd_raw: usize) -> String {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        let mut title = [0u16; 256];
+        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut title);
+        let title_str = String::from_utf16_lossy(&title[..len as usize]);
+
+        let mut class = [0u16; 256];
+        let clen = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut class);
+        let class_str = String::from_utf16_lossy(&class[..clen as usize]);
+
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
+
+        let mut pid: u32 = 0;
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
+
+        format!("Title: '{}'\nClass: '{}'\nRect: [{}, {}, {}, {}]\nPID: {}", title_str, class_str, rect.left, rect.top, rect.right, rect.bottom, pid)
+    }
+}
+
 /// Return the screen rect of `hwnd` without visibility checks — used to get
 /// the panel's current position so it can be blanked from captures.
 pub fn window_screen_rect(hwnd: HWND) -> Option<Rect> {
     frame_rect_of(hwnd)
+}
+
+/// Returns the rect of the entire multi-monitor virtual desktop.
+pub fn get_virtual_desktop_rect() -> Rect {
+    unsafe {
+        Rect {
+            x: GetSystemMetrics(SM_XVIRTUALSCREEN),
+            y: GetSystemMetrics(SM_YVIRTUALSCREEN),
+            width: GetSystemMetrics(SM_CXVIRTUALSCREEN) as u32,
+            height: GetSystemMetrics(SM_CYVIRTUALSCREEN) as u32,
+        }
+    }
 }
 
 /// Find all visible top-level windows belonging to our own process that are
@@ -192,8 +226,13 @@ fn is_webview2_renderer(pid: u32) -> bool {
 }
 
 
-/// Is `hwnd` a plausible capture target (visible, not minimised, has an
-/// acceptable class, and is NOT owned by our process)?
+/// Is `hwnd` a plausible capture target (the actual app the user is interacting with)?
+/// We must vigorously filter out "ghost" windows and invisible overlays because
+/// Z-order walks (`EnumWindows`) frequently trip over them.
+/// This prevents capturing:
+/// - Windows 10/11 suspended/cloaked UWP apps (e.g., hidden Search or Settings)
+/// - Gaming overlays (NVIDIA GeForce, Steam, Xbox Game Bar, Discord, AMD)
+/// - Our own background/renderer processes (Tauri/WebView2 overlay canvas)
 fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
@@ -204,6 +243,40 @@ fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
         if pid == 0 || pid == our_pid {
             return false;
         }
+        
+        // Filter out windows owned by our app (e.g. WebView2 popups or overlay windows)
+        let root = GetAncestor(hwnd, GA_ROOTOWNER);
+        let mut root_pid: u32 = 0;
+        let _ = GetWindowThreadProcessId(root, Some(&mut root_pid as *mut u32));
+        if root_pid == our_pid {
+            return false;
+        }
+
+        // Filter out Windows 10/11 "cloaked" windows.
+        // UWP apps and hidden system overlays are WS_VISIBLE but cloaked.
+        let mut cloaked: u32 = 0;
+        let res = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        );
+        if res.is_ok() && cloaked != 0 {
+            return false;
+        }
+
+        // Generic Overlay Filter:
+        // Automatically skips gaming and system overlays (Steam, Discord, Xbox, NVIDIA, AMD).
+        // These overlays run invisibly in the background and sit high in the Z-order.
+        // They use WS_EX_TOOLWINDOW (to hide from Taskbar/Alt-Tab) or WS_EX_TRANSPARENT 
+        // (to allow mouse clicks to pass through them to the game beneath).
+        // If a window cannot receive mouse clicks, the user cannot be interacting with it!
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex_style & WS_EX_TOOLWINDOW.0) != 0 || (ex_style & WS_EX_TRANSPARENT.0) != 0 {
+            return false;
+        }
+
+
         let mut wr = RECT::default();
         if GetWindowRect(hwnd, &mut wr).is_err() {
             return false;
@@ -374,39 +447,20 @@ pub fn capture_desktop_region(rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u
         return Err(anyhow!("zero dimensions {}×{}", w, h));
     }
     unsafe {
-        // Locate the monitor that contains the rect's center point.
-        let center = POINT {
-            x: rect.x + (rect.width as i32) / 2,
-            y: rect.y + (rect.height as i32) / 2,
-        };
-        let hmon = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
-        if hmon.is_invalid() {
-            return Err(anyhow!("MonitorFromPoint returned null"));
-        }
-
-        let mut info = MONITORINFOEXW::default();
-        info.monitorInfo.cbSize = mem::size_of::<MONITORINFOEXW>() as u32;
-        if !GetMonitorInfoW(hmon, &mut info.monitorInfo as *mut MONITORINFO).as_bool() {
-            return Err(anyhow!("GetMonitorInfoW failed"));
-        }
-        let mon_left = info.monitorInfo.rcMonitor.left;
-        let mon_top = info.monitorInfo.rcMonitor.top;
-
-        // szDevice is e.g. "\\.\DISPLAY1". Per-monitor DC bypasses the
-        // negative-coord limitation of full-virtual-desktop DCs.
-        let device_name = PCWSTR::from_raw(info.szDevice.as_ptr());
-        let hdc_screen = CreateDCW(w!("DISPLAY"), device_name, PCWSTR::null(), None);
+        // Use GetDC(NULL) to get the true Virtual Desktop DC that spans all monitors.
+        // CreateDCW("DISPLAY", NULL) only returns the primary monitor DC.
+        let hdc_screen = GetDC(None);
         if hdc_screen.is_invalid() {
-            return Err(anyhow!("CreateDCW failed for monitor"));
+            return Err(anyhow!("GetDC failed for virtual desktop"));
         }
 
         let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
         let h_bmp = CreateCompatibleBitmap(hdc_screen, w, h);
         let prev = SelectObject(hdc_mem, h_bmp.into());
 
-        // Source coords are monitor-relative since the DC is per-monitor.
-        let src_x = rect.x - mon_left;
-        let src_y = rect.y - mon_top;
+        // Source coords are absolute virtual desktop coordinates.
+        let src_x = rect.x;
+        let src_y = rect.y;
         let blt_ok = BitBlt(
             hdc_mem, 0, 0, w, h,
             Some(hdc_screen), src_x, src_y, SRCCOPY,
@@ -441,7 +495,7 @@ pub fn capture_desktop_region(rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u
         SelectObject(hdc_mem, prev);
         let _ = DeleteObject(h_bmp.into());
         let _ = DeleteDC(hdc_mem);
-        let _ = DeleteDC(hdc_screen);
+        let _ = ReleaseDC(None, hdc_screen);
 
         if !blt_ok {
             return Err(anyhow!("BitBlt failed"));

@@ -58,9 +58,17 @@ Rules:
 15. DESKTOP APP TASKS: If the user asks for help with a desktop application
     (Word, Excel, Photoshop, VS Code, etc.), guide them through that application's
     own UI — NEVER tell them to open a browser or search online.
-16. SCREEN SCOPE: The screenshot always shows the foreground application window only.
-    If the target UI is in a different app, tell the user to click on that app to
-    bring it into focus, then Guide me will capture it automatically.
+16. SCREEN SCOPE & FULL SCREEN REQUESTS: The screenshot always shows the foreground
+    application window only. You cannot see the Windows Taskbar, Start Menu, Desktop
+    icons, or other background apps. If the user asks for help interacting with the
+    operating system or finding an app that is not in the current window, DO NOT GUESS.
+    Instead, set `request_full_screen: true` to ask the user for permission to capture
+    their entire desktop for the next step. Explain why you need it in the instruction.
+17. APPLICATION CONTEXT: At the end of the prompt, you will receive the [Current Window Info]
+    containing the Title and Class of the application currently in focus. If the user changes focus
+    to an unexpected application or window during the session that is unrelated to the current task,
+    DO NOT guess or try to fulfill the instruction in the wrong application. Instead, ask the user
+    to bring the correct target application back into focus to continue.
 
 Use the navigate_step tool for all responses."#;
 

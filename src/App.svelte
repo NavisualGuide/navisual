@@ -26,14 +26,16 @@
     instruction: string;
     located: LocateResult | null;
     needs_input: boolean;
+    request_full_screen: boolean;
     provider: string;
     error: string | null;
     grid_cell: string | null;
+    debug_screenshot_path: string | null;
   };
-  type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
+  type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "consent_prompt" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string };
-  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio";
+  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer";
   type SettingsPayload = {
     api_provider: string;
     anthropic_api_key: string;
@@ -58,6 +60,8 @@
     hotkey_pause: string;
     hotkey_icon: string;
     grid_test_enabled: boolean;
+    debug_screenshot_enabled: boolean;
+    debug_show_response_info: boolean;
   };
 
   // Core state
@@ -98,6 +102,8 @@
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
     hotkey_pause: "Ctrl+KeyS", hotkey_icon: "Ctrl+KeyQ",
     grid_test_enabled: false,
+    debug_screenshot_enabled: false,
+    debug_show_response_info: false,
   };
   let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
   let settingsSaving = $state(false);
@@ -106,6 +112,7 @@
   let showKeyAnthropic = $state(false);
   let showKeyGemini = $state(false);
   let showKeyOpenAI = $state(false);
+  let debugShowInfo = $state(false);
   let showQuickMenu = $state(false);
   let isMuted = $state(false);
   let isOverlayCleared = $state(false);
@@ -135,8 +142,9 @@
     if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
   }
 
+  let _historyId = 0;
   async function addToHistory(role: HistoryRole, text: string, meta?: string) {
-    history.push({ id: Date.now(), role, text, meta });
+    history.push({ id: ++_historyId, role, text, meta });
     await tick();
     if (historyEl) historyEl.scrollTop = historyEl.scrollHeight;
   }
@@ -288,6 +296,7 @@
       // Keep the live auto_advance state — the Pause/Resume button may have
       // changed it since the last disk save, and the button is the source of truth.
       settingsForm = { ...data, auto_advance: autoAdvanceEnabled };
+      debugShowInfo = data.debug_show_response_info;
     } catch (e) {
       settingsError = String(e);
     }
@@ -323,6 +332,7 @@
       provider = settingsForm.api_provider;
       autoAdvanceEnabled = settingsForm.auto_advance;
       isMuted = !settingsForm.tts_enabled;
+      debugShowInfo = settingsForm.debug_show_response_info;
       const hkErrors = await registerShortcuts(settingsForm);
       if (hkErrors.length) {
         settingsError = `Saved, but hotkey registration failed: ${hkErrors.join("; ")}`;
@@ -358,7 +368,11 @@
     sessionId = res.session_id;
     gridCell = res.grid_cell ?? null;
     if (res.provider) provider = res.provider;
-    phase = res.needs_input ? "needs_input" : "guiding";
+    if (res.request_full_screen) {
+      phase = "consent_prompt";
+    } else {
+      phase = res.needs_input ? "needs_input" : "guiding";
+    }
     if (res.instruction) {
       const cleanInstruction = stripGridRef(res.instruction);
       let meta: string | undefined;
@@ -370,39 +384,62 @@
       addToHistory("ai", cleanInstruction, meta);
       if (!isMuted) invoke("speak", { text: cleanInstruction }).catch(() => {});
     }
+    if (res.debug_screenshot_path) {
+      addToHistory("system", `📷 ${res.debug_screenshot_path}`);
+    }
+  }
+
+  function allowFullScreen() {
+    guide_impl(true);
+  }
+
+  function denyFullScreen() {
+    task = "Permission to capture full screen was denied. Please ask me to manually bring the required application into focus.";
+    correction();
   }
 
   async function guide() {
-    if (!task.trim()) return;
-    const taskText = task.trim();
+    guide_impl(false);
+  }
+
+  async function guide_impl(fullScreen: boolean) {
+    if (!task.trim() && !fullScreen) return;
+    const taskText = fullScreen ? "[User granted permission to capture full desktop for the next step]" : task.trim();
     task = "";
     // Keep session context when in the middle of a task; start fresh from idle/error.
-    const isReply = phase === "guiding" || phase === "needs_input";
+    const isReply = phase === "guiding" || phase === "needs_input" || phase === "consent_prompt";
+    const prevPhase = phase;
     await addToHistory("user", taskText);
     currentInstruction = "";
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply });
+      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply, fullScreen });
       stopTimer();
       if (token !== requestToken) return;
       if (!res.ok) {
-        phase = "error";
-        addToHistory("error", res.error ?? "guide failed");
+        phase = prevPhase;
+        addToHistory("system", "⚠️ " + (res.error ?? "guide failed"));
+        if (!fullScreen && taskText !== "") task = taskText;
         return;
       }
       applyResponse(res, 0, token);
     } catch (e) {
       stopTimer();
       if (token !== requestToken) return;
-      phase = "error";
-      addToHistory("error", String(e));
+      phase = prevPhase;
+      addToHistory("system", "⚠️ " + String(e));
+      if (!fullScreen && taskText !== "") task = taskText;
     }
   }
 
   async function nextStep() {
+    // Don't allow next while an AI call is in flight — the hotkey can fire
+    // even when the Next button is disabled (Svelte derived state edge case).
+    if (phase === "thinking") return;
     const nextIdx = stepIndex + 1;
+    const prevPhase = phase;
     if (nextIdx >= steps.length) {
       // Re-query AI — tell it what was just completed so it doesn't repeat.
       const completed = currentInstruction || lastCompletedInstruction;
@@ -419,16 +456,16 @@
         stopTimer();
         if (token !== requestToken) return;
         if (!res.ok) {
-          phase = "error";
-          addToHistory("error", res.error ?? "re-query failed");
+          phase = prevPhase;
+          addToHistory("system", "⚠️ " + (res.error ?? "re-query failed"));
           return;
         }
         applyResponse(res, 0, token);
       } catch (e) {
         stopTimer();
         if (token !== requestToken) return;
-        phase = "error";
-        addToHistory("error", String(e));
+        phase = prevPhase;
+        addToHistory("system", "⚠️ " + String(e));
       }
       return;
     }
@@ -445,14 +482,15 @@
     } catch (e) {
       stopTimer();
       if (token !== requestToken) return;
-      phase = "error";
-      addToHistory("error", String(e));
+      phase = prevPhase;
+      addToHistory("system", "⚠️ " + String(e));
     }
   }
 
   async function correction() {
     const note = task.trim();
     if (note) task = "";
+    const prevPhase = phase;
     addToHistory("correction", note ? `Wrong — ${note}` : "Marked wrong — re-analysing…");
     currentInstruction = "";
     phase = "thinking";
@@ -463,16 +501,18 @@
       stopTimer();
       if (token !== requestToken) return;
       if (!res.ok) {
-        phase = "error";
-        addToHistory("error", res.error ?? "correction failed");
+        phase = prevPhase;
+        addToHistory("system", "⚠️ " + (res.error ?? "correction failed"));
+        if (note !== "") task = note;
         return;
       }
       applyResponse(res, 0, token);
     } catch (e) {
       stopTimer();
       if (token !== requestToken) return;
-      phase = "error";
-      addToHistory("error", String(e));
+      phase = prevPhase;
+      addToHistory("system", "⚠️ " + String(e));
+      if (note !== "") task = note;
     }
   }
 
@@ -492,6 +532,7 @@
     : phase === "thinking"  ? `thinking · ${(elapsedMs / 1000).toFixed(1)}s`
     : phase === "guiding"   ? `step ${stepIndex + 1}/${steps.length}`
     : phase === "needs_input" ? "needs input"
+    : phase === "consent_prompt" ? "needs permission"
     : "error"
   );
 
@@ -643,7 +684,7 @@
           </span>
           <div class="h-body">
             <span class="h-text">{entry.text}</span>
-            {#if entry.meta}
+            {#if entry.meta && debugShowInfo}
               <span class="h-meta">{entry.meta}</span>
             {/if}
           </div>
@@ -659,23 +700,34 @@
 
     <!-- Task input — always enabled; Enter submits, isReply detected from phase -->
     <section class="task-section">
-      {#if phase === "needs_input"}
-        <div class="input-hint">💬 AI needs your input — type your answer below</div>
-      {:else if phase === "guiding"}
-        <div class="input-hint">Type a follow-up or correction · ＋ for a new task</div>
-      {/if}
-      <textarea
-        bind:value={task}
-        onkeydown={handleKeydown}
-        placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
-        rows={2}
-      ></textarea>
-      {#if isThinking}
-        <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
+      {#if phase === "consent_prompt"}
+        <div class="consent-box" style="padding: 8px; font-size: 0.9em; line-height: 1.4; color: var(--fg);">
+          <p style="margin: 0 0 8px 0;">🛡️ <strong>Permission Request</strong><br/>
+            The AI needs to look outside your current window to find what you're looking for. Allow AI Navigator to capture your entire screen for this next step?</p>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn-primary" style="flex: 1" onclick={allowFullScreen}>Allow Once</button>
+            <button class="btn-ghost" style="flex: 1" onclick={denyFullScreen}>Deny</button>
+          </div>
+        </div>
       {:else}
-        <button class="btn-primary btn-full" onclick={guide} disabled={!task.trim()}>
-          {phase === "needs_input" ? "↩ Send answer" : phase === "guiding" ? "↩ Follow up" : "Guide me"}
-        </button>
+        {#if phase === "needs_input"}
+          <div class="input-hint">💬 AI needs your input — type your answer below</div>
+        {:else if phase === "guiding"}
+          <div class="input-hint">Type a follow-up or correction · ＋ for a new task</div>
+        {/if}
+        <textarea
+          bind:value={task}
+          onkeydown={handleKeydown}
+          placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
+          rows={2}
+        ></textarea>
+        {#if isThinking}
+          <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
+        {:else}
+          <button class="btn-primary btn-full" onclick={() => guide()} disabled={!task.trim()}>
+            {phase === "needs_input" ? "↩ Send answer" : phase === "guiding" ? "↩ Follow up" : "Guide me"}
+          </button>
+        {/if}
       {/if}
     </section>
 
@@ -778,6 +830,7 @@
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
+          <button class="tab-btn {settingsTab === 'developer' ? 'tab-active' : ''}" onclick={() => (settingsTab = "developer")}>Developer</button>
         </div>
 
         <div class="modal-body">
@@ -926,13 +979,6 @@
                 <span>Automatically move to the next step when the screen changes</span>
               </label>
             </div>
-            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
-              <p class="setting-label" style="color:var(--accent)">Developer</p>
-              <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.grid_test_enabled} />
-                <span>Grid test mode — draw 16×9 grid on screenshots and show AI cell label in response</span>
-              </label>
-            </div>
 
           {:else if settingsTab === "hotkeys"}
             <p class="stub-hint" style="margin-bottom:10px">Click a field then press your shortcut combo. Re-registered immediately on Save — no restart needed.</p>
@@ -951,6 +997,35 @@
             <div class="setting-group">
               <label class="setting-label">Toggle icon mode</label>
               <HotkeyInput bind:value={settingsForm.hotkey_icon} />
+            </div>
+
+          {:else if settingsTab === "developer"}
+            <!-- Developer tab -->
+            <div class="setting-group">
+              <p class="setting-label">Debug screenshots</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
+                <span>Save a copy of every screenshot sent to the AI</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.ai-navigator.app\debug\</p>
+              <button class="btn-ghost" style="margin-top:8px;font-size:12px;padding:5px 10px"
+                onclick={() => invoke("open_debug_folder").catch(() => {})}>
+                📂 Open screenshot folder
+              </button>
+            </div>
+            <div class="setting-group">
+              <p class="setting-label">Response info</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.debug_show_response_info} />
+                <span>Show locate method, confidence, and element name after each AI response</span>
+              </label>
+            </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">Grid test</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.grid_test_enabled} />
+                <span>Draw 16×9 grid on screenshots and show AI cell label in response</span>
+              </label>
             </div>
 
           {:else}

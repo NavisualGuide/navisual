@@ -125,6 +125,7 @@ impl GeminiClient {
         let mut output_tokens = 0;
         let mut in_instruction = false;
         let mut emitted_instruction_len = 0;
+        let mut raw_text = String::new();
 
         while let Some(event_result) = stream.next().await {
             let event = event_result?;
@@ -176,10 +177,94 @@ impl GeminiClient {
                                         }
                                     }
                                 }
+                            } else if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                raw_text.push_str(text);
+                                // Prevent streaming raw text directly as it might be pseudo-JSON
                             }
                         }
                     }
                 }
+            }
+        }
+
+        if accumulated_json.trim().is_empty() {
+            if !raw_text.is_empty() {
+                let mut clean_instruction = raw_text.trim().to_string();
+                
+                // Extract clean instruction if Gemini outputted pseudo-JSON
+                if let Some(start_idx) = clean_instruction.find(r#"instruction: ""#) {
+                    let after = &clean_instruction[start_idx + 14..];
+                    if let Some(end_idx) = after.find('"') {
+                        clean_instruction = after[..end_idx].to_string();
+                    }
+                } else if let Some(start_idx) = clean_instruction.find(r#""instruction": ""#) {
+                    let after = &clean_instruction[start_idx + 16..];
+                    if let Some(end_idx) = after.find('"') {
+                        clean_instruction = after[..end_idx].to_string();
+                    }
+                }
+
+                let mut checkpoint = true;
+                if raw_text.contains("checkpoint: false") || raw_text.contains("\"checkpoint\": false") {
+                    checkpoint = false;
+                }
+
+                let mut needs_input = false;
+                if raw_text.contains("needs_input: true") || raw_text.contains("\"needs_input\": true") {
+                    needs_input = true;
+                }
+
+                let mut grid_cell = None;
+                if let Some(idx) = raw_text.find(r#"grid_cell: ""#).or_else(|| raw_text.find(r#""grid_cell": ""#)) {
+                    let offset = if raw_text[idx..].starts_with("\"grid_cell") { 14 } else { 12 };
+                    let after = &raw_text[idx + offset..];
+                    if let Some(end) = after.find('"') {
+                        grid_cell = Some(after[..end].to_string());
+                    }
+                }
+
+                let mut target_role = None;
+                if let Some(idx) = raw_text.find(r#"target_role: ""#).or_else(|| raw_text.find(r#""target_role": ""#)) {
+                    let offset = if raw_text[idx..].starts_with("\"target_role") { 16 } else { 14 };
+                    let after = &raw_text[idx + offset..];
+                    if let Some(end) = after.find('"') {
+                        let role_str = &after[..end];
+                        target_role = serde_json::from_str(&format!("\"{}\"", role_str)).ok();
+                    }
+                }
+
+                let mut state_summary = "Continuing task...".to_string();
+                if let Some(idx) = raw_text.find(r#"state_summary: ""#).or_else(|| raw_text.find(r#""state_summary": ""#)) {
+                    let offset = if raw_text[idx..].starts_with("\"state_summary") { 18 } else { 16 };
+                    let after = &raw_text[idx + offset..];
+                    if let Some(end) = after.find('"') {
+                        state_summary = after[..end].to_string();
+                    }
+                }
+
+                let fallback = NavigateStepResponse {
+                    steps: vec![crate::ai::types::GuidanceStep {
+                        instruction: clean_instruction,
+                        target_text: None,
+                        target_role,
+                        target_region: None,
+                        target_nearby_text: None,
+                        overlay_type: crate::ai::types::OverlayType::None,
+                        clipboard: None,
+                        checkpoint,
+                        grid_cell,
+                    }],
+                    state_summary,
+                    needs_input,
+                    request_full_screen: false,
+                };
+                
+                // Emit the cleaned instruction to the UI instantly
+                on_chunk(&fallback.steps[0].instruction);
+                
+                return Ok((fallback, input_tokens, output_tokens));
+            } else {
+                bail!("Gemini returned an empty response (possible safety filter or API error).");
             }
         }
 

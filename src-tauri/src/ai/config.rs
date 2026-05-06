@@ -62,6 +62,8 @@ pub struct Config {
 
     // Developer / testing
     pub grid_test_enabled: bool,
+    pub debug_screenshot_enabled: bool,
+    pub debug_show_response_info: bool,
 }
 
 impl Default for Config {
@@ -99,6 +101,8 @@ impl Default for Config {
             hotkey_pause: "Ctrl+KeyS".to_string(),
             hotkey_icon:  "Ctrl+KeyQ".to_string(),
             grid_test_enabled: false,
+            debug_screenshot_enabled: false,
+            debug_show_response_info: false,
         }
     }
 }
@@ -144,6 +148,8 @@ impl Config {
         if let Ok(v) = env::var("HOTKEY_PAUSE") { if !v.is_empty() { config.hotkey_pause = v; } }
         if let Ok(v) = env::var("HOTKEY_ICON")  { if !v.is_empty() { config.hotkey_icon  = v; } }
         if let Ok(v) = env::var("GRID_TEST_ENABLED") { config.grid_test_enabled = v == "true" || v == "1"; }
+        if let Ok(v) = env::var("DEBUG_SCREENSHOT_ENABLED") { config.debug_screenshot_enabled = v == "true" || v == "1"; }
+        if let Ok(v) = env::var("DEBUG_SHOW_RESPONSE_INFO") { config.debug_show_response_info = v == "true" || v == "1"; }
         if let Ok(v) = env::var("MANAGED_PROVIDER") { config.managed_provider = v; }
         if let Ok(v) = env::var("MANAGED_TOKEN_CAP") { 
             if let Ok(n) = v.parse() { config.managed_token_cap = n; }

@@ -68,6 +68,25 @@ pub fn capture_active_window_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Vec<
     }
 }
 
+/// Captures the entire multi-monitor virtual desktop.
+/// Returns (jpeg bytes, virtual desktop rect).
+pub fn capture_virtual_desktop_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Vec<u8>, Rect)> {
+    #[cfg(windows)]
+    {
+        let rect = win::get_virtual_desktop_rect();
+        let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_rects(&mut img, &rect, exclude);
+        let buf = encode_jpeg(&cap_size(img), quality)?;
+        Ok((buf, rect))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (quality, exclude);
+        Err(anyhow!("virtual desktop capture only implemented for Windows"))
+    }
+}
+
 /// Re-capture a previously discovered window by its stored raw HWND.
 /// Validates the window is still alive and not minimised before capturing.
 /// Returns an error if the window is gone — caller should then call
@@ -89,6 +108,19 @@ pub fn recapture_window_jpeg(hwnd_raw: usize, quality: u8, exclude: &[Rect]) -> 
     {
         let _ = (hwnd_raw, quality, exclude);
         Err(anyhow!("recapture only implemented for Windows"))
+    }
+}
+
+/// Get debug information about a specific window by its raw HWND.
+pub fn get_window_info(hwnd_raw: usize) -> String {
+    #[cfg(windows)]
+    {
+        win::get_window_info(hwnd_raw)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd_raw;
+        String::from("Window info only available on Windows")
     }
 }
 

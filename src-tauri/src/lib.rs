@@ -171,10 +171,13 @@ struct GuideResponse {
     instruction: String,
     located: Option<locator::LocateResult>,
     needs_input: bool,
+    request_full_screen: bool,
     provider: String,
     error: Option<String>,
     /// Grid test mode: cell label the AI identified for the current step.
     grid_cell: Option<String>,
+    /// Path to the debug screenshot saved for this request (None when disabled).
+    debug_screenshot_path: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -217,6 +220,8 @@ struct SettingsPayload {
     hotkey_pause: String,
     hotkey_icon: String,
     grid_test_enabled: bool,
+    debug_screenshot_enabled: bool,
+    debug_show_response_info: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -259,6 +264,7 @@ async fn guide(
     state: State<'_, AppState>,
     task: String,
     is_reply: bool,
+    full_screen: Option<bool>,
 ) -> Result<GuideResponse, String> {
     let is_next_requery = task.starts_with("[User completed:");
     // Only reset session state for a genuine new task (not resume, not reply, not next-requery).
@@ -285,6 +291,7 @@ async fn guide(
     };
 
     let grid_test_enabled = { state.ai_router.lock().await.config.grid_test_enabled };
+    let debug_screenshot_enabled = { state.ai_router.lock().await.config.debug_screenshot_enabled };
 
     let stored_hwnd = {
         let g = state.guidance.lock().unwrap();
@@ -295,8 +302,19 @@ async fn guide(
     // capture so the AI never sees our own UI chrome in screenshots.
     let exclude = capture::get_panel_rects();
 
-    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>), ()> {
-        let (bytes, rect_opt, hwnd_opt) = if let Some(hwnd_raw) = stored_hwnd {
+    // Debug folder is a sub-directory of the app data dir.
+    let debug_dir = app.path().app_data_dir()
+        .map(|p| p.join("debug"))
+        .ok();
+
+    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>), ()> {
+        let is_fs = full_screen.unwrap_or(false);
+        let (bytes, rect_opt, hwnd_opt) = if is_fs {
+            match capture::capture_virtual_desktop_jpeg(75, &exclude) {
+                Ok((bytes, rect)) => (bytes, Some(rect), None),
+                Err(_) => return Err(()),
+            }
+        } else if let Some(hwnd_raw) = stored_hwnd {
             // Reuse the HWND we already discovered — skip z-order walk entirely.
             match capture::recapture_window_jpeg(hwnd_raw, 75, &exclude) {
                 Ok((bytes, rect)) => (bytes, Some(rect), Some(hwnd_raw)),
@@ -320,13 +338,41 @@ async fn guide(
         } else {
             bytes
         };
-        Ok((capture::to_base64(&final_bytes), rect_opt, hwnd_opt))
+
+        let debug_path = if debug_screenshot_enabled {
+            if let Some(ref dir) = debug_dir {
+                let _ = std::fs::create_dir_all(dir);
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+                let path = dir.join(format!("screenshot_{ts}.jpg"));
+                let txt_path = dir.join(format!("screenshot_{ts}.txt"));
+
+                if let Some(hwnd) = hwnd_opt {
+                    #[cfg(windows)]
+                    {
+                        let info = capture::get_window_info(hwnd);
+                        let _ = std::fs::write(&txt_path, info);
+                    }
+                }
+
+                if std::fs::write(&path, &final_bytes).is_ok() {
+                    Some(path.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok((capture::to_base64(&final_bytes), rect_opt, hwnd_opt, debug_path))
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
-    let (screenshot_b64, capture_rect_opt, new_hwnd_opt) = match capture_result {
-        Ok((b64, rect_opt, hwnd_opt)) => (b64, rect_opt, hwnd_opt),
+    let (screenshot_b64, capture_rect_opt, new_hwnd_opt, debug_screenshot_path) = match capture_result {
+        Ok((b64, rect_opt, hwnd_opt, dbg)) => (b64, rect_opt, hwnd_opt, dbg),
         Err(()) => {
             return Ok(GuideResponse {
                 ok: false,
@@ -336,26 +382,39 @@ async fn guide(
                 instruction: String::new(),
                 located: None,
                 needs_input: false,
+                request_full_screen: false,
                 provider: String::new(),
                 error: Some(
                     "No application window found. Please click on the program you want \
                      help with to bring it into focus, then try Guide me again.".to_string()
                 ),
                 grid_cell: None,
+                debug_screenshot_path: None,
             });
         }
     };
 
     let mut router = state.ai_router.lock().await;
 
+    let mut window_context = String::new();
+    if let Some(hwnd) = new_hwnd_opt {
+        let info = capture::get_window_info(hwnd);
+        window_context = format!("\n[Current Window Info]\n{}", info);
+    }
+
     // Append grid context to the prompt so the AI knows to fill grid_cell.
     let add_grid = |text: String| -> String {
+        let text_with_ctx = if !window_context.is_empty() {
+            format!("{text}\n{window_context}")
+        } else {
+            text
+        };
         if grid_test_enabled {
-            format!("{text}\n\n[Grid test: the screenshot has a 16×9 grid overlay. \
+            format!("{text_with_ctx}\n\n[Grid test: the screenshot has a 16×9 grid overlay. \
                 Columns 1-16 left-to-right, rows A-I top-to-bottom. \
                 For the target element fill in the grid_cell field (e.g. \"D7\").]")
         } else {
-            text
+            text_with_ctx
         }
     };
 
@@ -402,9 +461,11 @@ async fn guide(
                 instruction: String::new(),
                 located: None,
                 needs_input: false,
+                request_full_screen: false,
                 provider: router.config.api_provider.clone(),
                 error: Some(e.to_string()),
                 grid_cell: None,
+                debug_screenshot_path: None,
             });
         }
     };
@@ -412,6 +473,7 @@ async fn guide(
     let steps = response.steps;
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
+    let request_full_screen = response.request_full_screen;
     let provider = router.config.api_provider.clone();
 
     if let Some(session) = &mut router.session_manager.current_session {
@@ -421,6 +483,11 @@ async fn guide(
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
     }
+
+    // Release the ai_router Mutex before execute_step so that concurrent
+    // commands (next_step, send_correction) do not deadlock while the
+    // locator runs its blocking A11y/OCR calls.
+    drop(router);
 
     {
         let mut g = state.guidance.lock().unwrap();
@@ -442,9 +509,11 @@ async fn guide(
             instruction: String::new(),
             located: None,
             needs_input,
+            request_full_screen,
             provider,
             error: None,
             grid_cell: None,
+            debug_screenshot_path,
         });
     }
 
@@ -465,6 +534,10 @@ async fn guide(
                 let _ = win.emit("overlay:grid", &payload);
             }
         }
+    } else {
+        if let Some(win) = app.get_webview_window("overlay") {
+            let _ = win.emit("overlay:grid_clear", ());
+        }
     }
 
     Ok(GuideResponse {
@@ -475,9 +548,11 @@ async fn guide(
         instruction: steps[0].instruction.clone(),
         located,
         needs_input,
+        request_full_screen,
         provider,
         error: None,
         grid_cell,
+        debug_screenshot_path,
     })
 }
 
@@ -520,6 +595,10 @@ async fn next_step(
                 let _ = win.emit("overlay:grid", &payload);
             }
         }
+    } else {
+        if let Some(win) = app.get_webview_window("overlay") {
+            let _ = win.emit("overlay:grid_clear", ());
+        }
     }
 
     Ok(GuideResponse {
@@ -530,9 +609,11 @@ async fn next_step(
         instruction: steps[step_index].instruction.clone(),
         located,
         needs_input,
+        request_full_screen: false, // next_step just steps forward
         provider,
         error: None,
         grid_cell,
+        debug_screenshot_path: None,
     })
 }
 
@@ -542,25 +623,68 @@ async fn send_correction(
     state: State<'_, AppState>,
     note: Option<String>,
 ) -> Result<GuideResponse, String> {
-    let (session_id, stored_hwnd) = {
+    let session_id = {
         let g = state.guidance.lock().unwrap();
-        (g.session_id.clone(), g.target_hwnd)
+        g.session_id.clone()
     };
     let session_id = session_id.ok_or("no active session")?;
 
+    // Clear the stored HWND so the correction capture always re-discovers the
+    // currently focused window. If the first guide pointed at the wrong app,
+    // the user can switch focus to the right app then press Wrong and the next
+    // capture will find the correct window.
+    {
+        let mut g = state.guidance.lock().unwrap();
+        g.target_hwnd = None;
+    }
+
     let exclude = capture::get_panel_rects();
 
-    let screenshot_b64 = tokio::task::spawn_blocking(move || -> String {
-        // Prefer the stored HWND to avoid z-order re-discovery.
-        if let Some(hwnd_raw) = stored_hwnd {
-            if let Ok((bytes, _)) = capture::recapture_window_jpeg(hwnd_raw, 75, &exclude) {
-                return capture::to_base64(&bytes);
-            }
+    let mut router = state.ai_router.lock().await;
+    let grid_test_enabled = router.config.grid_test_enabled;
+    let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
+    drop(router); // Release lock before blocking capture
+
+    let debug_dir = app.path().app_data_dir().map(|p| p.join("debug")).ok();
+
+    // Fresh capture — no stored HWND, always walks z-order to the focused window.
+    let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path) = tokio::task::spawn_blocking(move || {
+        if let Ok((bytes, rect, hwnd)) = capture::capture_active_window_jpeg(75, &exclude) {
+            let final_bytes = if grid_test_enabled {
+                grid::overlay_grid_on_jpeg(&bytes, 75)
+            } else {
+                bytes
+            };
+
+            let debug_path = if debug_screenshot_enabled {
+                if let Some(ref dir) = debug_dir {
+                    let _ = std::fs::create_dir_all(dir);
+                    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+                    let path = dir.join(format!("screenshot_corr_{ts}.jpg"));
+                    let txt_path = dir.join(format!("screenshot_corr_{ts}.txt"));
+
+                    #[cfg(windows)]
+                    {
+                        let info = capture::get_window_info(hwnd);
+                        let _ = std::fs::write(&txt_path, info);
+                    }
+
+                    if std::fs::write(&path, &final_bytes).is_ok() {
+                        Some(path.to_string_lossy().into_owned())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            (capture::to_base64(&final_bytes), Some(rect), Some(hwnd), debug_path)
+        } else {
+            (String::new(), None, None, None)
         }
-        if let Ok((bytes, _, _)) = capture::capture_active_window_jpeg(75, &exclude) {
-            return capture::to_base64(&bytes);
-        }
-        String::new()
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
@@ -575,7 +699,19 @@ async fn send_correction(
         Some(n) => format!("{} User note: {}", crate::ai::prompts::CORRECTION_CONTEXT, n),
         None    => crate::ai::prompts::CORRECTION_CONTEXT.to_string(),
     };
-    let user_text = user_text_owned.as_str();
+    
+    let mut window_context = String::new();
+    if let Some(hwnd) = new_hwnd {
+        let info = capture::get_window_info(hwnd);
+        window_context = format!("\n[Current Window Info]\n{}", info);
+    }
+    
+    let final_user_text = if !window_context.is_empty() {
+        format!("{user_text_owned}\n{window_context}")
+    } else {
+        user_text_owned
+    };
+    let user_text = final_user_text.as_str();
 
     let app_clone = app.clone();
     let on_chunk = move |chunk: &str| {
@@ -592,6 +728,7 @@ async fn send_correction(
     let steps = response.steps;
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
+    let request_full_screen = response.request_full_screen;
     let provider = router.config.api_provider.clone();
 
     if let Some(session) = &mut router.session_manager.current_session {
@@ -602,11 +739,18 @@ async fn send_correction(
         router.session_manager.save_session(None);
     }
 
+    // Release the Mutex before execute_step — same pattern as guide().
+    // The locator runs blocking UIA/OCR calls that can take 1-3 s; holding the
+    // Mutex during that time would deadlock any concurrent Tauri command.
+    drop(router);
+
     {
         let mut g = state.guidance.lock().unwrap();
         g.steps = steps.clone();
         g.state_summary = state_summary;
         g.needs_input = needs_input;
+        g.capture_rect = new_capture_rect;
+        g.target_hwnd = new_hwnd;
     }
 
     if steps.is_empty() {
@@ -618,13 +762,36 @@ async fn send_correction(
             instruction: String::new(),
             located: None,
             needs_input,
+            request_full_screen,
             provider,
             error: None,
             grid_cell: None,
+            debug_screenshot_path,
         });
     }
 
     let located = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay).unwrap_or(None);
+
+    let grid_cell = valid_grid_cell(steps.get(0).and_then(|s| s.grid_cell.clone()));
+    if grid_test_enabled {
+        if let Ok(vd) = overlay::virtual_desktop_rect() {
+            let payload = GridOverlayPayload {
+                capture_rect: new_capture_rect,
+                virtual_origin: [vd.x, vd.y],
+                virtual_size: [vd.width, vd.height],
+                highlighted_cell: grid_cell.clone(),
+                cols: grid::COLS,
+                rows: grid::ROWS,
+            };
+            if let Some(win) = app.get_webview_window("overlay") {
+                let _ = win.emit("overlay:grid", &payload);
+            }
+        }
+    } else {
+        if let Some(win) = app.get_webview_window("overlay") {
+            let _ = win.emit("overlay:grid_clear", ());
+        }
+    }
 
     Ok(GuideResponse {
         ok: true,
@@ -634,9 +801,11 @@ async fn send_correction(
         instruction: steps[0].instruction.clone(),
         located,
         needs_input,
+        request_full_screen,
         provider,
         error: None,
-        grid_cell: steps.get(0).and_then(|s| s.grid_cell.clone()),
+        grid_cell,
+        debug_screenshot_path,
     })
 }
 
@@ -812,6 +981,23 @@ async fn capture_active_window(quality: Option<u8>) -> Result<CaptureResult, Str
     })
 }
 
+/// Open the debug screenshot folder in Windows Explorer (creates it if missing).
+#[tauri::command]
+async fn open_debug_folder(app: AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?
+        .join("debug");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir: {e}"))?;
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("explorer: {e}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, String> {
     let router = state.ai_router.lock().await;
@@ -840,6 +1026,8 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         hotkey_pause: c.hotkey_pause.clone(),
         hotkey_icon:  c.hotkey_icon.clone(),
         grid_test_enabled: c.grid_test_enabled,
+        debug_screenshot_enabled: c.debug_screenshot_enabled,
+        debug_show_response_info: c.debug_show_response_info,
     })
 }
 
@@ -872,7 +1060,9 @@ async fn save_settings(
         ("HOTKEY_WRONG".into(),         payload.hotkey_wrong.clone()),
         ("HOTKEY_PAUSE".into(),         payload.hotkey_pause.clone()),
         ("HOTKEY_ICON".into(),          payload.hotkey_icon.clone()),
-        ("GRID_TEST_ENABLED".into(),    payload.grid_test_enabled.to_string()),
+        ("GRID_TEST_ENABLED".into(),              payload.grid_test_enabled.to_string()),
+        ("DEBUG_SCREENSHOT_ENABLED".into(),       payload.debug_screenshot_enabled.to_string()),
+        ("DEBUG_SHOW_RESPONSE_INFO".into(),       payload.debug_show_response_info.to_string()),
     ];
 
     // API keys: only overwrite if the user actually typed something
@@ -1009,6 +1199,7 @@ pub fn run() {
             speak,
             get_settings,
             save_settings,
+            open_debug_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

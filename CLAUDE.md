@@ -63,29 +63,21 @@
 
 | Component | File | Purpose | Status |
 |-----------|------|---------|--------|
-| Session Manager | `core/session.py` | Lifecycle, persistence, conversation history | TODO |
-| State Summarizer | `core/state.py` | Compact app state for API context | TODO |
-| Cost Tracker | `core/cost_tracker.py` | Token budgets, safety margins | TODO |
-| Correction Handler | `core/correction.py` | Re-analysis on user "wrong" signal | TODO |
-| Step Sequencer | `core/step_sequencer.py` | Advance through multi-step responses locally | TODO |
-| Screen Capture | `input/screen_capture.py` | On-demand screenshots | TODO |
-| Screen Monitor | `input/screen_monitor.py` | Event-driven detection | TODO |
-| Chat Input | `input/chat_input.py` | User prompt input | TODO |
-| Voice Input | `input/voice_input.py` | Push-to-talk via SpeechRecognition + Google STT | DONE |
-| API Router | `ai/api_router.py` | Provider selection, request building | DONE |
-| Anthropic Client | `ai/anthropic_client.py` | Anthropic API (tool_use) | DONE |
-| Gemini Client | `ai/gemini_client.py` | Google Gemini API (function calling) | DONE |
-| Ollama Client | `ai/ollama_client.py` | Local Ollama inference (JSON mode) | DONE |
-| OpenAI Client | `ai/openai_client.py` | OpenAI API (function_calling) | STUB |
-| Tool Schemas | `ai/tool_schemas.py` | navigate_step tool definition | DONE |
-| Element Locator | `locator/element_locator.py` | Orchestrates OCR + A11y + templates | TODO |
-| OCR Engine | `locator/ocr_engine.py` | **FALLBACK**: PaddleOCR wrapper, text → bbox | TODO |
-| A11y Engine | `locator/a11y_engine.py` | **PRIMARY**: Windows UIA element lookup (< 5ms) | TODO |
-| Overlay Renderer | `output/overlay.py` | Qt frameless window for overlays | TODO |
-| Clipboard Manager | `output/clipboard.py` | System clipboard access | TODO |
-| TTS Engine | `output/tts.py` | Text-to-speech via pyttsx3 (Windows SAPI) | DONE |
-| Main Window | `ui/main_window.py` | Chat UI (PySide6) | TODO |
-| Floating Window | `ui/floating_window.py` | Hotkey-activated input + correction button | TODO |
+| Session Manager | `src-tauri/src/ai/session.rs` | Lifecycle, persistence, conversation history | DONE |
+| State Context | `src-tauri/src/ai/prompts.rs` | App state, window context, and Rule 17 | DONE |
+| Cost Tracker | `src-tauri/src/ai/cost_tracker.rs` | Token budgets, daily/monthly caps | DONE |
+| API Router | `src-tauri/src/ai/mod.rs` | Provider selection (Anthropic, Gemini, Ollama) | DONE |
+| Screen Capture | `src-tauri/src/capture/mod.rs` | On-demand BitBlt, active-window crop | DONE |
+| Screen Watcher | `src-tauri/src/screen_watcher.rs` | Event-driven aHash detection (500ms) | DONE |
+| Element Locator | `src-tauri/src/locator/mod.rs` | Orchestrates OCR + A11y + templates | DONE |
+| OCR Engine | `src-tauri/src/locator/ocr.rs` | **FALLBACK**: Windows.Media.Ocr (built-in) | DONE |
+| A11y Engine | `src-tauri/src/locator/a11y.rs` | **PRIMARY**: Windows UIA element lookup (< 5ms) | DONE |
+| Overlay Pipeline | `src-tauri/src/overlay.rs` | Configure/emit overlay updates to WebView | DONE |
+| TTS Engine | `src-tauri/src/tts.rs` | Text-to-speech via Windows SAPI (STA thread) | DONE |
+| Guidance Loop | `src-tauri/src/lib.rs` | `guide`, `next_step`, `send_correction` | DONE |
+| Frontend Panel | `src/App.svelte` | Main chat UI, history, and consent logic | DONE |
+| Frontend Overlay | `src/Overlay.svelte` | Transparent canvas for arrows/highlights | DONE |
+
 
 ---
 
@@ -336,7 +328,7 @@ if __name__ == "__main__":
 
 - **E.0 Rust Sidecar Rewrite**: Ported the Python sidecar logic to Rust. Removed the `sidecar/` directory, moving AI routing, Anthropic, Gemini, cost tracking, and session logic directly into `src-tauri/src/ai/`. This eliminates the need for Python as a runtime dependency.
 
-### ✅ Completed (v0.4 Phase E.1–E.6 — 2026-04-27)
+### ✅ Completed (v0.4 Phase E.1–E.7 — 2026-04-30)
 
 - **E.1 UI Overhaul** — already noted in Phase D.4 entry above.
 - **E.2 Streaming responses** — Rust AI router streams SSE from Anthropic/Gemini via `reqwest`; `stream_chunk` Tauri event appended to `currentInstruction` in real time. Partial JSON instruction extracted in `ai/streaming.rs`.
@@ -345,10 +337,14 @@ if __name__ == "__main__":
 - **E.5 `needs_input` reply UI** — dedicated `replyText` state; blue reply section renders when `phase === "needs_input"`; Enter key + Send button; `isReply: true` flag preserves session in Rust.
 - **E.5b Next button context pass-through** — `lastCompletedInstruction` carried into `[User completed: "..."]` re-query; Rust guard prevents session reset on continuation calls.
 - **E.6 Settings UI** — ⚙ modal with Provider / Screen Guide / Hotkeys / Audio tabs. `get_settings` / `save_settings` Tauri commands. Atomic `.env` write; empty key fields skip overwrite; in-process config reload via `router.reload_config()`. Emits `overlay:theme` event; `Overlay.svelte` re-parameterizes draw colors + line widths live.
-
-### ✅ Completed (v0.4 Phase E.7 + polish — 2026-04-30)
-
 - **E.7 Voice input** — 🎤 button in action row + `Alt+A` global hotkey; uses `SpeechRecognition` / `webkitSpeechRecognition` Web Speech API inside WebView2; transcript auto-submitted as task prompt; enabled/disabled via Settings → Audio. Language configurable (9 BCP-47 locales in dropdown).
+
+### ✅ Completed (v0.4 Phase E.8–E.11 — 2026-05-05)
+
+- **E.8 Restore Task Input** — User input is preserved in the text box if the AI call fails (e.g., window minimized), preventing re-typing.
+- **E.9 Consent-Driven Full Screen** — Secure, user-granted permission flow for virtual desktop capture across all monitors. AI must explicitly request access; user must explicitly allow. Reverts to active-window mode immediately after use.
+- **E.10 Context Awareness** — Focused window Title and Class injected into AI prompts. System prompt Rule 17 added to instruct AI to refuse guesses when the user deviates from the target application.
+- **E.11 Error Resilience** — Mid-session capture failures (e.g. window minimized) no longer lock the UI or disable buttons; state reverts to previous phase; aggressive red error messages replaced with soft "system" warning icons.
 - **UI terminology** — "Auto-advance" renamed to **Autopilot**; "Overlay" renamed to **Screen Guide**; "Subtitle" renamed to **Live caption** throughout all UI strings.
 - **Settings: Show/Hide API key** — `get_settings` now returns actual stored API key (was always empty); Show/Hide uses `{#if}` blocks (distinct DOM elements) to reliably unmask password inputs in WebView2.
 - **Settings: model dropdowns** — All provider model fields changed from `<input list="datalist">` to `<select>` so all options are always visible.
@@ -377,11 +373,11 @@ v0.3.1 — Remaining v0.3 items (Python, Windows):
   Note: single-screen picker was evaluated and removed — active-window crop makes it redundant.
 
 v0.4 — DONE: Tauri/Rust rewrite (Phases A–E.7 + hardening):
-  ✅ Full Rust backend: screen capture (PrintWindow), A11y (UIA), OCR (Windows.Media.Ocr),
+  ✅ Full Rust backend: screen capture (BitBlt), A11y (UIA), OCR (Windows.Media.Ocr),
      AI router (Anthropic + Gemini streaming), TTS (Windows SAPI), hotkeys, overlay
   ✅ Session-level HWND storage — stable window targeting across z-order changes
   ✅ Option A Set-of-Marks grid with axis-label margin strips (font8x8)
-  ✅ Removed request_full_screen / virtual desktop capture / panel blanking
+  ✅ Consent-driven full-screen capture (E.9) / Virtual desktop restored via BitBlt
   Remaining: signed installer + EV code signing (blocked on server being ready first)
 
 v0.5 — Server + Monetization: see [server-plan.md](docs/server-plan.md)
@@ -449,7 +445,7 @@ v0.3  DONE — token optimization + active-window crop + UI consolidation (Conso
       + checkpoint rework + multi-window A11y + A11y false-match fix
 v0.3.1  single screen mode + settings window + PyPI packaging + subtitle persistence
 v0.4  DONE — full Tauri/Rust rewrite (Phases A–E.7 + hardening); stable HWND targeting;
-      SoM grid; removed full-screen capture
+      SoM grid; restored full-screen capture (E.9) via consent loop
 v0.5  Server + monetization: Supabase (auth + relay) + Stripe; free trial (anonymous
       auth, 50 req) + PAYG coins + subscriptions + signed installer
 v0.6  Template matching + Nav-Packs v1 + Blender/SolidWorks + quantized local models

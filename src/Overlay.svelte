@@ -346,6 +346,13 @@
         }
       }
     });
+    await listen<void>("overlay:grid_clear", () => {
+      gridUpdate = null;
+      if (animFrame === null && canvas) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    });
   });
 </script>
 
