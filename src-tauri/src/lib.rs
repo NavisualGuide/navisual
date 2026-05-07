@@ -8,6 +8,7 @@ mod ai;
 mod tts;
 mod track;
 mod screen_watcher;
+mod server;
 
 use ai::router::AiRouter;
 use ai::config::Config;
@@ -58,6 +59,8 @@ struct AppState {
     last_overlay: std::sync::Mutex<Option<(overlay::OverlayKind, Option<capture::Rect>, Option<String>)>>,
     /// Resolved path to the .env settings file — always writable (app data dir).
     env_path: PathBuf,
+    /// Path to the Supabase session JSON file (managed provider only).
+    supabase_session_path: PathBuf,
     #[allow(dead_code)]
     screen_watcher: screen_watcher::ScreenWatcher,
 }
@@ -450,9 +453,18 @@ async fn guide(
         (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
     };
 
+    // Emit balance update for managed provider before processing the result.
+    if let Some(remaining) = router.get_managed_free_remaining() {
+        let _ = app.emit("balance_update", remaining);
+    }
+
     let response = match resp {
         Ok(r) => r,
         Err(e) => {
+            let err_str = e.to_string();
+            if err_str == "free_trial_exhausted" {
+                let _ = app.emit("trial_exhausted", ());
+            }
             return Ok(GuideResponse {
                 ok: false,
                 session_id,
@@ -463,7 +475,11 @@ async fn guide(
                 needs_input: false,
                 request_full_screen: false,
                 provider: router.config.api_provider.clone(),
-                error: Some(e.to_string()),
+                error: Some(if err_str == "free_trial_exhausted" {
+                    "Your 50 free requests have been used.".to_string()
+                } else {
+                    err_str
+                }),
                 grid_cell: None,
                 debug_screenshot_path: None,
             });
@@ -720,9 +736,20 @@ async fn send_correction(
 
     let resp = router.send_guidance_request(user_text, Some(&screenshot_b64), Some(&summary), on_chunk).await;
 
+    if let Some(remaining) = router.get_managed_free_remaining() {
+        let _ = app.emit("balance_update", remaining);
+    }
+
     let response = match resp {
         Ok(r) => r,
-        Err(e) => return Err(e.to_string()),
+        Err(e) => {
+            let err_str = e.to_string();
+            if err_str == "free_trial_exhausted" {
+                let _ = app.emit("trial_exhausted", ());
+                return Err("Your 50 free requests have been used.".to_string());
+            }
+            return Err(err_str);
+        }
     };
 
     let steps = response.steps;
@@ -1102,6 +1129,63 @@ async fn save_settings(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct SessionStatus {
+    signed_in: bool,
+    free_remaining: Option<u32>,
+}
+
+/// Sign in anonymously to Supabase (managed provider). Safe to call even if already signed in.
+#[tauri::command]
+async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, String> {
+    let (supabase_url, anon_key) = {
+        let router = state.ai_router.lock().await;
+        let url = router.config.supabase_url.clone().ok_or("SUPABASE_URL not configured")?;
+        let key = router.config.supabase_anon_key.clone().ok_or("SUPABASE_ANON_KEY not configured")?;
+        (url, key)
+    };
+
+    let new_session = server::sign_in_anonymously(&supabase_url, &anon_key)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    server::save_session(&state.supabase_session_path, &new_session);
+
+    {
+        let mut router = state.ai_router.lock().await;
+        router.set_managed_session(new_session);
+    }
+
+    Ok(SessionStatus { signed_in: true, free_remaining: None })
+}
+
+/// Fetch the managed-provider balance (tier, free_remaining, coin_balance_microdollars).
+#[tauri::command]
+async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceResponse, String> {
+    let (supabase_url, access_token) = {
+        let router = state.ai_router.lock().await;
+        let url = router.config.supabase_url.clone().ok_or("SUPABASE_URL not configured")?;
+        // Try to get the access token from the managed client's session.
+        let token = match &router.client_access_token() {
+            Some(t) => t.clone(),
+            None => return Err("Not signed in to managed provider".to_string()),
+        };
+        (url, token)
+    };
+    server::get_balance(&supabase_url, &access_token)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Return whether the app currently has a managed-provider session.
+#[tauri::command]
+async fn get_session_status(state: State<'_, AppState>) -> Result<SessionStatus, String> {
+    let router = state.ai_router.lock().await;
+    let free_remaining = router.get_managed_free_remaining();
+    let signed_in = router.has_managed_session();
+    Ok(SessionStatus { signed_in, free_remaining })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1157,8 +1241,9 @@ pub fn run() {
                 Some(app_data_dir.join("usage.json")),
             );
             let session_manager = SessionManager::new(app_data_dir.join("sessions"));
+            let supabase_session_path = app_data_dir.join("supabase_session.json");
 
-            let router = AiRouter::new(config, cost_tracker, session_manager);
+            let router = AiRouter::new(config, cost_tracker, session_manager, Some(supabase_session_path.clone()));
             log::info!("AiRouter ready (provider: {})", router.config.api_provider);
             handle.manage(AppState {
                 ai_router: tokio::sync::Mutex::new(router),
@@ -1167,6 +1252,7 @@ pub fn run() {
                 tracker,
                 last_overlay: std::sync::Mutex::new(None),
                 env_path,
+                supabase_session_path,
                 screen_watcher: watcher,
             });
 
@@ -1200,6 +1286,9 @@ pub fn run() {
             get_settings,
             save_settings,
             open_debug_folder,
+            sign_in_anon,
+            get_balance,
+            get_session_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

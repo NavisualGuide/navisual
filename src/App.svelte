@@ -82,6 +82,10 @@
     return text.replace(/\s*\(grid cell [A-I]\d{1,2}\)\.?/gi, '').trimEnd();
   }
 
+  // Managed provider (S.1) state
+  let freeRemaining = $state<number | null>(null);
+  let showTrialExhausted = $state(false);
+
   // UI state
   let iconMode = $state(false);
   let showSettings = $state(false);
@@ -543,6 +547,7 @@
     settingsForm.api_provider === "anthropic" ? settingsForm.anthropic_model
     : settingsForm.api_provider === "gemini" ? settingsForm.gemini_model
     : settingsForm.api_provider === "ollama" ? settingsForm.ollama_model
+    : settingsForm.api_provider === "managed" ? "managed"
     : settingsForm.openai_model
   );
   let headerLabel = $derived(activeModel || provider);
@@ -612,6 +617,29 @@
       await register("Ctrl+KeyA", () => { toggleVoiceInput(); });
     } catch (_) {}
 
+    // S.1 — Managed provider: anonymous sign-in on first launch.
+    if (settingsForm.api_provider === "managed") {
+      try {
+        await invoke("sign_in_anon");
+      } catch (e) {
+        addToHistory("system", "⚠️ Managed sign-in failed: " + String(e));
+      }
+      try {
+        const bal = await invoke<{ tier: string; free_remaining: number }>("get_balance");
+        freeRemaining = bal.free_remaining;
+      } catch (_) {}
+    }
+
+    listen<number>("balance_update", (event) => {
+      freeRemaining = event.payload;
+      if (freeRemaining <= 0) showTrialExhausted = true;
+    });
+
+    listen("trial_exhausted", () => {
+      freeRemaining = 0;
+      showTrialExhausted = true;
+    });
+
     await addToHistory("system", "Navisual ready");
   });
 
@@ -639,6 +667,9 @@
       <span class="header-title">Navisual</span>
       {#if headerLabel}
         <span class="header-provider">{headerLabel}</span>
+      {/if}
+      {#if settingsForm.api_provider === "managed" && freeRemaining !== null}
+        <span class="header-balance" class:header-balance-low={freeRemaining <= 5}>{freeRemaining} left</span>
       {/if}
       <div class="header-actions">
         <button class="hdr-btn" onclick={openSettings} title="Settings">⚙</button>
@@ -804,6 +835,40 @@
     </footer>
   </main>
 
+  <!-- Trial exhausted modal (S.1) -->
+  {#if showTrialExhausted}
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={() => (showTrialExhausted = false)}
+      onkeydown={(e) => { if (e.key === "Escape") showTrialExhausted = false; }}
+    >
+      <div
+        class="modal"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label="Free trial exhausted"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.stopPropagation()}
+        style="max-width: 320px;"
+      >
+        <div class="modal-header">
+          <span class="modal-title">Free trial used</span>
+          <button class="hdr-btn hdr-btn-close" onclick={() => (showTrialExhausted = false)}>✕</button>
+        </div>
+        <div class="modal-body" style="padding: 20px; text-align: center; line-height: 1.6;">
+          <p style="font-size: 2em; margin-bottom: 12px;">🎯</p>
+          <p style="margin-bottom: 8px; font-weight: 600;">Your 50 free requests have been used.</p>
+          <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
+            Coin purchases are coming soon — stay tuned.
+          </p>
+          <button class="btn-primary btn-full" onclick={() => (showTrialExhausted = false)}>Close</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- Settings modal (E.6) -->
   {#if showSettings}
     <div
@@ -839,10 +904,10 @@
             <div class="setting-group">
               <p class="setting-label">Provider</p>
               <div class="provider-radios">
-                {#each (["anthropic","gemini","ollama","openai"] as const) as p}
+                {#each (["managed","anthropic","gemini","ollama","openai"] as const) as p}
                   <label class="radio-opt" class:radio-active={settingsForm.api_provider === p}>
                     <input type="radio" name="provider" value={p} bind:group={settingsForm.api_provider} />
-                    {p.charAt(0).toUpperCase() + p.slice(1)}
+                    {p === "managed" ? "Managed (free)" : p.charAt(0).toUpperCase() + p.slice(1)}
                   </label>
                 {/each}
               </div>
@@ -1180,6 +1245,19 @@
     font-weight: 600;
     letter-spacing: 0.01em;
     flex-shrink: 0;
+  }
+
+  .header-balance {
+    font-size: 11px;
+    color: var(--accent);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    background: rgba(255, 107, 53, 0.12);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  .header-balance-low {
+    color: #ff4040;
+    background: rgba(255, 64, 64, 0.15);
   }
 
   .header-provider {

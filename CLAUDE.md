@@ -1,7 +1,7 @@
 # Navisual — Project Guide
 
-**Version:** 0.4.0-alpha
-**Status:** v0.4 Phases A–E.7 complete (Tauri scaffold, full-Rust AI backend, screen capture + A11y + OCR + locator, overlay, guidance loop + chat UI, hotkeys, TTS, screen watcher, streaming, clipboard, needs_input reply UI, settings modal, voice input). Settings stored in %APPDATA%\com.navisual.app\.env. Next: packaging / internal tester distribution.
+**Version:** 0.5.0-alpha
+**Status:** v0.5 S.1 complete (Supabase anonymous auth relay, OpenRouter free-tier AI, managed provider in app, balance chip + trial-exhausted modal, session persistence). v0.4 Phases A–E.11 also complete. Settings stored in %APPDATA%\com.navisual.app\.env. Next: S.2 PAYG coins + Stripe, signed installer.
 **License:** FSL-1.1-Apache-2.0 (Functional Source License, converts to Apache 2.0 after 2 years)
 **Design Doc:** [Navisual-Design-Document.md](docs/Navisual-Design-Document.md) *(Note: This SDD is the main source of truth for future changes. Always update `CLAUDE.md` to sync with the SDD).*
 **Settings:** [settings.md](docs/settings.md)
@@ -356,7 +356,34 @@ if __name__ == "__main__":
 - **`restore_overlay` Rust command** — `AppState.last_overlay` stores the last non-None `(OverlayKind, bbox, text)` emitted by `execute_step`; `restore_overlay` re-emits from this store.
 - **App data dir for settings** — All persistent files moved to `app.path().app_data_dir()` (Windows: `%APPDATA%\com.navisual.app\`). `Config::load()` now accepts `Option<&Path>`; `save_settings` uses `state.env_path` (stored in `AppState`). Session files and usage.json also moved to the same directory. Fixes write-permission failures when installed to `Program Files`.
 
-### 🚧 Next: v0.5 — Server + Monetization
+### ✅ Completed (v0.5 S.1 — 2026-05-05)
+
+- **Supabase S.1 server deployed** — Edge Function `relay` proxies OpenRouter requests;
+  `user_profiles` table with RLS; anonymous sign-in enabled; OpenRouter free model
+  (`nvidia/nemotron-nano-12b-v2-vl:free`); 50 free requests per anonymous session.
+- **`src-tauri/src/server.rs`** — `SupabaseSession` struct; `sign_in_anonymously`, `refresh_session`,
+  `get_balance`, `load_session`, `save_session` helpers; session persisted to
+  `%APPDATA%\com.navisual.app\supabase_session.json`.
+- **`src-tauri/src/ai/managed.rs`** — `ManagedClient` that POSTs to the Supabase relay with
+  a Bearer JWT; `ensure_token()` refreshes session automatically; non-streaming response
+  parsed from OpenAI tool-call format; emits `free_trial_exhausted` error on 402.
+- **Router `Managed` variant** — `ApiClient::Managed(ManagedClient)` in `router.rs`;
+  `init_client` arm for `"managed"` reads `SUPABASE_URL` + `SUPABASE_ANON_KEY` from config;
+  `ensure_token()` called before each request; `get_managed_free_remaining()` and
+  `set_managed_session()` exposed for lib.rs; session preserved across `reload_config`.
+- **Tauri commands** — `sign_in_anon`, `get_balance`, `get_session_status` added to lib.rs;
+  `guide()` and `send_correction()` emit `balance_update` and `trial_exhausted` events.
+- **App.svelte** — `freeRemaining` balance chip in header (amber→red when ≤ 5); trial-exhausted
+  modal on 402 or balance reaching 0; anonymous sign-in on first launch when provider is
+  `"managed"`; "Managed (free)" added to provider radio in Settings.
+- **Config** — `supabase_url`, `supabase_anon_key`, `managed_model` fields added; read from
+  `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `MANAGED_MODEL` env vars.
+- **Marketing site** — `navisualguide.com` live via GitHub Pages (`NavisualGuide/NavisualGuide.github.io`);
+  CNAME + DNS A records configured on Porkbun. `navisual.guide` deferred (GitHub Pages only supports one custom domain per site).
+- **Rename complete** — "AI Navigator" → "Navisual" across all source files, docs, config,
+  bundle ID (`com.navisual.app`), Cargo package name (`navisual-backend`), lib name (`navisual_backend_lib`).
+
+### 🚧 Next: v0.5 S.2 — Pay-As-You-Go + Signed Installer
 
 **Known OCR limitation — Task Manager / high-DPI primary.** Windows.Media.Ocr wants ~30 px text for reliable reads; small-font nav items (Task Manager sidebar ~12–14 physical px) are at the reliability floor. The capture self-exclusion fix removes noise (only the target window is OCR'd), but the text pixel size is what it is. A 2× bilinear upscale of captures with width <1280 before OCR is the planned follow-up if Task Manager / other compact-UI apps miss too often in practice.
 
@@ -381,8 +408,8 @@ v0.4 — DONE: Tauri/Rust rewrite (Phases A–E.7 + hardening):
   Remaining: signed installer + EV code signing (blocked on server being ready first)
 
 v0.5 — Server + Monetization: see [server-plan.md](docs/server-plan.md)
-  S.1 Free trial proxy — Supabase Edge Function + Postgres; anonymous auth on first
-       launch (no sign-up required); OpenRouter free Llama Vision; 50 free requests;
+  ✅ S.1 Free trial proxy — Supabase Edge Function + Postgres; anonymous auth on first
+       launch (no sign-up required); OpenRouter free nvidia vision; 50 free requests;
        anonymous session upgrades to real account in-place when user pays (S.2)
   S.2 Pay As You Go — Google OAuth upgrade + Stripe coins ($5 min, 1 coin = $0.20);
        Gemini Flash for paid requests; Billing tab in Settings
