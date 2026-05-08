@@ -28,7 +28,11 @@ htmlcov/
 .vscode/
 .claude/
 
-# Internal — business plans, pricing, server config (in navisual-internal repo)
+# Internal — goes to NavisualGuide/navisual-internal (private repo)
+# Push workflow: see REPOS.md in navisual-internal, or run:
+#   git fetch internal && git checkout -b internal-push internal/main
+#   git add -f docs/ supabase/ && git commit && git push internal internal-push:main
+#   git checkout main && git branch -d internal-push
 docs/
 supabase/
 
