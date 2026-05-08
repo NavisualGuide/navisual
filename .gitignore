@@ -26,5 +26,15 @@ htmlcov/
 
 # IDE / local
 .vscode/
-.claude/scheduled_tasks.lock
+.claude/
+
+# Internal — business plans, pricing, server config (in navisual-internal repo)
+docs/
+supabase/
+
+# Build artifacts
+dist/
+
+# Spike test output
+tools/spike_output/
 

@@ -2,125 +2,109 @@
 
 **The AI guides, never overrides.**
 
-Navisual is a Windows desktop app that guides you through computer tasks by watching your screen and giving real-time step-by-step instructions via on-screen overlays and audio. The AI never clicks, types, or takes control — every action is yours.
+Navisual is a Windows desktop app that watches your screen and gives real-time step-by-step instructions via on-screen overlays and audio. The AI never clicks, types, or takes control — every action is yours.
 
-**Status:** v0.3.1-alpha — actively developed, suitable for developer testing.
+**Status:** v0.5.0-alpha — developer preview. No installer yet; build from source.  
+**Website:** [navisualguide.com](https://navisualguide.com)
 
 ---
 
-## Tester Setup (Windows 11)
+## Quick Start
 
-### 1. Install Python 3.11+
+**No API key required.** The app includes 50 free AI requests out of the box. Just build, launch, and start guiding.
 
-Download from [python.org](https://www.python.org/downloads/). During install, check **"Add Python to PATH"**.
+1. Type your task — *"How do I export a PDF in Illustrator?"*
+2. Follow the arrows and audio instructions on screen
+3. Press `Ctrl+`` to confirm each step and advance
 
-Verify:
-```
-python --version   # must be 3.11 or higher
-```
+---
 
-### 2. Get the code
+## Build from Source (Windows)
 
-```
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (stable toolchain)
+- [Node.js](https://nodejs.org/) 18+
+- [Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (for Windows system crates)
+- [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) — pre-installed on Windows 11
+
+### Steps
+
+```powershell
 git clone https://github.com/NavisualGuide/navisual.git
 cd navisual
+npm install
+npm run tauri dev      # development (hot reload)
+npm run tauri build    # production binary
 ```
 
-Or download the ZIP from GitHub and extract it.
+The production binary is placed in `src-tauri/target/release/`.
 
-### 3. Create a virtual environment
+### Configuration
 
-```
-python -m venv venv
-venv\Scripts\activate
-```
+Settings are stored in `%APPDATA%\com.navisual.app\.env`. The app creates this file on first launch. You can also copy `.env.example` there to pre-configure it.
 
-### 4. Install dependencies
+In development (`npm run tauri dev`), the project-root `.env` is used instead.
 
-```
-pip install -e .
-```
-
-### 5. Configure your API key
-
-```
-copy .env.example .env
-```
-
-Open `.env` and set your provider. **Gemini is the easiest for testers — free, no credit card:**
+**To use your own API key** (optional — the free managed tier works without one):
 
 ```env
 API_PROVIDER=gemini
 GEMINI_API_KEY=AIza-xxx        # Free key: https://aistudio.google.com/apikey
-DAILY_TOKEN_CAP=1000000        # Raise the cap — default 100k is tight for testing
 ```
 
-Alternatively, use Anthropic (Claude):
+Or use Anthropic:
 
 ```env
 API_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-xxx
-DAILY_TOKEN_CAP=1000000
 ```
 
-### 6. Run
-
-```
-python -m src.main
-```
-
-Run as a **regular user** (not admin) — global hotkeys work without elevation on Windows 11.
+All settings are also configurable in-app via **Settings** (gear icon) — no `.env` editing required.
 
 ---
 
-## Using Navisual
+## AI Providers
 
-The panel starts as a small draggable dot (icon mode). Click it to expand. Type your task in the input box, then follow the on-screen arrows and subtitles.
+| Provider | Setup | Cost |
+|----------|-------|------|
+| **Managed (free)** | None — works on first launch | 50 free requests, then paid |
+| Gemini | Free API key at [aistudio.google.com](https://aistudio.google.com/apikey) | Free tier available |
+| Anthropic | API key at [console.anthropic.com](https://console.anthropic.com) | Pay per use |
+| Ollama | [ollama.com](https://ollama.com) + `ollama pull llama3.2-vision` | Free, runs locally |
+| OpenAI | API key at [platform.openai.com](https://platform.openai.com) | Pay per use |
 
-### Hotkeys
+---
+
+## Hotkeys
 
 | Key | Action |
 |-----|--------|
-| `Alt+\`` | Next step / confirm completed |
-| `Alt+E` | Wrong — re-analyze the current screen |
-| `Alt+S` | Pause / resume capture |
-| `Alt+Q` | Show / hide the panel |
-| `Alt+A` | Push-to-talk voice input |
-| `Alt+R` | Re-read last instruction aloud |
+| `Ctrl+`` | Next step / confirm completed |
+| `Ctrl+E` | Wrong — re-analyze the current screen |
+| `Ctrl+S` | Pause / resume |
+| `Ctrl+Q` | Show / hide the panel |
 
 All hotkeys are configurable in **Settings → Hotkeys**.
 
-### Settings
-
-Click the gear icon in the panel to open Settings. You can change your API provider and key, adjust overlay appearance, and remap hotkeys — no `.env` editing required.
-
 ---
 
-## Known Issues / Friction Points
-
-| Issue | Fix |
-|-------|-----|
-| Panel not visible after launch | Look for a small orange dot — click it to expand |
-| No spoken instructions | Add `ENABLE_TTS=true` to `.env` |
-| `keyboard` raises PermissionError | Run as a normal user, not as Administrator |
-| Arrow points to wrong place | Use `Alt+E` (Wrong) to trigger a re-analysis |
-
----
-
-## Features (v0.3.1-alpha)
+## Features
 
 - **Observe, never act** — reads your screen, never moves the mouse or types
-- **Real-time overlay arrows** — points at the exact UI element to click
-- **Audio narration** — optional TTS via Windows SAPI
-- **Voice input** — push-to-talk via Google Web Speech API
-- **Multi-provider AI** — Gemini (free), Anthropic (Claude), Ollama (local), OpenAI
-- **Multi-step sequences** — groups sequential actions to reduce API calls
+- **Screen Guide** — overlay arrows and highlights pointing at the exact UI element
+- **Live captions** — subtitle strip showing the current instruction
+- **Audio narration** — TTS via Windows SAPI (no install required)
+- **Voice input** — push-to-talk via Web Speech API
+- **Free managed tier** — 50 requests out of the box, no account needed
+- **Multi-provider AI** — Gemini, Anthropic (Claude), Ollama (local), OpenAI, Managed
 - **Windows UI Automation** — primary element locator, < 5ms for browsers
 - **Windows OCR** — built-in fallback, zero model downloads
-- **Active-window crop** — sends only the relevant window to the AI (~80% token reduction)
-- **Session persistence** — save and resume tasks
-- **In-app settings** — configure provider, overlay, and hotkeys without editing `.env`
-- **Correction hotkey** — `Alt+E` to re-analyze when the AI gets it wrong
+- **Active-window crop** — sends only the relevant window to the AI
+- **Multi-step sequences** — groups sequential actions to reduce API calls
+- **Session persistence** — state preserved across app restarts
+- **Autopilot mode** — auto-advances on screen change without pressing next
+- **In-app settings** — configure everything without editing files
 
 ---
 
@@ -128,38 +112,25 @@ Click the gear icon in the panel to open Settings. You can change your API provi
 
 ```
 navisual/
-├── src/
-│   ├── main.py            # Entry point
-│   ├── config.py          # Configuration
-│   ├── core/              # Session, state, cost tracking
-│   ├── input/             # Screen capture, event detection
-│   ├── ai/                # API clients (Gemini, Anthropic, Ollama, OpenAI)
-│   ├── locator/           # Element locator (A11y + OCR)
-│   ├── output/            # Overlay, TTS, clipboard
-│   └── ui/                # PySide6 windows
-├── docs/
-│   ├── Navisual-Design-Document.md   # Full design spec
-│   ├── settings.md                        # Settings reference
-│   └── nav-packs.md                       # Nav-Pack format spec
-├── .env.example           # Config template
-└── CLAUDE.md              # Developer / project guide
-```
-
----
-
-## Development
-
-```bash
-# Install with dev extras
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Lint / format / type check
-ruff check src/
-black src/
-mypy src/
+├── src/                        # Svelte frontend
+│   ├── App.svelte              # Main panel UI
+│   └── Overlay.svelte          # Transparent overlay canvas
+├── src-tauri/                  # Rust backend
+│   ├── src/
+│   │   ├── lib.rs              # Tauri commands + guidance loop
+│   │   ├── ai/                 # AI router (Anthropic, Gemini, Ollama, Managed)
+│   │   ├── capture/            # Screen capture (BitBlt, active-window crop)
+│   │   ├── locator/            # Element locator (UIA + OCR)
+│   │   ├── overlay.rs          # Overlay pipeline
+│   │   ├── tts.rs              # Windows SAPI TTS
+│   │   ├── server.rs           # Supabase auth client
+│   │   └── screen_watcher.rs   # Screen change detection (aHash)
+│   ├── Cargo.toml
+│   └── tauri.conf.json
+├── index.html                  # Panel window entry point
+├── overlay.html                # Overlay window entry point
+├── .env.example                # Config template
+└── CLAUDE.md                   # Developer guide
 ```
 
 ---
@@ -167,9 +138,9 @@ mypy src/
 ## Roadmap
 
 ```
-v0.3.1  Settings window + hotkeys redesign + bug fixes     ← current
-v0.4    Signed Windows installer (embedded Python, no setup required)
-v0.5    Template matching + Nav-Packs (Blender, SolidWorks)
+v0.5    ✅ Free managed tier (Supabase relay, anonymous auth, 50 free requests)
+        🔜 Pay-as-you-go coin purchases + signed Windows installer
+v0.6    Template matching + Nav-Packs (Blender, SolidWorks)
 v1.0    Microsoft Store + enterprise features + public launch
 v1.x    macOS port + Linux port
 ```
@@ -179,21 +150,19 @@ v1.x    macOS port + Linux port
 ## Privacy
 
 - Screenshots are processed in RAM and never written to disk
-- The AI receives only the active window crop (not your full desktop by default)
-- Use `Alt+S` (Pause) to stop capture at any time
+- Only the active window is sent to the AI by default (not your full desktop)
+- Full-screen capture requires explicit permission each time
+- Use `Ctrl+S` (Pause) to stop all capture instantly
 - Run fully offline with Ollama — no data leaves your machine
+
+---
+
+## Contributing
+
+Issues and pull requests welcome. See [CLAUDE.md](CLAUDE.md) for architecture overview and development notes.
 
 ---
 
 ## License
 
-[FSL-1.1-Apache-2.0](https://fsl.software/) — source-available with a 2-year non-compete clause. Each version converts to Apache 2.0 two years after release.
-
----
-
-## Links
-
-- **Issues / bugs:** [GitHub Issues](https://github.com/NavisualGuide/navisual/issues)
-- **Design doc:** [Navisual-Design-Document.md](docs/Navisual-Design-Document.md)
-- **Settings reference:** [settings.md](docs/settings.md)
-- **Free Gemini key:** https://aistudio.google.com/apikey
+[FSL-1.1-Apache-2.0](https://fsl.software/) — source-available. Each version converts to Apache 2.0 two years after its release date.
