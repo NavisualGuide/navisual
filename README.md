@@ -15,7 +15,7 @@ Navisual is a Windows desktop app that watches your screen and gives real-time s
 
 1. Type your task — *"How do I export a PDF in Illustrator?"*
 2. Follow the arrows and audio instructions on screen
-3. Press `Ctrl+`` to confirm each step and advance
+3. Press ``Ctrl+` `` to confirm each step and advance
 
 ---
 
@@ -129,8 +129,7 @@ navisual/
 │   └── tauri.conf.json
 ├── index.html                  # Panel window entry point
 ├── overlay.html                # Overlay window entry point
-├── .env.example                # Config template
-└── CLAUDE.md                   # Developer guide
+└── .env.example                # Config template
 ```
 
 ---
@@ -159,7 +158,7 @@ v1.x    macOS port + Linux port
 
 ## Contributing
 
-Issues and pull requests welcome. See [CLAUDE.md](CLAUDE.md) for architecture overview and development notes.
+Issues and pull requests welcome.
 
 ---
 
