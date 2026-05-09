@@ -124,7 +124,7 @@ navisual/
 │   │   ├── overlay.rs          # Overlay pipeline
 │   │   ├── tts.rs              # Windows SAPI TTS
 │   │   ├── server.rs           # Supabase auth client
-│   │   └── screen_watcher.rs   # Screen change detection (aHash)
+│   │   ├── track.rs            # Window tracker (HWND focus detection)
 │   ├── Cargo.toml
 │   └── tauri.conf.json
 ├── index.html                  # Panel window entry point
