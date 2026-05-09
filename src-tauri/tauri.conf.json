@@ -44,6 +44,14 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": [
+        "https://navisualguide.com/releases/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

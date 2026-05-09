@@ -12,6 +12,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
   import { listen, emitTo } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
   import HotkeyInput from "./HotkeyInput.svelte";
 
   type Rect = { x: number; y: number; width: number; height: number };
@@ -166,6 +167,9 @@ See the LICENSE file in the root of this repository for complete details.
   let showSettings = $state(false);
   let showAbout = $state(false);
   let appVersion = $state("…");
+  let pendingUpdate = $state<Update | null>(null);
+  let updateStatus = $state<"idle" | "checking" | "downloading" | "done">("idle");
+  let updateProgress = $state(0);
   let settingsTab = $state<SettingsTab>("provider");
   let history = $state<HistoryEntry[]>([]);
   let historyEl: HTMLElement | null = $state(null);
@@ -262,6 +266,45 @@ See the LICENSE file in the root of this repository for complete details.
     if (autopilotInterval !== null) {
       clearInterval(autopilotInterval);
       autopilotInterval = null;
+    }
+  }
+
+  async function checkForUpdates(manual = false) {
+    if (updateStatus === "checking" || updateStatus === "downloading") return;
+    updateStatus = "checking";
+    try {
+      const update = await checkUpdate();
+      if (update?.available) {
+        pendingUpdate = update;
+      } else if (manual) {
+        pendingUpdate = null;
+      }
+    } catch (_) {
+      // Silently ignore network errors on background check
+    } finally {
+      if (updateStatus === "checking") updateStatus = "idle";
+    }
+  }
+
+  async function installUpdate() {
+    if (!pendingUpdate || updateStatus === "downloading") return;
+    updateStatus = "downloading";
+    updateProgress = 0;
+    let totalBytes = 0;
+    let downloadedBytes = 0;
+    try {
+      await pendingUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started" && event.data.contentLength) {
+          totalBytes = event.data.contentLength;
+        } else if (event.event === "Progress") {
+          downloadedBytes += event.data.chunkLength ?? 0;
+          if (totalBytes > 0) updateProgress = Math.round((downloadedBytes / totalBytes) * 100);
+        } else if (event.event === "Finished") {
+          updateStatus = "done";
+        }
+      });
+    } catch (_) {
+      updateStatus = "idle";
     }
   }
 
@@ -666,6 +709,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   onMount(async () => {
     getVersion().then(v => { appVersion = v; }).catch(() => {});
+    setTimeout(() => checkForUpdates(), 5000);
 
     // Position bottom-right then show — panel starts hidden (visible:false in
     // tauri.conf.json) so the user never sees a blank frame at 0,0 while
@@ -783,6 +827,11 @@ See the LICENSE file in the root of this repository for complete details.
       {/if}
       {#if settingsForm.api_provider === "managed" && freeRemaining !== null}
         <span class="header-balance" class:header-balance-low={freeRemaining <= 5}>{freeRemaining} left</span>
+      {/if}
+      {#if pendingUpdate}
+        <button class="header-update" onclick={() => (showAbout = true)} title="Update available">
+          ↑ {pendingUpdate.version}
+        </button>
       {/if}
       <div class="header-actions">
         <button class="hdr-btn" onclick={() => (showAbout = true)} title="About Navisual">ⓘ</button>
@@ -1406,6 +1455,24 @@ See the LICENSE file in the root of this repository for complete details.
             <button class="about-link" onclick={() => openUrl("https://github.com/NavisualGuide/navisual")}>GitHub</button>
             <button class="about-link" onclick={() => openUrl("mailto:feedback@navisualguide.com")}>Send feedback</button>
           </div>
+
+          <!-- Update section -->
+          <div class="about-update">
+            {#if updateStatus === "downloading"}
+              <span class="update-status">Downloading… {updateProgress}%</span>
+              <div class="update-progress-bar"><div class="update-progress-fill" style="width:{updateProgress}%"></div></div>
+            {:else if updateStatus === "done"}
+              <span class="update-status update-done">✓ Installed — please restart Navisual</span>
+            {:else if pendingUpdate}
+              <span class="update-status update-avail">v{pendingUpdate.version} available</span>
+              <button class="btn-primary" onclick={installUpdate}>Install &amp; restart</button>
+            {:else if updateStatus === "checking"}
+              <span class="update-status">Checking for updates…</span>
+            {:else}
+              <button class="btn-ghost" onclick={() => checkForUpdates(true)}>Check for updates</button>
+            {/if}
+          </div>
+
           <p class="about-license">Licensed under FSL-1.1-Apache-2.0 — converts to Apache 2.0 two years after each release.</p>
         </div>
       </div>
@@ -2379,5 +2446,60 @@ See the LICENSE file in the root of this repository for complete details.
     font-size: 10px;
     color: var(--text-tertiary);
     line-height: 1.5;
+  }
+
+  .about-update {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    background: var(--surface-2);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+
+  .update-status {
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  .update-avail {
+    color: var(--warning);
+    font-weight: 600;
+  }
+
+  .update-done {
+    color: var(--success);
+  }
+
+  .update-progress-bar {
+    height: 4px;
+    background: var(--surface-3);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .update-progress-fill {
+    height: 100%;
+    background: var(--accent-500);
+    border-radius: 2px;
+    transition: width 0.2s ease;
+  }
+
+  .header-update {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--warning);
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 4px;
+    padding: 2px 6px;
+    cursor: pointer;
+    margin-right: 4px;
+    flex-shrink: 0;
+  }
+
+  .header-update:hover {
+    background: rgba(245, 158, 11, 0.2);
   }
 </style>
