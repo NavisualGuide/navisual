@@ -16,6 +16,11 @@ pub mod ocr;
 #[cfg(windows)]
 pub mod orchestrator;
 
+#[cfg(windows)]
+pub mod hit_test;
+
+pub mod trace;
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LocateResult {
     /// Bounding box in physical pixels, virtual-desktop coords.

@@ -10,9 +10,12 @@
 //! eventual overlay renderer can consume it directly without further
 //! translation.
 
+use super::hit_test::{self, HitTestOutcome};
+use super::trace::{FinalDecision, LocateTrace, OcrTrace};
 use super::{a11y, ocr, LocateResult};
 use crate::capture::{self, Rect};
 use anyhow::Result;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Default)]
 pub struct LocateOptions {
@@ -23,46 +26,87 @@ pub struct LocateOptions {
     pub min_confidence: f32,
 }
 
-pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<Option<LocateResult>> {
+pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateResult>, LocateTrace)> {
+    let started = Instant::now();
+    let mut trace = LocateTrace::new(target_text);
+    trace.target_role = opts.role.clone();
+    trace.nearby_text = opts.nearby_text.clone();
+    trace.grid_cell = opts.zone;
+
     // Pass 1 — A11y.
     let mut a11y_opts = opts.clone();
     if a11y_opts.a11y_timeout_ms == 0 {
         a11y_opts.a11y_timeout_ms = 150;
     }
-    if let Some(hit) = a11y::find_element(target_text, &a11y_opts)? {
-        return Ok(Some(hit));
+    let (a11y_hit, a11y_trace) = match a11y::find_element(target_text, &a11y_opts) {
+        Ok(v) => v,
+        Err(e) => {
+            trace.final_decision = FinalDecision::Error { message: e.to_string() };
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((None, trace));
+        }
+    };
+    trace.a11y = a11y_trace;
+    if let Some(hit) = a11y_hit {
+        trace.final_decision = FinalDecision::HitA11y;
+        trace.final_bbox = Some(hit.bbox.clone());
+        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+        return Ok((Some(hit), trace));
     }
 
     // Pass 2 — OCR fallback on the active window.
+    //
+    // A1: Capture at native resolution (no cap_size, no JPEG encode) so OCR
+    //     sees clean pixels instead of the downscaled+compressed AI image.
+    let ocr_started = Instant::now();
     let exclude = capture::get_panel_rects();
-    let (jpeg, crop_rect, _hwnd) = match capture::capture_active_window_jpeg(80, &exclude) {
-        Ok(v) => v,
-        Err(_) => {
-            // If active-window capture fails (e.g. our own panel is
-            // foreground), fall back to the full primary monitor.
-            let bytes = capture::capture_primary_monitor_jpeg(80)?;
-            // Primary monitor rect at (0,0) — not strictly correct on
-            // multi-monitor, but good enough for the fallback of a fallback.
-            (
-                bytes,
-                Rect {
-                    x: 0,
-                    y: 0,
-                    width: 0,
-                    height: 0,
-                },
-                0usize,
-            )
+
+    let (ocr_bytes, crop_rect, img_w, img_h) =
+        match capture::capture_active_window_raw(&exclude) {
+            Ok((raw_img, rect, _hwnd)) => {
+                let (iw, ih) = (raw_img.width(), raw_img.height());
+                match capture::encode_png_for_ocr(&raw_img) {
+                    Ok(bytes) => (bytes, rect, iw, ih),
+                    Err(e) => {
+                        trace.final_decision = FinalDecision::Error { message: e.to_string() };
+                        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                        return Ok((None, trace));
+                    }
+                }
+            }
+            Err(_) => {
+                // Fallback: primary monitor via JPEG (panel is foreground or no app found).
+                let jpeg = match capture::capture_primary_monitor_jpeg(80) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        trace.final_decision = FinalDecision::Error { message: e.to_string() };
+                        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                        return Ok((None, trace));
+                    }
+                };
+                let (iw, ih) = image::load_from_memory(&jpeg)
+                    .map(|img| (img.width(), img.height()))
+                    .unwrap_or((0, 0));
+                (jpeg, Rect { x: 0, y: 0, width: 0, height: 0 }, iw, ih)
+            }
+        };
+
+    let results = match ocr::run_ocr(&ocr_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            trace.final_decision = FinalDecision::Error { message: e.to_string() };
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((None, trace));
         }
     };
+    let mut ocr_trace = OcrTrace {
+        ran: true,
+        line_count: results.iter().filter(|r| r.confidence >= 1.0).count(),
+        word_count: results.iter().filter(|r| r.confidence < 1.0).count(),
+        sample_texts: results.iter().take(30).map(|r| r.text.clone()).collect(),
+        ..Default::default()
+    };
 
-    // Decode dims from the JPEG so find_text's zone-filter gets correct
-    // screen_width/height (the OCR coords live in image space).
-    let (img_w, img_h) = image::load_from_memory(&jpeg)
-        .map(|img| (img.width(), img.height()))
-        .unwrap_or((0, 0));
-
-    let results = ocr::run_ocr(&jpeg)?;
     let find_opts = ocr::FindOptions {
         role: opts.role.as_deref(),
         nearby_text: opts.nearby_text.as_deref(),
@@ -72,14 +116,21 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<Option<LocateRe
         min_confidence: opts.min_confidence,
     };
 
-    let Some(hit) = ocr::find_text(target_text, &results, &find_opts) else {
-        return Ok(None);
+    let outcome = ocr::find_text(target_text, &results, &find_opts);
+    ocr_trace.candidates = outcome.candidates;
+    ocr_trace.strategy_used = outcome.strategy_used;
+    ocr_trace.elapsed_ms = ocr_started.elapsed().as_millis() as u32;
+    let Some(hit) = outcome.winner else {
+        trace.ocr = ocr_trace;
+        trace.final_decision = FinalDecision::Miss;
+        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+        return Ok((None, trace));
     };
 
     // Translate image-pixel coords back to virtual-desktop coords.
-    // The capture pipeline downscales to 1536×768 max before JPEG encode, so
-    // img_w/img_h may be smaller than crop_rect.width/height. Scale back up
-    // first, then add the crop origin.
+    // img_w/img_h are the OCR image dims (native or 2× upscaled).
+    // sx/sy converts OCR-space pixels back to native screen pixels, then the
+    // crop origin is added to get virtual-desktop absolute coordinates.
     let (sx, sy) = if img_w > 0 && img_h > 0 && crop_rect.width > 0 && crop_rect.height > 0 {
         (
             crop_rect.width  as f32 / img_w as f32,
@@ -95,10 +146,29 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<Option<LocateRe
         height: (hit.bbox.3 as f32 * sy).round() as u32,
     };
 
-    Ok(Some(LocateResult {
-        bbox,
+    // C5 — WindowFromPoint hit-test: reject if the leaf HWND under the bbox
+    // centre belongs to a non-interactive Win32 class (label, header, etc.).
+    let cx = bbox.x + (bbox.width as i32 / 2);
+    let cy = bbox.y + (bbox.height as i32 / 2);
+    match hit_test::verify_hit(cx, cy) {
+        HitTestOutcome::Rejected { leaf_class } => {
+            trace.ocr = ocr_trace;
+            trace.final_decision = FinalDecision::RejectedByHitTest { leaf_class };
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((None, trace));
+        }
+        HitTestOutcome::Pass | HitTestOutcome::WebRenderer => {}
+    }
+
+    let result = LocateResult {
+        bbox: bbox.clone(),
         name: hit.text.clone(),
         role: "Ocr".to_string(),
         confidence: hit.confidence,
-    }))
+    };
+    trace.ocr = ocr_trace;
+    trace.final_decision = FinalDecision::HitOcr;
+    trace.final_bbox = Some(bbox);
+    trace.elapsed_ms = started.elapsed().as_millis() as u32;
+    Ok((Some(result), trace))
 }

@@ -14,6 +14,7 @@
 //!   and search each one that belongs to a different process.
 //! - Reject elements with obviously bogus coordinates (|x|,|y| > 10 000 px).
 
+use super::trace::{A11yCandidate, A11yTrace};
 use super::LocateResult;
 use crate::capture::Rect;
 use anyhow::{anyhow, Context, Result};
@@ -177,28 +178,36 @@ fn element_to_result(el: &UIElement) -> Option<LocateResult> {
 }
 
 /// Public entry point. Returns the first element whose accessible name
-/// satisfies the anchored regex and whose role matches (when specified).
+/// satisfies the anchored regex and whose role matches (when specified),
+/// plus a trace recording every candidate considered.
 ///
 /// `timeout_ms` caps both the UIA matcher's internal timeout and the
 /// manual-walk fallback.
 pub fn find_element(
     target_text: &str,
     opts: &super::orchestrator::LocateOptions,
-) -> Result<Option<LocateResult>> {
+) -> Result<(Option<LocateResult>, A11yTrace)> {
+    let mut trace = A11yTrace {
+        ran: true,
+        ..Default::default()
+    };
+
     if target_text.trim().is_empty() {
-        return Ok(None);
+        return Ok((None, trace));
     }
 
+    let started = Instant::now();
     let timeout_ms = if opts.a11y_timeout_ms == 0 { 150 } else { opts.a11y_timeout_ms };
     let automation = UIAutomation::new().map_err(|e| anyhow!("UIAutomation init: {e}"))?;
     let name_re = Arc::new(build_name_regex(target_text)?);
+    trace.regex_used = name_re.as_str().to_string();
     let target_norm_len = norm_dashes(target_text).chars().count();
     let desired_ct = opts.role.as_deref().and_then(role_to_control_type);
 
     // Decide which top-level window(s) to search.
     let (fg_hwnd, fg_pid) = foreground_pid();
     let our_pid = own_pid();
-    
+
     // Compute window rect for zone scoring
     let mut win_rect = RECT::default();
     if !fg_hwnd.0.is_null() {
@@ -220,9 +229,11 @@ pub fn find_element(
             .filter_map(|h| automation.element_from_handle(h.into()).ok())
             .collect()
     };
+    trace.search_roots_count = search_roots.len();
 
     if search_roots.is_empty() {
-        return Ok(None);
+        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+        return Ok((None, trace));
     }
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -232,16 +243,17 @@ pub fn find_element(
 
     for root in &search_roots {
         if Instant::now() > deadline {
+            trace.timed_out = true;
             break;
         }
         // Pass 1
         candidates.extend(match_in_subtree_all(&automation, root, &name_re, desired_ct, per_root_ms)?);
-        if Instant::now() > deadline { break; }
+        if Instant::now() > deadline { trace.timed_out = true; break; }
         // Pass 2
         if desired_ct.is_some() {
             candidates.extend(match_in_subtree_all(&automation, root, &name_re, None, per_root_ms)?);
         }
-        if Instant::now() > deadline { break; }
+        if Instant::now() > deadline { trace.timed_out = true; break; }
         // Pass 3
         candidates.extend(manual_walk_all(
             root,
@@ -253,7 +265,8 @@ pub fn find_element(
     }
 
     if candidates.is_empty() {
-        return Ok(None);
+        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+        return Ok((None, trace));
     }
 
     // Sort by grid proximity if zone is provided
@@ -276,7 +289,27 @@ pub fn find_element(
         });
     }
 
-    Ok(candidates.into_iter().next())
+    // Record candidates in the trace. The first one is selected; the rest
+    // are listed as "lower zone proximity" or "duplicate match" so the
+    // debug drawer can show why they weren't chosen.
+    for (i, c) in candidates.iter().enumerate() {
+        trace.candidates.push(A11yCandidate {
+            name: c.name.clone(),
+            role: c.role.clone(),
+            bbox: (c.bbox.x, c.bbox.y, c.bbox.width, c.bbox.height),
+            selected: i == 0,
+            reject_reason: if i == 0 {
+                None
+            } else if opts.zone.is_some() {
+                Some("not closest to zone".to_string())
+            } else {
+                Some("not first match".to_string())
+            },
+        });
+    }
+
+    trace.elapsed_ms = started.elapsed().as_millis() as u32;
+    Ok((candidates.into_iter().next(), trace))
 }
 
 fn match_in_subtree_all(

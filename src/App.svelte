@@ -31,6 +31,7 @@
     error: string | null;
     grid_cell: string | null;
     debug_screenshot_path: string | null;
+    locate_trace: LocateTrace | null;
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "consent_prompt" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
@@ -62,6 +63,62 @@
     grid_test_enabled: boolean;
     debug_screenshot_enabled: boolean;
     debug_show_response_info: boolean;
+    debug_locate_trace_enabled: boolean;
+    debug_locate_log_file_enabled: boolean;
+  };
+
+  // ---- Locator trace types (mirror src-tauri/src/locator/trace.rs) ----
+  type A11yCandidate = {
+    name: string;
+    role: string;
+    bbox: [number, number, number, number];
+    selected: boolean;
+    reject_reason: string | null;
+  };
+  type A11yTrace = {
+    ran: boolean;
+    regex_used: string;
+    search_roots_count: number;
+    candidates: A11yCandidate[];
+    timed_out: boolean;
+    elapsed_ms: number;
+  };
+  type OcrCandidate = {
+    text: string;
+    bbox: [number, number, number, number];
+    confidence: number;
+    strategy: string;
+    score: number | null;
+    selected: boolean;
+    reject_reason: string | null;
+  };
+  type OcrTrace = {
+    ran: boolean;
+    line_count: number;
+    word_count: number;
+    sample_texts: string[];
+    strategy_used: string | null;
+    tier_reached: number;
+    candidates: OcrCandidate[];
+    elapsed_ms: number;
+  };
+  type FinalDecision =
+    | { kind: "miss" }
+    | { kind: "hit_a11y" }
+    | { kind: "hit_ocr" }
+    | { kind: "rejected_by_hit_test"; leaf_class: string }
+    | { kind: "error"; message: string };
+  type LocateTrace = {
+    timestamp_ms: number;
+    target_text: string;
+    target_role: string | null;
+    nearby_text: string | null;
+    grid_cell: [number, number] | null;
+    a11y: A11yTrace;
+    ocr: OcrTrace;
+    final_decision: FinalDecision;
+    final_bbox: { x: number; y: number; width: number; height: number } | null;
+    elapsed_ms: number;
   };
 
   // Core state
@@ -73,6 +130,8 @@
   let stepIndex = $state(0);
   let currentInstruction = $state("");
   let locateResult = $state<LocateResult | null>(null);
+  let locateTrace = $state<LocateTrace | null>(null);
+  let debugDrawerOpen = $state(false);
   let sessionId = $state("");
   let provider = $state("");
   let gridCell = $state<string | null>(null);
@@ -85,6 +144,15 @@
   // Managed provider (S.1) state
   let freeRemaining = $state<number | null>(null);
   let showTrialExhausted = $state(false);
+
+  // Phase 0.2: which app is currently shared with the AI.
+  type SharedAppInfo = {
+    hwnd: number;
+    rect: { x: number; y: number; width: number; height: number };
+    app_name: string;
+    exe_name: string;
+  };
+  let sharedApp = $state<SharedAppInfo | null>(null);
 
   // UI state
   let iconMode = $state(false);
@@ -108,6 +176,8 @@
     grid_test_enabled: false,
     debug_screenshot_enabled: false,
     debug_show_response_info: false,
+    debug_locate_trace_enabled: false,
+    debug_locate_log_file_enabled: false,
   };
   let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
   let settingsSaving = $state(false);
@@ -155,6 +225,36 @@
 
   // Whether the global auto-advance setting is on (loaded from config on mount).
   let autoAdvanceEnabled = $state(false);
+
+  // Autopilot on-demand polling.
+  let screenChangeDebounce = 0;
+  let autopilotInterval: ReturnType<typeof setInterval> | null = null;
+
+  function startAutopilotPolling() {
+    if (autopilotInterval !== null) return;
+    autopilotInterval = setInterval(async () => {
+      if (!autoAdvanceEnabled) return;
+      try {
+        const res = await invoke<{ changed: boolean }>("check_screen_changed");
+        if (!res.changed) return;
+        if (phase !== "guiding") return;
+        const now = Date.now();
+        if (now - screenChangeDebounce < 5000) return;
+        const currentStep = steps[stepIndex];
+        if (!currentStep) return;
+        screenChangeDebounce = now;
+        addToHistory("system", "Screen changed — checking next step…");
+        nextStep();
+      } catch (_) {}
+    }, 500);
+  }
+
+  function stopAutopilotPolling() {
+    if (autopilotInterval !== null) {
+      clearInterval(autopilotInterval);
+      autopilotInterval = null;
+    }
+  }
 
   function toggleMute() {
     isMuted = !isMuted;
@@ -335,6 +435,7 @@
       await invoke("save_settings", { payload: settingsForm });
       provider = settingsForm.api_provider;
       autoAdvanceEnabled = settingsForm.auto_advance;
+      if (autoAdvanceEnabled) startAutopilotPolling(); else stopAutopilotPolling();
       isMuted = !settingsForm.tts_enabled;
       debugShowInfo = settingsForm.debug_show_response_info;
       const hkErrors = await registerShortcuts(settingsForm);
@@ -358,6 +459,7 @@
     stepIndex = 0;
     currentInstruction = "";
     locateResult = null;
+    locateTrace = null;
     sessionId = "";
     history = [];
     await addToHistory("system", "New session started");
@@ -369,6 +471,7 @@
     stepIndex = idx;
     currentInstruction = stripGridRef(res.instruction);
     locateResult = res.located;
+    locateTrace = res.locate_trace;
     sessionId = res.session_id;
     gridCell = res.grid_cell ?? null;
     if (res.provider) provider = res.provider;
@@ -588,27 +691,19 @@
       }
     });
 
-    // E.3 — Screen change detection + auto-advance.
-    // Guards:
-    //   - Must be in "guiding" phase (not thinking / idle / error)
-    //   - Must NOT be paused (user clicked Pause)
-    //   - 5s debounce prevents rapid-fire AI calls
-    let screenChangeDebounce = 0;
-    listen<{ distance: number }>("screen_changed", (_event) => {
-      const now = Date.now();
-      // Hard debounce: ignore events that arrive within 5s of the last auto-advance.
-      if (now - screenChangeDebounce < 5000) return;
-      // Only act when actively guiding and not already processing.
-      if (phase !== "guiding") return;
-      // Respect the global auto-advance setting.
-      if (!autoAdvanceEnabled) return;
-      screenChangeDebounce = now;
-
-      const currentStep = steps[stepIndex];
-      if (!currentStep) return;
-      addToHistory("system", "Screen changed — checking next step…");
-      nextStep();
+    // Phase 0.2: keep the "Shared: <App>" header chip in sync with whatever
+    // window the backend is capturing.
+    listen<SharedAppInfo>("app_changed", (event) => {
+      sharedApp = event.payload;
     });
+    try {
+      const initial = await invoke<SharedAppInfo | null>("get_shared_app_info");
+      if (initial) sharedApp = initial;
+    } catch (_) {}
+
+    // E.3 — Autopilot: on-demand screen-change polling.
+    // Functions are defined at module level; start now if already enabled.
+    if (autoAdvanceEnabled) startAutopilotPolling();
 
     await registerShortcuts(initHotkeys);
 
@@ -644,6 +739,7 @@
   });
 
   onDestroy(async () => {
+    stopAutopilotPolling();
     await unregisterAll().catch(() => {});
   });
 </script>
@@ -667,6 +763,12 @@
       <span class="header-title">Navisual</span>
       {#if headerLabel}
         <span class="header-provider">{headerLabel}</span>
+      {/if}
+      {#if sharedApp}
+        <span class="header-shared" title="Window currently shared with the AI">
+          <span class="header-shared-dot"></span>
+          {sharedApp.app_name}
+        </span>
       {/if}
       {#if settingsForm.api_provider === "managed" && freeRemaining !== null}
         <span class="header-balance" class:header-balance-low={freeRemaining <= 5}>{freeRemaining} left</span>
@@ -699,6 +801,106 @@
           {/if}
         </div>
         <p class="latest-text">{stripGridRef(currentInstruction)}</p>
+
+        <!-- D6: subtle miss note — only when a target was expected but not found -->
+        {#if !locateResult && steps[stepIndex]?.target_text && phase === "guiding"}
+          <p class="miss-note">⊘ Pointer unavailable — follow the instruction above</p>
+        {/if}
+
+        <!-- Phase 0.1: locate-trace debug drawer -->
+        {#if settingsForm.debug_locate_trace_enabled && locateTrace}
+          <div class="debug-drawer">
+            <button class="debug-toggle" onclick={() => (debugDrawerOpen = !debugDrawerOpen)}>
+              {debugDrawerOpen ? "▾" : "▸"} Debug · {locateTrace.final_decision.kind} · {locateTrace.elapsed_ms} ms
+            </button>
+            {#if debugDrawerOpen}
+              <div class="debug-body">
+                <div class="debug-row">
+                  <span class="debug-key">target</span>
+                  <span class="debug-val">"{locateTrace.target_text}"</span>
+                </div>
+                {#if locateTrace.target_role}
+                  <div class="debug-row">
+                    <span class="debug-key">role</span>
+                    <span class="debug-val">{locateTrace.target_role}</span>
+                  </div>
+                {/if}
+                {#if locateTrace.nearby_text}
+                  <div class="debug-row">
+                    <span class="debug-key">nearby</span>
+                    <span class="debug-val">"{locateTrace.nearby_text}"</span>
+                  </div>
+                {/if}
+                {#if locateTrace.grid_cell}
+                  <div class="debug-row">
+                    <span class="debug-key">grid_cell</span>
+                    <span class="debug-val">col {locateTrace.grid_cell[0] + 1}, row {String.fromCharCode(65 + locateTrace.grid_cell[1])}</span>
+                  </div>
+                {/if}
+
+                <!-- A11y section -->
+                <div class="debug-section">
+                  <div class="debug-section-head">
+                    A11y · {locateTrace.a11y.candidates.length} candidate{locateTrace.a11y.candidates.length === 1 ? "" : "s"}
+                    {#if locateTrace.a11y.timed_out} · timed out{/if}
+                    · {locateTrace.a11y.elapsed_ms} ms
+                  </div>
+                  {#if locateTrace.a11y.regex_used}
+                    <div class="debug-mono">{locateTrace.a11y.regex_used}</div>
+                  {/if}
+                  {#each locateTrace.a11y.candidates as c}
+                    <div class="debug-cand {c.selected ? 'cand-selected' : 'cand-rejected'}">
+                      <span class="cand-mark">{c.selected ? "✔" : "·"}</span>
+                      <span class="cand-text">"{c.name}"</span>
+                      <span class="cand-meta">{c.role}</span>
+                      {#if c.reject_reason}<span class="cand-reason">— {c.reject_reason}</span>{/if}
+                    </div>
+                  {/each}
+                </div>
+
+                <!-- OCR section -->
+                {#if locateTrace.ocr.ran}
+                  <div class="debug-section">
+                    <div class="debug-section-head">
+                      OCR · {locateTrace.ocr.line_count} line{locateTrace.ocr.line_count === 1 ? "" : "s"}, {locateTrace.ocr.word_count} word{locateTrace.ocr.word_count === 1 ? "" : "s"}
+                      {#if locateTrace.ocr.strategy_used} · {locateTrace.ocr.strategy_used}{/if}
+                      · {locateTrace.ocr.elapsed_ms} ms
+                    </div>
+                    {#each locateTrace.ocr.candidates as c}
+                      <div class="debug-cand {c.selected ? 'cand-selected' : 'cand-rejected'}">
+                        <span class="cand-mark">{c.selected ? "✔" : "·"}</span>
+                        <span class="cand-text">"{c.text}"</span>
+                        <span class="cand-meta">{c.strategy}{c.score !== null ? ` ${(c.score * 100).toFixed(0)}%` : ""}</span>
+                        {#if c.reject_reason}<span class="cand-reason">— {c.reject_reason}</span>{/if}
+                      </div>
+                    {/each}
+                    {#if locateTrace.ocr.sample_texts.length > 0}
+                      <details class="debug-samples">
+                        <summary>OCR sample ({locateTrace.ocr.sample_texts.length} of first 30)</summary>
+                        <ul>
+                          {#each locateTrace.ocr.sample_texts as s}
+                            <li>"{s}"</li>
+                          {/each}
+                        </ul>
+                      </details>
+                    {/if}
+                  </div>
+                {/if}
+
+                <!-- C5 hit-test rejection detail -->
+                {#if locateTrace.final_decision.kind === "rejected_by_hit_test"}
+                  <div class="debug-section">
+                    <div class="debug-section-head" style="color: #f59e0b">⊘ C5 hit-test rejected</div>
+                    <div class="debug-row">
+                      <span class="debug-key">leaf class</span>
+                      <span class="debug-val">{locateTrace.final_decision.leaf_class}</span>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
       </section>
     {/if}
 
@@ -797,6 +999,7 @@
           autoAdvanceEnabled = !autoAdvanceEnabled;
           settingsForm = { ...settingsForm, auto_advance: autoAdvanceEnabled };
           invoke("save_settings", { payload: settingsForm }).catch(() => {});
+          if (autoAdvanceEnabled) startAutopilotPolling(); else stopAutopilotPolling();
         }}
         title={autoAdvanceEnabled ? "Autopilot on — click to turn off" : "Autopilot off — click to turn on"}>
         {autoAdvanceEnabled ? "⏸ Autopilot" : "✈ Autopilot"}
@@ -1092,6 +1295,18 @@
                 <span>Draw 16×9 grid on screenshots and show AI cell label in response</span>
               </label>
             </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">Locate diagnostics</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.debug_locate_trace_enabled} />
+                <span>Show locate trace drawer in panel after each step</span>
+              </label>
+              <label class="toggle-row" style="margin-top:6px">
+                <input type="checkbox" bind:checked={settingsForm.debug_locate_log_file_enabled} />
+                <span>Append every locate to locate_log.jsonl</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\locate_log.jsonl</p>
+            </div>
 
           {:else}
             <!-- Audio tab -->
@@ -1274,6 +1489,38 @@
     border-radius: 4px;
   }
 
+  /* Phase 0.2: "Shared: <App>" indicator chip. */
+  .header-shared {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--accent, #ff6b35);
+    background: rgba(255, 107, 53, 0.10);
+    border: 1px solid rgba(255, 107, 53, 0.35);
+    padding: 1px 6px;
+    border-radius: 4px;
+    flex-shrink: 1;
+    min-width: 0;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: default;
+  }
+  .header-shared-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent, #ff6b35);
+    flex-shrink: 0;
+    animation: shared-pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes shared-pulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 1.0; }
+  }
+
   .header-actions {
     margin-left: auto;
     display: flex;
@@ -1334,6 +1581,85 @@
     color: var(--text-primary);
     margin: 0;
   }
+
+  .miss-note {
+    font-size: 11px;
+    color: var(--text-muted, #6b7280);
+    margin: 4px 0 0;
+  }
+
+  /* ── Debug drawer (Phase 0.1) ────────────────────── */
+
+  .debug-drawer {
+    margin-top: 8px;
+    border-top: 1px dashed rgba(255, 255, 255, 0.1);
+    padding-top: 6px;
+  }
+  .debug-toggle {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font: 11px ui-monospace, monospace;
+    padding: 2px 0;
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+  }
+  .debug-toggle:hover { color: var(--text-primary); }
+  .debug-body {
+    margin-top: 4px;
+    font: 11px ui-monospace, monospace;
+    color: var(--text-primary);
+  }
+  .debug-row {
+    display: flex;
+    gap: 6px;
+    line-height: 1.5;
+  }
+  .debug-key {
+    color: var(--text-muted);
+    min-width: 64px;
+  }
+  .debug-val { color: var(--text-primary); word-break: break-all; }
+  .debug-section {
+    margin-top: 6px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .debug-section-head {
+    color: var(--accent, #ff6b35);
+    font-weight: 600;
+    margin-bottom: 3px;
+  }
+  .debug-mono {
+    color: var(--text-muted);
+    font-size: 10px;
+    margin-bottom: 4px;
+    word-break: break-all;
+  }
+  .debug-cand {
+    display: flex;
+    gap: 4px;
+    line-height: 1.45;
+    flex-wrap: wrap;
+  }
+  .cand-selected { color: #67e480; }
+  .cand-rejected { color: var(--text-muted); }
+  .cand-mark { width: 10px; flex-shrink: 0; }
+  .cand-text { flex-shrink: 0; }
+  .cand-meta { color: var(--text-muted); }
+  .cand-reason { color: var(--text-muted); font-style: italic; }
+  .debug-samples {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 10px;
+  }
+  .debug-samples ul {
+    margin: 4px 0 0 12px;
+    padding: 0;
+    list-style: disc;
+  }
+  .debug-samples li { line-height: 1.4; }
 
   /* ── History ─────────────────────────────────────── */
 

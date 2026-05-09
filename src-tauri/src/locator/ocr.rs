@@ -15,6 +15,8 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 // `IAsyncOperation<T>::join()` is exposed directly (via windows_future::join).
 
+use super::trace::OcrCandidate;
+
 /// A single OCR detection — line-level or word-level.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OcrResult {
@@ -163,16 +165,17 @@ pub fn run_ocr(image_bytes: &[u8]) -> Result<Vec<OcrResult>> {
 
 // ---------- `find_text` matcher ----------
 //
-// Port of `legacy/src/locator/ocr_engine.py::OCREngine.find_text`, preserving:
-// - Exact-match strategy with role-aware size preference.
-// - Substring match with MIN_SUBSTR_LEN guard.
-// - Fuzzy SequenceMatcher fallback (> 0.7 ratio).
-// - Leading/trailing punctuation strip (curly quotes, apostrophes).
-// - 4%-screen-height button cap (reject headings), MAX_LABEL_LEN=60.
-// - Optional nearby_text anchor + 16×9 zone filter.
+// Three strategies in priority order:
+// 1. Exact match (punctuation-stripped, case-insensitive).
+// 2. Word-boundary substring (G2): target or OCR token must sit at \b..\b
+//    within the other string. Any length allowed — short labels ("OK", "Save")
+//    now work; bare prefix matches ("Insert" in "InsertedText") are rejected.
+// 3. Fuzzy SequenceMatcher fallback (> 0.85 ratio).
+//
+// Supporting: 4%-height button cap, MAX_LABEL_LEN=60, nearby_text anchor,
+// 16×9 zone filter, role-aware size preference.
 
 const MAX_LABEL_LEN: usize = 60;
-const MIN_SUBSTR_LEN: usize = 8;
 
 fn strip_punct(s: &str) -> String {
     let start = s
@@ -213,15 +216,24 @@ pub struct FindOptions<'a> {
     pub min_confidence: f32,
 }
 
+/// Output of `find_text` — the matched OcrResult plus debug info.
+#[derive(Debug, Clone, Default)]
+pub struct FindOutcome<'a> {
+    pub winner: Option<&'a OcrResult>,
+    pub strategy_used: Option<String>,
+    pub candidates: Vec<OcrCandidate>,
+}
+
 /// Find the best match for `target_text` in `results`. Returns the winning
-/// OcrResult or None.
+/// OcrResult plus a list of candidates considered for debug tracing.
 pub fn find_text<'a>(
     target_text: &str,
     results: &'a [OcrResult],
     opts: &FindOptions<'_>,
-) -> Option<&'a OcrResult> {
+) -> FindOutcome<'a> {
+    let mut outcome = FindOutcome::default();
     if target_text.is_empty() || results.is_empty() {
-        return None;
+        return outcome;
     }
     let target_lower = target_text.trim().to_ascii_lowercase();
 
@@ -332,18 +344,53 @@ pub fn find_text<'a>(
         Some(pool[0])
     };
 
+    let make_candidate = |r: &OcrResult, strategy: &str, score: Option<f32>, selected: bool, reject: Option<&str>| OcrCandidate {
+        text: r.text.clone(),
+        bbox: r.bbox,
+        confidence: r.confidence,
+        strategy: strategy.to_string(),
+        score,
+        selected,
+        reject_reason: reject.map(|s| s.to_string()),
+    };
+
     // Strategy 1: exact match (case-insensitive, punctuation-stripped).
     let exact: Vec<&OcrResult> = candidates
         .iter()
         .copied()
         .filter(|r| strip_punct(&r.text).to_ascii_lowercase() == target_lower)
         .collect();
-    if let Some(r) = pick_best(&exact) {
-        return Some(r);
+    if let Some(winner) = pick_best(&exact) {
+        for r in &exact {
+            outcome.candidates.push(make_candidate(
+                r,
+                "exact",
+                None,
+                std::ptr::eq(*r, winner),
+                if std::ptr::eq(*r, winner) { None } else { Some("not preferred size") },
+            ));
+        }
+        outcome.strategy_used = Some("exact".to_string());
+        outcome.winner = Some(winner);
+        return outcome;
     }
 
-    // Strategy 2: substring match (either direction). Protect against short
-    // OCR tokens ("in", "for") matching as substrings of the target.
+    // Strategy 2: word-boundary substring match (G2).
+    //
+    // Direction A — OCR token is a whole word within the target text:
+    //   `\b<rc>\b` must match inside target_lower.
+    //   Minimum 2 chars to suppress single-letter OCR noise.
+    //   Example: OCR "Source" found inside target "Source Control".
+    //
+    // Direction B — target is a whole word within the OCR line:
+    //   Pre-compiled `\b<target>\b` must match inside the OCR text.
+    //   Example: target "Message" found inside OCR "Message (Ctrl+Enter to commit...)".
+    //   Also correctly rejects: "Insert" in "InsertedText" (no boundary after "t").
+    //   Note: "Insert" still matches "Insert Space" (space IS a boundary) — the
+    //   exact-match strategy wins first when both words appear in the OCR pool.
+    let target_wb_re = regex::Regex::new(
+        &format!(r"(?i)\b{}\b", regex::escape(&target_lower))
+    ).ok();
     let substr: Vec<&OcrResult> = candidates
         .iter()
         .copied()
@@ -352,46 +399,105 @@ pub fn find_text<'a>(
             if rc.is_empty() {
                 return false;
             }
-            // Target contains OCR text (OCR is a substring of target)
-            let target_contains_rc = target_lower.contains(&rc) && rc.chars().count() >= MIN_SUBSTR_LEN;
-            // OCR text contains target
-            let rc_contains_target = if rc.contains(&target_lower) {
-                if target_lower.chars().count() >= 4 {
-                    true
-                } else {
-                    // If target is very short (e.g. "no"), require it to be a distinct word
-                    // so it doesn't match "notice".
-                    let is_word = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&target_lower)))
-                        .map(|re| re.is_match(&rc))
-                        .unwrap_or(false);
-                    is_word
-                }
-            } else {
-                false
+            // Direction A: OCR token as whole word inside target.
+            let target_contains_rc = rc.chars().count() >= 2 && {
+                regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&rc)))
+                    .map(|re| re.is_match(&target_lower))
+                    .unwrap_or(false)
             };
+            // Direction B: target as whole word inside OCR line.
+            let rc_contains_target = target_wb_re
+                .as_ref()
+                .map(|re| re.is_match(&rc))
+                .unwrap_or(false);
             target_contains_rc || rc_contains_target
         })
         .collect();
-    if let Some(r) = pick_best(&substr) {
-        return Some(r);
+    if let Some(winner) = pick_best(&substr) {
+        for r in &substr {
+            outcome.candidates.push(make_candidate(
+                r,
+                "substring",
+                None,
+                std::ptr::eq(*r, winner),
+                if std::ptr::eq(*r, winner) { None } else { Some("not preferred size") },
+            ));
+        }
+        outcome.strategy_used = Some("substring".to_string());
+        outcome.winner = Some(winner);
+        return outcome;
     }
 
-    // Strategy 3: fuzzy SequenceMatcher > 0.85.
-    // 0.7 was too loose — "Status" matched "Startup" at 0.77.
-    let mut best: Option<&OcrResult> = None;
-    let mut best_ratio = 0.85f32;
-    for r in &candidates {
-        let rc = strip_punct(&r.text).to_ascii_lowercase();
-        if rc.is_empty() {
+    // Strategy 3: fuzzy cascade (D2) — three tiers with relaxed thresholds.
+    //
+    // Scores are computed once from the already-held OCR results (no recapture).
+    // Each tier re-filters the scored pool; the first tier that yields a winner
+    // stops the cascade.
+    //
+    // Tier 1 (fuzzy-t1): ≥ 0.85 — same strict bar as before.
+    // Tier 2 (fuzzy-t2): ≥ 0.75 — catches OCR misreads ("Commit ✓", glyph noise).
+    // Tier 3 (fuzzy-t3): ≥ 0.65 — last resort; role-size preference is dropped,
+    //                    highest scorer wins directly.
+    const FUZZY_TIERS: &[(f32, &str)] = &[
+        (0.85, "fuzzy-t1"),
+        (0.75, "fuzzy-t2"),
+        (0.65, "fuzzy-t3"),
+    ];
+
+    // Score every candidate once, sorted best-first.
+    let mut scored: Vec<(&OcrResult, f32)> = candidates
+        .iter()
+        .map(|r| {
+            let rc = strip_punct(&r.text).to_ascii_lowercase();
+            let ratio = if rc.is_empty() { 0.0 } else { sequence_ratio(&target_lower, &rc) };
+            (*r, ratio)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut winner: Option<&OcrResult> = None;
+    let mut winning_tier: &str = "";
+
+    'tiers: for &(threshold, label) in FUZZY_TIERS {
+        let pool: Vec<&OcrResult> = scored
+            .iter()
+            .filter(|(_, s)| *s >= threshold)
+            .map(|(r, _)| *r)
+            .collect();
+        if pool.is_empty() {
             continue;
         }
-        let ratio = sequence_ratio(&target_lower, &rc);
-        if ratio > best_ratio {
-            best_ratio = ratio;
-            best = Some(*r);
+        // Tier 3 ignores role-size preference — take the highest scorer directly.
+        let chosen = if label == "fuzzy-t3" {
+            pool.into_iter().next()
+        } else {
+            pick_best(&pool)
+        };
+        if let Some(w) = chosen {
+            winner = Some(w);
+            winning_tier = label;
+            break 'tiers;
         }
     }
-    best
+
+    // Record top-5 for the debug drawer with the resolved tier label.
+    let tier_label = if winning_tier.is_empty() { "fuzzy" } else { winning_tier };
+    for (r, score) in scored.iter().take(5) {
+        let selected = winner.map(|w| std::ptr::eq(*r, w)).unwrap_or(false);
+        let reject = if selected {
+            None
+        } else if *score < 0.65 {
+            Some("score below 0.65")
+        } else {
+            Some("not chosen")
+        };
+        outcome.candidates.push(make_candidate(r, tier_label, Some(*score), selected, reject));
+    }
+    if winner.is_some() {
+        outcome.strategy_used = Some(winning_tier.to_string());
+    }
+    outcome.winner = winner;
+    outcome
 }
 
 fn proximity_sq(r: &OcrResult, ax: f32, ay: f32) -> f32 {

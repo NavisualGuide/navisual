@@ -69,6 +69,10 @@ pub struct Config {
     pub grid_test_enabled: bool,
     pub debug_screenshot_enabled: bool,
     pub debug_show_response_info: bool,
+    /// Render the locator-trace drawer in the panel (Phase 0.1).
+    pub debug_locate_trace_enabled: bool,
+    /// Append every locate trace to %APPDATA%\com.navisual.app\locate_log.jsonl.
+    pub debug_locate_log_file_enabled: bool,
 }
 
 impl Default for Config {
@@ -111,6 +115,8 @@ impl Default for Config {
             grid_test_enabled: false,
             debug_screenshot_enabled: false,
             debug_show_response_info: false,
+            debug_locate_trace_enabled: false,
+            debug_locate_log_file_enabled: false,
         }
     }
 }
@@ -162,6 +168,8 @@ impl Config {
         if let Ok(v) = env::var("GRID_TEST_ENABLED") { config.grid_test_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_SCREENSHOT_ENABLED") { config.debug_screenshot_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_SHOW_RESPONSE_INFO") { config.debug_show_response_info = v == "true" || v == "1"; }
+        if let Ok(v) = env::var("DEBUG_LOCATE_TRACE_ENABLED") { config.debug_locate_trace_enabled = v == "true" || v == "1"; }
+        if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") { config.debug_locate_log_file_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("MANAGED_PROVIDER") { config.managed_provider = v; }
         if let Ok(v) = env::var("MANAGED_TOKEN_CAP") { 
             if let Ok(n) = v.parse() { config.managed_token_cap = n; }

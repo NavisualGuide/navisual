@@ -21,7 +21,7 @@ use crate::capture::Rect;
 /// An overlay command. Mirrors the v0.3 Python `overlay.py` primitives so
 /// the Svelte canvas renderer can match it one-for-one.
 #[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum OverlayKind {
     /// Arrow pointing at bbox from the nearest panel edge.
     Arrow,
@@ -29,6 +29,9 @@ pub enum OverlayKind {
     Box,
     /// Subtitle strip along the bottom of the active screen.
     Subtitle,
+    /// Phase 0.2: outline the captured app's window with a flash + fade
+    /// animation so the user can see exactly what's being shared.
+    AppBoundary,
     /// No draw — clears the overlay.
     None,
 }

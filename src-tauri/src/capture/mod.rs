@@ -87,6 +87,48 @@ pub fn capture_virtual_desktop_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Ve
     }
 }
 
+/// Capture the active foreground window as a raw RGBA ImageBuffer (no JPEG encode,
+/// no downscale cap). Used by the OCR path so it sees native-resolution pixels.
+///
+/// Returns (raw_image, window rect in physical pixels, raw HWND as usize).
+pub fn capture_active_window_raw(exclude: &[Rect]) -> Result<(ImageBuffer<Rgba<u8>, Vec<u8>>, Rect, usize)> {
+    #[cfg(windows)]
+    {
+        let (hwnd, rect) = win::get_foreground_target()
+            .ok_or_else(|| anyhow!("no foreground window found"))?;
+        let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_rects(&mut img, &rect, exclude);
+        return Ok((img, rect, hwnd.0 as usize));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = exclude;
+        Err(anyhow!("raw capture only implemented for Windows"))
+    }
+}
+
+/// Encode a raw RGBA image as lossless PNG for OCR consumption.
+///
+/// RGB channels are preserved exactly; alpha is dropped (OCR doesn't need it).
+/// Uses default PNG compression (level 6) — correct and reasonably fast for
+/// the sizes we handle (typically ≤ 1920×1080 before any upscale).
+pub fn encode_png_for_ocr(img: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> Result<Vec<u8>> {
+    use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
+    let (w, h) = (img.width(), img.height());
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for px in img.pixels() {
+        rgb.push(px[0]);
+        rgb.push(px[1]);
+        rgb.push(px[2]);
+    }
+    let mut out = Vec::new();
+    PngEncoder::new(&mut out)
+        .write_image(&rgb, w, h, ColorType::Rgb8.into())
+        .context("png encode for ocr")?;
+    Ok(out)
+}
+
 /// Re-capture a previously discovered window by its stored raw HWND.
 /// Validates the window is still alive and not minimised before capturing.
 /// Returns an error if the window is gone — caller should then call
@@ -123,6 +165,31 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
         String::from("Window info only available on Windows")
     }
 }
+
+/// Phase 0.2: structured info about the active capture target (used for the
+/// "Shared: <App>" indicator). Returns `None` if no plausible target.
+#[cfg(windows)]
+pub fn get_active_window_info() -> Option<win::ActiveWindowInfo> {
+    win::get_active_window_info()
+}
+
+#[cfg(not(windows))]
+pub fn get_active_window_info() -> Option<()> {
+    None
+}
+
+/// Phase 0.2: structured info about a specific HWND (cheaper than walking
+/// foreground when the capture path already knows the HWND).
+#[cfg(windows)]
+pub fn get_window_info_for_hwnd(hwnd_raw: usize) -> Option<win::ActiveWindowInfo> {
+    win::get_window_info_for_hwnd(hwnd_raw)
+}
+
+#[cfg(not(windows))]
+pub fn get_window_info_for_hwnd(_hwnd_raw: usize) -> Option<()> {
+    None
+}
+
 
 /// Downscale `img` to fit within MAX_CAP_W × MAX_CAP_H, preserving aspect ratio.
 /// Returns the original unchanged if already within bounds.

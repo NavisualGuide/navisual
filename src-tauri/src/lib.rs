@@ -7,7 +7,6 @@ mod overlay;
 mod ai;
 mod tts;
 mod track;
-mod screen_watcher;
 mod server;
 
 use ai::router::AiRouter;
@@ -61,8 +60,8 @@ struct AppState {
     env_path: PathBuf,
     /// Path to the Supabase session JSON file (managed provider only).
     supabase_session_path: PathBuf,
-    #[allow(dead_code)]
-    screen_watcher: screen_watcher::ScreenWatcher,
+    /// Previous aHash for Autopilot on-demand screen-change polling.
+    screen_hash: std::sync::Mutex<Option<u64>>,
 }
 
 /// Discard out-of-bounds grid cells before showing them as a badge.
@@ -94,8 +93,8 @@ fn execute_step(
     step: &GuidanceStep,
     tracker: &track::WindowTracker,
     last_overlay: &std::sync::Mutex<Option<(overlay::OverlayKind, Option<capture::Rect>, Option<String>)>>,
-) -> Result<Option<locator::LocateResult>, String> {
-    let located = if let Some(ref text) = step.target_text {
+) -> Result<(Option<locator::LocateResult>, Option<locator::trace::LocateTrace>), String> {
+    let (located, trace) = if let Some(ref text) = step.target_text {
         #[cfg(windows)]
         {
             let opts = locator::orchestrator::LocateOptions {
@@ -114,20 +113,20 @@ fn execute_step(
             };
             let text_owned = text.clone();
             match locator::orchestrator::locate(&text_owned, &opts) {
-                Ok(r) => r,
+                Ok((result, trace)) => (result, Some(trace)),
                 Err(e) => {
                     log::warn!("locate failed for {:?}: {e}", text);
-                    None
+                    (None, None)
                 }
             }
         }
         #[cfg(not(windows))]
         {
             let _ = text;
-            None
+            (None, None)
         }
     } else {
-        None
+        (None, None)
     };
 
     let kind = overlay_kind_for_step(&step.overlay_type);
@@ -162,8 +161,94 @@ fn execute_step(
         tracker.clear();
     }
 
-    Ok(located)
+    Ok((located, trace))
 }
+
+// ---------- Autopilot on-demand screen-change polling ----------
+
+const AUTOPILOT_CHANGE_THRESHOLD: u32 = 6;
+
+fn ahash_of_screen() -> Option<u64> {
+    let exclude = capture::get_panel_rects();
+    let (jpeg, _rect, _hwnd) = capture::capture_active_window_jpeg(30, &exclude).ok()?;
+    let img = image::load_from_memory(&jpeg).ok()?;
+    let thumb = image::imageops::resize(&img.to_luma8(), 8, 8, image::imageops::FilterType::Triangle);
+    let pixels: Vec<u8> = thumb.pixels().map(|p| p.0[0]).collect();
+    let mean: u64 = pixels.iter().map(|&v| v as u64).sum::<u64>() / pixels.len().max(1) as u64;
+    let mut hash: u64 = 0;
+    for (i, &v) in pixels.iter().enumerate() {
+        if (v as u64) > mean {
+            hash |= 1u64 << i;
+        }
+    }
+    Some(hash)
+}
+
+fn hamming64(a: u64, b: u64) -> u32 {
+    (a ^ b).count_ones()
+}
+
+/// Called by the frontend Autopilot polling loop every 500 ms.
+/// Captures the active window, computes aHash, compares to the last stored hash.
+/// Updates the stored hash unconditionally so the baseline stays current.
+/// Returns `changed=true` when Hamming distance exceeds threshold.
+#[tauri::command]
+async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let hash = ahash_of_screen();
+    let mut prev_opt = state.screen_hash.lock().unwrap();
+    let changed = match (hash, *prev_opt) {
+        (Some(h), Some(prev)) => hamming64(prev, h) >= AUTOPILOT_CHANGE_THRESHOLD,
+        _ => false,
+    };
+    if let Some(h) = hash {
+        *prev_opt = Some(h);
+    }
+    Ok(serde_json::json!({ "changed": changed }))
+}
+
+/// Optionally append a trace to the rolling JSONL log when enabled in settings.
+fn maybe_log_trace(app: &AppHandle, trace: &locator::trace::LocateTrace, log_enabled: bool) {
+    if !log_enabled {
+        return;
+    }
+    if let Ok(dir) = app.path().app_data_dir() {
+        let path = dir.join("locate_log.jsonl");
+        if let Err(e) = locator::trace::append_jsonl(&path, trace) {
+            log::warn!("locate_log.jsonl write failed: {e}");
+        }
+    }
+}
+
+/// Phase 0.2: emit the animated "shared app boundary" overlay and the
+/// `app_changed` event so the panel chip stays in sync with what's captured.
+#[cfg(windows)]
+fn announce_shared_app(app: &AppHandle, hwnd_raw: usize) {
+    let info = match capture::get_window_info_for_hwnd(hwnd_raw) {
+        Some(i) => i,
+        None => return,
+    };
+    let payload = SharedAppInfoPayload {
+        hwnd: info.hwnd as u64,
+        rect: info.rect.clone(),
+        app_name: info.app_name.clone(),
+        exe_name: info.exe_name.clone(),
+    };
+    let _ = app.emit("app_changed", &payload);
+
+    // Animated boundary box.
+    if let Ok(update) = overlay::make_update(
+        overlay::OverlayKind::AppBoundary,
+        Some(info.rect),
+        Some(info.app_name),
+    ) {
+        if let Err(e) = overlay::emit_update(app, update) {
+            log::debug!("app_boundary emit failed: {e}");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn announce_shared_app(_app: &AppHandle, _hwnd_raw: usize) {}
 
 #[derive(serde::Serialize)]
 struct GuideResponse {
@@ -181,6 +266,9 @@ struct GuideResponse {
     grid_cell: Option<String>,
     /// Path to the debug screenshot saved for this request (None when disabled).
     debug_screenshot_path: Option<String>,
+    /// Locator trace for the current step (Phase 0.1).
+    /// `None` when the step has no target_text or when the locator wasn't run.
+    locate_trace: Option<locator::trace::LocateTrace>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -196,6 +284,15 @@ struct GridOverlayPayload {
 #[derive(serde::Serialize, Clone)]
 struct StreamChunkPayload {
     delta: String,
+}
+
+/// Phase 0.2: payload for "Shared: <App>" header chip and `app_changed` event.
+#[derive(serde::Serialize, Clone)]
+struct SharedAppInfoPayload {
+    hwnd: u64,
+    rect: capture::Rect,
+    app_name: String,
+    exe_name: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -225,6 +322,8 @@ struct SettingsPayload {
     grid_test_enabled: bool,
     debug_screenshot_enabled: bool,
     debug_show_response_info: bool,
+    debug_locate_trace_enabled: bool,
+    debug_locate_log_file_enabled: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -310,6 +409,15 @@ async fn guide(
         .map(|p| p.join("debug"))
         .ok();
 
+    // Clear the previous step's pointer before capture — prevents it from
+    // appearing in the AI's screenshot. Stop the tracker first so it can't
+    // re-emit the old overlay during the 33 ms DWM composite wait.
+    state.tracker.clear();
+    if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
+        let _ = overlay::emit_update(&app, update);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(33)).await;
+
     let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>), ()> {
         let is_fs = full_screen.unwrap_or(false);
         let (bytes, rect_opt, hwnd_opt) = if is_fs {
@@ -393,9 +501,16 @@ async fn guide(
                 ),
                 grid_cell: None,
                 debug_screenshot_path: None,
+                locate_trace: None,
             });
         }
     };
+
+    // Phase 0.2 — flash the shared-app boundary so the user can see what
+    // we're capturing. Emits the `app_changed` event for the header chip too.
+    if let Some(hwnd_raw) = new_hwnd_opt {
+        announce_shared_app(&app, hwnd_raw);
+    }
 
     let mut router = state.ai_router.lock().await;
 
@@ -482,6 +597,7 @@ async fn guide(
                 }),
                 grid_cell: None,
                 debug_screenshot_path: None,
+                locate_trace: None,
             });
         }
     };
@@ -530,10 +646,14 @@ async fn guide(
             error: None,
             grid_cell: None,
             debug_screenshot_path,
+            locate_trace: None,
         });
     }
 
-    let located = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay).unwrap_or(None);
+    let log_trace = state.ai_router.lock().await.config.debug_locate_log_file_enabled;
+    let (located, locate_trace) = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay)
+        .unwrap_or((None, None));
+    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
     let grid_cell = valid_grid_cell(steps.get(0).and_then(|s| s.grid_cell.clone()));
     if grid_test_enabled {
@@ -569,6 +689,7 @@ async fn guide(
         error: None,
         grid_cell,
         debug_screenshot_path,
+        locate_trace,
     })
 }
 
@@ -593,8 +714,13 @@ async fn next_step(
         return Err(format!("step_index {step_index} out of range ({})", steps.len()));
     }
 
-    let grid_test_enabled = { state.ai_router.lock().await.config.grid_test_enabled };
-    let located = execute_step(&app, &steps[step_index], &state.tracker, &state.last_overlay).unwrap_or(None);
+    let (grid_test_enabled, log_trace) = {
+        let cfg = &state.ai_router.lock().await.config;
+        (cfg.grid_test_enabled, cfg.debug_locate_log_file_enabled)
+    };
+    let (located, locate_trace) = execute_step(&app, &steps[step_index], &state.tracker, &state.last_overlay)
+        .unwrap_or((None, None));
+    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
     let grid_cell = valid_grid_cell(steps.get(step_index).and_then(|s| s.grid_cell.clone()));
     if grid_test_enabled {
@@ -630,6 +756,7 @@ async fn next_step(
         error: None,
         grid_cell,
         debug_screenshot_path: None,
+        locate_trace,
     })
 }
 
@@ -662,6 +789,13 @@ async fn send_correction(
     drop(router); // Release lock before blocking capture
 
     let debug_dir = app.path().app_data_dir().map(|p| p.join("debug")).ok();
+
+    // Clear the previous pointer before capture.
+    state.tracker.clear();
+    if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
+        let _ = overlay::emit_update(&app, update);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     // Fresh capture — no stored HWND, always walks z-order to the focused window.
     let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path) = tokio::task::spawn_blocking(move || {
@@ -704,6 +838,11 @@ async fn send_correction(
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
+
+    // Phase 0.2 — show shared-app boundary on correction too.
+    if let Some(hwnd_raw) = new_hwnd {
+        announce_shared_app(&app, hwnd_raw);
+    }
 
     let mut router = state.ai_router.lock().await;
     let summary = {
@@ -794,10 +933,14 @@ async fn send_correction(
             error: None,
             grid_cell: None,
             debug_screenshot_path,
+            locate_trace: None,
         });
     }
 
-    let located = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay).unwrap_or(None);
+    let log_trace = state.ai_router.lock().await.config.debug_locate_log_file_enabled;
+    let (located, locate_trace) = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay)
+        .unwrap_or((None, None));
+    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
     let grid_cell = valid_grid_cell(steps.get(0).and_then(|s| s.grid_cell.clone()));
     if grid_test_enabled {
@@ -833,6 +976,7 @@ async fn send_correction(
         error: None,
         grid_cell,
         debug_screenshot_path,
+        locate_trace,
     })
 }
 
@@ -859,6 +1003,32 @@ async fn restore_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(
         }
     } else {
         Ok(())
+    }
+}
+
+/// Phase 0.2: structured info about the window being shared with the AI.
+/// Used by the panel to show the "Shared: <App>" header chip.
+#[tauri::command]
+fn get_shared_app_info(state: State<'_, AppState>) -> Option<SharedAppInfoPayload> {
+    #[cfg(windows)]
+    {
+        let stored = { state.guidance.lock().unwrap().target_hwnd };
+        let info = match stored {
+            Some(hwnd) => capture::get_window_info_for_hwnd(hwnd)
+                .or_else(capture::get_active_window_info),
+            None => capture::get_active_window_info(),
+        };
+        info.map(|i| SharedAppInfoPayload {
+            hwnd: i.hwnd as u64,
+            rect: i.rect,
+            app_name: i.app_name,
+            exe_name: i.exe_name,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        None
     }
 }
 
@@ -924,7 +1094,7 @@ async fn locate_a11y(
             a11y_timeout_ms: timeout_ms.unwrap_or(1500),
             min_confidence: 0.5,
         };
-        let result = tokio::task::spawn_blocking(move || {
+        let (result, _trace) = tokio::task::spawn_blocking(move || {
             locator::a11y::find_element(&text, &opts)
         })
         .await
@@ -968,7 +1138,7 @@ async fn locate_element(
             a11y_timeout_ms: timeout_ms.unwrap_or(500),
             min_confidence: 0.5,
         };
-        let result = tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts))
+        let (result, _trace) = tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts))
             .await
             .map_err(|e| format!("task join: {e}"))?
             .map_err(|e| e.to_string())?;
@@ -1055,6 +1225,8 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         grid_test_enabled: c.grid_test_enabled,
         debug_screenshot_enabled: c.debug_screenshot_enabled,
         debug_show_response_info: c.debug_show_response_info,
+        debug_locate_trace_enabled: c.debug_locate_trace_enabled,
+        debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
     })
 }
 
@@ -1090,6 +1262,8 @@ async fn save_settings(
         ("GRID_TEST_ENABLED".into(),              payload.grid_test_enabled.to_string()),
         ("DEBUG_SCREENSHOT_ENABLED".into(),       payload.debug_screenshot_enabled.to_string()),
         ("DEBUG_SHOW_RESPONSE_INFO".into(),       payload.debug_show_response_info.to_string()),
+        ("DEBUG_LOCATE_TRACE_ENABLED".into(),     payload.debug_locate_trace_enabled.to_string()),
+        ("DEBUG_LOCATE_LOG_FILE_ENABLED".into(),  payload.debug_locate_log_file_enabled.to_string()),
     ];
 
     // API keys: only overwrite if the user actually typed something
@@ -1223,7 +1397,6 @@ pub fn run() {
             let handle = app.handle().clone();
             let tts = tts::TtsEngine::new();
             let tracker = track::WindowTracker::new();
-            let watcher = screen_watcher::ScreenWatcher::start(handle.clone());
 
             // Resolve the app data directory (user-writable on all platforms).
             // Falls back to CWD so dev builds with no installation still work.
@@ -1253,7 +1426,7 @@ pub fn run() {
                 last_overlay: std::sync::Mutex::new(None),
                 env_path,
                 supabase_session_path,
-                screen_watcher: watcher,
+                screen_hash: std::sync::Mutex::new(None),
             });
 
             Ok(())
@@ -1280,8 +1453,10 @@ pub fn run() {
             guide,
             next_step,
             send_correction,
+            check_screen_changed,
             clear_overlay,
             restore_overlay,
+            get_shared_app_info,
             speak,
             get_settings,
             save_settings,

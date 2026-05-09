@@ -82,6 +82,119 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
     }
 }
 
+/// Phase 0.2: lightweight info about the window currently being captured.
+/// Used for the "Shared: <App>" header chip and the animated boundary overlay.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActiveWindowInfo {
+    pub hwnd: usize,
+    pub rect: Rect,
+    pub app_name: String,
+    pub exe_name: String,
+}
+
+/// Read the process exe path for `pid`. Returns the full path or empty string.
+fn exe_path_of_pid(pid: u32) -> String {
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if ok {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// Resolve a friendly app display name. Priority:
+/// 1. Window title (truncated to 60 chars)
+/// 2. Exe file basename minus `.exe`
+fn resolve_app_name(hwnd: HWND, exe_path: &str) -> String {
+    unsafe {
+        let mut title = [0u16; 256];
+        let len = GetWindowTextW(hwnd, &mut title) as usize;
+        if len > 0 {
+            let s = String::from_utf16_lossy(&title[..len]);
+            let s = s.trim();
+            if !s.is_empty() {
+                return if s.chars().count() > 60 {
+                    s.chars().take(57).chain("...".chars()).collect()
+                } else {
+                    s.to_string()
+                };
+            }
+        }
+    }
+
+    if !exe_path.is_empty() {
+        let base = std::path::Path::new(exe_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown");
+        return base.to_string();
+    }
+
+    "Unknown app".to_string()
+}
+
+/// Phase 0.2: gather info about the active capture target without actually
+/// capturing pixels. Mirrors `get_foreground_target` HWND-selection logic.
+pub fn get_active_window_info() -> Option<ActiveWindowInfo> {
+    let (hwnd, rect) = get_foreground_target()?;
+    let mut pid: u32 = 0;
+    unsafe {
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
+    }
+    let exe_path = exe_path_of_pid(pid);
+    let exe_name = std::path::Path::new(&exe_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let app_name = resolve_app_name(hwnd, &exe_path);
+    Some(ActiveWindowInfo {
+        hwnd: hwnd.0 as usize,
+        rect,
+        app_name,
+        exe_name,
+    })
+}
+
+/// Phase 0.2: same as `get_active_window_info` but resolves an existing HWND
+/// (used when `g.target_hwnd` is already known so the callsite doesn't have
+/// to re-walk the z-order).
+pub fn get_window_info_for_hwnd(hwnd_raw: usize) -> Option<ActiveWindowInfo> {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    let rect = frame_rect_of(hwnd)?;
+    let mut pid: u32 = 0;
+    unsafe {
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
+    }
+    let exe_path = exe_path_of_pid(pid);
+    let exe_name = std::path::Path::new(&exe_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let app_name = resolve_app_name(hwnd, &exe_path);
+    Some(ActiveWindowInfo {
+        hwnd: hwnd_raw,
+        rect,
+        app_name,
+        exe_name,
+    })
+}
+
 /// Return the screen rect of `hwnd` without visibility checks — used to get
 /// the panel's current position so it can be blanked from captures.
 pub fn window_screen_rect(hwnd: HWND) -> Option<Rect> {

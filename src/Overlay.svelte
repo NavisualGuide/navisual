@@ -4,7 +4,7 @@
 
   type Rect = { x: number; y: number; width: number; height: number };
   type OverlayUpdate = {
-    kind: "arrow" | "box" | "subtitle" | "none";
+    kind: "arrow" | "box" | "subtitle" | "app_boundary" | "none";
     bbox: Rect | null;
     text: string | null;
     virtual_origin: [number, number];
@@ -26,6 +26,12 @@
   let gridUpdate: GridUpdate | null = null;
   let animFrame: number | null = null;
   let animStart = 0;
+
+  // Phase 0.2: brief animated outline of the captured app's window. Lives
+  // alongside the main overlay so it doesn't replace the locator highlight.
+  let appBoundary: OverlayUpdate | null = null;
+  let appBoundaryStart = 0;
+  const APP_BOUNDARY_DURATION_MS = 10_000; // 9s solid + 1s ease-out fade
   // Plain object — NOT $state. drawBox/drawArrow read this in rAF callbacks where
   // Svelte's reactive getters don't fire; mutating fields in-place ensures every
   // frame sees the latest values without any signal overhead.
@@ -192,6 +198,60 @@
     }
   }
 
+  /**
+   * Phase 0.2: draw the "shared app" boundary overlay.
+   * Three-stage animation over APP_BOUNDARY_DURATION_MS (10 s):
+   *   0..250ms  — flash in at full opacity with inner glow
+   *   250..9000ms — hold at full opacity (solid outline)
+   *   9000..10000ms — ease-out cubic fade to 0
+   * A new capture replaces appBoundary immediately, resetting the timer.
+   * Returns true while the animation is still running, false when complete.
+   */
+  function drawAppBoundary(
+    ctx: CanvasRenderingContext2D,
+    bx: number, by: number, bw: number, bh: number,
+    age: number,
+  ): boolean {
+    if (age >= APP_BOUNDARY_DURATION_MS) return false;
+
+    const flashEnd = 250;
+    const fadeStart = APP_BOUNDARY_DURATION_MS - 1_000; // 9000ms
+    let opacity = 1.0;
+    if (age > fadeStart) {
+      const fadeProgress = (age - fadeStart) / 1_000;
+      // ease-out cubic
+      const eased = 1 - Math.pow(1 - fadeProgress, 3);
+      opacity = 1 - eased;
+    }
+
+    const [r, g, b] = hexToRgb(theme.color);
+    const lw = Math.max(2, theme.thickness);
+
+    // Subtle inset accent fill during the flash phase only
+    if (age < flashEnd) {
+      const flashFill = (1 - age / flashEnd) * 0.10;
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${flashFill})`;
+      ctx.fillRect(bx, by, bw, bh);
+    }
+
+    // Outer dark shadow for contrast against any background
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = `rgba(0, 0, 0, ${0.55 * opacity})`;
+    ctx.lineWidth = lw * 2.2;
+    ctx.lineJoin = "round";
+    ctx.strokeRect(bx, by, bw, bh);
+
+    // Accent outline with glow
+    ctx.shadowColor = theme.color;
+    ctx.shadowBlur = 12 * opacity + (age < flashEnd ? 14 : 0);
+    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${opacity})`;
+    ctx.lineWidth = lw;
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.shadowBlur = 0;
+
+    return true;
+  }
+
   function drawGrid(ctx: CanvasRenderingContext2D, g: GridUpdate, canvasW: number, canvasH: number) {
     const [ox, oy] = g.virtual_origin;
     const gx = g.capture_rect ? g.capture_rect.x - ox : 0;
@@ -247,11 +307,14 @@
   }
 
   function renderFrame(timestamp: number) {
-    if (!canvas || !currentUpdate) return;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-    const u = currentUpdate;
-    const [ox, oy] = u.virtual_origin;
-    const [vw, vh] = u.virtual_size;
+
+    // Pick a virtual_origin/size — prefer currentUpdate, fall back to appBoundary.
+    const reference = currentUpdate ?? appBoundary;
+    if (!reference) return;
+    const [ox, oy] = reference.virtual_origin;
+    const [vw, vh] = reference.virtual_size;
 
     // Only reassign canvas dimensions when they actually change.
     // Assigning canvas.width/height clears the entire canvas even when the
@@ -268,35 +331,62 @@
     // persists alongside animated arrows/boxes without a separate rAF loop).
     if (gridUpdate) drawGrid(ctx, gridUpdate, vw, vh);
 
-    const t = timestamp - animStart;
+    let needNextFrame = false;
 
-    if (u.kind === "none") {
-      // No regular overlay — keep the rAF alive only if the grid needs redraw.
-      if (gridUpdate) animFrame = requestAnimationFrame(renderFrame);
-      return;
+    // Phase 0.2: app-boundary flash overlay — sits beneath the locator
+    // highlight, auto-clears after APP_BOUNDARY_DURATION_MS.
+    if (appBoundary && appBoundary.bbox) {
+      const ageMs = timestamp - appBoundaryStart;
+      const ab = appBoundary;
+      const abx = ab.bbox.x - ox;
+      const aby = ab.bbox.y - oy;
+      const abw = ab.bbox.width;
+      const abh = ab.bbox.height;
+      const stillRunning = drawAppBoundary(ctx, abx, aby, abw, abh, ageMs);
+      if (stillRunning) {
+        needNextFrame = true;
+      } else {
+        appBoundary = null;
+      }
     }
 
-    // Subtitle is drawn alongside every overlay type (arrow, box, subtitle-only).
-    // Rust always passes step.instruction as u.text.
-    if (theme.subtitle_enabled && u.text) {
-      drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.text);
+    const u = currentUpdate;
+    if (u) {
+      const t = timestamp - animStart;
+
+      if (u.kind === "none") {
+        // No regular overlay — keep the rAF alive only if grid or boundary need redraw.
+        if (gridUpdate || needNextFrame) animFrame = requestAnimationFrame(renderFrame);
+        return;
+      }
+
+      // Subtitle is drawn alongside every overlay type (arrow, box, subtitle-only).
+      // Rust always passes step.instruction as u.text.
+      if (theme.subtitle_enabled && u.text) {
+        drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.text);
+      }
+
+      // Subtitle-only step — no bbox to locate, no animation loop needed.
+      if (u.kind === "subtitle") {
+        if (needNextFrame) animFrame = requestAnimationFrame(renderFrame);
+        return;
+      }
+
+      if (u.bbox) {
+        const padding = 12;
+        const bx = u.bbox.x - ox - padding;
+        const by = u.bbox.y - oy - padding;
+        const bw = u.bbox.width + padding * 2;
+        const bh = u.bbox.height + padding * 2;
+
+        if (u.kind === "arrow") drawArrow(ctx, bx, by, bw, bh, t);
+        else if (u.kind !== "app_boundary") drawBox(ctx, bx, by, bw, bh, t);
+        animFrame = requestAnimationFrame(renderFrame);
+        return;
+      }
     }
 
-    // Subtitle-only step — no bbox to locate, no animation loop needed.
-    if (u.kind === "subtitle") return;
-
-    if (!u.bbox) return; // no element located — subtitle already drawn above
-
-    const padding = 12;
-    const bx = u.bbox.x - ox - padding;
-    const by = u.bbox.y - oy - padding;
-    const bw = u.bbox.width + padding * 2;
-    const bh = u.bbox.height + padding * 2;
-
-    if (u.kind === "arrow") drawArrow(ctx, bx, by, bw, bh, t);
-    else drawBox(ctx, bx, by, bw, bh, t);
-
-    animFrame = requestAnimationFrame(renderFrame);
+    if (needNextFrame) animFrame = requestAnimationFrame(renderFrame);
   }
 
   function startAnimation(update: OverlayUpdate) {
@@ -325,6 +415,14 @@
 
   onMount(async () => {
     await listen<OverlayUpdate>("overlay:update", (event) => {
+      // Phase 0.2: AppBoundary is a transient flash, not a replacement for
+      // the locator overlay. Run it on its own animation track.
+      if (event.payload.kind === "app_boundary") {
+        appBoundary = event.payload;
+        appBoundaryStart = performance.now();
+        if (animFrame === null) animFrame = requestAnimationFrame(renderFrame);
+        return;
+      }
       startAnimation(event.payload);
     });
     await listen<OverlayTheme>("overlay:theme", (event) => {
