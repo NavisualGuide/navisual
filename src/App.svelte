@@ -6,10 +6,12 @@ See the LICENSE file in the root of this repository for complete details.
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
   import { listen, emitTo } from "@tauri-apps/api/event";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import HotkeyInput from "./HotkeyInput.svelte";
 
   type Rect = { x: number; y: number; width: number; height: number };
@@ -162,6 +164,8 @@ See the LICENSE file in the root of this repository for complete details.
   // UI state
   let iconMode = $state(false);
   let showSettings = $state(false);
+  let showAbout = $state(false);
+  let appVersion = $state("…");
   let settingsTab = $state<SettingsTab>("provider");
   let history = $state<HistoryEntry[]>([]);
   let historyEl: HTMLElement | null = $state(null);
@@ -661,6 +665,8 @@ See the LICENSE file in the root of this repository for complete details.
   let headerLabel = $derived(activeModel || provider);
 
   onMount(async () => {
+    getVersion().then(v => { appVersion = v; }).catch(() => {});
+
     // Position bottom-right then show — panel starts hidden (visible:false in
     // tauri.conf.json) so the user never sees a blank frame at 0,0 while
     // WebView2 initialises. We show only once the UI is fully painted.
@@ -779,6 +785,7 @@ See the LICENSE file in the root of this repository for complete details.
         <span class="header-balance" class:header-balance-low={freeRemaining <= 5}>{freeRemaining} left</span>
       {/if}
       <div class="header-actions">
+        <button class="hdr-btn" onclick={() => (showAbout = true)} title="About Navisual">ⓘ</button>
         <button class="hdr-btn" onclick={openSettings} title="Settings">⚙</button>
         <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to icon (Alt+Q)">⊟</button>
         <button class="hdr-btn hdr-btn-close" onclick={closeWindow} title="Quit">✕</button>
@@ -1361,6 +1368,45 @@ See the LICENSE file in the root of this repository for complete details.
           <button class="btn-primary" onclick={applySettings} disabled={settingsSaving}>
             {settingsSaving ? "Saving…" : "Apply"}
           </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- About modal -->
+  {#if showAbout}
+    <div
+      class="modal-backdrop"
+      role="presentation"
+      onclick={() => (showAbout = false)}
+      onkeydown={(e) => { if (e.key === "Escape") showAbout = false; }}
+    >
+      <div
+        class="modal about-modal"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label="About Navisual"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.stopPropagation()}
+      >
+        <div class="modal-header">
+          <span class="modal-title">About</span>
+          <button class="hdr-btn hdr-btn-close" onclick={() => (showAbout = false)}>✕</button>
+        </div>
+        <div class="about-body">
+          <div class="about-logo">
+            <span class="about-dot"></span>
+            <span class="about-name">Navisual</span>
+            <span class="about-version">v{appVersion}</span>
+          </div>
+          <p class="about-tagline">The AI guides, never overrides.</p>
+          <div class="about-links">
+            <button class="about-link" onclick={() => openUrl("https://navisualguide.com")}>navisualguide.com</button>
+            <button class="about-link" onclick={() => openUrl("https://github.com/NavisualGuide/navisual")}>GitHub</button>
+            <button class="about-link" onclick={() => openUrl("mailto:feedback@navisualguide.com")}>Send feedback</button>
+          </div>
+          <p class="about-license">Licensed under FSL-1.1-Apache-2.0 — converts to Apache 2.0 two years after each release.</p>
         </div>
       </div>
     </div>
@@ -2255,5 +2301,83 @@ See the LICENSE file in the root of this repository for complete details.
     accent-color: var(--accent-500);
     cursor: pointer;
     flex-shrink: 0;
+  }
+
+  /* ── About modal ──────────────────────────────────── */
+
+  .about-modal {
+    max-width: 320px;
+  }
+
+  .about-body {
+    padding: 24px 20px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .about-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .about-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent-500);
+    box-shadow: 0 0 6px var(--accent-500);
+    flex-shrink: 0;
+  }
+
+  .about-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .about-version {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: var(--surface-3);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .about-tagline {
+    margin: 0;
+    color: var(--text-secondary);
+    font-style: italic;
+    font-size: 12px;
+  }
+
+  .about-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .about-link {
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--accent-400);
+    font-size: 12px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  .about-link:hover {
+    background: var(--surface-2);
+    color: var(--accent-500);
+  }
+
+  .about-license {
+    margin: 0;
+    font-size: 10px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
   }
 </style>
