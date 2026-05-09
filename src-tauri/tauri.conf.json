@@ -48,7 +48,7 @@
     "updater": {
       "pubkey": "",
       "endpoints": [
-        "https://navisualguide.com/releases/latest.json"
+        "https://gwekzberpfuxsoddwwqj.supabase.co/storage/v1/object/public/releases/latest.json"
       ]
     }
   },
