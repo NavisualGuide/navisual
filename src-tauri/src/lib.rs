@@ -272,16 +272,6 @@ struct GuideResponse {
 }
 
 #[derive(serde::Serialize, Clone)]
-struct GridOverlayPayload {
-    capture_rect: Option<capture::Rect>,
-    virtual_origin: [i32; 2],
-    virtual_size: [u32; 2],
-    highlighted_cell: Option<String>,
-    cols: u32,
-    rows: u32,
-}
-
-#[derive(serde::Serialize, Clone)]
 struct StreamChunkPayload {
     delta: String,
 }
@@ -656,25 +646,6 @@ async fn guide(
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
     let grid_cell = valid_grid_cell(steps.get(0).and_then(|s| s.grid_cell.clone()));
-    if grid_test_enabled {
-        if let Ok(vd) = overlay::virtual_desktop_rect() {
-            let payload = GridOverlayPayload {
-                capture_rect: capture_rect_opt,
-                virtual_origin: [vd.x, vd.y],
-                virtual_size: [vd.width, vd.height],
-                highlighted_cell: grid_cell.clone(),
-                cols: grid::COLS,
-                rows: grid::ROWS,
-            };
-            if let Some(win) = app.get_webview_window("overlay") {
-                let _ = win.emit("overlay:grid", &payload);
-            }
-        }
-    } else {
-        if let Some(win) = app.get_webview_window("overlay") {
-            let _ = win.emit("overlay:grid_clear", ());
-        }
-    }
 
     Ok(GuideResponse {
         ok: true,
@@ -714,34 +685,15 @@ async fn next_step(
         return Err(format!("step_index {step_index} out of range ({})", steps.len()));
     }
 
-    let (grid_test_enabled, log_trace) = {
+    let log_trace = {
         let cfg = &state.ai_router.lock().await.config;
-        (cfg.grid_test_enabled, cfg.debug_locate_log_file_enabled)
+        cfg.debug_locate_log_file_enabled
     };
     let (located, locate_trace) = execute_step(&app, &steps[step_index], &state.tracker, &state.last_overlay)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
     let grid_cell = valid_grid_cell(steps.get(step_index).and_then(|s| s.grid_cell.clone()));
-    if grid_test_enabled {
-        if let Ok(vd) = overlay::virtual_desktop_rect() {
-            let payload = GridOverlayPayload {
-                capture_rect,
-                virtual_origin: [vd.x, vd.y],
-                virtual_size: [vd.width, vd.height],
-                highlighted_cell: grid_cell.clone(),
-                cols: grid::COLS,
-                rows: grid::ROWS,
-            };
-            if let Some(win) = app.get_webview_window("overlay") {
-                let _ = win.emit("overlay:grid", &payload);
-            }
-        }
-    } else {
-        if let Some(win) = app.get_webview_window("overlay") {
-            let _ = win.emit("overlay:grid_clear", ());
-        }
-    }
 
     Ok(GuideResponse {
         ok: true,
@@ -943,25 +895,6 @@ async fn send_correction(
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
     let grid_cell = valid_grid_cell(steps.get(0).and_then(|s| s.grid_cell.clone()));
-    if grid_test_enabled {
-        if let Ok(vd) = overlay::virtual_desktop_rect() {
-            let payload = GridOverlayPayload {
-                capture_rect: new_capture_rect,
-                virtual_origin: [vd.x, vd.y],
-                virtual_size: [vd.width, vd.height],
-                highlighted_cell: grid_cell.clone(),
-                cols: grid::COLS,
-                rows: grid::ROWS,
-            };
-            if let Some(win) = app.get_webview_window("overlay") {
-                let _ = win.emit("overlay:grid", &payload);
-            }
-        }
-    } else {
-        if let Some(win) = app.get_webview_window("overlay") {
-            let _ = win.emit("overlay:grid_clear", ());
-        }
-    }
 
     Ok(GuideResponse {
         ok: true,
