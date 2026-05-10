@@ -34,7 +34,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 fn role_to_control_type(role: &str) -> Option<ControlType> {
     match role.to_ascii_lowercase().as_str() {
         "button" => Some(ControlType::Button),
-        "tab" => Some(ControlType::TabItem),
+        // TabItem covers classic WinForms/WPF tabs; ListItem covers WinUI
+        // NavigationView items (Task Manager, Settings, etc.). Returning None
+        // lets Pass 2 handle the ambiguity rather than blocking on the wrong type.
+        "tab" => None,
         "link" => Some(ControlType::Hyperlink),
         "textbox" => Some(ControlType::Edit),
         "menuitem" => Some(ControlType::MenuItem),
@@ -320,11 +323,16 @@ fn match_in_subtree_all(
     timeout_ms: u64,
 ) -> Result<Vec<LocateResult>> {
     let re = name_re.clone();
+    // Cap the UIA internal timeout at 100ms. The UIA matcher uses this as a
+    // "wait for element to appear" poll; if set to the full budget it blocks
+    // the whole allocation when nothing is found, starving Passes 2 and 3.
+    // The outer deadline already enforces the total budget.
+    let internal_timeout = timeout_ms.min(100);
     let mut matcher = automation
         .create_matcher()
         .from_ref(root)
         .depth(15)
-        .timeout(timeout_ms)
+        .timeout(internal_timeout)
         .filter_fn(Box::new(move |el: &UIElement| {
             let name = el.get_name().unwrap_or_default();
             if name.is_empty() {
