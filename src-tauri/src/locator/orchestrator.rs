@@ -24,6 +24,14 @@ pub struct LocateOptions {
     pub zone: Option<(u32, u32)>,
     pub a11y_timeout_ms: u64,
     pub min_confidence: f32,
+    /// Raw HWND captured at AI-call time. When set, A11y searches this HWND
+    /// directly (not GetForegroundWindow) and OCR captures this HWND's rect —
+    /// so a focus change between AI capture and locate can't redirect us to
+    /// the wrong window.
+    pub target_hwnd: Option<usize>,
+    /// When set, the orchestrator writes the lossless PNG sent to OCR to this
+    /// path. Useful for diagnosing why OCR misses specific UI elements.
+    pub debug_ocr_image_path: Option<std::path::PathBuf>,
 }
 
 pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateResult>, LocateTrace)> {
@@ -61,8 +69,26 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
     let ocr_started = Instant::now();
     let exclude = capture::get_panel_rects();
 
-    let (ocr_bytes, crop_rect, img_w, img_h) =
-        match capture::capture_active_window_raw(&exclude) {
+    // Prefer the pinned HWND (the one the AI saw) so a focus change between
+    // AI capture and locate can't send us to the wrong window. Falls through
+    // to GetForegroundWindow if no HWND is pinned or the window is gone.
+    let pinned_capture = opts
+        .target_hwnd
+        .and_then(|h| capture::recapture_window_raw(h, &exclude).ok());
+
+    let (ocr_bytes, crop_rect, img_w, img_h) = match pinned_capture {
+        Some((raw_img, rect)) => {
+            let (iw, ih) = (raw_img.width(), raw_img.height());
+            match capture::encode_png_for_ocr(&raw_img) {
+                Ok(bytes) => (bytes, rect, iw, ih),
+                Err(e) => {
+                    trace.final_decision = FinalDecision::Error { message: e.to_string() };
+                    trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                    return Ok((None, trace));
+                }
+            }
+        }
+        None => match capture::capture_active_window_raw(&exclude) {
             Ok((raw_img, rect, _hwnd)) => {
                 let (iw, ih) = (raw_img.width(), raw_img.height());
                 match capture::encode_png_for_ocr(&raw_img) {
@@ -89,7 +115,20 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
                     .unwrap_or((0, 0));
                 (jpeg, Rect { x: 0, y: 0, width: 0, height: 0 }, iw, ih)
             }
-        };
+        },
+    };
+
+    // When debug screenshots are enabled, save the exact PNG sent to OCR so it
+    // can be inspected. This is the lossless native-resolution image — what
+    // OCR actually sees, not the downscaled JPEG sent to the AI.
+    if let Some(ref path) = opts.debug_ocr_image_path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(path, &ocr_bytes) {
+            log::warn!("debug_ocr_image_path write failed: {e}");
+        }
+    }
 
     let results = match ocr::run_ocr(&ocr_bytes) {
         Ok(r) => r,

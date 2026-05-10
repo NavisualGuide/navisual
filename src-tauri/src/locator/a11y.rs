@@ -208,29 +208,47 @@ pub fn find_element(
     let desired_ct = opts.role.as_deref().and_then(role_to_control_type);
 
     // Decide which top-level window(s) to search.
-    let (fg_hwnd, fg_pid) = foreground_pid();
+    //
+    // Priority: if the caller pinned a target HWND (the one the AI saw), use
+    // it directly. This prevents focus changes between AI capture and locate
+    // from redirecting us to the wrong window — common when the AI takes a
+    // long time (e.g. local Ollama models) and the user switches focus.
     let our_pid = own_pid();
-
-    // Compute window rect for zone scoring
     let mut win_rect = RECT::default();
-    if !fg_hwnd.0.is_null() {
-        unsafe { let _ = GetWindowRect(fg_hwnd, &mut win_rect); }
-    }
 
-    let search_roots: Vec<UIElement> = if fg_pid != 0 && fg_pid != our_pid {
-        match automation.element_from_handle(fg_hwnd.into()) {
-            Ok(el) => vec![el],
-            Err(_) => Vec::new(),
+    let search_roots: Vec<UIElement> = if let Some(hwnd_raw) = opts.target_hwnd {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        unsafe {
+            if !hwnd.0.is_null() && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
+                let _ = GetWindowRect(hwnd, &mut win_rect);
+                match automation.element_from_handle(hwnd.into()) {
+                    Ok(el) => vec![el],
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            }
         }
     } else {
-        let hwnds = collect_visible_top_windows(our_pid, 8);
-        if let Some(&first) = hwnds.first() {
-            unsafe { let _ = GetWindowRect(first, &mut win_rect); }
+        let (fg_hwnd, fg_pid) = foreground_pid();
+        if !fg_hwnd.0.is_null() {
+            unsafe { let _ = GetWindowRect(fg_hwnd, &mut win_rect); }
         }
-        hwnds
-            .into_iter()
-            .filter_map(|h| automation.element_from_handle(h.into()).ok())
-            .collect()
+        if fg_pid != 0 && fg_pid != our_pid {
+            match automation.element_from_handle(fg_hwnd.into()) {
+                Ok(el) => vec![el],
+                Err(_) => Vec::new(),
+            }
+        } else {
+            let hwnds = collect_visible_top_windows(our_pid, 8);
+            if let Some(&first) = hwnds.first() {
+                unsafe { let _ = GetWindowRect(first, &mut win_rect); }
+            }
+            hwnds
+                .into_iter()
+                .filter_map(|h| automation.element_from_handle(h.into()).ok())
+                .collect()
+        }
     };
     trace.search_roots_count = search_roots.len();
 

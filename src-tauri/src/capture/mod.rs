@@ -130,6 +130,31 @@ pub fn encode_png_for_ocr(img: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> Result<Vec<u8
     Ok(out)
 }
 
+/// Re-capture a previously discovered window by its stored raw HWND, returning
+/// raw RGBA pixels (no JPEG, no downscale). Used by the OCR locator path so it
+/// always sees the same window the AI was shown — even if the user switched
+/// focus between the AI call and the locate.
+#[allow(clippy::type_complexity)]
+pub fn recapture_window_raw(
+    hwnd_raw: usize,
+    exclude: &[Rect],
+) -> Result<(ImageBuffer<Rgba<u8>, Vec<u8>>, Rect)> {
+    #[cfg(windows)]
+    {
+        let rect = win::validate_hwnd_raw(hwnd_raw)
+            .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
+        let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_rects(&mut img, &rect, exclude);
+        Ok((img, rect))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd_raw, exclude);
+        Err(anyhow!("recapture_window_raw only implemented for Windows"))
+    }
+}
+
 /// Re-capture a previously discovered window by its stored raw HWND.
 /// Validates the window is still alive and not minimised before capturing.
 /// Returns an error if the window is gone — caller should then call

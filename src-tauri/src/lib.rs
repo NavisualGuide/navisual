@@ -96,6 +96,8 @@ fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
 fn execute_step(
     app: &AppHandle,
     step: &GuidanceStep,
+    target_hwnd: Option<usize>,
+    debug_ocr_path: Option<std::path::PathBuf>,
     tracker: &track::WindowTracker,
     last_overlay: &std::sync::Mutex<Option<(overlay::OverlayKind, Option<capture::Rect>, Option<String>)>>,
 ) -> Result<(Option<locator::LocateResult>, Option<locator::trace::LocateTrace>), String> {
@@ -115,6 +117,8 @@ fn execute_step(
                 }),
                 a11y_timeout_ms: 500,
                 min_confidence: 0.5,
+                target_hwnd,
+                debug_ocr_image_path: debug_ocr_path,
             };
             let text_owned = text.clone();
             match locator::orchestrator::locate(&text_owned, &opts) {
@@ -127,7 +131,7 @@ fn execute_step(
         }
         #[cfg(not(windows))]
         {
-            let _ = text;
+            let _ = (text, target_hwnd, debug_ocr_path);
             (None, None)
         }
     } else {
@@ -647,7 +651,12 @@ async fn guide(
     }
 
     let log_trace = state.ai_router.lock().await.config.debug_locate_log_file_enabled;
-    let (located, locate_trace) = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay)
+    let debug_ocr_path = if debug_screenshot_enabled {
+        app.path().app_data_dir().ok().map(|p| p.join("debug").join("ocr_input.png"))
+    } else {
+        None
+    };
+    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd_opt, debug_ocr_path, &state.tracker, &state.last_overlay)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
@@ -691,11 +700,17 @@ async fn next_step(
         return Err(format!("step_index {step_index} out of range ({})", steps.len()));
     }
 
-    let log_trace = {
+    let (log_trace, debug_screenshot_enabled) = {
         let cfg = &state.ai_router.lock().await.config;
-        cfg.debug_locate_log_file_enabled
+        (cfg.debug_locate_log_file_enabled, cfg.debug_screenshot_enabled)
     };
-    let (located, locate_trace) = execute_step(&app, &steps[step_index], &state.tracker, &state.last_overlay)
+    let stored_hwnd = { state.guidance.lock().unwrap().target_hwnd };
+    let debug_ocr_path = if debug_screenshot_enabled {
+        app.path().app_data_dir().ok().map(|p| p.join("debug").join("ocr_input.png"))
+    } else {
+        None
+    };
+    let (located, locate_trace) = execute_step(&app, &steps[step_index], stored_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
@@ -895,8 +910,16 @@ async fn send_correction(
         });
     }
 
-    let log_trace = state.ai_router.lock().await.config.debug_locate_log_file_enabled;
-    let (located, locate_trace) = execute_step(&app, &steps[0], &state.tracker, &state.last_overlay)
+    let (log_trace, debug_screenshot_enabled) = {
+        let cfg = &state.ai_router.lock().await.config;
+        (cfg.debug_locate_log_file_enabled, cfg.debug_screenshot_enabled)
+    };
+    let debug_ocr_path = if debug_screenshot_enabled {
+        app.path().app_data_dir().ok().map(|p| p.join("debug").join("ocr_input.png"))
+    } else {
+        None
+    };
+    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
@@ -1032,6 +1055,8 @@ async fn locate_a11y(
             zone: None,
             a11y_timeout_ms: timeout_ms.unwrap_or(1500),
             min_confidence: 0.5,
+            target_hwnd: None,
+            debug_ocr_image_path: None,
         };
         let (result, _trace) = tokio::task::spawn_blocking(move || {
             locator::a11y::find_element(&text, &opts)
@@ -1076,6 +1101,8 @@ async fn locate_element(
             zone,
             a11y_timeout_ms: timeout_ms.unwrap_or(500),
             min_confidence: 0.5,
+            target_hwnd: None,
+            debug_ocr_image_path: None,
         };
         let (result, _trace) = tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts))
             .await
