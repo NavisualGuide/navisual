@@ -11,6 +11,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicClient {
     client: Client,
+    #[allow(dead_code)]
     api_key: String,
     pub model: String,
 }
@@ -35,6 +36,7 @@ impl AnthropicClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn is_available(&self) -> bool {
         !self.api_key.is_empty()
     }

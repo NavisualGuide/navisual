@@ -49,7 +49,7 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
     trace.a11y = a11y_trace;
     if let Some(hit) = a11y_hit {
         trace.final_decision = FinalDecision::HitA11y;
-        trace.final_bbox = Some(hit.bbox.clone());
+        trace.final_bbox = Some(hit.bbox);
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
         return Ok((Some(hit), trace));
     }
@@ -161,7 +161,7 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
     }
 
     let result = LocateResult {
-        bbox: bbox.clone(),
+        bbox,
         name: hit.text.clone(),
         role: "Ocr".to_string(),
         confidence: hit.confidence,

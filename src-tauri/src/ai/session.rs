@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use chrono::{Local, DateTime};
-use std::path::PathBuf;
+use chrono::Local;
 use std::fs;
+use std::path::PathBuf;
 use crate::ai::types::{GuidanceStep, Role, Message};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,12 +89,7 @@ impl Session {
 
         let mut messages = Vec::new();
         for turn in &self.conversation[start..] {
-            if turn.role == "correction" {
-                messages.push(Message {
-                    role: Role::User,
-                    content: turn.content.clone(),
-                });
-            } else if turn.role == "user" {
+            if turn.role == "correction" || turn.role == "user" {
                 messages.push(Message {
                     role: Role::User,
                     content: turn.content.clone(),
@@ -139,6 +134,7 @@ impl SessionManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn load_session(&mut self, session_id: &str) -> Option<Session> {
         let file_path = self.session_dir.join(format!("{}.json", session_id));
         if let Ok(content) = fs::read_to_string(file_path) {

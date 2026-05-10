@@ -58,7 +58,7 @@ pub fn capture_active_window_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Vec<
         let mut img = win::capture_desktop_region(&rect)?;
         win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;
-        return Ok((buf, rect, hwnd.0 as usize));
+        Ok((buf, rect, hwnd.0 as usize))
     }
 
     #[cfg(not(windows))]
@@ -91,6 +91,7 @@ pub fn capture_virtual_desktop_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Ve
 /// no downscale cap). Used by the OCR path so it sees native-resolution pixels.
 ///
 /// Returns (raw_image, window rect in physical pixels, raw HWND as usize).
+#[allow(clippy::type_complexity)]
 pub fn capture_active_window_raw(exclude: &[Rect]) -> Result<(ImageBuffer<Rgba<u8>, Vec<u8>>, Rect, usize)> {
     #[cfg(windows)]
     {
@@ -98,7 +99,7 @@ pub fn capture_active_window_raw(exclude: &[Rect]) -> Result<(ImageBuffer<Rgba<u
             .ok_or_else(|| anyhow!("no foreground window found"))?;
         let mut img = win::capture_desktop_region(&rect)?;
         win::blank_rects(&mut img, &rect, exclude);
-        return Ok((img, rect, hwnd.0 as usize));
+        Ok((img, rect, hwnd.0 as usize))
     }
 
     #[cfg(not(windows))]
@@ -143,7 +144,7 @@ pub fn recapture_window_jpeg(hwnd_raw: usize, quality: u8, exclude: &[Rect]) -> 
         let mut img = win::capture_desktop_region(&rect)?;
         win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;
-        return Ok((buf, rect));
+        Ok((buf, rect))
     }
 
     #[cfg(not(windows))]

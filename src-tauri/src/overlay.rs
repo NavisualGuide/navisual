@@ -100,7 +100,7 @@ pub fn virtual_desktop_rect() -> Result<Rect> {
     let mut guard = cache.lock().unwrap();
     if let Some(ref c) = *guard {
         if c.at.elapsed() < Duration::from_secs(30) {
-            return Ok(c.rect.clone());
+            return Ok(c.rect);
         }
     }
     let monitors = xcap::Monitor::all().context("enumerate monitors")?;
@@ -127,7 +127,7 @@ pub fn virtual_desktop_rect() -> Result<Rect> {
         width: (max_x - min_x).max(0) as u32,
         height: (max_y - min_y).max(0) as u32,
     };
-    *guard = Some(CachedVd { rect: rect.clone(), at: Instant::now() });
+    *guard = Some(CachedVd { rect, at: Instant::now() });
     Ok(rect)
 }
 

@@ -25,6 +25,7 @@ const GRID_ALPHA: f32 = 0.55;
 
 /// Parse a cell label like "D7" into (row_index, col_index), both 0-based.
 /// Row A=0 … I=8; col 1→0 … 16→15. Returns None for out-of-range labels.
+#[allow(dead_code)]
 pub fn parse_cell(label: &str) -> Option<(u32, u32)> {
     let s = label.trim().to_ascii_uppercase();
     let mut chars = s.chars();

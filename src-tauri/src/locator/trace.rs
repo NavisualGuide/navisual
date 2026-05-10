@@ -117,7 +117,7 @@ pub fn append_jsonl(path: &Path, trace: &LocateTrace) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     let line = serde_json::to_string(trace)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     writeln!(file, "{line}")?;
     Ok(())
 }

@@ -11,8 +11,7 @@ use super::Rect;
 use anyhow::{anyhow, Result};
 use image::{ImageBuffer, Rgba};
 use std::mem;
-use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, POINT, RECT, TRUE};
+use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
@@ -197,6 +196,7 @@ pub fn get_window_info_for_hwnd(hwnd_raw: usize) -> Option<ActiveWindowInfo> {
 
 /// Return the screen rect of `hwnd` without visibility checks — used to get
 /// the panel's current position so it can be blanked from captures.
+#[allow(dead_code)]
 pub fn window_screen_rect(hwnd: HWND) -> Option<Rect> {
     frame_rect_of(hwnd)
 }
@@ -294,10 +294,8 @@ fn frame_rect_of(hwnd: HWND) -> Option<Rect> {
             &mut rect as *mut RECT as *mut _,
             std::mem::size_of::<RECT>() as u32,
         );
-        if res.is_err() {
-            if GetWindowRect(hwnd, &mut rect).is_err() {
-                return None;
-            }
+        if res.is_err() && GetWindowRect(hwnd, &mut rect).is_err() {
+            return None;
         }
         let width = (rect.right - rect.left).max(0) as u32;
         let height = (rect.bottom - rect.top).max(0) as u32;

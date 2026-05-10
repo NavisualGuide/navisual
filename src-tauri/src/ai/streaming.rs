@@ -3,9 +3,9 @@ pub fn extract_visible_instruction(partial_json: &str) -> String {
     if let Some(idx) = partial_json.rfind(prefix) {
         let remainder = &partial_json[idx + prefix.len()..];
         let trimmed = remainder.trim_start();
-        if trimmed.starts_with('"') {
+        if let Some(stripped) = trimmed.strip_prefix('"') {
             let mut result = String::new();
-            let mut chars = trimmed[1..].chars().peekable();
+            let mut chars = stripped.chars().peekable();
             while let Some(ch) = chars.next() {
                 if ch == '\\' {
                     if let Some(next_ch) = chars.next() {

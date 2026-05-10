@@ -20,10 +20,9 @@ use ai::session::SessionManager;
 use ai::types::{GuidanceStep, OverlayType};
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::{AppHandle, Manager, State, Emitter};
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
 #[derive(serde::Serialize)]
 struct CaptureResult {
@@ -59,6 +58,7 @@ struct AppState {
     tts: tts::TtsEngine,
     tracker: track::WindowTracker,
     /// Last non-None overlay emitted — used by restore_overlay to bring it back after Clear.
+    #[allow(clippy::type_complexity)]
     last_overlay: std::sync::Mutex<Option<(overlay::OverlayKind, Option<capture::Rect>, Option<String>)>>,
     /// Resolved path to the .env settings file — always writable (app data dir).
     env_path: PathBuf,
@@ -76,7 +76,7 @@ fn valid_grid_cell(cell: Option<String>) -> Option<String> {
     let mut chars = s.chars();
     let row = chars.next()?.to_ascii_uppercase();
     let col: u32 = chars.as_str().trim().parse().ok()?;
-    if row >= 'A' && row <= 'I' && col >= 1 && col <= 16 {
+    if ('A'..='I').contains(&row) && (1..=16).contains(&col) {
         Some(s)
     } else {
         None
@@ -92,6 +92,7 @@ fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn execute_step(
     app: &AppHandle,
     step: &GuidanceStep,
@@ -107,7 +108,7 @@ fn execute_step(
                 zone: step.grid_cell.as_ref().and_then(|cell| {
                     let row = cell.chars().next()?.to_ascii_uppercase();
                     let col: u32 = cell[1..].trim().parse().ok()?;
-                    if col < 1 || col > 16 { return None; }
+                    if !(1..=16).contains(&col) { return None; }
                     let row_idx = (row as u32).checked_sub('A' as u32)?;
                     if row_idx > 8 { return None; }
                     Some((col - 1, row_idx)) // grid col 1-16 → zone 0-15; row A-I → 0-8
@@ -134,13 +135,13 @@ fn execute_step(
     };
 
     let kind = overlay_kind_for_step(&step.overlay_type);
-    let bbox = located.as_ref().map(|r| r.bbox.clone());
+    let bbox = located.as_ref().map(|r| r.bbox);
     let text_for_overlay = Some(step.instruction.clone());
 
     if !matches!(kind, overlay::OverlayKind::None) {
-        *last_overlay.lock().unwrap() = Some((kind, bbox.clone(), text_for_overlay.clone()));
+        *last_overlay.lock().unwrap() = Some((kind, bbox, text_for_overlay.clone()));
     }
-    match overlay::make_update(kind, bbox.clone(), text_for_overlay.clone()) {
+    match overlay::make_update(kind, bbox, text_for_overlay.clone()) {
         Ok(update) => {
             if let Err(e) = overlay::emit_update(app, update) {
                 log::warn!("overlay emit failed: {e}");
@@ -233,7 +234,7 @@ fn announce_shared_app(app: &AppHandle, hwnd_raw: usize) {
     };
     let payload = SharedAppInfoPayload {
         hwnd: info.hwnd as u64,
-        rect: info.rect.clone(),
+        rect: info.rect,
         app_name: info.app_name.clone(),
         exe_name: info.exe_name.clone(),
     };
@@ -412,6 +413,7 @@ async fn guide(
     }
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
+    #[allow(clippy::type_complexity)]
     let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>), ()> {
         let is_fs = full_screen.unwrap_or(false);
         let (bytes, rect_opt, hwnd_opt) = if is_fs {
@@ -649,7 +651,7 @@ async fn guide(
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
-    let grid_cell = valid_grid_cell(steps.get(0).and_then(|s| s.grid_cell.clone()));
+    let grid_cell = valid_grid_cell(steps.first().and_then(|s| s.grid_cell.clone()));
 
     Ok(GuideResponse {
         ok: true,
@@ -674,7 +676,7 @@ async fn next_step(
     state: State<'_, AppState>,
     step_index: usize,
 ) -> Result<GuideResponse, String> {
-    let (steps, session_id, needs_input, provider, capture_rect) = {
+    let (steps, session_id, needs_input, provider, _capture_rect) = {
         let g = state.guidance.lock().unwrap();
         (
             g.steps.clone(),
@@ -739,7 +741,7 @@ async fn send_correction(
 
     let exclude = capture::get_panel_rects();
 
-    let mut router = state.ai_router.lock().await;
+    let router = state.ai_router.lock().await;
     let grid_test_enabled = router.config.grid_test_enabled;
     let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
     drop(router); // Release lock before blocking capture
@@ -898,7 +900,7 @@ async fn send_correction(
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
-    let grid_cell = valid_grid_cell(steps.get(0).and_then(|s| s.grid_cell.clone()));
+    let grid_cell = valid_grid_cell(steps.first().and_then(|s| s.grid_cell.clone()));
 
     Ok(GuideResponse {
         ok: true,
@@ -1003,7 +1005,7 @@ async fn capture_screen(quality: Option<u8>) -> Result<CaptureResult, String> {
 fn emit_box_overlay(app: &AppHandle, result: &locator::LocateResult) {
     match overlay::make_update(
         overlay::OverlayKind::Box,
-        Some(result.bbox.clone()),
+        Some(result.bbox),
         None,
     ) {
         Ok(update) => {
@@ -1063,7 +1065,7 @@ async fn locate_element(
         let zone = grid_cell.as_deref().and_then(|cell| {
             let row = cell.chars().next()?.to_ascii_uppercase();
             let col: u32 = cell[1..].trim().parse().ok()?;
-            if col < 1 || col > 16 { return None; }
+            if !(1..=16).contains(&col) { return None; }
             let row_idx = (row as u32).checked_sub('A' as u32)?;
             if row_idx > 8 { return None; }
             Some((col - 1, row_idx))
