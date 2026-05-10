@@ -7,11 +7,13 @@ use crate::ai::session::SessionManager;
 use crate::ai::types::NavigateStepResponse;
 use crate::ai::anthropic::{AnthropicClient, build_messages as build_anthropic};
 use crate::ai::gemini::{GeminiClient, build_messages as build_gemini};
+use crate::ai::ollama::{OllamaClient, build_messages as build_ollama};
 use crate::ai::managed::{ManagedClient, build_messages as build_managed};
 
 pub enum ApiClient {
     Anthropic(AnthropicClient),
     Gemini(GeminiClient),
+    Ollama(OllamaClient),
     Managed(ManagedClient),
 }
 
@@ -120,6 +122,17 @@ impl AiRouter {
                     }
                 }
             }
+            "ollama" => {
+                let timeout = self.config.ollama_timeout_sec;
+                match OllamaClient::new(
+                    self.config.ollama_base_url.clone(),
+                    self.config.ollama_model.clone(),
+                    timeout,
+                ) {
+                    Ok(client) => self.client = Some(ApiClient::Ollama(client)),
+                    Err(e) => log::error!("OllamaClient init failed: {e}"),
+                }
+            }
             "managed" => {
                 let url = match &self.config.supabase_url {
                     Some(u) => u.clone(),
@@ -170,6 +183,10 @@ impl AiRouter {
             }
             Some(ApiClient::Gemini(c)) => {
                 let msgs = build_gemini(user_text, screenshot_b64, state_summary, &conversation);
+                c.send_message(msgs, None, &mut on_chunk).await?
+            }
+            Some(ApiClient::Ollama(c)) => {
+                let msgs = build_ollama(user_text, screenshot_b64, state_summary, &conversation);
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
             Some(ApiClient::Managed(c)) => {
