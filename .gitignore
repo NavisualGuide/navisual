@@ -43,3 +43,6 @@ dist/
 # Spike test output
 tools/spike_output/
 
+
+# Private test fixtures
+fixtures/
