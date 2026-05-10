@@ -1,11 +1,31 @@
 use serde_json::{json, Value};
 use reqwest::{Client, header};
-use anyhow::{Result, bail, anyhow};
+use anyhow::{Result, bail};
 use std::time::Duration;
 use futures_util::StreamExt;
 
 use crate::ai::types::{NavigateStepResponse, GuidanceStep, OverlayType, Message, Role};
 use crate::ai::prompts::SYSTEM_PROMPT;
+
+/// Appended to the system prompt so the model knows to return JSON.
+/// Vision models in Ollama don't support the tools/function-calling API,
+/// so we use prompt engineering instead and parse JSON from the text response.
+const JSON_FORMAT_INSTRUCTION: &str = r#"
+
+IMPORTANT: You must respond ONLY with a valid JSON object — no markdown fences, no explanation before or after. Use exactly this schema:
+{"steps":[{"instruction":"<your instruction>","target_text":"<1-5 words to find on screen>","target_role":"button","overlay_type":"arrow","checkpoint":true}],"state_summary":"<brief state>","needs_input":false}
+
+Fields:
+- instruction: what the user should do (required)
+- target_text: 1-5 words visible on screen that identify the element (optional)
+- target_role: one of button|tab|link|textbox|menuitem|checkbox|radio|combobox|slider|image|heading|other (optional)
+- target_region: one of top-left|top-center|top-right|center-left|center|center-right|bottom-left|bottom-center|bottom-right (optional)
+- overlay_type: arrow|highlight|circle|none (default arrow)
+- clipboard: text to copy to clipboard (optional)
+- checkpoint: true = wait for user, false = auto-advance (required)
+- needs_input: true if you need the user to clarify something before proceeding
+- request_full_screen: true if you need to see beyond the active window
+- state_summary: one sentence describing what was just accomplished"#;
 
 pub struct OllamaClient {
     client: Client,
@@ -35,55 +55,12 @@ impl OllamaClient {
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
-        let tool = json!({
-            "type": "function",
-            "function": {
-                "name": "navigate_step",
-                "description": "Provide navigation instructions for the user. Return one or more steps. Steps with checkpoint=true will wait for the user to complete the action before proceeding.",
-                "parameters": {
-                    "type": "object",
-                    "required": ["steps", "state_summary", "needs_input"],
-                    "properties": {
-                        "steps": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "required": ["instruction", "checkpoint"],
-                                "properties": {
-                                    "instruction": {"type": "string"},
-                                    "target_text": {"type": "string"},
-                                    "target_role": {
-                                        "type": "string",
-                                        "enum": ["button", "tab", "link", "textbox", "menuitem", "checkbox", "radio", "combobox", "slider", "image", "heading", "other"]
-                                    },
-                                    "target_region": {
-                                        "type": "string",
-                                        "enum": ["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"]
-                                    },
-                                    "target_nearby_text": {"type": "string"},
-                                    "overlay_type": {
-                                        "type": "string",
-                                        "enum": ["arrow", "highlight", "circle", "none"]
-                                    },
-                                    "clipboard": {"type": "string"},
-                                    "checkpoint": {"type": "boolean"},
-                                    "grid_cell": {"type": "string"}
-                                }
-                            }
-                        },
-                        "state_summary": {"type": "string"},
-                        "needs_input": {"type": "boolean"},
-                        "request_full_screen": {"type": "boolean"}
-                    }
-                }
-            }
-        });
-
+        // Vision models in Ollama do not support the tools API — omit it entirely
+        // and rely on the JSON format instruction in the system message instead.
         let payload = json!({
             "model": effective_model,
             "messages": messages,
-            "stream": true,
-            "tools": [tool]
+            "stream": true
         });
 
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
@@ -96,7 +73,6 @@ impl OllamaClient {
         }
 
         let mut accumulated_text = String::new();
-        let mut tool_call_args: Option<Value> = None;
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
         let mut in_instruction = false;
@@ -108,7 +84,7 @@ impl OllamaClient {
             let chunk = chunk_result?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
-            // Ollama streams NDJSON — process one complete line at a time.
+            // Ollama streams NDJSON — one JSON object per line.
             while let Some(nl) = line_buf.find('\n') {
                 let line = line_buf[..nl].trim().to_string();
                 line_buf = line_buf[nl + 1..].to_string();
@@ -119,7 +95,7 @@ impl OllamaClient {
                     Err(_) => continue,
                 };
 
-                // Token usage appears on the final done=true line.
+                // Token counts appear on the final done=true line.
                 if let Some(n) = data.get("prompt_eval_count").and_then(|v| v.as_u64()) {
                     input_tokens = n;
                 }
@@ -127,42 +103,30 @@ impl OllamaClient {
                     output_tokens = n;
                 }
 
-                if let Some(message) = data.get("message") {
-                    // Tool call returned by the model.
-                    if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-                        for tc in tool_calls {
-                            if let Some(func) = tc.get("function") {
-                                if func.get("name").and_then(|n| n.as_str()) == Some("navigate_step") {
-                                    if let Some(args) = func.get("arguments") {
-                                        tool_call_args = Some(args.clone());
-                                    }
-                                }
-                            }
+                if let Some(content) = data
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                {
+                    if !content.is_empty() {
+                        accumulated_text.push_str(content);
+
+                        // Stream the instruction field as it arrives.
+                        let prefix = r#""instruction":""#;
+                        let prefix_sp = r#""instruction": ""#;
+                        if !in_instruction
+                            && (accumulated_text.contains(prefix)
+                                || accumulated_text.contains(prefix_sp))
+                        {
+                            in_instruction = true;
                         }
-                    }
-
-                    // Content chunks — streamed text (used when model returns plain text
-                    // instead of a tool call, or when it narrates before calling the tool).
-                    if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
-                        if !content.is_empty() {
-                            accumulated_text.push_str(content);
-
-                            let prefix = r#""instruction":""#;
-                            let prefix_sp = r#""instruction": ""#;
-                            if !in_instruction
-                                && (accumulated_text.contains(prefix)
-                                    || accumulated_text.contains(prefix_sp))
-                            {
-                                in_instruction = true;
-                            }
-                            if in_instruction {
-                                let visible = crate::ai::streaming::extract_visible_instruction(
-                                    &accumulated_text,
-                                );
-                                if visible.len() > emitted_instruction_len {
-                                    on_chunk(&visible[emitted_instruction_len..]);
-                                    emitted_instruction_len = visible.len();
-                                }
+                        if in_instruction {
+                            let visible = crate::ai::streaming::extract_visible_instruction(
+                                &accumulated_text,
+                            );
+                            if visible.len() > emitted_instruction_len {
+                                on_chunk(&visible[emitted_instruction_len..]);
+                                emitted_instruction_len = visible.len();
                             }
                         }
                     }
@@ -170,33 +134,24 @@ impl OllamaClient {
             }
         }
 
-        // Prefer a structured tool call if the model produced one.
-        if let Some(args) = tool_call_args {
-            let step_response: NavigateStepResponse = serde_json::from_value(args.clone())
-                .map_err(|e| anyhow!("Failed to parse Ollama tool args: {e}\n{args}"))?;
-            if emitted_instruction_len == 0 {
-                if let Some(s) = step_response.steps.first() {
-                    on_chunk(&s.instruction);
-                }
-            }
-            return Ok((step_response, input_tokens, output_tokens));
-        }
-
-        // Fall back to plain-text response (llama models sometimes ignore tool schemas).
         let text = accumulated_text.trim().to_string();
         if text.is_empty() {
-            bail!("Ollama returned an empty response (check that the model is running: ollama serve)");
+            bail!("Ollama returned an empty response (is ollama serve running?)");
         }
 
-        // Try to extract a JSON object embedded in the text.
-        let json_text = {
-            let s = text.find('{');
-            let e = text.rfind('}');
-            match (s, e) {
-                (Some(s), Some(e)) if e > s => &text[s..=e],
-                _ => text.as_str(),
-            }
+        // Strip optional markdown code fences the model may add despite instructions.
+        let stripped = text
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        // Extract the outermost JSON object from the response.
+        let json_text = match (stripped.find('{'), stripped.rfind('}')) {
+            (Some(s), Some(e)) if e > s => &stripped[s..=e],
+            _ => stripped,
         };
+
         if let Ok(step_response) = serde_json::from_str::<NavigateStepResponse>(json_text) {
             if !step_response.steps.is_empty() {
                 if emitted_instruction_len == 0 {
@@ -206,7 +161,7 @@ impl OllamaClient {
             }
         }
 
-        // Plain text — wrap it as a single checkpoint step.
+        // Last resort: wrap raw text as a single checkpoint step.
         let fallback = NavigateStepResponse {
             steps: vec![GuidanceStep {
                 instruction: text.clone(),
@@ -238,7 +193,9 @@ pub fn build_messages(
 ) -> Vec<Value> {
     let mut messages = Vec::new();
 
-    messages.push(json!({ "role": "system", "content": SYSTEM_PROMPT }));
+    // Append the JSON format instruction so the model knows what to return.
+    let system_with_format = format!("{}{}", SYSTEM_PROMPT, JSON_FORMAT_INSTRUCTION);
+    messages.push(json!({ "role": "system", "content": system_with_format }));
 
     for turn in conversation_history {
         let role = match turn.role {
@@ -257,7 +214,7 @@ pub fn build_messages(
 
     let mut user_msg = json!({ "role": "user", "content": content });
 
-    // Ollama native vision: base64 images go in the top-level "images" array.
+    // Ollama native vision: base64 images in the top-level "images" array.
     if let Some(b64) = screenshot_b64 {
         user_msg["images"] = json!([b64]);
     }
