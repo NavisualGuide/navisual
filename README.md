@@ -92,7 +92,7 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 ## Features
 
 - **Observe, never act** — reads your screen, never moves the mouse or types
-- **Screen Guide** — overlay arrows and highlights pointing at the exact UI element
+- **Screen Guide** — overlay indicators pointing at the exact UI element
 - **Live captions** — subtitle strip showing the current instruction
 - **Audio narration** — TTS via Windows SAPI (no install required)
 - **Voice input** — push-to-talk via Web Speech API
@@ -139,7 +139,7 @@ navisual/
 ```
 v0.5    ✅ Free managed tier (Supabase relay, anonymous auth, 50 free requests)
         🔜 Pay-as-you-go coin purchases + signed Windows installer
-v0.6    Template matching + Nav-Packs (Blender, SolidWorks)
+v0.6    Template matching + Nav-Packs 
 v1.0    Microsoft Store + enterprise features + public launch
 v1.x    macOS port + Linux port
 ```
