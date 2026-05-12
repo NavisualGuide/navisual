@@ -355,7 +355,11 @@
       const t = timestamp - animStart;
 
       if (u.kind === "none") {
-        // No regular overlay — keep the rAF alive only if grid or boundary need redraw.
+        // No locator overlay — but still draw the subtitle caption if present
+        // so the instruction text is always visible on screen.
+        if (theme.subtitle_enabled && u.text) {
+          drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.text);
+        }
         if (gridUpdate || needNextFrame) animFrame = requestAnimationFrame(renderFrame);
         return;
       }

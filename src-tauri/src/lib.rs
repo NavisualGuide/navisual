@@ -138,7 +138,12 @@ fn execute_step(
         (None, None)
     };
 
-    let kind = overlay_kind_for_step(&step.overlay_type);
+    // When the locator found a target, always show at least an arrow — never
+    // suppress the pointer just because the model returned overlay_type:none.
+    let mut kind = overlay_kind_for_step(&step.overlay_type);
+    if located.is_some() && matches!(kind, overlay::OverlayKind::None) {
+        kind = overlay::OverlayKind::Arrow;
+    }
     let bbox = located.as_ref().map(|r| r.bbox);
     let text_for_overlay = Some(step.instruction.clone());
 
@@ -307,6 +312,11 @@ struct SettingsPayload {
     ollama_model: String,
     openai_api_key: String,
     openai_model: String,
+    deepseek_api_key: String,
+    deepseek_model: String,
+    qwen_api_key: String,
+    qwen_model: String,
+    qwen_base_url: String,
     overlay_color: String,
     overlay_thickness: u32,
     subtitle_enabled: bool,
@@ -652,7 +662,8 @@ async fn guide(
 
     let log_trace = state.ai_router.lock().await.config.debug_locate_log_file_enabled;
     let debug_ocr_path = if debug_screenshot_enabled {
-        app.path().app_data_dir().ok().map(|p| p.join("debug").join("ocr_input.png"))
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+        app.path().app_data_dir().ok().map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
         None
     };
@@ -706,7 +717,8 @@ async fn next_step(
     };
     let stored_hwnd = { state.guidance.lock().unwrap().target_hwnd };
     let debug_ocr_path = if debug_screenshot_enabled {
-        app.path().app_data_dir().ok().map(|p| p.join("debug").join("ocr_input.png"))
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+        app.path().app_data_dir().ok().map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
         None
     };
@@ -915,7 +927,8 @@ async fn send_correction(
         (cfg.debug_locate_log_file_enabled, cfg.debug_screenshot_enabled)
     };
     let debug_ocr_path = if debug_screenshot_enabled {
-        app.path().app_data_dir().ok().map(|p| p.join("debug").join("ocr_input.png"))
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+        app.path().app_data_dir().ok().map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
         None
     };
@@ -1177,6 +1190,11 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         ollama_model: c.ollama_model.clone(),
         openai_api_key: c.openai_api_key.clone().unwrap_or_default(),
         openai_model: c.openai_model.clone(),
+        deepseek_api_key: c.deepseek_api_key.clone().unwrap_or_default(),
+        deepseek_model: c.deepseek_model.clone(),
+        qwen_api_key: c.qwen_api_key.clone().unwrap_or_default(),
+        qwen_model: c.qwen_model.clone(),
+        qwen_base_url: c.qwen_base_url.clone(),
         overlay_color: c.overlay_color.clone(),
         overlay_thickness: c.overlay_thickness,
         subtitle_enabled: c.subtitle_enabled,
@@ -1214,6 +1232,9 @@ async fn save_settings(
         ("OLLAMA_BASE_URL".into(),      payload.ollama_base_url.clone()),
         ("OLLAMA_MODEL".into(),         payload.ollama_model.clone()),
         ("OPENAI_MODEL".into(),         payload.openai_model.clone()),
+        ("DEEPSEEK_MODEL".into(),       payload.deepseek_model.clone()),
+        ("QWEN_MODEL".into(),           payload.qwen_model.clone()),
+        ("QWEN_BASE_URL".into(),        payload.qwen_base_url.clone()),
         ("OVERLAY_COLOR".into(),        payload.overlay_color.clone()),
         ("OVERLAY_THICKNESS".into(),    payload.overlay_thickness.to_string()),
         ("SUBTITLE_ENABLED".into(),     payload.subtitle_enabled.to_string()),
@@ -1241,6 +1262,12 @@ async fn save_settings(
     }
     if !payload.openai_api_key.trim().is_empty() {
         updates.push(("OPENAI_API_KEY".into(), payload.openai_api_key.clone()));
+    }
+    if !payload.deepseek_api_key.trim().is_empty() {
+        updates.push(("DEEPSEEK_API_KEY".into(), payload.deepseek_api_key.clone()));
+    }
+    if !payload.qwen_api_key.trim().is_empty() {
+        updates.push(("QWEN_API_KEY".into(), payload.qwen_api_key.clone()));
     }
 
     // Atomic write to .env

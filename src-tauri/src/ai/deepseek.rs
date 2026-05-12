@@ -7,9 +7,8 @@ use futures_util::StreamExt;
 use crate::ai::types::{NavigateStepResponse, GuidanceStep, OverlayType, Message, Role};
 use crate::ai::prompts::SYSTEM_PROMPT;
 
-/// Appended to the system prompt so the model knows to return JSON.
-/// Vision models in Ollama don't support the tools/function-calling API,
-/// so we use prompt engineering instead and parse JSON from the text response.
+/// Same schema instruction as Ollama — DeepSeek doesn't support function-calling
+/// for vision models, so we use prompt engineering + response_format:json_object.
 const JSON_FORMAT_INSTRUCTION: &str = r#"
 
 IMPORTANT: Respond ONLY with a single valid JSON object — no markdown, no explanation. The top-level object has exactly four keys: "steps", "state_summary", "needs_input", "request_full_screen".
@@ -43,14 +42,16 @@ Top-level fields (outside "steps", required):
 - needs_input: true only if you must ask the user a question before continuing
 - request_full_screen: true only if you need to see beyond the current window"#;
 
-pub struct OllamaClient {
+pub struct DeepSeekClient {
     client: Client,
+    pub api_key: String,
     pub model: String,
     pub base_url: String,
+    name: String,
 }
 
-impl OllamaClient {
-    pub fn new(base_url: String, model: String, timeout_sec: u64) -> Result<Self> {
+impl DeepSeekClient {
+    pub fn new(api_key: String, model: String, timeout_sec: u64, base_url: Option<String>, name: Option<String>) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
@@ -60,7 +61,9 @@ impl OllamaClient {
             .timeout(Duration::from_secs(timeout_sec))
             .default_headers(headers)
             .build()?;
-        Ok(Self { client, model, base_url })
+        let base_url = base_url.unwrap_or_else(|| "https://api.deepseek.com/v1/chat/completions".to_string());
+        let name = name.unwrap_or_else(|| "DeepSeek".to_string());
+        Ok(Self { client, api_key, model, base_url, name })
     }
 
     pub async fn send_message(
@@ -71,23 +74,24 @@ impl OllamaClient {
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
-        // Vision models in Ollama do not support the tools API — use the built-in
-        // "format":"json" field to force JSON output at the sampler level, then
-        // rely on the system prompt JSON schema instruction to get the right shape.
         let payload = json!({
             "model": effective_model,
             "messages": messages,
             "stream": true,
-            "format": "json"
+            "response_format": { "type": "json_object" }
         });
 
-        let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let response = self.client
+            .post(&self.base_url)
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await?;
-            bail!("Ollama API error ({}): {}", status, body);
+            bail!("{} API error ({}): {}", self.name, status, body);
         }
 
         let mut accumulated_text = String::new();
@@ -102,34 +106,45 @@ impl OllamaClient {
             let chunk = chunk_result?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
-            // Ollama streams NDJSON — one JSON object per line.
+            // OpenAI SSE format: "data: {...}\n\n" lines.
             while let Some(nl) = line_buf.find('\n') {
                 let line = line_buf[..nl].trim().to_string();
                 line_buf = line_buf[nl + 1..].to_string();
                 if line.is_empty() { continue; }
 
-                let data: Value = match serde_json::from_str(&line) {
+                let data_str = if let Some(s) = line.strip_prefix("data: ") {
+                    s.trim()
+                } else {
+                    continue;
+                };
+
+                if data_str == "[DONE]" { break; }
+
+                let data: Value = match serde_json::from_str(data_str) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
 
-                // Token counts appear on the final done=true line.
-                if let Some(n) = data.get("prompt_eval_count").and_then(|v| v.as_u64()) {
-                    input_tokens = n;
-                }
-                if let Some(n) = data.get("eval_count").and_then(|v| v.as_u64()) {
-                    output_tokens = n;
+                // Token counts appear in the final chunk's usage field.
+                if let Some(usage) = data.get("usage") {
+                    if let Some(n) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                        input_tokens = n;
+                    }
+                    if let Some(n) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                        output_tokens = n;
+                    }
                 }
 
                 if let Some(content) = data
-                    .get("message")
-                    .and_then(|m| m.get("content"))
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("delta"))
+                    .and_then(|d| d.get("content"))
                     .and_then(|c| c.as_str())
                 {
                     if !content.is_empty() {
                         accumulated_text.push_str(content);
 
-                        // Stream the instruction field as it arrives.
                         let prefix = r#""instruction":""#;
                         let prefix_sp = r#""instruction": ""#;
                         if !in_instruction
@@ -154,17 +169,15 @@ impl OllamaClient {
 
         let text = accumulated_text.trim().to_string();
         if text.is_empty() {
-            bail!("Ollama returned an empty response (is ollama serve running?)");
+            bail!("{} returned an empty response", self.name);
         }
 
-        // Strip optional markdown code fences the model may add despite instructions.
         let stripped = text
             .trim_start_matches("```json")
             .trim_start_matches("```")
             .trim_end_matches("```")
             .trim();
 
-        // Extract the outermost JSON object from the response.
         let json_text = match (stripped.find('{'), stripped.rfind('}')) {
             (Some(s), Some(e)) if e > s => &stripped[s..=e],
             _ => stripped,
@@ -179,7 +192,6 @@ impl OllamaClient {
             }
         }
 
-        // Last resort: wrap raw text as a single checkpoint step.
         let fallback = NavigateStepResponse {
             steps: vec![GuidanceStep {
                 instruction: text.clone(),
@@ -205,13 +217,12 @@ impl OllamaClient {
 
 pub fn build_messages(
     user_text: &str,
-    screenshot_b64: Option<&str>,
+    _screenshot_b64: Option<&str>,
     state_summary: Option<&str>,
     conversation_history: &[Message],
 ) -> Vec<Value> {
     let mut messages = Vec::new();
 
-    // Append the JSON format instruction so the model knows what to return.
     let system_with_format = format!("{}{}", SYSTEM_PROMPT, JSON_FORMAT_INSTRUCTION);
     messages.push(json!({ "role": "system", "content": system_with_format }));
 
@@ -224,19 +235,61 @@ pub fn build_messages(
         messages.push(json!({ "role": role, "content": turn.content }));
     }
 
-    let mut content = String::new();
+    let mut text_content = String::new();
     if let Some(summary) = state_summary {
-        content.push_str(&format!("[Context] {}\n", summary));
+        text_content.push_str(&format!("[Context] {}\n", summary));
     }
-    content.push_str(user_text);
+    text_content.push_str(user_text);
 
-    let mut user_msg = json!({ "role": "user", "content": content });
+    // DeepSeek's chat completions API (api.deepseek.com) is text-only —
+    // image_url content parts are rejected with a 400. Skip the screenshot.
+    messages.push(json!({ "role": "user", "content": text_content }));
 
-    // Ollama native vision: base64 images in the top-level "images" array.
+    messages
+}
+
+/// Build messages for Qwen (DashScope OpenAI-compat endpoint).
+/// Qwen VL models accept image_url with base64 data URLs — include the screenshot.
+pub fn build_qwen_messages(
+    user_text: &str,
+    screenshot_b64: Option<&str>,
+    state_summary: Option<&str>,
+    conversation_history: &[Message],
+) -> Vec<Value> {
+    let mut messages = Vec::new();
+
+    let system_with_format = format!("{}{}", SYSTEM_PROMPT, JSON_FORMAT_INSTRUCTION);
+    messages.push(json!({ "role": "system", "content": system_with_format }));
+
+    for turn in conversation_history {
+        let role = match turn.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::System => "system",
+        };
+        messages.push(json!({ "role": role, "content": turn.content }));
+    }
+
+    let mut text_content = String::new();
+    if let Some(summary) = state_summary {
+        text_content.push_str(&format!("[Context] {}\n", summary));
+    }
+    text_content.push_str(user_text);
+
     if let Some(b64) = screenshot_b64 {
-        user_msg["images"] = json!([b64]);
+        let content = json!([
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:image/jpeg;base64,{}", b64)
+                }
+            },
+            { "type": "text", "text": text_content }
+        ]);
+        messages.push(json!({ "role": "user", "content": content }));
+    } else {
+        messages.push(json!({ "role": "user", "content": text_content }));
     }
 
-    messages.push(user_msg);
     messages
 }

@@ -8,12 +8,16 @@ use crate::ai::types::NavigateStepResponse;
 use crate::ai::anthropic::{AnthropicClient, build_messages as build_anthropic};
 use crate::ai::gemini::{GeminiClient, build_messages as build_gemini};
 use crate::ai::ollama::{OllamaClient, build_messages as build_ollama};
+use crate::ai::deepseek::{DeepSeekClient, build_messages as build_deepseek, build_qwen_messages as build_qwen};
 use crate::ai::managed::{ManagedClient, build_messages as build_managed};
 
 pub enum ApiClient {
     Anthropic(AnthropicClient),
     Gemini(GeminiClient),
     Ollama(OllamaClient),
+    DeepSeek(DeepSeekClient),
+    OpenAI(DeepSeekClient),
+    Qwen(DeepSeekClient),
     Managed(ManagedClient),
 }
 
@@ -133,6 +137,52 @@ impl AiRouter {
                     Err(e) => log::error!("OllamaClient init failed: {e}"),
                 }
             }
+            "deepseek" => {
+                if let Some(key) = &self.config.deepseek_api_key {
+                    match DeepSeekClient::new(
+                        key.clone(),
+                        self.config.deepseek_model.clone(),
+                        self.config.api_timeout_sec,
+                        None,
+                        Some("DeepSeek".to_string()),
+                    ) {
+                        Ok(client) => self.client = Some(ApiClient::DeepSeek(client)),
+                        Err(e) => log::error!("DeepSeekClient init failed: {e}"),
+                    }
+                }
+            }
+            "openai" => {
+                if let Some(key) = &self.config.openai_api_key {
+                    match DeepSeekClient::new(
+                        key.clone(),
+                        self.config.openai_model.clone(),
+                        self.config.api_timeout_sec,
+                        Some("https://api.openai.com/v1/chat/completions".to_string()),
+                        Some("OpenAI".to_string()),
+                    ) {
+                        Ok(client) => self.client = Some(ApiClient::OpenAI(client)),
+                        Err(e) => log::error!("OpenAI client init failed: {e}"),
+                    }
+                }
+            }
+            "qwen" => {
+                if let Some(key) = &self.config.qwen_api_key {
+                    let chat_url = format!(
+                        "{}/chat/completions",
+                        self.config.qwen_base_url.trim_end_matches('/')
+                    );
+                    match DeepSeekClient::new(
+                        key.clone(),
+                        self.config.qwen_model.clone(),
+                        self.config.api_timeout_sec,
+                        Some(chat_url),
+                        Some("Qwen".to_string()),
+                    ) {
+                        Ok(client) => self.client = Some(ApiClient::Qwen(client)),
+                        Err(e) => log::error!("Qwen client init failed: {e}"),
+                    }
+                }
+            }
             "managed" => {
                 let url = match &self.config.supabase_url {
                     Some(u) => u.clone(),
@@ -187,6 +237,14 @@ impl AiRouter {
             }
             Some(ApiClient::Ollama(c)) => {
                 let msgs = build_ollama(user_text, screenshot_b64, state_summary, &conversation);
+                c.send_message(msgs, None, &mut on_chunk).await?
+            }
+            Some(ApiClient::DeepSeek(c)) | Some(ApiClient::OpenAI(c)) => {
+                let msgs = build_deepseek(user_text, screenshot_b64, state_summary, &conversation);
+                c.send_message(msgs, None, &mut on_chunk).await?
+            }
+            Some(ApiClient::Qwen(c)) => {
+                let msgs = build_qwen(user_text, screenshot_b64, state_summary, &conversation);
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
             Some(ApiClient::Managed(c)) => {

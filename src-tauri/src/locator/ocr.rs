@@ -380,7 +380,10 @@ pub fn find_text<'a>(
     // Direction A — OCR token is a whole word within the target text:
     //   `\b<rc>\b` must match inside target_lower.
     //   Minimum 2 chars to suppress single-letter OCR noise.
-    //   Example: OCR "Source" found inside target "Source Control".
+    //   Word-count guard: OCR text must cover more than half of target's word
+    //   count, so a single-word OCR token (e.g. "GPU") cannot match a multi-
+    //   word target (e.g. "GPU 0") when many unrelated "GPU" elements exist on
+    //   screen. Single-word targets are unaffected (1*2 > 1 passes).
     //
     // Direction B — target is a whole word within the OCR line:
     //   Pre-compiled `\b<target>\b` must match inside the OCR text.
@@ -388,6 +391,7 @@ pub fn find_text<'a>(
     //   Also correctly rejects: "Insert" in "InsertedText" (no boundary after "t").
     //   Note: "Insert" still matches "Insert Space" (space IS a boundary) — the
     //   exact-match strategy wins first when both words appear in the OCR pool.
+    let target_word_count = target_lower.split_whitespace().count();
     let target_wb_re = regex::Regex::new(
         &format!(r"(?i)\b{}\b", regex::escape(&target_lower))
     ).ok();
@@ -401,6 +405,9 @@ pub fn find_text<'a>(
             }
             // Direction A: OCR token as whole word inside target.
             let target_contains_rc = rc.chars().count() >= 2 && {
+                let rc_word_count = rc.split_whitespace().count();
+                // Word-count guard: OCR token must cover more than half the target's words.
+                rc_word_count * 2 > target_word_count &&
                 regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&rc)))
                     .map(|re| re.is_match(&target_lower))
                     .unwrap_or(false)
@@ -445,11 +452,19 @@ pub fn find_text<'a>(
     ];
 
     // Score every candidate once, sorted best-first.
+    // Length guard: OCR text shorter than 2/3 of the target gets a zero score
+    // so it cannot sneak through any tier. "GPU" (3 chars) must not score 0.75
+    // against "GPU 0" (5 chars) simply because it is a common substring.
+    let target_len = target_lower.len();
     let mut scored: Vec<(&OcrResult, f32)> = candidates
         .iter()
         .map(|r| {
             let rc = strip_punct(&r.text).to_ascii_lowercase();
-            let ratio = if rc.is_empty() { 0.0 } else { sequence_ratio(&target_lower, &rc) };
+            let ratio = if rc.is_empty() || rc.len() * 3 < target_len * 2 {
+                0.0
+            } else {
+                sequence_ratio(&target_lower, &rc)
+            };
             (*r, ratio)
         })
         .collect();
@@ -497,6 +512,24 @@ pub fn find_text<'a>(
         outcome.strategy_used = Some(winning_tier.to_string());
     }
     outcome.winner = winner;
+
+    // Zone-filter fallback: if a zone was active and no strategy found a winner,
+    // the AI's grid_cell estimate may be wrong (e.g. nav-sidebar items are in
+    // col 1 but AI reports col 4). Retry on the full unfiltered pool so the
+    // correct element is not silently excluded.
+    if outcome.winner.is_none() && opts.zone.is_some() {
+        let no_zone = FindOptions { zone: None, ..*opts };
+        let mut fallback = find_text(target_text, results, &no_zone);
+        // Prefix strategy with "nz-" so the debug drawer shows the retry.
+        if let Some(ref s) = fallback.strategy_used.clone() {
+            fallback.strategy_used = Some(format!("nz-{s}"));
+        }
+        for c in &mut fallback.candidates {
+            c.strategy = format!("nz-{}", c.strategy);
+        }
+        return fallback;
+    }
+
     outcome
 }
 

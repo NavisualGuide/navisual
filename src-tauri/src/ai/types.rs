@@ -69,6 +69,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NavigateStepResponse {
     pub steps: Vec<GuidanceStep>,
+    #[serde(default)]
     pub state_summary: String,
     #[serde(default)]
     pub needs_input: bool,

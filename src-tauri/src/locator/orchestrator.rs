@@ -165,6 +165,7 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
         return Ok((None, trace));
     };
+    let hit = hit.clone();
 
     // Translate image-pixel coords back to virtual-desktop coords.
     // img_w/img_h are the OCR image dims (native or 2× upscaled).

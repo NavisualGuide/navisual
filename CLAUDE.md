@@ -383,7 +383,7 @@ if __name__ == "__main__":
 - **Rename complete** — "AI Navigator" → "Navisual" across all source files, docs, config,
   bundle ID (`com.navisual.app`), Cargo package name (`navisual-backend`), lib name (`navisual_backend_lib`).
 
-### ✅ Completed (v0.5 Locator Accuracy — Phase 0 + Phase 1 — 2026-05-09)
+### ✅ Completed (v0.5 Locator Accuracy — Phase 0 + Phase 1 — 2026-05-09, updated 2026-05-10)
 
 - **Phase 0.1 — Locate-trace debug surface** — `LocateTrace` struct records every A11y candidate (with reject reason) and every OCR candidate (with strategy, score, reject reason) per locate call. Collapsible "Debug" drawer below each instruction (Settings → Debug to enable); rolling JSONL log at `%APPDATA%\com.navisual.app\locate_log.jsonl` (5 MB rotating).
 - **Phase 0.2 — Shared-app indicator** — Active window boundary flashes on screen (10 s ease-out fade) whenever a locate starts; "Shared: \<App Name\>" chip in panel header updates when the captured window changes.
@@ -395,10 +395,22 @@ if __name__ == "__main__":
 - **Overlay clear before AI screenshot** — `tracker.clear()` + `OverlayKind::None` + 33 ms DWM composite wait before every BitBlt capture sent to AI, so the previous pointer is not visible in the AI's image.
 - **Autopilot: on-demand polling** — Always-on `screen_watcher.rs` background thread deleted. Replaced with `check_screen_changed` Tauri command (aHash, Hamming threshold 6/64) polled every 500 ms by the frontend only while Autopilot is active.
 - **Terminology: "arrow" → "pointer"** — UI strings and docs updated. The visual indicator (box + directional arrow) is now consistently called "pointer" or "screen guide".
+- **Zone-filter fallback (nz-exact)** — Root cause of the Task Manager "Performance" miss was the zone filter silently discarding the correct OCR candidate because the AI reported an inaccurate `grid_cell`. Fix: when all zone-filtered strategies find no winner, `find_text` retries with `zone: None`; the winning strategy is prefixed `nz-` in the debug trace. Confirmed 8/8 success. The OCR engine found "Performance" correctly at 1× resolution throughout — it was never a resolution issue.
+- **A11y walker fix** — `walk_recursive` was calling `UIAutomation::new()` per node, burning the 100 ms time budget before reaching deep elements. Fixed: one `UIAutomation` + one `UITreeWalker` created at the top of `manual_walk_all`, passed down through recursion. Walk depth raised from 8 → 12.
+- **A2 upscale tried and removed** — 2× Lanczos upscale before OCR retry was implemented, tested against Task Manager, and found to have no effect (zone filter was the cause, not resolution). `run_ocr_upscaled` removed from `ocr.rs`; orchestrator restored to single-pass OCR + immediate Miss on no winner.
+- **Unique OCR debug filenames** — `ocr_input.png` replaced with `ocr_<YYYYMMDD_HHMMSS_ms>.png` so each locate call's debug image is preserved independently. Matches the AI screenshot naming convention. Developer settings label updated to "Debug captures" with description covering both AI screenshots and OCR inputs.
+
+### ✅ Completed (v0.5.1 — BYOK providers for Chinese users — 2026-05-11)
+
+- **DeepSeek BYOK** — `src-tauri/src/ai/deepseek.rs` (new); OpenAI-compat SSE client with `response_format:json_object`; text-only (api.deepseek.com rejects `image_url`); models: `deepseek-v4-flash` (default), `deepseek-v4-pro`. Env: `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`.
+- **OpenAI wired up** — Previously stubbed; now uses `DeepSeekClient` pointed at `api.openai.com/v1/chat/completions` with `image_url` vision; models: `gpt-5.4` (default), `gpt-5.4-mini`, `gpt-5.5`, `gpt-4.1`.
+- **Qwen BYOK** — Reuses `DeepSeekClient` with configurable base URL; sends screenshots via `image_url` (Qwen VL accepts them); models: `qwen3-vl-plus` (default), `qwen3.5-flash`; endpoint defaults to `dashscope.aliyuncs.com/compatible-mode/v1` but user can paste workspace URL (e.g. `ws-xxx.cn-hongkong.maas.aliyuncs.com/compatible-mode/v1`) for workspace-specific API keys. Env: `QWEN_API_KEY`, `QWEN_MODEL`, `QWEN_BASE_URL`.
+- **Provider fixes** — Error messages now show the actual provider name ("OpenAI API error", "Qwen API error") not "DeepSeek API error". Header model chip correctly shows DeepSeek/Qwen model name. `activeModel` derived covers all providers.
+- **Model dropdowns updated** — OpenAI: GPT-5.x series replacing GPT-4o (obsolete). DeepSeek: removed unavailable `deepseek-vl2`; DeepSeek API is text-only. Qwen: confirmed working models only after live testing (`qwen3-vl-flash` and `qwen3.5l-plus` removed as unavailable in HK workspace).
 
 ### 🚧 Next: v0.5 S.2 — Pay-As-You-Go + Signed Installer
 
-**Known OCR limitation — compact-font apps.** Windows.Media.Ocr wants ~30 px text; Task Manager sidebar nav (~12–14 physical px) is at the reliability floor. Native-resolution capture (A1) reduces misses for mid-size text, but very small fonts remain unreliable. No upscale fallback is planned until the problem is observed more broadly.
+**Known OCR limitation — compact-font apps.** Windows.Media.Ocr wants ~30 px text; Task Manager sidebar nav (~12–14 physical px) is at the reliability floor. Native-resolution capture (A1) reduces misses for mid-size text, but very small fonts remain unreliable. The zone-filter fallback (nz-exact) resolves the case where the AI reports an inaccurate grid_cell. True low-resolution misses (text genuinely below OCR threshold) are not addressed — no upscale fallback is planned until observed more broadly.
 
 **Known OCR limitation — short bbox on substring match.** When the OCR winner is a substring of a longer label (e.g., "mini" within "Satechi Mac mini M4 Hub…"), the pointer box covers only that word, not the full element. A11y returns the full element rect; this is an OCR-path gap. Planned fix: prefer longer substring matches when multiple whole-word candidates exist.
 

@@ -57,6 +57,11 @@ See the LICENSE file in the root of this repository for complete details.
     ollama_model: string;
     openai_api_key: string;
     openai_model: string;
+    deepseek_api_key: string;
+    deepseek_model: string;
+    qwen_api_key: string;
+    qwen_model: string;
+    qwen_base_url: string;
     overlay_color: string;
     overlay_thickness: number;
     subtitle_enabled: boolean;
@@ -180,7 +185,10 @@ See the LICENSE file in the root of this repository for complete details.
     anthropic_api_key: "", anthropic_model: "claude-sonnet-4-6", anthropic_fast_model: "claude-haiku-4-5-20251001",
     gemini_api_key: "", gemini_model: "gemini-2.5-flash", gemini_fast_model: "gemini-2.5-flash-lite",
     ollama_base_url: "http://localhost:11434", ollama_model: "llama3.2-vision",
-    openai_api_key: "", openai_model: "gpt-4o",
+    openai_api_key: "", openai_model: "gpt-5.4",
+    deepseek_api_key: "", deepseek_model: "deepseek-v4-flash",
+    qwen_api_key: "", qwen_model: "qwen3-vl-plus",
+    qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     overlay_color: "#FF6B35", overlay_thickness: 4,
     subtitle_enabled: true, auto_advance: false,
     tts_enabled: true, voice_input_enabled: false, voice_language: "en-US",
@@ -199,6 +207,8 @@ See the LICENSE file in the root of this repository for complete details.
   let showKeyAnthropic = $state(false);
   let showKeyGemini = $state(false);
   let showKeyOpenAI = $state(false);
+  let showKeyDeepSeek = $state(false);
+  let showKeyQwen = $state(false);
   let debugShowInfo = $state(false);
   let showQuickMenu = $state(false);
   let isMuted = $state(false);
@@ -445,7 +455,7 @@ See the LICENSE file in the root of this repository for complete details.
   async function openSettings() {
     settingsError = null;
     settingsSaved = false;
-    showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false;
+    showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false;
     showSettings = true;
     try {
       const data = await invoke<SettingsPayload>("get_settings");
@@ -702,6 +712,8 @@ See the LICENSE file in the root of this repository for complete details.
     settingsForm.api_provider === "anthropic" ? settingsForm.anthropic_model
     : settingsForm.api_provider === "gemini" ? settingsForm.gemini_model
     : settingsForm.api_provider === "ollama" ? settingsForm.ollama_model
+    : settingsForm.api_provider === "deepseek" ? settingsForm.deepseek_model
+    : settingsForm.api_provider === "qwen" ? settingsForm.qwen_model
     : settingsForm.api_provider === "managed" ? "managed"
     : settingsForm.openai_model
   );
@@ -1168,7 +1180,7 @@ See the LICENSE file in the root of this repository for complete details.
             <div class="setting-group">
               <p class="setting-label">Provider</p>
               <div class="provider-radios">
-                {#each (["managed","anthropic","gemini","ollama","openai"] as const) as p}
+                {#each (["managed","anthropic","gemini","ollama","openai","deepseek","qwen"] as const) as p}
                   <label class="radio-opt" class:radio-active={settingsForm.api_provider === p}>
                     <input type="radio" name="provider" value={p} bind:group={settingsForm.api_provider} />
                     {p === "managed" ? "Managed (free)" : p.charAt(0).toUpperCase() + p.slice(1)}
@@ -1272,11 +1284,70 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="setting-group">
                 <label class="setting-label" for="openai-model">Model</label>
                 <select id="openai-model" class="setting-select" bind:value={settingsForm.openai_model}>
-                  <option value="gpt-4o">gpt-4o</option>
-                  <option value="gpt-4o-mini">gpt-4o-mini</option>
-                  <option value="o1">o1</option>
-                  <option value="o3">o3</option>
+                  <option value="gpt-5.4">gpt-5.4 (recommended)</option>
+                  <option value="gpt-5.4-mini">gpt-5.4-mini (fast)</option>
+                  <option value="gpt-5.5">gpt-5.5 (best quality)</option>
+                  <option value="gpt-4.1">gpt-4.1 (stable fallback)</option>
                 </select>
+              </div>
+
+            {:else if settingsForm.api_provider === "deepseek"}
+              <div class="setting-group">
+                <label class="setting-label" for="deepseek-key">API Key</label>
+                <div class="key-row">
+                  {#if showKeyDeepSeek}
+                    <input id="deepseek-key" class="setting-input" type="text"
+                      bind:value={settingsForm.deepseek_api_key}
+                      placeholder="sk-…" spellcheck="false" />
+                  {:else}
+                    <input id="deepseek-key" class="setting-input" type="password"
+                      bind:value={settingsForm.deepseek_api_key}
+                      placeholder="sk-…" spellcheck="false" />
+                  {/if}
+                  <button class="key-toggle" onclick={() => { showKeyDeepSeek = !showKeyDeepSeek; }}>
+                    {showKeyDeepSeek ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="deepseek-model">Model</label>
+                <select id="deepseek-model" class="setting-select" bind:value={settingsForm.deepseek_model}>
+                  <option value="deepseek-v4-flash">deepseek-v4-flash (recommended)</option>
+                  <option value="deepseek-v4-pro">deepseek-v4-pro (best quality)</option>
+                </select>
+              </div>
+
+            {:else if settingsForm.api_provider === "qwen"}
+              <div class="setting-group">
+                <label class="setting-label" for="qwen-key">API Key</label>
+                <div class="key-row">
+                  {#if showKeyQwen}
+                    <input id="qwen-key" class="setting-input" type="text"
+                      bind:value={settingsForm.qwen_api_key}
+                      placeholder="sk-…" spellcheck="false" />
+                  {:else}
+                    <input id="qwen-key" class="setting-input" type="password"
+                      bind:value={settingsForm.qwen_api_key}
+                      placeholder="sk-…" spellcheck="false" />
+                  {/if}
+                  <button class="key-toggle" onclick={() => { showKeyQwen = !showKeyQwen; }}>
+                    {showKeyQwen ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="qwen-model">Model</label>
+                <select id="qwen-model" class="setting-select" bind:value={settingsForm.qwen_model}>
+                  <option value="qwen3-vl-plus">qwen3-vl-plus (vision, recommended)</option>
+                  <option value="qwen3.5-flash">qwen3.5-flash (vision, fast)</option>
+                </select>
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="qwen-url">Base URL</label>
+                <input id="qwen-url" class="setting-input" type="text"
+                  bind:value={settingsForm.qwen_base_url}
+                  placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
+                <p class="setting-hint">Workspace endpoint: paste your openAiCompatible URL here</p>
               </div>
             {/if}
 
@@ -1331,15 +1402,15 @@ See the LICENSE file in the root of this repository for complete details.
           {:else if settingsTab === "developer"}
             <!-- Developer tab -->
             <div class="setting-group">
-              <p class="setting-label">Debug screenshots</p>
+              <p class="setting-label">Debug captures</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
-                <span>Save a copy of every screenshot sent to the AI</span>
+                <span>Save AI screenshots and OCR inputs to the debug folder</span>
               </label>
               <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.navisual.app\debug\</p>
               <button class="btn-ghost" style="margin-top:8px;font-size:12px;padding:5px 10px"
                 onclick={() => invoke("open_debug_folder").catch(() => {})}>
-                📂 Open screenshot folder
+                📂 Open debug folder
               </button>
             </div>
             <div class="setting-group">

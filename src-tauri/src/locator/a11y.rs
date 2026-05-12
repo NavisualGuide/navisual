@@ -375,11 +375,23 @@ fn manual_walk_all(
     desired_ct: Option<ControlType>,
     deadline: Instant,
 ) -> Vec<LocateResult> {
+    // Create one UIAutomation + walker for the entire recursive walk instead of
+    // one per visited node — the old per-node allocation consumed most of the
+    // 100 ms budget before reaching deep WinUI 3 elements (e.g. NavigationViewItem).
+    let automation = match UIAutomation::new() {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+    let walker = match automation.get_control_view_walker() {
+        Ok(w) => w,
+        Err(_) => return Vec::new(),
+    };
     let mut candidates = Vec::new();
     walk_recursive(
         root,
+        &walker,
         0,
-        8,
+        12,
         deadline,
         target_norm_lower,
         target_len,
@@ -392,6 +404,7 @@ fn manual_walk_all(
 #[allow(clippy::too_many_arguments)]
 fn walk_recursive(
     element: &UIElement,
+    walker: &uiautomation::UITreeWalker,
     depth: u32,
     max_depth: u32,
     deadline: Instant,
@@ -437,18 +450,11 @@ fn walk_recursive(
         }
     }
 
-    let automation = match UIAutomation::new() {
-        Ok(a) => a,
-        Err(_) => return,
-    };
-    let walker = match automation.get_control_view_walker() {
-        Ok(w) => w,
-        Err(_) => return,
-    };
     if let Ok(mut child) = walker.get_first_child(element) {
         loop {
             walk_recursive(
                 &child,
+                walker,
                 depth + 1,
                 max_depth,
                 deadline,
