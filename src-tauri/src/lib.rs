@@ -1344,6 +1344,12 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
         .map_err(|e| e.to_string())
 }
 
+/// Exit the process so the NSIS updater (already running) can replace the binary.
+#[tauri::command]
+fn exit_for_update(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 /// Return whether the app currently has a managed-provider session.
 #[tauri::command]
 async fn get_session_status(state: State<'_, AppState>) -> Result<SessionStatus, String> {
@@ -1458,6 +1464,7 @@ pub fn run() {
             sign_in_anon,
             get_balance,
             get_session_status,
+            exit_for_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

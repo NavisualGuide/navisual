@@ -313,6 +313,8 @@ See the LICENSE file in the root of this repository for complete details.
           updateStatus = "done";
         }
       });
+      // NSIS installer is now running — exit so it can replace the binary and relaunch.
+      await invoke("exit_for_update");
     } catch (_) {
       updateStatus = "idle";
     }
