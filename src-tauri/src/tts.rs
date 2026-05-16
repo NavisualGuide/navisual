@@ -121,9 +121,9 @@ mod imp {
                 Ok(p) => {
                     let s = pwstr_to_string(p.0 as *const u16);
                     CoTaskMemFree(Some(p.0 as *const _));
-                    if s.is_empty() { id.split('\\').last().unwrap_or("Unknown").to_string() } else { s }
+                    if s.is_empty() { id.split('\\').next_back().unwrap_or("Unknown").to_string() } else { s }
                 }
-                Err(_) => id.split('\\').last().unwrap_or("Unknown").to_string(),
+                Err(_) => id.split('\\').next_back().unwrap_or("Unknown").to_string(),
             };
             out.push(VoiceInfo { id, name });
         }
