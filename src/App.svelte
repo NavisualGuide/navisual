@@ -39,11 +39,12 @@ See the LICENSE file in the root of this repository for complete details.
     error: string | null;
     grid_cell: string | null;
     debug_screenshot_path: string | null;
+    chat_thumb_b64: string | null;
     locate_trace: LocateTrace | null;
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "consent_prompt" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
-  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string };
+  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer";
   type SettingsPayload = {
     api_provider: string;
@@ -67,6 +68,7 @@ See the LICENSE file in the root of this repository for complete details.
     subtitle_enabled: boolean;
     auto_advance: boolean;
     tts_enabled: boolean;
+    tts_voice: string;
     voice_input_enabled: boolean;
     voice_language: string;
     hotkey_next: string;
@@ -167,6 +169,51 @@ See the LICENSE file in the root of this repository for complete details.
   };
   let sharedApp = $state<SharedAppInfo | null>(null);
 
+  // Target-window picker (item 1)
+  type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; };
+  let targetPickerOpen = $state(false);
+  let targetWindows = $state<TargetWindowInfo[]>([]);
+  let pinnedHwnd = $state<number | null>(null);
+
+  // Friendly names for exe stems shown in the "Shared:" chip (mirrors Rust's friendly_exe_name).
+  const EXE_DISPLAY: Record<string, string> = {
+    olk: "Outlook", outlook: "Outlook",
+    code: "VS Code",
+    winword: "Word", excel: "Excel", powerpnt: "PowerPoint", onenote: "OneNote",
+    msedge: "Edge", chrome: "Chrome", firefox: "Firefox",
+    slack: "Slack", teams: "Teams",
+    windowsterminal: "Terminal", wt: "Terminal",
+    wechat: "WeChat", notion: "Notion", obsidian: "Obsidian",
+    discord: "Discord", zoom: "Zoom", notepad: "Notepad",
+  };
+
+  function exeStem(name: string): string {
+    return name.replace(/\.exe$/i, "").trim() || name;
+  }
+  function friendlyName(exeName: string): string {
+    const stem = exeStem(exeName).toLowerCase();
+    return EXE_DISPLAY[stem] ?? exeStem(exeName);
+  }
+
+  type VoiceInfo = { id: string; name: string; };
+  let availableVoices = $state<VoiceInfo[]>([]);
+
+  async function openTargetPicker() {
+    targetWindows = await invoke<TargetWindowInfo[]>("list_target_windows");
+    targetPickerOpen = true;
+  }
+
+  async function selectTarget(hwnd: number | null) {
+    targetPickerOpen = false;
+    if (hwnd === null) {
+      await invoke("unpin_target_window");
+      pinnedHwnd = null;
+    } else {
+      await invoke("pin_target_window", { hwnd });
+      pinnedHwnd = hwnd;
+    }
+  }
+
   // UI state
   let iconMode = $state(false);
   let showSettings = $state(false);
@@ -187,11 +234,11 @@ See the LICENSE file in the root of this repository for complete details.
     ollama_base_url: "http://localhost:11434", ollama_model: "llama3.2-vision",
     openai_api_key: "", openai_model: "gpt-5.4",
     deepseek_api_key: "", deepseek_model: "deepseek-v4-flash",
-    qwen_api_key: "", qwen_model: "qwen3-vl-plus",
+    qwen_api_key: "", qwen_model: "qwen3.6-plus",
     qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     overlay_color: "#FF6B35", overlay_thickness: 4,
     subtitle_enabled: true, auto_advance: false,
-    tts_enabled: true, voice_input_enabled: false, voice_language: "en-US",
+    tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "en-US",
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
     hotkey_pause: "Ctrl+KeyS", hotkey_icon: "Ctrl+KeyQ",
     grid_test_enabled: false,
@@ -240,10 +287,90 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   let _historyId = 0;
-  async function addToHistory(role: HistoryRole, text: string, meta?: string) {
-    history.push({ id: ++_historyId, role, text, meta });
+  async function addToHistory(role: HistoryRole, text: string, meta?: string): Promise<number> {
+    const id = ++_historyId;
+    history.push({ id, role, text, meta });
     await tick();
     if (historyEl) historyEl.scrollTop = historyEl.scrollHeight;
+    return id;
+  }
+
+  // Screenshot thumbnail lightbox.
+  let lightboxOpen = $state(false);
+  let lightboxSrc = $state<string | null>(null);
+  let lightboxLoading = $state(false);
+  let _lightboxPrevSize: { w: number; h: number } | null = null;
+  let _lightboxPrevPos: { x: number; y: number } | null = null;
+
+  async function openLightbox() {
+    lightboxLoading = true;
+    lightboxSrc = null;
+    try {
+      lightboxSrc = await invoke<string | null>("get_chat_full_screenshot");
+    } catch (_) {}
+    lightboxLoading = false;
+    if (!lightboxSrc) return;
+
+    // Expand the panel window to comfortably display the screenshot,
+    // then restore it when the lightbox closes.
+    const win = getCurrentWindow();
+    try {
+      const outer = await win.outerSize();      // physical pixels
+      const pos   = await win.outerPosition();
+      const scale = window.devicePixelRatio || 1;
+      _lightboxPrevSize = { w: outer.width, h: outer.height };
+      _lightboxPrevPos  = { x: pos.x, y: pos.y };
+
+      // Target: fit the screenshot plus a small margin, capped at 90% of screen.
+      const sw = window.screen.availWidth;
+      const sh = window.screen.availHeight;
+      const targetW = Math.round(Math.min(sw * 0.9, 1560));  // 1536 + margin
+      const targetH = Math.round(Math.min(sh * 0.9, 800));
+      // Center on screen.
+      const newX = Math.round((sw - targetW) / 2);
+      const newY = Math.round((sh - targetH) / 2);
+      await win.setSize(new LogicalSize(targetW, targetH));
+      await win.setPosition(new LogicalPosition(newX, newY));
+    } catch (_) {}
+
+    lightboxOpen = true;
+  }
+
+  async function closeLightbox() {
+    lightboxOpen = false;
+    lightboxSrc = null;
+    const win = getCurrentWindow();
+    try {
+      if (_lightboxPrevSize) {
+        const scale = window.devicePixelRatio || 1;
+        await win.setSize(new LogicalSize(
+          _lightboxPrevSize.w / scale,
+          _lightboxPrevSize.h / scale,
+        ));
+      }
+      if (_lightboxPrevPos) {
+        await win.setPosition(new LogicalPosition(_lightboxPrevPos.x, _lightboxPrevPos.y));
+      }
+    } catch (_) {}
+    _lightboxPrevSize = null;
+    _lightboxPrevPos  = null;
+  }
+
+  // Attach a new thumbnail to a history entry, fading out all previous thumbnails.
+  function attachThumb(entryId: number, thumbB64: string) {
+    const FADE_MS = 500;
+    // Mark existing visible thumbs as fading.
+    const toFade = history.filter(h => h.thumb && !h.thumbFading);
+    for (const e of toFade) e.thumbFading = true;
+    // After the animation, erase their data.
+    if (toFade.length > 0) {
+      setTimeout(() => {
+        for (const e of toFade) { e.thumb = undefined; e.thumbFading = false; }
+      }, FADE_MS);
+    }
+    // Set new thumb.
+    const entry = history.find(h => h.id === entryId);
+    if (entry) entry.thumb = thumbB64;
   }
 
   // Whether the global auto-advance setting is on (loaded from config on mount).
@@ -459,6 +586,8 @@ See the LICENSE file in the root of this repository for complete details.
     settingsSaved = false;
     showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false;
     showSettings = true;
+    // Load voice list in background — non-blocking, shows "Loading…" until done.
+    invoke<VoiceInfo[]>("list_tts_voices").then(v => { availableVoices = v; }).catch(() => {});
     try {
       const data = await invoke<SettingsPayload>("get_settings");
       // Keep the live auto_advance state — the Pause/Resume button may have
@@ -491,6 +620,21 @@ See the LICENSE file in the root of this repository for complete details.
     return errors;
   }
 
+  function resetSettings() {
+    // Restore everything to defaults but preserve API keys so the user
+    // doesn't lose credentials they've already entered.
+    const preserved = {
+      anthropic_api_key: settingsForm.anthropic_api_key,
+      gemini_api_key: settingsForm.gemini_api_key,
+      openai_api_key: settingsForm.openai_api_key,
+      deepseek_api_key: settingsForm.deepseek_api_key,
+      qwen_api_key: settingsForm.qwen_api_key,
+    };
+    settingsForm = { ...SETTINGS_DEFAULTS, ...preserved };
+    settingsError = null;
+    settingsSaved = false;
+  }
+
   async function applySettings() {
     settingsSaving = true;
     settingsError = null;
@@ -508,6 +652,10 @@ See the LICENSE file in the root of this repository for complete details.
       } else {
         settingsSaved = true;
         setTimeout(() => { settingsSaved = false; }, 2000);
+      }
+      if (activeModel && activeModel !== lastAppliedModel) {
+        addToHistory("system", `Switched to ${activeModel}`);
+        lastAppliedModel = activeModel;
       }
     } catch (e) {
       settingsError = String(e);
@@ -580,7 +728,7 @@ See the LICENSE file in the root of this repository for complete details.
     // Keep session context when in the middle of a task; start fresh from idle/error.
     const isReply = phase === "guiding" || phase === "needs_input" || phase === "consent_prompt";
     const prevPhase = phase;
-    await addToHistory("user", taskText);
+    const userEntryId = await addToHistory("user", taskText);
     currentInstruction = "";
     phase = "thinking";
     startTimer();
@@ -589,6 +737,7 @@ See the LICENSE file in the root of this repository for complete details.
       const res = await invoke<GuideResponse>("guide", { task: taskText, isReply, fullScreen });
       stopTimer();
       if (token !== requestToken) return;
+      if (res.chat_thumb_b64) attachThumb(userEntryId, res.chat_thumb_b64);
       if (!res.ok) {
         phase = prevPhase;
         addToHistory("system", "⚠️ " + (res.error ?? "guide failed"));
@@ -619,6 +768,9 @@ See the LICENSE file in the root of this repository for complete details.
       phase = "thinking";
       startTimer();
       const token = ++requestToken;
+      // Create a history entry so the screenshot thumbnail has somewhere to live.
+      const reQueryId = await addToHistory("system",
+        completed ? `✓ Completed — re-analysing…` : "Re-analysing…");
       try {
         const res = await invoke<GuideResponse>("guide", {
           task: completed ? `[User completed: "${completed}"]` : "",
@@ -626,6 +778,7 @@ See the LICENSE file in the root of this repository for complete details.
         });
         stopTimer();
         if (token !== requestToken) return;
+        if (res.chat_thumb_b64) attachThumb(reQueryId, res.chat_thumb_b64);
         if (!res.ok) {
           phase = prevPhase;
           addToHistory("system", "⚠️ " + (res.error ?? "re-query failed"));
@@ -662,7 +815,7 @@ See the LICENSE file in the root of this repository for complete details.
     const note = task.trim();
     if (note) task = "";
     const prevPhase = phase;
-    addToHistory("correction", note ? `Wrong — ${note}` : "Marked wrong — re-analysing…");
+    const corrEntryId = await addToHistory("correction", note ? `Wrong — ${note}` : "Marked wrong — re-analysing…");
     currentInstruction = "";
     phase = "thinking";
     startTimer();
@@ -671,6 +824,7 @@ See the LICENSE file in the root of this repository for complete details.
       const res = await invoke<GuideResponse>("send_correction", { note: note || null });
       stopTimer();
       if (token !== requestToken) return;
+      if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64);
       if (!res.ok) {
         phase = prevPhase;
         addToHistory("system", "⚠️ " + (res.error ?? "correction failed"));
@@ -720,6 +874,7 @@ See the LICENSE file in the root of this repository for complete details.
     : settingsForm.openai_model
   );
   let headerLabel = $derived(activeModel || provider);
+  let lastAppliedModel = $state<string>("");
 
   onMount(async () => {
     getVersion().then(v => { appVersion = v; }).catch(() => {});
@@ -804,7 +959,8 @@ See the LICENSE file in the root of this repository for complete details.
       showTrialExhausted = true;
     });
 
-    await addToHistory("system", "Navisual ready");
+    lastAppliedModel = activeModel;
+    await addToHistory("system", `Navisual ready — using ${activeModel}`);
   });
 
   onDestroy(async () => {
@@ -814,7 +970,7 @@ See the LICENSE file in the root of this repository for complete details.
 </script>
 
 {#if iconMode}
-  <!-- Icon mode: 56×56 orange dot — mousedown starts drag; click expands -->
+  <!-- Icon mode: goldfish icon — mousedown starts drag; click expands -->
   <button
     class="icon-btn"
     onclick={handleIconClick}
@@ -822,7 +978,7 @@ See the LICENSE file in the root of this repository for complete details.
     onpointermove={handleIconPointermove}
     title="Expand Navisual (Alt+Q)"
   >
-    <span class="icon-glow"></span>
+    <img src="/goldfish.svg" class="icon-fish" alt="Navisual" draggable="false" />
   </button>
 {:else}
   <main>
@@ -830,14 +986,18 @@ See the LICENSE file in the root of this repository for complete details.
     <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
       <span class="header-title">Navisual</span>
-      {#if headerLabel}
-        <span class="header-provider">{headerLabel}</span>
-      {/if}
       {#if sharedApp}
-        <span class="header-shared" title="Window currently shared with the AI">
+        <button
+          class="header-shared"
+          class:header-shared-pinned={pinnedHwnd !== null}
+          title={pinnedHwnd !== null ? "Target pinned — click to change" : "Click to choose target app"}
+          onmousedown={(e) => e.stopPropagation()}
+          onclick={openTargetPicker}
+        >
           <span class="header-shared-dot"></span>
-          {sharedApp.app_name}
-        </span>
+          {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
+          {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
+        </button>
       {/if}
       {#if settingsForm.api_provider === "managed" && freeRemaining !== null}
         <span class="header-balance" class:header-balance-low={freeRemaining <= 5}>{freeRemaining} left</span>
@@ -996,6 +1156,16 @@ See the LICENSE file in the root of this repository for complete details.
               <span class="h-meta">{entry.meta}</span>
             {/if}
           </div>
+          {#if entry.thumb}
+            <button
+              class="h-thumb-btn"
+              class:h-thumb-fading={entry.thumbFading}
+              onclick={openLightbox}
+              title="Click to view full screenshot"
+            >
+              <img class="h-thumb" src="data:image/jpeg;base64,{entry.thumb}" alt="screenshot" />
+            </button>
+          {/if}
         </div>
       {/each}
       {#if isThinking}
@@ -1105,13 +1275,51 @@ See the LICENSE file in the root of this repository for complete details.
         {/if}
       </div>
       <div class="shortcut-legend">
-        <span>{settingsForm.hotkey_next} Next</span>
-        <span>{settingsForm.hotkey_wrong} Wrong</span>
-        <span>{settingsForm.hotkey_pause} Pause</span>
-        <span>{settingsForm.hotkey_icon} Icon</span>
+        <span>{settingsForm.hotkey_next} <span class="hk-label">Next</span></span>
+        <span>{settingsForm.hotkey_wrong} <span class="hk-label">Wrong</span></span>
+        <span>{settingsForm.hotkey_pause} <span class="hk-label">Pause</span></span>
+        <span>{settingsForm.hotkey_icon} <span class="hk-label">Icon</span></span>
       </div>
     </footer>
   </main>
+
+  <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden -->
+  {#if targetPickerOpen}
+    <div class="target-picker-backdrop" role="presentation" onclick={() => (targetPickerOpen = false)}></div>
+    <div class="target-picker" role="listbox" aria-label="Choose target app">
+      <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null} onclick={() => selectTarget(null)}>
+        <span class="target-pick-check">{pinnedHwnd === null ? "✓" : ""}</span>
+        <span class="target-pick-name">Auto-detect</span>
+        <span class="target-pick-sub">follow the foreground window</span>
+      </button>
+      {#each targetWindows as w (w.hwnd)}
+        <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === w.hwnd} onclick={() => selectTarget(w.hwnd)}>
+          <span class="target-pick-check">{pinnedHwnd === w.hwnd ? "✓" : ""}</span>
+          <span class="target-pick-name">{w.display_name}</span>
+          {#if w.title && w.title !== w.display_name}
+            <span class="target-pick-sub">{w.title.length > 40 ? w.title.slice(0, 38) + "…" : w.title}</span>
+          {/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
+
+  <!-- Screenshot lightbox — panel window is temporarily expanded to fit -->
+  {#if lightboxOpen}
+    <div class="lightbox-backdrop" role="presentation" onclick={closeLightbox}>
+      {#if lightboxLoading}
+        <span class="lightbox-loading">Loading…</span>
+      {:else if lightboxSrc}
+        <img
+          class="lightbox-img"
+          src="data:image/jpeg;base64,{lightboxSrc}"
+          alt="Full screenshot"
+          onclick={(e) => e.stopPropagation()}
+        />
+        <span class="lightbox-hint">Click outside to close</span>
+      {/if}
+    </div>
+  {/if}
 
   <!-- Trial exhausted modal (S.1) -->
   {#if showTrialExhausted}
@@ -1340,8 +1548,9 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="setting-group">
                 <label class="setting-label" for="qwen-model">Model</label>
                 <select id="qwen-model" class="setting-select" bind:value={settingsForm.qwen_model}>
-                  <option value="qwen3-vl-plus">qwen3-vl-plus (vision, recommended)</option>
-                  <option value="qwen3.5-flash">qwen3.5-flash (vision, fast)</option>
+                  <option value="qwen3.6-plus">qwen3.6-plus (recommended)</option>
+                  <option value="qwen3.6-flash">qwen3.6-flash (fast)</option>
+                  <option value="qwen3.5-omni-plus">qwen3.5-omni-plus (multimodal)</option>
                 </select>
               </div>
               <div class="setting-group">
@@ -1349,7 +1558,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <input id="qwen-url" class="setting-input" type="text"
                   bind:value={settingsForm.qwen_base_url}
                   placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
-                <p class="setting-hint">Workspace endpoint: paste your openAiCompatible URL here</p>
+                <p class="setting-hint">Leave blank to use the default DashScope endpoint (mainland China). Only change if using a custom workspace URL.</p>
               </div>
             {/if}
 
@@ -1452,6 +1661,20 @@ See the LICENSE file in the root of this repository for complete details.
               </label>
             </div>
             <div class="setting-group">
+              <label class="setting-label" for="tts-voice">Voice</label>
+              <select id="tts-voice" class="setting-select"
+                bind:value={settingsForm.tts_voice}
+                disabled={!settingsForm.tts_enabled}>
+                <option value="">System default</option>
+                {#if availableVoices.length === 0}
+                  <option disabled value="">Loading voices…</option>
+                {/if}
+                {#each availableVoices as v}
+                  <option value={v.id}>{v.name}</option>
+                {/each}
+              </select>
+            </div>
+            <div class="setting-group">
               <p class="setting-label">Voice input</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.voice_input_enabled} />
@@ -1479,6 +1702,7 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
 
         <div class="modal-footer">
+          <button class="btn-ghost btn-reset" onclick={resetSettings} title="Restore all settings to defaults (API keys are preserved)">Reset to defaults</button>
           {#if settingsError}
             <span class="settings-error">{settingsError}</span>
           {:else if settingsSaved}
@@ -1523,6 +1747,7 @@ See the LICENSE file in the root of this repository for complete details.
             <span class="about-version">v{appVersion}</span>
           </div>
           <p class="about-tagline">The AI guides, never overrides.</p>
+          <p class="about-disclaimer">Navisual uses AI, which can make mistakes. Always verify each suggested action before performing it.</p>
           <div class="about-links">
             <button class="about-link" onclick={() => openUrl("https://navisualguide.com")}>navisualguide.com</button>
             <button class="about-link" onclick={() => openUrl("https://github.com/NavisualGuide/navisual")}>GitHub</button>
@@ -1586,27 +1811,29 @@ See the LICENSE file in the root of this repository for complete details.
   /* ── Icon mode ─────────────────────────────────── */
 
   .icon-btn {
-    width: 56px;
-    height: 56px;
-    border-radius: 50%;
-    background: var(--accent-500);
+    width: 64px;
+    height: 64px;
+    border-radius: 16px;
+    background: none;
     border: none;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 0 20px rgba(255, 107, 53, 0.55);
-    transition: box-shadow 160ms ease-out, transform 160ms ease-out;
+    padding: 0;
+    filter: drop-shadow(0 4px 12px rgba(255, 107, 53, 0.5));
+    transition: filter 160ms ease-out, transform 160ms ease-out;
   }
   .icon-btn:hover {
-    box-shadow: 0 0 28px rgba(255, 107, 53, 0.75);
-    transform: scale(1.06);
+    filter: drop-shadow(0 6px 18px rgba(255, 107, 53, 0.75));
+    transform: scale(1.08);
   }
-  .icon-glow {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.85);
+  .icon-fish {
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
+    pointer-events: none;
+    user-select: none;
   }
 
   /* ── Panel ──────────────────────────────────────── */
@@ -1615,8 +1842,10 @@ See the LICENSE file in the root of this repository for complete details.
     background: var(--surface-1);
     border: 1px solid var(--border);
     border-radius: 14px;
-    height: calc(100vh - 16px);
-    margin: 8px;
+    height: calc(100vh - 6px);
+    margin: 2px 4px 4px 4px;
+    min-width: 352px;
+    min-height: 370px;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
     display: flex;
     flex-direction: column;
@@ -1697,8 +1926,12 @@ See the LICENSE file in the root of this repository for complete details.
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    cursor: default;
+    cursor: pointer;
+    font-family: inherit;
   }
+  .header-shared:hover { background: rgba(255, 107, 53, 0.18); }
+  .header-shared-pinned { border-style: solid; border-width: 1.5px; }
+  .header-shared-pin { font-size: 9px; opacity: 0.8; }
   .header-shared-dot {
     width: 6px;
     height: 6px;
@@ -1710,6 +1943,57 @@ See the LICENSE file in the root of this repository for complete details.
   @keyframes shared-pulse {
     0%, 100% { opacity: 0.55; }
     50% { opacity: 1.0; }
+  }
+
+  /* Target-window picker (item 1) */
+  .target-picker-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 998;
+  }
+  .target-picker {
+    position: fixed;
+    top: 34px;
+    left: 8px;
+    min-width: 220px;
+    max-width: 320px;
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+    z-index: 999;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  }
+  .target-pick-item {
+    display: grid;
+    grid-template-columns: 14px 1fr;
+    grid-template-rows: auto auto;
+    align-items: center;
+    column-gap: 6px;
+    width: 100%;
+    padding: 5px 8px;
+    border-radius: 5px;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .target-pick-item:hover { background: var(--surface-3); }
+  .target-pick-selected { color: var(--accent, #ff6b35); }
+  .target-pick-check { font-size: 11px; grid-row: 1 / 3; }
+  .target-pick-name { font-weight: 500; }
+  .target-pick-sub {
+    grid-column: 2;
+    font-size: 10px;
+    color: var(--text-tertiary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .header-actions {
@@ -1875,7 +2159,58 @@ See the LICENSE file in the root of this repository for complete details.
     font-size: 13px;
     line-height: 1.5;
   }
-
+  .h-thumb-btn {
+    flex-shrink: 0;
+    align-self: center;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: zoom-in;
+    border-radius: 4px;
+    transition: opacity 0.5s ease-out;
+  }
+  .h-thumb-btn:hover .h-thumb { opacity: 1; }
+  .h-thumb-fading { opacity: 0; pointer-events: none; }
+  .h-thumb {
+    display: block;
+    width: 80px;
+    height: 45px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    opacity: 0.7;
+    transition: opacity 0.2s;
+  }
+  .lightbox-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.82);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    cursor: zoom-out;
+  }
+  .lightbox-img {
+    max-width: 92%;
+    max-height: 88vh;
+    border-radius: 6px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7);
+    cursor: default;
+  }
+  .lightbox-loading {
+    color: var(--text-secondary);
+    font-size: 14px;
+  }
+  .lightbox-hint {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.45);
+    pointer-events: none;
+  }
   .h-label {
     font-weight: 700;
     font-size: 10px;
@@ -2149,6 +2484,11 @@ See the LICENSE file in the root of this repository for complete details.
     font-family: "JetBrains Mono", ui-monospace, monospace;
     white-space: nowrap;
   }
+  .shortcut-legend .hk-label {
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-weight: 500;
+  }
 
   /* ── Shared buttons ──────────────────────────────── */
 
@@ -2277,6 +2617,8 @@ See the LICENSE file in the root of this repository for complete details.
     gap: 8px;
     flex-shrink: 0;
   }
+  .btn-reset { margin-right: auto; font-size: 12px; opacity: 0.75; }
+  .btn-reset:hover { opacity: 1; }
 
   /* ── Settings form elements ──────────────────────── */
 
@@ -2490,6 +2832,12 @@ See the LICENSE file in the root of this repository for complete details.
     color: var(--text-secondary);
     font-style: italic;
     font-size: 12px;
+  }
+  .about-disclaimer {
+    margin: 0;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    line-height: 1.4;
   }
 
   .about-links {

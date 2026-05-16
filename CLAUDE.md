@@ -408,6 +408,55 @@ if __name__ == "__main__":
 - **Provider fixes** — Error messages now show the actual provider name ("OpenAI API error", "Qwen API error") not "DeepSeek API error". Header model chip correctly shows DeepSeek/Qwen model name. `activeModel` derived covers all providers.
 - **Model dropdowns updated** — OpenAI: GPT-5.x series replacing GPT-4o (obsolete). DeepSeek: removed unavailable `deepseek-vl2`; DeepSeek API is text-only. Qwen: confirmed working models only after live testing (`qwen3-vl-flash` and `qwen3.5l-plus` removed as unavailable in HK workspace).
 
+### ✅ Completed (v0.5.2 — auto-updater restart fix — 2026-05-11)
+
+- **Auto-updater restart** — `exit_for_update` Tauri command exits the current process after `downloadAndInstall()` so the NSIS installer can replace the binary and relaunch. Signing pubkey added to `tauri.conf.json`; GitHub secrets `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` wired to CI. Releases are now signed — updater verifies the signature before installing.
+
+### ✅ Completed (v0.5.3 — UI polish, UX features, icon redesign — 2026-05-15)
+
+**Qwen improvements**
+- Models updated to `qwen3.6-plus` (default), `qwen3.6-flash`, `qwen3.5-omni-plus`. Default endpoint changed to `dashscope.aliyuncs.com` (mainland China). OneCore-first SAPI voice enumeration.
+- Connection error message now says "Qwen — cannot reach {url}: …" instead of the raw reqwest error, making misconfigured base URLs immediately obvious.
+
+**UI Polish (items 6, 8, 9, 10, 13, 14)**
+- Panel margin reduced to 2px top / 4px sides so the title bar is closer to the window edge (drag zone tighter).
+- `minWidth: 360, minHeight: 380` set in both `tauri.conf.json` and CSS — panel can't be resized to hide action buttons or hotkey strip.
+- Model name moved from the header chip into the conversation: first message reads "Navisual ready — using {model}"; Settings → Apply emits "Switched to {model}" if the model changed.
+- Status bar: hotkey *labels* (Next / Wrong / Pause / Icon) now render in `--text-secondary` at `font-weight: 500`; key combos stay tertiary — easier to scan.
+- Settings: **Reset to defaults** button (left-aligned in footer); preserves all API keys.
+- AI disclaimer added to the About dialog and the website hero section.
+
+**Target window dropdown (items 1 + 2)**
+- `capture::list_target_windows()` enumerates all candidate windows via `EnumWindows` → `is_target_candidate`, deduplicates by exe stem (only the most-recently-focused window per app is listed), maps exe stems to friendly names (`olk`→Outlook, `code`→VS Code, etc.).
+- New Tauri commands: `list_target_windows`, `pin_target_window(hwnd)`, `unpin_target_window`.
+- `GuidanceState.pinned_hwnd` persists across new tasks (unlike `target_hwnd` which resets). Survives until the user explicitly unpins.
+- The "Shared: <App>" header chip is now a clickable button — click to open the target picker dropdown; pinned state shown with 📌; chip shows exe stem (friendly name) not window title (fixes WeChat chat threads showing as the target name).
+
+**Tracker resize fix (item 4)** — `track.rs` now stores `win_width` + `win_height` alongside position. Overlay re-emits on any dimension change (not just left/top move), so resizing from right/bottom edge no longer leaves a stale pointer.
+
+**Clipboard prompt tightening (item 3)** — Rule 6 in `prompts.rs` now covers ALL typing actions (form fields, dialogs, address bars, terminal commands) not just CLI tasks.
+
+**TTS voice selection (item 5)**
+- `tts.rs`: new `VoiceInfo`, `SetVoice`, `ListVoices` message variants. STA thread enumerates `Speech_OneCore\Voices` (modern, superset on Win10/11) then falls back to `Speech\Voices` if empty.
+- Settings → Audio: "Voice" dropdown populated lazily when Settings opens. Persisted as `TTS_VOICE` env var; applied live on Save without restart.
+
+**Screenshot thumbnail in chat (item 7)**
+- Every `guide()` / `send_correction()` call saves two files: `chat_thumb.jpg` (160×90, JPEG q=40) and `chat_full.jpg` (full AI screenshot). Both share the same lifecycle — overwritten on next capture, deleted on new session, deleted on app exit.
+- A small thumbnail appears next to each user/correction history bubble. When a new screenshot arrives, the previous thumbnail fades out with a 500 ms CSS opacity transition.
+- Click the thumbnail → panel window expands to fit the full screenshot, lightbox appears. Click backdrop to close and restore original panel size.
+- Re-query triggered by "→ Next" (when all steps are exhausted) also attaches a thumbnail to its history entry.
+
+**Goldfish icon (item 11)**
+- New SVG goldfish icon (`icons/goldfish.svg`) — dark rounded square background (#18181B), orange-to-gold gradient body, forked fan tail, dorsal + pectoral fins, expressive eye.
+- `pnpm tauri icon icons/goldfish.svg` generated all required sizes (32×32 through 310×310, .ico, .icns).
+- Collapsed panel mode now shows the goldfish icon (64×64, rounded square, drop-shadow glow) instead of the plain orange dot.
+
+**Pointer redesign (item 12)** — `Overlay.svelte` `drawBox` and `drawArrow` completely rewritten:
+- *Ripple rings (A)*: 3 staggered concentric rings expand from element center, fading as they grow. No hard border rectangle.
+- *Viewfinder brackets (B)*: Bold corner-only marks (shadow + accent + corner dot). A warm gradient scan line sweeps top→bottom.
+- *Crosshair*: Subtle ± crosshair at element center.
+- *Floating beacon* (arrow variant): Glowing white/orange beacon floats above the element on a dashed drop-line with halo rings. Replaces the old solid triangle.
+
 ### 🚧 Next: v0.5 S.2 — Pay-As-You-Go + Signed Installer
 
 **Known OCR limitation — compact-font apps.** Windows.Media.Ocr wants ~30 px text; Task Manager sidebar nav (~12–14 physical px) is at the reliability floor. Native-resolution capture (A1) reduces misses for mid-size text, but very small fonts remain unreliable. The zone-filter fallback (nz-exact) resolves the case where the AI reports an inaccurate grid_cell. True low-resolution misses (text genuinely below OCR threshold) are not addressed — no upscale fallback is planned until observed more broadly.

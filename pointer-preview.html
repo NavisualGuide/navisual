@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Navisual — Pointer Style Preview</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #111; color: #fff; font-family: -apple-system, 'Segoe UI', sans-serif; padding: 32px; }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; color: #FF6B35; }
+    p.sub { color: #888; font-size: 13px; margin-bottom: 32px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .card { background: #1c1c1e; border-radius: 16px; padding: 20px; }
+    .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 4px; color: #FF9060; }
+    .card p  { font-size: 12px; color: #666; margin-bottom: 16px; line-height: 1.5; }
+    canvas   { display: block; border-radius: 12px; width: 100%; }
+    .choose  { margin-top: 32px; display: flex; gap: 12px; flex-wrap: wrap; }
+    .choose button {
+      background: #2a2a2e; border: 1px solid #444; color: #fff;
+      padding: 10px 22px; border-radius: 8px; cursor: pointer; font-size: 13px;
+      transition: background 0.15s;
+    }
+    .choose button:hover { background: #FF6B35; border-color: #FF6B35; }
+  </style>
+</head>
+<body>
+  <h1>Navisual — Pointer Style Preview</h1>
+  <p class="sub">Open this file in Chrome/Edge. Each canvas shows the style against a realistic grey app window.</p>
+  <div class="grid">
+    <div class="card">
+      <h2>A — Ripple Rings</h2>
+      <p>Concentric circles expand from the element's center. No box. Small crosshair at center. Sonar / water-ripple feel.</p>
+      <canvas id="cA" width="480" height="280"></canvas>
+    </div>
+    <div class="card">
+      <h2>B — Viewfinder Brackets</h2>
+      <p>Bold corner brackets only — no full border. A bright scan line sweeps through the element. Cinematic / camera feel.</p>
+      <canvas id="cB" width="480" height="280"></canvas>
+    </div>
+    <div class="card">
+      <h2>C — Floating Beacon</h2>
+      <p>A glowing pin floats above the element with expanding halo rings, connected by a thin drop line. Minimal and elegant.</p>
+      <canvas id="cC" width="480" height="280"></canvas>
+    </div>
+    <div class="card">
+      <h2>D — Spotlight Vignette</h2>
+      <p>The screen edges darken with a radial vignette. A warm glow ring pulses around the element — like a stage spotlight.</p>
+      <canvas id="cD" width="480" height="280"></canvas>
+    </div>
+  </div>
+  <div class="choose">
+    <span style="color:#888;font-size:13px;align-self:center">Tell Claude which you prefer (or mix elements):</span>
+    <button onclick="pick('A')">A — Ripple Rings</button>
+    <button onclick="pick('B')">B — Viewfinder</button>
+    <button onclick="pick('C')">C — Beacon</button>
+    <button onclick="pick('D')">D — Spotlight</button>
+  </div>
+
+<script>
+const ACCENT = "#FF6B35";
+const [AR, AG, AB] = [255, 107, 53];
+
+// Fake "app window" background on every canvas
+function drawFakeBg(ctx, w, h) {
+  // Window chrome
+  ctx.fillStyle = "#2a2a2e"; ctx.fillRect(0, 0, w, h);
+  // Toolbar
+  ctx.fillStyle = "#1e1e1e"; ctx.fillRect(0, 0, w, 36);
+  // Traffic lights
+  ["#ff5f57","#febc2e","#28c840"].forEach((c,i) => {
+    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(14+i*22, 18, 6, 0, Math.PI*2); ctx.fill();
+  });
+  // Fake content rows
+  ctx.fillStyle = "#333";
+  for (let y = 60; y < h - 20; y += 36) {
+    ctx.fillRect(20, y, w * 0.55, 20);
+    ctx.fillRect(w * 0.65, y, w * 0.28, 20);
+  }
+}
+
+// ──────────────────────────────────────────────
+// A: RIPPLE RINGS
+// ──────────────────────────────────────────────
+const cA = document.getElementById("cA");
+const ctxA = cA.getContext("2d");
+const W = cA.width, H = cA.height;
+
+// The "element" the pointer is pointing at
+const elA = { x: W/2 - 70, y: H/2 - 14, w: 140, h: 28 };
+const cx0 = elA.x + elA.w/2, cy0 = elA.y + elA.h/2;
+
+function drawA(t) {
+  ctxA.clearRect(0,0,W,H);
+  drawFakeBg(ctxA, W, H);
+  // Highlight the fake element underneath
+  ctxA.fillStyle = "#3a3a3e"; ctxA.fillRect(elA.x, elA.y, elA.w, elA.h);
+  ctxA.fillStyle = "#fff"; ctxA.font = "12px sans-serif"; ctxA.textAlign = "center";
+  ctxA.fillText("Insert Table", cx0, cy0 + 4);
+
+  // Three staggered ripple rings
+  for (let i = 0; i < 3; i++) {
+    const phase = ((t / 1400 + i / 3) % 1);        // 0→1 cycling
+    const radius = 24 + phase * 90;
+    const alpha  = (1 - phase) * 0.65;
+    ctxA.beginPath();
+    ctxA.arc(cx0, cy0, radius, 0, Math.PI * 2);
+    ctxA.strokeStyle = `rgba(${AR},${AG},${AB},${alpha})`;
+    ctxA.lineWidth = 2.5 - phase * 1.5;
+    ctxA.shadowColor = ACCENT; ctxA.shadowBlur = 8;
+    ctxA.stroke();
+    ctxA.shadowBlur = 0;
+  }
+
+  // Crosshair at center
+  const pulse = (Math.sin(t / 500) + 1) / 2;
+  const r = 8;
+  ctxA.strokeStyle = `rgba(${AR},${AG},${AB},${0.6 + pulse*0.4})`;
+  ctxA.lineWidth = 2;
+  ctxA.shadowColor = ACCENT; ctxA.shadowBlur = 10;
+  ctxA.beginPath(); ctxA.moveTo(cx0-r,cy0); ctxA.lineTo(cx0+r,cy0); ctxA.stroke();
+  ctxA.beginPath(); ctxA.moveTo(cx0,cy0-r); ctxA.lineTo(cx0,cy0+r); ctxA.stroke();
+  // Center dot
+  ctxA.fillStyle = ACCENT;
+  ctxA.beginPath(); ctxA.arc(cx0, cy0, 3, 0, Math.PI*2); ctxA.fill();
+  ctxA.shadowBlur = 0;
+}
+
+// ──────────────────────────────────────────────
+// B: VIEWFINDER BRACKETS
+// ──────────────────────────────────────────────
+const cB = document.getElementById("cB");
+const ctxB = cB.getContext("2d");
+const elB = { x: W/2 - 85, y: H/2 - 16, w: 170, h: 32 };
+const pad = 14;
+const bx = elB.x - pad, by = elB.y - pad, bw = elB.w + pad*2, bh = elB.h + pad*2;
+
+function drawB(t) {
+  ctxB.clearRect(0,0,W,H);
+  drawFakeBg(ctxB, W, H);
+  ctxB.fillStyle = "#3a3a3e"; ctxB.fillRect(elB.x, elB.y, elB.w, elB.h);
+  ctxB.fillStyle = "#fff"; ctxB.font = "12px sans-serif"; ctxB.textAlign = "center";
+  ctxB.fillText("Insert Table", elB.x + elB.w/2, elB.y + elB.h/2 + 4);
+
+  const pulse = (Math.sin(t / 700) + 1) / 2;
+  const arm = 22;  // length of each bracket arm
+
+  function drawBracket(ox, oy, dx, dy) {
+    ctxB.strokeStyle = "#000"; ctxB.lineWidth = 5;
+    ctxB.beginPath();
+    ctxB.moveTo(ox + dx*arm, oy); ctxB.lineTo(ox, oy); ctxB.lineTo(ox, oy + dy*arm);
+    ctxB.stroke();
+    ctxB.strokeStyle = ACCENT;
+    ctxB.lineWidth = 3;
+    ctxB.shadowColor = ACCENT; ctxB.shadowBlur = 8 + pulse * 14;
+    ctxB.stroke();
+    ctxB.shadowBlur = 0;
+  }
+  drawBracket(bx,    by,    1,  1);
+  drawBracket(bx+bw, by,   -1,  1);
+  drawBracket(bx,    by+bh, 1, -1);
+  drawBracket(bx+bw, by+bh,-1, -1);
+
+  // Corner dots
+  [[bx,by],[bx+bw,by],[bx,by+bh],[bx+bw,by+bh]].forEach(([x,y]) => {
+    ctxB.fillStyle = ACCENT;
+    ctxB.shadowColor = ACCENT; ctxB.shadowBlur = 10;
+    ctxB.beginPath(); ctxB.arc(x, y, 3, 0, Math.PI*2); ctxB.fill();
+    ctxB.shadowBlur = 0;
+  });
+
+  // Animated scan line
+  const scanPhase = (t / 1200) % 1;
+  const scanY = by + scanPhase * bh;
+  const scanAlpha = Math.sin(scanPhase * Math.PI) * 0.85;
+  const scanGrad = ctxB.createLinearGradient(bx, 0, bx+bw, 0);
+  scanGrad.addColorStop(0,   `rgba(${AR},${AG},${AB},0)`);
+  scanGrad.addColorStop(0.15,`rgba(${AR},${AG},${AB},${scanAlpha})`);
+  scanGrad.addColorStop(0.5, `rgba(255,200,120,${scanAlpha})`);
+  scanGrad.addColorStop(0.85,`rgba(${AR},${AG},${AB},${scanAlpha})`);
+  scanGrad.addColorStop(1,   `rgba(${AR},${AG},${AB},0)`);
+  ctxB.fillStyle = scanGrad;
+  ctxB.fillRect(bx, scanY - 1.5, bw, 3);
+  // Glow line
+  ctxB.strokeStyle = `rgba(255,220,150,${scanAlpha * 0.8})`;
+  ctxB.lineWidth = 1;
+  ctxB.shadowColor = `rgba(255,180,80,0.9)`;
+  ctxB.shadowBlur = 8;
+  ctxB.beginPath(); ctxB.moveTo(bx, scanY); ctxB.lineTo(bx+bw, scanY); ctxB.stroke();
+  ctxB.shadowBlur = 0;
+}
+
+// ──────────────────────────────────────────────
+// C: FLOATING BEACON
+// ──────────────────────────────────────────────
+const cC = document.getElementById("cC");
+const ctxC = cC.getContext("2d");
+const elC = { x: W/2 - 65, y: H/2, w: 130, h: 28 };
+const beaconX = elC.x + elC.w/2;
+const beaconY = elC.y - 44;
+
+function drawC(t) {
+  ctxC.clearRect(0,0,W,H);
+  drawFakeBg(ctxC, W, H);
+  ctxC.fillStyle = "#3a3a3e"; ctxC.fillRect(elC.x, elC.y, elC.w, elC.h);
+  ctxC.fillStyle = "#fff"; ctxC.font = "12px sans-serif"; ctxC.textAlign = "center";
+  ctxC.fillText("Insert Table", elC.x + elC.w/2, elC.y + elC.h/2 + 4);
+
+  const pulse = (Math.sin(t / 600) + 1) / 2;
+
+  // Soft glow under element
+  const grd = ctxC.createRadialGradient(
+    elC.x+elC.w/2, elC.y+elC.h/2, 0,
+    elC.x+elC.w/2, elC.y+elC.h/2, elC.w*0.7
+  );
+  grd.addColorStop(0, `rgba(${AR},${AG},${AB},${0.12 + pulse*0.08})`);
+  grd.addColorStop(1, `rgba(${AR},${AG},${AB},0)`);
+  ctxC.fillStyle = grd;
+  ctxC.fillRect(elC.x-40, elC.y-16, elC.w+80, elC.h+32);
+
+  // Drop line
+  const lineAlpha = 0.45 + pulse * 0.3;
+  const lineGrd = ctxC.createLinearGradient(0, beaconY+16, 0, elC.y);
+  lineGrd.addColorStop(0, `rgba(${AR},${AG},${AB},${lineAlpha})`);
+  lineGrd.addColorStop(1, `rgba(${AR},${AG},${AB},0.05)`);
+  ctxC.strokeStyle = lineGrd;
+  ctxC.lineWidth = 1.5;
+  ctxC.setLineDash([4, 4]);
+  ctxC.beginPath(); ctxC.moveTo(beaconX, beaconY+16); ctxC.lineTo(beaconX, elC.y);
+  ctxC.stroke(); ctxC.setLineDash([]);
+
+  // Halo rings from beacon
+  for (let i = 0; i < 2; i++) {
+    const phase = ((t / 1000 + i * 0.5) % 1);
+    const rr = 14 + phase * 40;
+    const aa = (1 - phase) * 0.5;
+    ctxC.beginPath(); ctxC.arc(beaconX, beaconY, rr, 0, Math.PI*2);
+    ctxC.strokeStyle = `rgba(${AR},${AG},${AB},${aa})`;
+    ctxC.lineWidth = 1.5;
+    ctxC.stroke();
+  }
+
+  // Beacon core
+  ctxC.shadowColor = ACCENT; ctxC.shadowBlur = 16 + pulse * 20;
+  ctxC.fillStyle = "#fff";
+  ctxC.beginPath(); ctxC.arc(beaconX, beaconY, 7, 0, Math.PI*2); ctxC.fill();
+  ctxC.fillStyle = ACCENT;
+  ctxC.beginPath(); ctxC.arc(beaconX, beaconY, 4.5, 0, Math.PI*2); ctxC.fill();
+  ctxC.shadowBlur = 0;
+
+  // Tiny downward chevron below beacon
+  const chevY = beaconY + 12;
+  ctxC.strokeStyle = `rgba(${AR},${AG},${AB},${0.5 + pulse*0.3})`;
+  ctxC.lineWidth = 1.5; ctxC.lineCap = "round";
+  ctxC.beginPath();
+  ctxC.moveTo(beaconX-5, chevY); ctxC.lineTo(beaconX, chevY+4); ctxC.lineTo(beaconX+5, chevY);
+  ctxC.stroke();
+}
+
+// ──────────────────────────────────────────────
+// D: SPOTLIGHT VIGNETTE
+// ──────────────────────────────────────────────
+const cD = document.getElementById("cD");
+const ctxD = cD.getContext("2d");
+const elD = { x: W/2 - 75, y: H/2 - 14, w: 150, h: 28 };
+
+function drawD(t) {
+  ctxD.clearRect(0,0,W,H);
+  drawFakeBg(ctxD, W, H);
+  ctxD.fillStyle = "#3a3a3e"; ctxD.fillRect(elD.x, elD.y, elD.w, elD.h);
+  ctxD.fillStyle = "#fff"; ctxD.font = "12px sans-serif"; ctxD.textAlign = "center";
+  ctxD.fillText("Insert Table", elD.x + elD.w/2, elD.y + elD.h/2 + 4);
+
+  const pulse = (Math.sin(t / 800) + 1) / 2;
+  const cx = elD.x + elD.w / 2;
+  const cy = elD.y + elD.h / 2;
+  const spotR = Math.max(elD.w, elD.h) * 1.15 + pulse * 12;
+
+  // Vignette: radial gradient from transparent at element to semi-dark at edges
+  const vig = ctxD.createRadialGradient(cx, cy, spotR * 0.6, cx, cy, Math.max(W, H) * 0.75);
+  vig.addColorStop(0, "rgba(0,0,0,0)");
+  vig.addColorStop(1, "rgba(0,0,0,0.55)");
+  ctxD.fillStyle = vig;
+  ctxD.fillRect(0, 0, W, H);
+
+  // Glow ring around element
+  const ringGrd = ctxD.createRadialGradient(cx, cy, spotR * 0.55, cx, cy, spotR);
+  ringGrd.addColorStop(0, `rgba(${AR},${AG},${AB},${0.18 + pulse * 0.12})`);
+  ringGrd.addColorStop(0.7, `rgba(${AR},${AG},${AB},${0.35 + pulse * 0.2})`);
+  ringGrd.addColorStop(1, "rgba(0,0,0,0)");
+  ctxD.fillStyle = ringGrd;
+  ctxD.beginPath(); ctxD.arc(cx, cy, spotR, 0, Math.PI*2); ctxD.fill();
+
+  // Inner bright ring (border) — manual rounded rect for compatibility
+  ctxD.strokeStyle = `rgba(${AR},${AG},${AB},${0.7 + pulse*0.3})`;
+  ctxD.lineWidth = 2;
+  ctxD.shadowColor = ACCENT; ctxD.shadowBlur = 14 + pulse * 16;
+  ctxD.beginPath();
+  const p2 = 10, rr2 = 8;
+  const rx2 = elD.x-p2, ry2 = elD.y-p2, rw2 = elD.w+p2*2, rh2 = elD.h+p2*2;
+  ctxD.moveTo(rx2+rr2, ry2);
+  ctxD.lineTo(rx2+rw2-rr2, ry2); ctxD.quadraticCurveTo(rx2+rw2, ry2, rx2+rw2, ry2+rr2);
+  ctxD.lineTo(rx2+rw2, ry2+rh2-rr2); ctxD.quadraticCurveTo(rx2+rw2, ry2+rh2, rx2+rw2-rr2, ry2+rh2);
+  ctxD.lineTo(rx2+rr2, ry2+rh2); ctxD.quadraticCurveTo(rx2, ry2+rh2, rx2, ry2+rh2-rr2);
+  ctxD.lineTo(rx2, ry2+rr2); ctxD.quadraticCurveTo(rx2, ry2, rx2+rr2, ry2);
+  ctxD.closePath(); ctxD.stroke();
+  ctxD.shadowBlur = 0;
+}
+
+// ──────────────────────────────────────────────
+// Animation loop
+// ──────────────────────────────────────────────
+let start = null;
+function loop(ts) {
+  if (!start) start = ts;
+  const t = ts - start;
+  drawA(t); drawB(t); drawC(t); drawD(t);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function pick(x) {
+  alert(`Great! Tell Claude: "I prefer option ${x}" — then Claude will implement it.`);
+}
+</script>
+</body>
+</html>

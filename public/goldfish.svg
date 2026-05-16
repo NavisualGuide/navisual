@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="body" x1="15%" y1="10%" x2="85%" y2="90%">
+      <stop offset="0%" stop-color="#FFD060"/>
+      <stop offset="45%" stop-color="#FF9020"/>
+      <stop offset="100%" stop-color="#E85010"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="30%" cy="30%" r="55%">
+      <stop offset="0%" stop-color="#FFF5CC" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#FF9020" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="belly" cx="42%" cy="68%" r="52%">
+      <stop offset="0%" stop-color="#FFE090" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#FF8020" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background: dark rounded square matching Navisual theme -->
+  <rect width="512" height="512" rx="108" ry="108" fill="#18181B"/>
+
+  <!-- Subtle background glow -->
+  <ellipse cx="235" cy="256" rx="175" ry="120" fill="#FF6B35" opacity="0.07" filter="url(#glow)"/>
+
+  <!-- Upper tail lobe — graceful curve -->
+  <path d="M 348,246
+           C 368,215 395,185 420,148
+           C 428,136 438,122 448,108
+           C 440,120 428,138 418,152
+           C 400,178 374,210 352,248 Z"
+        fill="#FF7C18" opacity="0.92"/>
+
+  <!-- Lower tail lobe -->
+  <path d="M 348,266
+           C 368,297 395,327 420,364
+           C 428,376 438,390 448,404
+           C 440,392 428,374 418,360
+           C 400,334 374,302 352,264 Z"
+        fill="#FF7C18" opacity="0.92"/>
+
+  <!-- Tail connector (where body meets tail) -->
+  <ellipse cx="345" cy="256" rx="22" ry="16" fill="#E86810"/>
+
+  <!-- Main body -->
+  <ellipse cx="210" cy="256" rx="148" ry="100" fill="url(#body)"/>
+
+  <!-- Belly soft highlight -->
+  <ellipse cx="210" cy="256" rx="148" ry="100" fill="url(#belly)"/>
+
+  <!-- Sheen / specular highlight -->
+  <ellipse cx="210" cy="256" rx="148" ry="100" fill="url(#sheen)"/>
+
+  <!-- Dorsal fin -->
+  <path d="M 152,160
+           C 178,100 228,92 282,158"
+        fill="#D85C08" stroke="none"/>
+  <!-- Dorsal fin inner (lighter edge) -->
+  <path d="M 158,162
+           C 182,112 228,104 278,162"
+        fill="#E87010" opacity="0.7"/>
+
+  <!-- Pectoral fin -->
+  <path d="M 240,318
+           C 272,372 258,408 222,400
+           C 192,388 194,342 230,322 Z"
+        fill="#D05808" opacity="0.82"/>
+
+  <!-- Eye — white sclera -->
+  <circle cx="106" cy="238" r="30" fill="white" opacity="0.95"/>
+  <!-- Iris -->
+  <circle cx="110" cy="238" r="21" fill="#0C0C0C"/>
+  <!-- Primary shine -->
+  <circle cx="118" cy="231" r="9" fill="white" opacity="0.92"/>
+  <!-- Secondary shine (smaller) -->
+  <circle cx="103" cy="245" r="4" fill="white" opacity="0.45"/>
+
+  <!-- Mouth (simple, expressive) -->
+  <path d="M 66,264 Q 60,275 70,282 Q 58,274 66,264 Z" fill="#C04C06"/>
+  <ellipse cx="67" cy="271" rx="10" ry="8" fill="#C84E06"/>
+</svg>

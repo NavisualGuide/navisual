@@ -25,6 +25,8 @@ struct TrackState {
     hwnd: isize,
     win_left: i32,
     win_top: i32,
+    win_width: i32,
+    win_height: i32,
     /// Element bbox relative to the window's top-left corner.
     rel_bbox: Rect,
     kind: OverlayKind,
@@ -80,10 +82,10 @@ impl WindowTracker {
                 if GetWindowRect(hwnd, &mut wr).is_err() {
                     return;
                 }
-                (hwnd.0 as isize, wr.left, wr.top)
+                (hwnd.0 as isize, wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top)
             };
 
-            let (hwnd, win_left, win_top) = result;
+            let (hwnd, win_left, win_top, win_width, win_height) = result;
             let rel_bbox = Rect {
                 x: abs_bbox.x - win_left,
                 y: abs_bbox.y - win_top,
@@ -95,6 +97,8 @@ impl WindowTracker {
                 hwnd,
                 win_left,
                 win_top,
+                win_width,
+                win_height,
                 rel_bbox,
                 kind,
                 text,
@@ -150,9 +154,16 @@ fn poll_once(state: &Mutex<Option<TrackState>>) {
             let restored = s.was_minimized;
             s.was_minimized = false;
 
-            if wr.left != s.win_left || wr.top != s.win_top || restored {
+            let new_w = wr.right - wr.left;
+            let new_h = wr.bottom - wr.top;
+            let moved = wr.left != s.win_left || wr.top != s.win_top;
+            let resized = new_w != s.win_width || new_h != s.win_height;
+
+            if moved || resized || restored {
                 s.win_left = wr.left;
                 s.win_top = wr.top;
+                s.win_width = new_w;
+                s.win_height = new_h;
 
                 let new_bbox = Rect {
                     x: wr.left + s.rel_bbox.x,

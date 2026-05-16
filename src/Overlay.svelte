@@ -42,61 +42,99 @@
     return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 107, 53];
   }
 
-  // Draw the highlight box with a pulsing glow.
-  // t = milliseconds elapsed since the box first appeared.
+  // Combined A+B pointer: ripple rings from center (A) + bold corner brackets (B)
+  // + animated scan line (B) + subtle crosshair center dot.
   function drawBox(
     ctx: CanvasRenderingContext2D,
     bx: number, by: number, bw: number, bh: number,
     t: number,
   ) {
     const [r, g, b] = hexToRgb(theme.color);
-    const pulse = (Math.sin(t / 700) + 1) / 2; // 0→1, ~4.4 s period
-    const lw = Math.max(1, theme.thickness);
+    const pulse = (Math.sin(t / 700) + 1) / 2;
+    const cx = bx + bw / 2;
+    const cy = by + bh / 2;
 
-    // Subtle accent fill
-    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.07 + pulse * 0.07})`;
-    ctx.fillRect(bx, by, bw, bh);
-
-    // Dark shadow outline — ensures contrast on any background color
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
-    ctx.lineWidth = lw * 2.25;
-    ctx.lineJoin = "round";
-    ctx.strokeRect(bx, by, bw, bh);
-
-    // Pulsing accent border
-    ctx.shadowColor = theme.color;
-    ctx.shadowBlur = 8 + pulse * 18;
-    ctx.strokeStyle = theme.color;
-    ctx.lineWidth = lw;
-    ctx.strokeRect(bx, by, bw, bh);
-    ctx.shadowBlur = 0;
-
-    // Corner L-marks: white base layer + accent glow layer
-    const tick = Math.min(24, Math.max(12, Math.min(bw * 0.35, bh * 0.35)));
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-
-    function corners(color: string, width: number, glow: number) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.shadowColor = glow ? theme.color : "transparent";
-      ctx.shadowBlur = glow;
-      // top-left
-      ctx.beginPath(); ctx.moveTo(bx, by + tick); ctx.lineTo(bx, by); ctx.lineTo(bx + tick, by); ctx.stroke();
-      // top-right
-      ctx.beginPath(); ctx.moveTo(bx + bw - tick, by); ctx.lineTo(bx + bw, by); ctx.lineTo(bx + bw, by + tick); ctx.stroke();
-      // bottom-left
-      ctx.beginPath(); ctx.moveTo(bx, by + bh - tick); ctx.lineTo(bx, by + bh); ctx.lineTo(bx + tick, by + bh); ctx.stroke();
-      // bottom-right (note: last lineTo goes UP, not back across — fixes original bug)
-      ctx.beginPath(); ctx.moveTo(bx + bw - tick, by + bh); ctx.lineTo(bx + bw, by + bh); ctx.lineTo(bx + bw, by + bh - tick); ctx.stroke();
+    // ── 1. RIPPLE RINGS from element center ──────────────────────────────
+    const baseR = Math.max(bw, bh) / 2 + 8;
+    for (let i = 0; i < 3; i++) {
+      const phase = ((t / 1500 + i / 3) % 1);
+      const radius = baseR + phase * Math.max(bw, bh) * 0.7;
+      const alpha  = (1 - phase) * 0.55;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      ctx.lineWidth = 2.5 - phase * 1.8;
+      ctx.shadowColor = theme.color;
+      ctx.shadowBlur = 6;
+      ctx.stroke();
       ctx.shadowBlur = 0;
     }
 
-    corners("#FFFFFF", 3.5, 0);
-    corners(theme.color, 2.5, 4 + pulse * 10);
+    // ── 2. CORNER BRACKETS (no full border) ──────────────────────────────
+    const arm = Math.min(26, Math.max(14, Math.min(bw * 0.38, bh * 0.5)));
+    ctx.lineCap = "square";
+    ctx.lineJoin = "miter";
+
+    function bracket(ox: number, oy: number, dx: number, dy: number) {
+      // Shadow layer
+      ctx.strokeStyle = "rgba(0,0,0,0.75)";
+      ctx.lineWidth = 5.5;
+      ctx.beginPath();
+      ctx.moveTo(ox + dx * arm, oy); ctx.lineTo(ox, oy); ctx.lineTo(ox, oy + dy * arm);
+      ctx.stroke();
+      // Accent layer
+      ctx.strokeStyle = theme.color;
+      ctx.lineWidth = 3;
+      ctx.shadowColor = theme.color;
+      ctx.shadowBlur = 8 + pulse * 16;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // Corner dot
+      ctx.fillStyle = theme.color;
+      ctx.shadowColor = theme.color;
+      ctx.shadowBlur = 10 + pulse * 8;
+      ctx.beginPath(); ctx.arc(ox, oy, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    bracket(bx,      by,      1, 1);
+    bracket(bx + bw, by,     -1, 1);
+    bracket(bx,      by + bh, 1, -1);
+    bracket(bx + bw, by + bh,-1, -1);
+
+    // ── 3. SCAN LINE sweeping top→bottom ─────────────────────────────────
+    const scanPhase = (t / 1500) % 1;
+    const scanY     = by + scanPhase * bh;
+    const scanAlpha = Math.sin(scanPhase * Math.PI) * 0.7;
+    const grad = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+    grad.addColorStop(0,    `rgba(${r},${g},${b},0)`);
+    grad.addColorStop(0.15, `rgba(${r},${g},${b},${scanAlpha})`);
+    grad.addColorStop(0.5,  `rgba(255, 210, 140, ${scanAlpha})`);
+    grad.addColorStop(0.85, `rgba(${r},${g},${b},${scanAlpha})`);
+    grad.addColorStop(1,    `rgba(${r},${g},${b},0)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(bx, scanY - 1.5, bw, 3);
+    // Bright core of the scan line
+    ctx.strokeStyle = `rgba(255, 230, 170, ${scanAlpha * 0.9})`;
+    ctx.lineWidth = 1;
+    ctx.shadowColor = "rgba(255, 180, 80, 0.9)";
+    ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.moveTo(bx, scanY); ctx.lineTo(bx + bw, scanY); ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // ── 4. CROSSHAIR dot at center (subtle) ──────────────────────────────
+    const cr = 5;
+    ctx.strokeStyle = `rgba(${r},${g},${b},${0.35 + pulse * 0.25})`;
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = "round";
+    ctx.shadowColor = theme.color; ctx.shadowBlur = 5;
+    ctx.beginPath(); ctx.moveTo(cx - cr, cy); ctx.lineTo(cx + cr, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy - cr); ctx.lineTo(cx, cy + cr); ctx.stroke();
+    ctx.shadowBlur = 0;
   }
 
+  // Arrow variant: same bracket+ripple combo, but adds a floating beacon
+  // above the element instead of the old solid triangle.
   function drawArrow(
     ctx: CanvasRenderingContext2D,
     bx: number, by: number, bw: number, bh: number,
@@ -104,33 +142,50 @@
   ) {
     drawBox(ctx, bx, by, bw, bh, t);
 
-    const pulse = (Math.sin(t / 700) + 1) / 2;
+    const [r, g, b] = hexToRgb(theme.color);
+    const pulse = (Math.sin(t / 600) + 1) / 2;
     const cx = bx + bw / 2;
-    const tipY = by - 4;
-    const shaftTopY = tipY - 36;
-    const halfBase = 12;
+    const beaconY = by - 44;
 
-    // Shadow
-    ctx.shadowColor = "rgba(0,0,0,0.5)";
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = "rgba(0,0,0,0.35)";
-    ctx.beginPath();
-    ctx.moveTo(cx, tipY + 2);
-    ctx.lineTo(cx - halfBase, shaftTopY + 2);
-    ctx.lineTo(cx + halfBase, shaftTopY + 2);
-    ctx.closePath();
-    ctx.fill();
+    // Drop line — dashed, fading toward element
+    const lineGrd = ctx.createLinearGradient(0, beaconY + 14, 0, by);
+    lineGrd.addColorStop(0, `rgba(${r},${g},${b},${0.6 + pulse * 0.25})`);
+    lineGrd.addColorStop(1, `rgba(${r},${g},${b},0.05)`);
+    ctx.strokeStyle = lineGrd;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 5]);
+    ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(cx, beaconY + 14); ctx.lineTo(cx, by); ctx.stroke();
+    ctx.setLineDash([]);
 
-    // Arrow body with glow
+    // Halo rings from beacon
+    for (let i = 0; i < 2; i++) {
+      const phase = ((t / 900 + i * 0.5) % 1);
+      const rr = 12 + phase * 30;
+      const aa = (1 - phase) * 0.5;
+      ctx.beginPath(); ctx.arc(cx, beaconY, rr, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${r},${g},${b},${aa})`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    // Beacon core — white outer, accent inner
     ctx.shadowColor = theme.color;
-    ctx.shadowBlur = 6 + pulse * 12;
+    ctx.shadowBlur = 18 + pulse * 20;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(cx, beaconY, 7.5, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = theme.color;
+    ctx.beginPath(); ctx.arc(cx, beaconY, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Tiny downward chevron below beacon
+    const chevY = beaconY + 13;
+    ctx.strokeStyle = `rgba(${r},${g},${b},${0.55 + pulse * 0.3})`;
+    ctx.lineWidth = 2; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.shadowColor = theme.color; ctx.shadowBlur = 6;
     ctx.beginPath();
-    ctx.moveTo(cx, tipY);
-    ctx.lineTo(cx - halfBase, shaftTopY);
-    ctx.lineTo(cx + halfBase, shaftTopY);
-    ctx.closePath();
-    ctx.fill();
+    ctx.moveTo(cx - 5, chevY); ctx.lineTo(cx, chevY + 5); ctx.lineTo(cx + 5, chevY);
+    ctx.stroke();
     ctx.shadowBlur = 0;
   }
 

@@ -49,6 +49,9 @@ struct GuidanceState {
     /// target even after git dialogs, credential prompts, or other transient
     /// windows pop above it in z-order.
     target_hwnd: Option<usize>,
+    /// User-explicitly pinned window (via the target-picker dropdown). Survives
+    /// new tasks; only cleared by `unpin_target_window` or when the window closes.
+    pinned_hwnd: Option<usize>,
 }
 
 /// Shared app state.
@@ -280,6 +283,9 @@ struct GuideResponse {
     grid_cell: Option<String>,
     /// Path to the debug screenshot saved for this request (None when disabled).
     debug_screenshot_path: Option<String>,
+    /// Tiny thumbnail (160×90, JPEG q=40, base64) of the screenshot sent to AI.
+    /// Separate from debug screenshots — shown in the chat history bubble.
+    chat_thumb_b64: Option<String>,
     /// Locator trace for the current step (Phase 0.1).
     /// `None` when the step has no target_text or when the locator wasn't run.
     locate_trace: Option<locator::trace::LocateTrace>,
@@ -322,6 +328,7 @@ struct SettingsPayload {
     subtitle_enabled: bool,
     auto_advance: bool,
     tts_enabled: bool,
+    tts_voice: String,
     voice_input_enabled: bool,
     voice_language: String,
     hotkey_next: String,
@@ -368,6 +375,36 @@ fn update_env_file(path: &std::path::Path, updates: &[(&str, &str)]) -> Result<(
     Ok(())
 }
 
+/// Save one 160×90 thumbnail + one full-resolution screenshot to the app data dir.
+/// Both files share the same lifecycle: overwritten together, deleted together.
+/// Completely separate from the developer debug screenshot path.
+fn make_chat_thumbnail(jpeg_bytes: &[u8], app_data_dir: &std::path::Path) -> Option<String> {
+    let thumb_path = app_data_dir.join("chat_thumb.jpg");
+    let full_path  = app_data_dir.join("chat_full.jpg");
+    // Replace both files atomically (old ones deleted first).
+    let _ = std::fs::remove_file(&thumb_path);
+    let _ = std::fs::remove_file(&full_path);
+    let _ = std::fs::write(&full_path, jpeg_bytes); // full AI screenshot for lightbox
+    let img = image::load_from_memory(jpeg_bytes).ok()?;
+    let thumb = img.resize(160, 90, image::imageops::FilterType::Nearest);
+    let mut buf = Vec::new();
+    {
+        use image::codecs::jpeg::JpegEncoder;
+        let mut enc = JpegEncoder::new_with_quality(&mut buf, 40);
+        enc.encode_image(&thumb).ok()?;
+    }
+    let _ = std::fs::write(&thumb_path, &buf);
+    Some(capture::to_base64(&buf))
+}
+
+/// Return the full-resolution chat screenshot as base64 (for the lightbox).
+/// Returns None if no screenshot has been taken yet this session.
+#[tauri::command]
+fn get_chat_full_screenshot(app: AppHandle) -> Option<String> {
+    let path = app.path().app_data_dir().ok()?.join("chat_full.jpg");
+    let bytes = std::fs::read(path).ok()?;
+    Some(capture::to_base64(&bytes))
+}
 
 #[tauri::command]
 async fn guide(
@@ -385,6 +422,11 @@ async fn guide(
         g.steps = vec![];
         g.state_summary = String::new();
         g.target_hwnd = None;
+        // Delete the previous chat thumbnail + full screenshot — new task starts fresh.
+        if let Ok(dir) = app.path().app_data_dir() {
+            let _ = std::fs::remove_file(dir.join("chat_thumb.jpg"));
+            let _ = std::fs::remove_file(dir.join("chat_full.jpg"));
+        }
     }
 
     let session_id = {
@@ -406,7 +448,7 @@ async fn guide(
 
     let stored_hwnd = {
         let g = state.guidance.lock().unwrap();
-        g.target_hwnd
+        g.pinned_hwnd.or(g.target_hwnd)
     };
 
     // Get the panel rect before entering spawn_blocking — blanked from the
@@ -418,6 +460,9 @@ async fn guide(
         .map(|p| p.join("debug"))
         .ok();
 
+    // Chat thumbnail + full screenshot — single pair of files, separate from debug.
+    let chat_dir = app.path().app_data_dir().ok();
+
     // Clear the previous step's pointer before capture — prevents it from
     // appearing in the AI's screenshot. Stop the tracker first so it can't
     // re-emit the old overlay during the 33 ms DWM composite wait.
@@ -428,7 +473,7 @@ async fn guide(
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     #[allow(clippy::type_complexity)]
-    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>), ()> {
+    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>), ()> {
         let is_fs = full_screen.unwrap_or(false);
         let (bytes, rect_opt, hwnd_opt) = if is_fs {
             match capture::capture_virtual_desktop_jpeg(75, &exclude) {
@@ -487,13 +532,15 @@ async fn guide(
             None
         };
 
-        Ok((capture::to_base64(&final_bytes), rect_opt, hwnd_opt, debug_path))
+        let thumb_b64 = chat_dir.as_ref()
+            .and_then(|d| make_chat_thumbnail(&final_bytes, d));
+        Ok((capture::to_base64(&final_bytes), rect_opt, hwnd_opt, debug_path, thumb_b64))
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
-    let (screenshot_b64, capture_rect_opt, new_hwnd_opt, debug_screenshot_path) = match capture_result {
-        Ok((b64, rect_opt, hwnd_opt, dbg)) => (b64, rect_opt, hwnd_opt, dbg),
+    let (screenshot_b64, capture_rect_opt, new_hwnd_opt, debug_screenshot_path, chat_thumb_b64) = match capture_result {
+        Ok((b64, rect_opt, hwnd_opt, dbg, thumb)) => (b64, rect_opt, hwnd_opt, dbg, thumb),
         Err(()) => {
             return Ok(GuideResponse {
                 ok: false,
@@ -511,6 +558,7 @@ async fn guide(
                 ),
                 grid_cell: None,
                 debug_screenshot_path: None,
+                chat_thumb_b64: None,
                 locate_trace: None,
             });
         }
@@ -607,6 +655,7 @@ async fn guide(
                 }),
                 grid_cell: None,
                 debug_screenshot_path: None,
+                chat_thumb_b64: None,
                 locate_trace: None,
             });
         }
@@ -656,6 +705,7 @@ async fn guide(
             error: None,
             grid_cell: None,
             debug_screenshot_path,
+            chat_thumb_b64,
             locate_trace: None,
         });
     }
@@ -686,6 +736,7 @@ async fn guide(
         error: None,
         grid_cell,
         debug_screenshot_path,
+        chat_thumb_b64,
         locate_trace,
     })
 }
@@ -715,7 +766,10 @@ async fn next_step(
         let cfg = &state.ai_router.lock().await.config;
         (cfg.debug_locate_log_file_enabled, cfg.debug_screenshot_enabled)
     };
-    let stored_hwnd = { state.guidance.lock().unwrap().target_hwnd };
+    let stored_hwnd = {
+        let g = state.guidance.lock().unwrap();
+        g.pinned_hwnd.or(g.target_hwnd)
+    };
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path().app_data_dir().ok().map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
@@ -741,6 +795,7 @@ async fn next_step(
         error: None,
         grid_cell,
         debug_screenshot_path: None,
+        chat_thumb_b64: None,
         locate_trace,
     })
 }
@@ -774,6 +829,7 @@ async fn send_correction(
     drop(router); // Release lock before blocking capture
 
     let debug_dir = app.path().app_data_dir().map(|p| p.join("debug")).ok();
+    let chat_dir = app.path().app_data_dir().ok();
 
     // Clear the previous pointer before capture.
     state.tracker.clear();
@@ -783,7 +839,7 @@ async fn send_correction(
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     // Fresh capture — no stored HWND, always walks z-order to the focused window.
-    let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path) = tokio::task::spawn_blocking(move || {
+    let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path, chat_thumb_b64) = tokio::task::spawn_blocking(move || {
         if let Ok((bytes, rect, hwnd)) = capture::capture_active_window_jpeg(75, &exclude) {
             let final_bytes = if grid_test_enabled {
                 grid::overlay_grid_on_jpeg(&bytes, 75)
@@ -816,9 +872,11 @@ async fn send_correction(
                 None
             };
 
-            (capture::to_base64(&final_bytes), Some(rect), Some(hwnd), debug_path)
+            let thumb_b64 = chat_dir.as_ref()
+                .and_then(|d| make_chat_thumbnail(&final_bytes, d));
+            (capture::to_base64(&final_bytes), Some(rect), Some(hwnd), debug_path, thumb_b64)
         } else {
-            (String::new(), None, None, None)
+            (String::new(), None, None, None, None)
         }
     })
     .await
@@ -918,6 +976,7 @@ async fn send_correction(
             error: None,
             grid_cell: None,
             debug_screenshot_path,
+            chat_thumb_b64,
             locate_trace: None,
         });
     }
@@ -951,6 +1010,7 @@ async fn send_correction(
         error: None,
         grid_cell,
         debug_screenshot_path,
+        chat_thumb_b64,
         locate_trace,
     })
 }
@@ -981,13 +1041,54 @@ async fn restore_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(
     }
 }
 
+/// Item 5 — enumerate installed TTS voices for the Settings voice picker.
+#[tauri::command]
+fn list_tts_voices(state: State<'_, AppState>) -> Vec<tts::VoiceInfo> {
+    state.tts.list_voices()
+}
+
+/// Item 1 — enumerate candidate windows for the target-picker dropdown.
+#[tauri::command]
+fn list_target_windows() -> Vec<capture::TargetWindowInfo> {
+    #[cfg(windows)]
+    { capture::list_target_windows() }
+    #[cfg(not(windows))]
+    { vec![] }
+}
+
+/// Item 1 — pin a specific window as the guidance target. Survives new tasks;
+/// only cleared by `unpin_target_window` or when the window is no longer valid.
+#[tauri::command]
+fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
+    {
+        let mut g = state.guidance.lock().unwrap();
+        g.pinned_hwnd = Some(hwnd);
+        g.target_hwnd = Some(hwnd);
+    }
+    #[cfg(windows)]
+    announce_shared_app(&app, hwnd);
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
+/// Item 1 — clear the pinned window and return to auto-detection.
+#[tauri::command]
+fn unpin_target_window(state: State<'_, AppState>) {
+    let mut g = state.guidance.lock().unwrap();
+    g.pinned_hwnd = None;
+    // target_hwnd retains the last auto-discovered window for the current session.
+}
+
 /// Phase 0.2: structured info about the window being shared with the AI.
 /// Used by the panel to show the "Shared: <App>" header chip.
 #[tauri::command]
 fn get_shared_app_info(state: State<'_, AppState>) -> Option<SharedAppInfoPayload> {
     #[cfg(windows)]
     {
-        let stored = { state.guidance.lock().unwrap().target_hwnd };
+        let stored = {
+            let g = state.guidance.lock().unwrap();
+            g.pinned_hwnd.or(g.target_hwnd)
+        };
         let info = match stored {
             Some(hwnd) => capture::get_window_info_for_hwnd(hwnd)
                 .or_else(capture::get_active_window_info),
@@ -1200,6 +1301,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         subtitle_enabled: c.subtitle_enabled,
         auto_advance: c.auto_advance,
         tts_enabled: c.tts_enabled,
+        tts_voice: c.tts_voice.clone(),
         voice_input_enabled: c.voice_input_enabled,
         voice_language: c.voice_language.clone(),
         hotkey_next:  c.hotkey_next.clone(),
@@ -1240,6 +1342,7 @@ async fn save_settings(
         ("SUBTITLE_ENABLED".into(),     payload.subtitle_enabled.to_string()),
         ("AUTO_ADVANCE".into(),         payload.auto_advance.to_string()),
         ("TTS_ENABLED".into(),          payload.tts_enabled.to_string()),
+        ("TTS_VOICE".into(),            payload.tts_voice.clone()),
         ("VOICE_INPUT_ENABLED".into(),  payload.voice_input_enabled.to_string()),
         ("VOICE_LANGUAGE".into(),       payload.voice_language.clone()),
         ("HOTKEY_NEXT".into(),          payload.hotkey_next.clone()),
@@ -1285,6 +1388,9 @@ async fn save_settings(
         let mut router = state.ai_router.lock().await;
         router.reload_config(new_config);
     }
+
+    // Apply TTS voice immediately (no restart required).
+    state.tts.set_voice(payload.tts_voice.clone());
 
     // Notify the overlay canvas of the new theme (broadcasts to all webview windows).
     let _ = app.emit("overlay:theme", OverlayThemePayload {
@@ -1407,6 +1513,10 @@ pub fn run() {
 
             // Init AI Router
             let config = Config::load(Some(&env_path));
+            // Apply configured TTS voice (if set) now that config is loaded.
+            if !config.tts_voice.is_empty() {
+                tts.set_voice(config.tts_voice.clone());
+            }
             let cost_tracker = CostTracker::new(
                 config.daily_token_cap,
                 config.monthly_token_cap,
@@ -1439,6 +1549,11 @@ pub fn run() {
             // on the next launch.
             if window.label() == "panel" {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    // Clean up chat thumbnail + full screenshot before exit.
+                    if let Ok(dir) = window.app_handle().path().app_data_dir() {
+                        let _ = std::fs::remove_file(dir.join("chat_thumb.jpg"));
+                        let _ = std::fs::remove_file(dir.join("chat_full.jpg"));
+                    }
                     window.app_handle().exit(0);
                 }
             }
@@ -1465,6 +1580,11 @@ pub fn run() {
             get_balance,
             get_session_status,
             exit_for_update,
+            list_target_windows,
+            pin_target_window,
+            unpin_target_window,
+            list_tts_voices,
+            get_chat_full_screenshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

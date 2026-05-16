@@ -216,6 +216,16 @@ pub fn get_window_info_for_hwnd(_hwnd_raw: usize) -> Option<()> {
     None
 }
 
+/// Item 1: re-export TargetWindowInfo so lib.rs can use capture::TargetWindowInfo.
+#[cfg(windows)]
+pub use win::TargetWindowInfo;
+
+/// Item 1: enumerate all candidate windows for the target-picker dropdown.
+#[cfg(windows)]
+pub fn list_target_windows() -> Vec<win::TargetWindowInfo> {
+    win::list_target_windows()
+}
+
 
 /// Downscale `img` to fit within MAX_CAP_W × MAX_CAP_H, preserving aspect ratio.
 /// Returns the original unchanged if already within bounds.

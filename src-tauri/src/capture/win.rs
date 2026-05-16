@@ -91,6 +91,43 @@ pub struct ActiveWindowInfo {
     pub exe_name: String,
 }
 
+/// A candidate window the user can pin as the guidance target.
+#[derive(serde::Serialize, Clone)]
+pub struct TargetWindowInfo {
+    pub hwnd: usize,
+    pub title: String,
+    pub exe_stem: String,
+    pub display_name: String,
+}
+
+/// Map well-known exe stems to friendly display names.
+fn friendly_exe_name(stem: &str) -> String {
+    match stem.to_lowercase().as_str() {
+        "olk" | "outlook" => "Outlook",
+        "code" => "VS Code",
+        "code - insiders" => "VS Code Insiders",
+        "winword" => "Word",
+        "excel" => "Excel",
+        "powerpnt" => "PowerPoint",
+        "onenote" => "OneNote",
+        "msedge" => "Edge",
+        "chrome" => "Chrome",
+        "firefox" => "Firefox",
+        "slack" => "Slack",
+        "teams" => "Teams",
+        "windowsterminal" | "wt" => "Terminal",
+        "wechat" => "WeChat",
+        "notion" => "Notion",
+        "obsidian" => "Obsidian",
+        "discord" => "Discord",
+        "zoom" => "Zoom",
+        "notepad" => "Notepad",
+        "explorer" => "Explorer",
+        other => return other.to_string(),
+    }
+    .to_string()
+}
+
 /// Read the process exe path for `pid`. Returns the full path or empty string.
 fn exe_path_of_pid(pid: u32) -> String {
     unsafe {
@@ -192,6 +229,62 @@ pub fn get_window_info_for_hwnd(hwnd_raw: usize) -> Option<ActiveWindowInfo> {
         app_name,
         exe_name,
     })
+}
+
+/// Enumerate all plausible capture targets visible on screen. Used by the
+/// "target window picker" so the user can explicitly pin an app.
+///
+/// Deduplicates by exe stem: if the same app has multiple windows open,
+/// only the topmost (most recently focused) window is returned — EnumWindows
+/// walks in z-order so the first hit per exe is always the most recently active.
+pub fn list_target_windows() -> Vec<TargetWindowInfo> {
+    struct State {
+        our_pid: u32,
+        seen_exe_stems: Vec<String>,
+        results: Vec<TargetWindowInfo>,
+    }
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        if !is_target_candidate(hwnd, state.our_pid) {
+            return TRUE;
+        }
+        let mut buf = [0u16; 256];
+        let len = GetWindowTextW(hwnd, &mut buf) as usize;
+        let title = String::from_utf16_lossy(&buf[..len]).trim().to_string();
+
+        let mut pid: u32 = 0;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let exe_path = exe_path_of_pid(pid);
+        let exe_stem = std::path::Path::new(&exe_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
+        // One entry per app — skip duplicate exe stems (same app, different window).
+        let key = exe_stem.to_lowercase();
+        if state.seen_exe_stems.contains(&key) {
+            return TRUE;
+        }
+        state.seen_exe_stems.push(key);
+
+        let display_name = friendly_exe_name(&exe_stem);
+        state.results.push(TargetWindowInfo {
+            hwnd: hwnd.0 as usize,
+            title,
+            exe_stem,
+            display_name,
+        });
+        TRUE
+    }
+
+    let our_pid = std::process::id();
+    let mut state = State { our_pid, seen_exe_stems: Vec::new(), results: Vec::new() };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+    state.results
 }
 
 /// Return the screen rect of `hwnd` without visibility checks — used to get

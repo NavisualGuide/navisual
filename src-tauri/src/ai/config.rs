@@ -62,6 +62,7 @@ pub struct Config {
 
     // Audio output (TTS)
     pub tts_enabled: bool,
+    pub tts_voice: String,  // SAPI token ID; empty = system default
 
     // Audio input (voice)
     pub voice_input_enabled: bool,
@@ -101,7 +102,7 @@ impl Default for Config {
             deepseek_api_key: None,
             deepseek_model: "deepseek-v4-flash".to_string(),
             qwen_api_key: None,
-            qwen_model: "qwen3-vl-plus".to_string(),
+            qwen_model: "qwen3.6-plus".to_string(),
             qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             supabase_url: Some("https://gwekzberpfuxsoddwwqj.supabase.co".to_string()),
             supabase_anon_key: Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3ZWt6YmVycGZ1eHNvZGR3d3FqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMTUxMjEsImV4cCI6MjA5MzY5MTEyMX0.gCXLsnFq3NMv8_JvZGcR9TB9bAfyjCnEnj4u0RZnRbg".to_string()),
@@ -119,6 +120,7 @@ impl Default for Config {
             subtitle_enabled: true,
             auto_advance: false,
             tts_enabled: true,
+            tts_voice: String::new(),
             voice_input_enabled: true,
             voice_language: "en-US".to_string(),
             hotkey_next:  "Ctrl+Backquote".to_string(),
@@ -179,6 +181,7 @@ impl Config {
         if let Ok(v) = env::var("SUBTITLE_ENABLED") { config.subtitle_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("AUTO_ADVANCE") { config.auto_advance = v == "true" || v == "1"; }
         if let Ok(v) = env::var("TTS_ENABLED") { config.tts_enabled = v == "true" || v == "1"; }
+        if let Ok(v) = env::var("TTS_VOICE") { if !v.is_empty() { config.tts_voice = v; } }
         if let Ok(v) = env::var("VOICE_INPUT_ENABLED") { config.voice_input_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("VOICE_LANGUAGE") { if !v.is_empty() { config.voice_language = v; } }
         if let Ok(v) = env::var("HOTKEY_NEXT")  { if !v.is_empty() { config.hotkey_next  = v; } }
