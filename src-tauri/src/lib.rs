@@ -1450,9 +1450,36 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
         .map_err(|e| e.to_string())
 }
 
-/// Exit the process so the NSIS updater (already running) can replace the binary.
+/// Called from the frontend after the NSIS installer has been downloaded.
+///
+/// Strategy:
+/// 1. Spawn the current executable path — NSIS has already replaced (or is
+///    replacing) the binary at that path, so the spawned process will be the
+///    updated version.
+/// 2. Exit the current process so any file locks are released and the NSIS
+///    installer can overwrite whatever it hasn't yet replaced.
+///
+/// This handles both the "NSIS already finished installing" case (spawn gets
+/// the new binary immediately) and the "NSIS is still running" case (exit
+/// releases the lock so NSIS can finish, and NSIS will launch the new app).
 #[tauri::command]
 fn exit_for_update(app: tauri::AppHandle) {
+    if let Ok(exe) = std::env::current_exe() {
+        // Spawn detached so the child survives after we exit.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            let _ = std::process::Command::new(&exe)
+                .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+                .spawn();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new(&exe).spawn();
+        }
+    }
     app.exit(0);
 }
 

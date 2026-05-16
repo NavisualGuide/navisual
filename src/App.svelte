@@ -438,10 +438,14 @@ See the LICENSE file in the root of this repository for complete details.
           if (totalBytes > 0) updateProgress = Math.round((downloadedBytes / totalBytes) * 100);
         } else if (event.event === "Finished") {
           updateStatus = "done";
+          // Fire-and-forget — don't await the promise because downloadAndInstall()
+          // may never resolve on Windows (NSIS holds the lock; we must exit first).
+          // exit_for_update spawns the new binary then exits.
+          invoke("exit_for_update").catch(() => {});
         }
       });
-      // NSIS installer is now running — exit so it can replace the binary and relaunch.
-      await invoke("exit_for_update");
+      // Safety net: if downloadAndInstall() did resolve without Finished firing.
+      invoke("exit_for_update").catch(() => {});
     } catch (_) {
       updateStatus = "idle";
     }
