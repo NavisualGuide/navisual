@@ -75,13 +75,14 @@ pub struct Config {
     pub hotkey_icon: String,
 
     // Developer / testing
-    pub grid_test_enabled: bool,
     pub debug_screenshot_enabled: bool,
     pub debug_show_response_info: bool,
     /// Render the locator-trace drawer in the panel (Phase 0.1).
     pub debug_locate_trace_enabled: bool,
     /// Append every locate trace to %APPDATA%\com.navisual.app\locate_log.jsonl.
     pub debug_locate_log_file_enabled: bool,
+    /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
+    pub debug_show_ai_bbox: bool,
 }
 
 impl Default for Config {
@@ -127,11 +128,11 @@ impl Default for Config {
             hotkey_wrong: "Ctrl+KeyE".to_string(),
             hotkey_pause: "Ctrl+KeyS".to_string(),
             hotkey_icon:  "Ctrl+KeyQ".to_string(),
-            grid_test_enabled: false,
             debug_screenshot_enabled: false,
             debug_show_response_info: false,
             debug_locate_trace_enabled: false,
             debug_locate_log_file_enabled: false,
+            debug_show_ai_bbox: false,
         }
     }
 }
@@ -139,9 +140,17 @@ impl Default for Config {
 impl Config {
     /// Loads configuration from a specific .env file path, or falls back to
     /// the working-directory .env (dev mode). Missing file is silently ignored.
+    ///
+    /// For the explicit-path case we use a hand-rolled parser instead of
+    /// `dotenvy::from_path` because our values can contain backslashes (Windows
+    /// registry paths in `TTS_VOICE`, e.g. `HKEY_LOCAL_MACHINE\SOFTWARE\...`).
+    /// dotenvy treats unquoted backslashes as escape-sequence starts, which
+    /// fails the parse on that line and silently drops every later line in the
+    /// file — so a SAPI token ID near the bottom of .env would also break
+    /// `DEBUG_SHOW_AI_BBOX`, `MANAGED_PROVIDER`, etc.
     pub fn load(env_file: Option<&std::path::Path>) -> Self {
         match env_file {
-            Some(path) => { let _ = dotenvy::from_path(path); }
+            Some(path) => load_env_file_simple(path),
             None       => { let _ = dotenvy::dotenv(); }
         }
 
@@ -188,11 +197,11 @@ impl Config {
         if let Ok(v) = env::var("HOTKEY_WRONG") { if !v.is_empty() { config.hotkey_wrong = v; } }
         if let Ok(v) = env::var("HOTKEY_PAUSE") { if !v.is_empty() { config.hotkey_pause = v; } }
         if let Ok(v) = env::var("HOTKEY_ICON")  { if !v.is_empty() { config.hotkey_icon  = v; } }
-        if let Ok(v) = env::var("GRID_TEST_ENABLED") { config.grid_test_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_SCREENSHOT_ENABLED") { config.debug_screenshot_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_SHOW_RESPONSE_INFO") { config.debug_show_response_info = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_LOCATE_TRACE_ENABLED") { config.debug_locate_trace_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") { config.debug_locate_log_file_enabled = v == "true" || v == "1"; }
+        if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") { config.debug_show_ai_bbox = v == "true" || v == "1"; }
         if let Ok(v) = env::var("MANAGED_PROVIDER") { config.managed_provider = v; }
         if let Ok(v) = env::var("MANAGED_TOKEN_CAP") { 
             if let Ok(n) = v.parse() { config.managed_token_cap = n; }
@@ -209,5 +218,32 @@ impl Config {
         }
 
         config
+    }
+}
+
+/// Minimal `.env` reader: one `KEY=VALUE` per line, `#` comments, blank lines
+/// ignored. Values are taken literally up to end of line — no quoting, no
+/// escape processing, no continuation. Sets process env vars so the existing
+/// `env::var(...)` reads in `Config::load` pick them up. Existing env vars are
+/// preserved (matches `dotenvy::from_path` semantics).
+fn load_env_file_simple(path: &std::path::Path) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = trimmed.find('=') else { continue };
+        let key = trimmed[..eq].trim();
+        let value = &trimmed[eq + 1..];
+        if key.is_empty() {
+            continue;
+        }
+        if env::var_os(key).is_none() {
+            env::set_var(key, value);
+        }
     }
 }

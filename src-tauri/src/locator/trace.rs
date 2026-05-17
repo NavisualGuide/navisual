@@ -15,7 +15,8 @@ pub struct LocateTrace {
     pub target_text: String,
     pub target_role: Option<String>,
     pub nearby_text: Option<String>,
-    pub grid_cell: Option<(u32, u32)>,
+    /// AI-predicted target bbox in virtual-desktop physical pixels (was: `grid_cell`).
+    pub ai_bbox: Option<Rect>,
     pub a11y: A11yTrace,
     pub ocr: OcrTrace,
     pub final_decision: FinalDecision,

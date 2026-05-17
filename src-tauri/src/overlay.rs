@@ -32,6 +32,10 @@ pub enum OverlayKind {
     /// Phase 0.2: outline the captured app's window with a flash + fade
     /// animation so the user can see exactly what's being shared.
     AppBoundary,
+    /// AI-bbox fallback when A11y/OCR both missed but the AI returned a
+    /// `target_bbox`. Rendered as a soft diffuse highlight at the inflated
+    /// AI bbox — a "look around here" cue, not a precise pointer.
+    Hint,
     /// No draw — clears the overlay.
     None,
 }
@@ -51,10 +55,16 @@ pub struct OverlayUpdate {
     /// The monitor the target element lives on (virtual-desktop physical pixels).
     /// Used to confine the subtitle strip to a single screen.
     pub active_screen: Option<Rect>,
+    /// AI-returned bounding box in virtual-desktop physical pixels.
+    /// Drawn as a distinct cyan-dashed box alongside the production pointer
+    /// when the developer "Show AI bbox" toggle is enabled.
+    pub ai_bbox: Option<Rect>,
 }
 
-/// Find which monitor contains the centre of `bbox`, falling back to the
-/// monitor nearest the virtual-desktop origin.
+/// Find which monitor contains the centre of `bbox`. When `bbox` is `None`
+/// (subtitle-only step, app-boundary clear, etc.), reuse the last-known
+/// active screen instead of jumping to monitor-nearest-origin — otherwise the
+/// subtitle visibly shifts between monitors mid-session.
 fn active_screen_for_bbox(bbox: Option<&Rect>) -> Option<Rect> {
     let monitors = xcap::Monitor::all().ok()?;
     if monitors.is_empty() { return None; }
@@ -68,12 +78,20 @@ fn active_screen_for_bbox(bbox: Option<&Rect>) -> Option<Rect> {
             let mw = m.width().unwrap_or(0) as i32;
             let mh = m.height().unwrap_or(0) as i32;
             if cx >= mx && cx < mx + mw && cy >= my && cy < my + mh {
-                return Some(Rect { x: mx, y: my, width: mw as u32, height: mh as u32 });
+                let rect = Rect { x: mx, y: my, width: mw as u32, height: mh as u32 };
+                *LAST_ACTIVE_SCREEN.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(rect);
+                return Some(rect);
             }
         }
     }
 
-    // Fall back to the monitor closest to (0, 0) — typically primary.
+    // No bbox (or bbox off-screen) — reuse the last-known active screen so the
+    // subtitle stays on the monitor the user is working on.
+    if let Some(cached) = *LAST_ACTIVE_SCREEN.get_or_init(|| Mutex::new(None)).lock().unwrap() {
+        return Some(cached);
+    }
+
+    // First-ever call with no bbox: fall back to the monitor closest to (0, 0).
     monitors.iter()
         .min_by_key(|m| m.x().unwrap_or(0).abs() + m.y().unwrap_or(0).abs())
         .map(|m| Rect {
@@ -83,6 +101,10 @@ fn active_screen_for_bbox(bbox: Option<&Rect>) -> Option<Rect> {
             height: m.height().unwrap_or(1080),
         })
 }
+
+/// Last monitor a bbox-bearing OverlayUpdate landed on. Used to stabilise the
+/// subtitle position across subtitle-only / app-boundary / clear emits.
+static LAST_ACTIVE_SCREEN: OnceLock<Mutex<Option<Rect>>> = OnceLock::new();
 
 struct CachedVd {
     rect: Rect,
@@ -178,8 +200,19 @@ pub fn make_update(
     bbox: Option<Rect>,
     text: Option<String>,
 ) -> Result<OverlayUpdate> {
+    make_update_with_ai_bbox(kind, bbox, text, None)
+}
+
+/// Build an OverlayUpdate that also carries an `ai_bbox` for the developer
+/// overlay (cyan dashed box). May be `None`.
+pub fn make_update_with_ai_bbox(
+    kind: OverlayKind,
+    bbox: Option<Rect>,
+    text: Option<String>,
+    ai_bbox: Option<Rect>,
+) -> Result<OverlayUpdate> {
     let vd = virtual_desktop_rect()?;
-    let active_screen = active_screen_for_bbox(bbox.as_ref());
+    let active_screen = active_screen_for_bbox(bbox.as_ref().or(ai_bbox.as_ref()));
     Ok(OverlayUpdate {
         kind,
         bbox,
@@ -187,6 +220,7 @@ pub fn make_update(
         virtual_origin: (vd.x, vd.y),
         virtual_size: (vd.width, vd.height),
         active_screen,
+        ai_bbox,
     })
 }
 

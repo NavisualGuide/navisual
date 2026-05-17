@@ -5,7 +5,6 @@
 //! Navisual — Rust/Tauri backend entry point.
 
 mod capture;
-mod grid;
 mod locator;
 mod overlay;
 mod ai;
@@ -61,8 +60,7 @@ struct AppState {
     tts: tts::TtsEngine,
     tracker: track::WindowTracker,
     /// Last non-None overlay emitted — used by restore_overlay to bring it back after Clear.
-    #[allow(clippy::type_complexity)]
-    last_overlay: std::sync::Mutex<Option<(overlay::OverlayKind, Option<capture::Rect>, Option<String>)>>,
+    last_overlay: std::sync::Mutex<Option<LastOverlay>>,
     /// Resolved path to the .env settings file — always writable (app data dir).
     env_path: PathBuf,
     /// Path to the Supabase session JSON file (managed provider only).
@@ -71,19 +69,59 @@ struct AppState {
     screen_hash: std::sync::Mutex<Option<u64>>,
 }
 
-/// Discard out-of-bounds grid cells before showing them as a badge.
-/// Valid range: rows A–I (9 rows), cols 1–16. The AI occasionally returns
-/// cells like "N3" when it sees a full-screen or ambiguous screenshot.
-fn valid_grid_cell(cell: Option<String>) -> Option<String> {
-    let s = cell?;
-    let mut chars = s.chars();
-    let row = chars.next()?.to_ascii_uppercase();
-    let col: u32 = chars.as_str().trim().parse().ok()?;
-    if ('A'..='I').contains(&row) && (1..=16).contains(&col) {
-        Some(s)
-    } else {
-        None
-    }
+/// Snapshot of the most recent non-clear overlay. Stored so `restore_overlay`
+/// can re-emit after the user clears the screen guide.
+#[derive(Clone)]
+struct LastOverlay {
+    kind: overlay::OverlayKind,
+    bbox: Option<capture::Rect>,
+    text: Option<String>,
+    ai_bbox: Option<capture::Rect>,
+}
+
+/// Slightly enlarge the AI bbox so the hint pointer reads as a thin collar
+/// around the element, not a tight fit. The "approximate" feel is conveyed by
+/// the dashed bracket styling in `drawHint`, not by size — so this is just a
+/// small 1.1× collar with a 60 px minimum to ensure very small bboxes still
+/// have visible brackets. Result is clamped to `capture_rect`.
+fn inflate_hint_bbox(
+    ai_bbox: capture::Rect,
+    capture_rect: Option<capture::Rect>,
+) -> Option<capture::Rect> {
+    let rect = capture_rect?;
+    let scale = 1.1f32;
+    let new_w = (ai_bbox.width as f32 * scale).max(60.0) as i32;
+    let new_h = (ai_bbox.height as f32 * scale).max(60.0) as i32;
+    let cx = ai_bbox.x + ai_bbox.width as i32 / 2;
+    let cy = ai_bbox.y + ai_bbox.height as i32 / 2;
+    let mut x = cx - new_w / 2;
+    let mut y = cy - new_h / 2;
+    let max_x = rect.x + rect.width as i32;
+    let max_y = rect.y + rect.height as i32;
+    x = x.max(rect.x).min(max_x.saturating_sub(1));
+    y = y.max(rect.y).min(max_y.saturating_sub(1));
+    let w = (new_w).min(max_x - x).max(1) as u32;
+    let h = (new_h).min(max_y - y).max(1) as u32;
+    log::info!(
+        "hint fallback: ai_bbox={:?}, inflated to ({}, {}, {}, {})",
+        ai_bbox, x, y, w, h
+    );
+    Some(capture::Rect { x, y, width: w, height: h })
+}
+
+/// Convert the AI's raw `target_bbox` from a step into a screen-coord Rect,
+/// applying the per-provider coordinate-system conversion. Returns `None`
+/// if the AI didn't return a bbox or we don't have a capture rect.
+fn compute_ai_bbox_for_step(
+    step: &GuidanceStep,
+    capture_rect: Option<capture::Rect>,
+    provider: &str,
+) -> Option<capture::Rect> {
+    let raw = step.target_bbox?;
+    let rect = capture_rect?;
+    let (ai_w, ai_h) = capture::ai_image_dims(rect.width, rect.height);
+    let format = ai::bbox::bbox_format_for_provider(provider);
+    ai::bbox::ai_bbox_to_screen_rect(raw, format, ai_w, ai_h, rect)
 }
 
 fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
@@ -95,14 +133,16 @@ fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 fn execute_step(
     app: &AppHandle,
     step: &GuidanceStep,
     target_hwnd: Option<usize>,
     debug_ocr_path: Option<std::path::PathBuf>,
     tracker: &track::WindowTracker,
-    last_overlay: &std::sync::Mutex<Option<(overlay::OverlayKind, Option<capture::Rect>, Option<String>)>>,
+    last_overlay: &std::sync::Mutex<Option<LastOverlay>>,
+    ai_bbox: Option<capture::Rect>,
+    capture_rect: Option<capture::Rect>,
 ) -> Result<(Option<locator::LocateResult>, Option<locator::trace::LocateTrace>), String> {
     let (located, trace) = if let Some(ref text) = step.target_text {
         #[cfg(windows)]
@@ -110,14 +150,7 @@ fn execute_step(
             let opts = locator::orchestrator::LocateOptions {
                 role: step.target_role.as_ref().map(|r| format!("{:?}", r).to_lowercase()),
                 nearby_text: step.target_nearby_text.clone(),
-                zone: step.grid_cell.as_ref().and_then(|cell| {
-                    let row = cell.chars().next()?.to_ascii_uppercase();
-                    let col: u32 = cell[1..].trim().parse().ok()?;
-                    if !(1..=16).contains(&col) { return None; }
-                    let row_idx = (row as u32).checked_sub('A' as u32)?;
-                    if row_idx > 8 { return None; }
-                    Some((col - 1, row_idx)) // grid col 1-16 → zone 0-15; row A-I → 0-8
-                }),
+                ai_bbox,
                 a11y_timeout_ms: 500,
                 min_confidence: 0.5,
                 target_hwnd,
@@ -141,19 +174,41 @@ fn execute_step(
         (None, None)
     };
 
+    let mut kind = overlay_kind_for_step(&step.overlay_type);
+    let mut bbox = located.as_ref().map(|r| r.bbox);
+
     // When the locator found a target, always show at least an arrow — never
     // suppress the pointer just because the model returned overlay_type:none.
-    let mut kind = overlay_kind_for_step(&step.overlay_type);
     if located.is_some() && matches!(kind, overlay::OverlayKind::None) {
         kind = overlay::OverlayKind::Arrow;
     }
-    let bbox = located.as_ref().map(|r| r.bbox);
+
+    // Hint fallback: when A11y *and* OCR both missed but the AI returned a
+    // target_bbox, emit a diffuse highlight at the inflated AI bbox so the
+    // user gets a "search this region" cue instead of nothing. The
+    // "pointer unavailable" caption in the panel still tells them it's
+    // approximate.
+    if located.is_none() && step.target_text.is_some() {
+        if let Some(ai) = ai_bbox {
+            if let Some(hint) = inflate_hint_bbox(ai, capture_rect) {
+                kind = overlay::OverlayKind::Hint;
+                bbox = Some(hint);
+            }
+        }
+    }
+
     let text_for_overlay = Some(step.instruction.clone());
 
-    if !matches!(kind, overlay::OverlayKind::None) {
-        *last_overlay.lock().unwrap() = Some((kind, bbox, text_for_overlay.clone()));
+    // Persist for restore_overlay — the AI bbox alone is a valid state too.
+    if !matches!(kind, overlay::OverlayKind::None) || ai_bbox.is_some() {
+        *last_overlay.lock().unwrap() = Some(LastOverlay {
+            kind,
+            bbox,
+            text: text_for_overlay.clone(),
+            ai_bbox,
+        });
     }
-    match overlay::make_update(kind, bbox, text_for_overlay.clone()) {
+    match overlay::make_update_with_ai_bbox(kind, bbox, text_for_overlay.clone(), ai_bbox) {
         Ok(update) => {
             if let Err(e) = overlay::emit_update(app, update) {
                 log::warn!("overlay emit failed: {e}");
@@ -279,8 +334,6 @@ struct GuideResponse {
     request_full_screen: bool,
     provider: String,
     error: Option<String>,
-    /// Grid test mode: cell label the AI identified for the current step.
-    grid_cell: Option<String>,
     /// Path to the debug screenshot saved for this request (None when disabled).
     debug_screenshot_path: Option<String>,
     /// Tiny thumbnail (160×90, JPEG q=40, base64) of the screenshot sent to AI.
@@ -289,6 +342,9 @@ struct GuideResponse {
     /// Locator trace for the current step (Phase 0.1).
     /// `None` when the step has no target_text or when the locator wasn't run.
     locate_trace: Option<locator::trace::LocateTrace>,
+    /// AI-returned bounding box in screen (virtual desktop) coordinates.
+    /// Developer "Show AI bbox" overlay reads this.
+    ai_bbox: Option<capture::Rect>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -335,11 +391,16 @@ struct SettingsPayload {
     hotkey_wrong: String,
     hotkey_pause: String,
     hotkey_icon: String,
-    grid_test_enabled: bool,
     debug_screenshot_enabled: bool,
     debug_show_response_info: bool,
     debug_locate_trace_enabled: bool,
     debug_locate_log_file_enabled: bool,
+    /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
+    /// Front-end only — backend always emits ai_bbox in OverlayUpdate; the
+    /// overlay renderer reads this flag (from `overlay:theme`) to decide
+    /// whether to draw the cyan dashed box.
+    #[serde(default)]
+    debug_show_ai_bbox: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -443,7 +504,6 @@ async fn guide(
         }
     };
 
-    let grid_test_enabled = { state.ai_router.lock().await.config.grid_test_enabled };
     let debug_screenshot_enabled = { state.ai_router.lock().await.config.debug_screenshot_enabled };
 
     let stored_hwnd = {
@@ -499,11 +559,7 @@ async fn guide(
                 Err(_) => return Err(()),
             }
         };
-        let final_bytes = if grid_test_enabled {
-            grid::overlay_grid_on_jpeg(&bytes, 75)
-        } else {
-            bytes
-        };
+        let final_bytes = bytes;
 
         let debug_path = if debug_screenshot_enabled {
             if let Some(ref dir) = debug_dir {
@@ -556,10 +612,10 @@ async fn guide(
                     "No application window found. Please click on the program you want \
                      help with to bring it into focus, then try Guide me again.".to_string()
                 ),
-                grid_cell: None,
                 debug_screenshot_path: None,
                 chat_thumb_b64: None,
                 locate_trace: None,
+                ai_bbox: None,
             });
         }
     };
@@ -578,19 +634,13 @@ async fn guide(
         window_context = format!("\n[Current Window Info]\n{}", info);
     }
 
-    // Append grid context to the prompt so the AI knows to fill grid_cell.
+    // Append window context to the prompt (no grid suffix any more — AI returns
+    // target_bbox instead).
     let add_grid = |text: String| -> String {
-        let text_with_ctx = if !window_context.is_empty() {
+        if !window_context.is_empty() {
             format!("{text}\n{window_context}")
         } else {
             text
-        };
-        if grid_test_enabled {
-            format!("{text_with_ctx}\n\n[Grid test: the screenshot has a 16×9 grid overlay. \
-                Columns 1-16 left-to-right, rows A-I top-to-bottom. \
-                For the target element fill in the grid_cell field (e.g. \"D7\").]")
-        } else {
-            text_with_ctx
         }
     };
 
@@ -653,10 +703,10 @@ async fn guide(
                 } else {
                     err_str
                 }),
-                grid_cell: None,
                 debug_screenshot_path: None,
                 chat_thumb_b64: None,
                 locate_trace: None,
+                ai_bbox: None,
             });
         }
     };
@@ -703,10 +753,10 @@ async fn guide(
             request_full_screen,
             provider,
             error: None,
-            grid_cell: None,
             debug_screenshot_path,
             chat_thumb_b64,
             locate_trace: None,
+            ai_bbox: None,
         });
     }
 
@@ -717,11 +767,10 @@ async fn guide(
     } else {
         None
     };
-    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd_opt, debug_ocr_path, &state.tracker, &state.last_overlay)
+    let ai_bbox = compute_ai_bbox_for_step(&steps[0], capture_rect_opt, &provider);
+    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd_opt, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, capture_rect_opt)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
-
-    let grid_cell = valid_grid_cell(steps.first().and_then(|s| s.grid_cell.clone()));
 
     Ok(GuideResponse {
         ok: true,
@@ -734,10 +783,10 @@ async fn guide(
         request_full_screen,
         provider,
         error: None,
-        grid_cell,
         debug_screenshot_path,
         chat_thumb_b64,
         locate_trace,
+        ai_bbox,
     })
 }
 
@@ -747,7 +796,7 @@ async fn next_step(
     state: State<'_, AppState>,
     step_index: usize,
 ) -> Result<GuideResponse, String> {
-    let (steps, session_id, needs_input, provider, _capture_rect) = {
+    let (steps, session_id, needs_input, provider, capture_rect) = {
         let g = state.guidance.lock().unwrap();
         (
             g.steps.clone(),
@@ -776,11 +825,10 @@ async fn next_step(
     } else {
         None
     };
-    let (located, locate_trace) = execute_step(&app, &steps[step_index], stored_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay)
+    let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
+    let (located, locate_trace) = execute_step(&app, &steps[step_index], stored_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, capture_rect)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
-
-    let grid_cell = valid_grid_cell(steps.get(step_index).and_then(|s| s.grid_cell.clone()));
 
     Ok(GuideResponse {
         ok: true,
@@ -793,10 +841,10 @@ async fn next_step(
         request_full_screen: false, // next_step just steps forward
         provider,
         error: None,
-        grid_cell,
         debug_screenshot_path: None,
         chat_thumb_b64: None,
         locate_trace,
+        ai_bbox,
     })
 }
 
@@ -824,7 +872,6 @@ async fn send_correction(
     let exclude = capture::get_panel_rects();
 
     let router = state.ai_router.lock().await;
-    let grid_test_enabled = router.config.grid_test_enabled;
     let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
     drop(router); // Release lock before blocking capture
 
@@ -841,11 +888,7 @@ async fn send_correction(
     // Fresh capture — no stored HWND, always walks z-order to the focused window.
     let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path, chat_thumb_b64) = tokio::task::spawn_blocking(move || {
         if let Ok((bytes, rect, hwnd)) = capture::capture_active_window_jpeg(75, &exclude) {
-            let final_bytes = if grid_test_enabled {
-                grid::overlay_grid_on_jpeg(&bytes, 75)
-            } else {
-                bytes
-            };
+            let final_bytes = bytes;
 
             let debug_path = if debug_screenshot_enabled {
                 if let Some(ref dir) = debug_dir {
@@ -974,10 +1017,10 @@ async fn send_correction(
             request_full_screen,
             provider,
             error: None,
-            grid_cell: None,
             debug_screenshot_path,
             chat_thumb_b64,
             locate_trace: None,
+            ai_bbox: None,
         });
     }
 
@@ -991,11 +1034,10 @@ async fn send_correction(
     } else {
         None
     };
-    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay)
+    let ai_bbox = compute_ai_bbox_for_step(&steps[0], new_capture_rect, &provider);
+    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, new_capture_rect)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
-
-    let grid_cell = valid_grid_cell(steps.first().and_then(|s| s.grid_cell.clone()));
 
     Ok(GuideResponse {
         ok: true,
@@ -1008,10 +1050,10 @@ async fn send_correction(
         request_full_screen,
         provider,
         error: None,
-        grid_cell,
         debug_screenshot_path,
         chat_thumb_b64,
         locate_trace,
+        ai_bbox,
     })
 }
 
@@ -1031,8 +1073,8 @@ async fn clear_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 
 #[tauri::command]
 async fn restore_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    if let Some((kind, bbox, text)) = state.last_overlay.lock().unwrap().clone() {
-        match overlay::make_update(kind, bbox, text) {
+    if let Some(last) = state.last_overlay.lock().unwrap().clone() {
+        match overlay::make_update_with_ai_bbox(last.kind, last.bbox, last.text, last.ai_bbox) {
             Ok(update) => overlay::emit_update(&app, update).map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         }
@@ -1166,7 +1208,7 @@ async fn locate_a11y(
         let opts = locator::orchestrator::LocateOptions {
             role,
             nearby_text: None,
-            zone: None,
+            ai_bbox: None,
             a11y_timeout_ms: timeout_ms.unwrap_or(1500),
             min_confidence: 0.5,
             target_hwnd: None,
@@ -1196,23 +1238,14 @@ async fn locate_element(
     text: String,
     role: Option<String>,
     nearby_text: Option<String>,
-    grid_cell: Option<String>,
     timeout_ms: Option<u64>,
 ) -> Result<Option<locator::LocateResult>, String> {
     #[cfg(windows)]
     {
-        let zone = grid_cell.as_deref().and_then(|cell| {
-            let row = cell.chars().next()?.to_ascii_uppercase();
-            let col: u32 = cell[1..].trim().parse().ok()?;
-            if !(1..=16).contains(&col) { return None; }
-            let row_idx = (row as u32).checked_sub('A' as u32)?;
-            if row_idx > 8 { return None; }
-            Some((col - 1, row_idx))
-        });
         let opts = locator::orchestrator::LocateOptions {
             role,
             nearby_text,
-            zone,
+            ai_bbox: None,
             a11y_timeout_ms: timeout_ms.unwrap_or(500),
             min_confidence: 0.5,
             target_hwnd: None,
@@ -1229,7 +1262,7 @@ async fn locate_element(
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, text, role, nearby_text, grid_cell, timeout_ms);
+        let _ = (app, text, role, nearby_text, timeout_ms);
         Err("locate_element only implemented for Windows".to_string())
     }
 }
@@ -1308,11 +1341,11 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         hotkey_wrong: c.hotkey_wrong.clone(),
         hotkey_pause: c.hotkey_pause.clone(),
         hotkey_icon:  c.hotkey_icon.clone(),
-        grid_test_enabled: c.grid_test_enabled,
         debug_screenshot_enabled: c.debug_screenshot_enabled,
         debug_show_response_info: c.debug_show_response_info,
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
+        debug_show_ai_bbox: c.debug_show_ai_bbox,
     })
 }
 
@@ -1349,11 +1382,11 @@ async fn save_settings(
         ("HOTKEY_WRONG".into(),         payload.hotkey_wrong.clone()),
         ("HOTKEY_PAUSE".into(),         payload.hotkey_pause.clone()),
         ("HOTKEY_ICON".into(),          payload.hotkey_icon.clone()),
-        ("GRID_TEST_ENABLED".into(),              payload.grid_test_enabled.to_string()),
         ("DEBUG_SCREENSHOT_ENABLED".into(),       payload.debug_screenshot_enabled.to_string()),
         ("DEBUG_SHOW_RESPONSE_INFO".into(),       payload.debug_show_response_info.to_string()),
         ("DEBUG_LOCATE_TRACE_ENABLED".into(),     payload.debug_locate_trace_enabled.to_string()),
         ("DEBUG_LOCATE_LOG_FILE_ENABLED".into(),  payload.debug_locate_log_file_enabled.to_string()),
+        ("DEBUG_SHOW_AI_BBOX".into(),             payload.debug_show_ai_bbox.to_string()),
     ];
 
     // API keys: only overwrite if the user actually typed something

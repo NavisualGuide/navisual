@@ -4,26 +4,25 @@
 
   type Rect = { x: number; y: number; width: number; height: number };
   type OverlayUpdate = {
-    kind: "arrow" | "box" | "subtitle" | "app_boundary" | "none";
+    kind: "arrow" | "box" | "subtitle" | "app_boundary" | "hint" | "none";
     bbox: Rect | null;
     text: string | null;
     virtual_origin: [number, number];
     virtual_size: [number, number];
     active_screen: Rect | null;
+    ai_bbox: Rect | null;
   };
-  type OverlayTheme = { color: string; thickness: number; subtitle_enabled: boolean };
-  type GridUpdate = {
-    capture_rect: Rect | null;
-    virtual_origin: [number, number];
-    virtual_size: [number, number];
-    highlighted_cell: string | null;
-    cols: number;
-    rows: number;
+  type OverlayTheme = {
+    color: string;
+    thickness: number;
+    subtitle_enabled: boolean;
+    /// Developer toggle: draw the AI-returned target_bbox as a distinct
+    /// cyan dashed box alongside the production pointer.
+    show_ai_bbox: boolean;
   };
 
   let canvas: HTMLCanvasElement;
   let currentUpdate: OverlayUpdate | null = null;
-  let gridUpdate: GridUpdate | null = null;
   let animFrame: number | null = null;
   let animStart = 0;
 
@@ -35,7 +34,12 @@
   // Plain object — NOT $state. drawBox/drawArrow read this in rAF callbacks where
   // Svelte's reactive getters don't fire; mutating fields in-place ensures every
   // frame sees the latest values without any signal overhead.
-  let theme: OverlayTheme = { color: "#FF6B35", thickness: 4, subtitle_enabled: true };
+  let theme: OverlayTheme = {
+    color: "#FF6B35",
+    thickness: 4,
+    subtitle_enabled: true,
+    show_ai_bbox: false,
+  };
 
   function hexToRgb(hex: string): [number, number, number] {
     const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
@@ -307,58 +311,140 @@
     return true;
   }
 
-  function drawGrid(ctx: CanvasRenderingContext2D, g: GridUpdate, canvasW: number, canvasH: number) {
-    const [ox, oy] = g.virtual_origin;
-    const gx = g.capture_rect ? g.capture_rect.x - ox : 0;
-    const gy = g.capture_rect ? g.capture_rect.y - oy : 0;
-    const gw = g.capture_rect ? g.capture_rect.width  : canvasW;
-    const gh = g.capture_rect ? g.capture_rect.height : canvasH;
-    const cellW = gw / g.cols;
-    const cellH = gh / g.rows;
+  /**
+   * Hint pointer — drawn when A11y and OCR both miss but the AI returned a
+   * `target_bbox`. Same family as `drawBox` (ripple rings + corner brackets,
+   * same pulse cadence + accent colour) so it feels like the main pointer.
+   * Differences signal "approximate, not pinpointed":
+   *   - Dashed brackets (instead of solid)
+   *   - No scan line (no active confirmed-target sweep)
+   *   - No crosshair, no corner dots (no exact-centre cues)
+   *   - Slightly softer alphas
+   * No label/tag — the user shouldn't need to know whether the pointer came
+   * from the local locator or from the AI fallback.
+   */
+  function drawHint(
+    ctx: CanvasRenderingContext2D,
+    bx: number, by: number, bw: number, bh: number,
+    t: number,
+  ) {
+    const [r, g, b] = hexToRgb(theme.color);
+    const pulse = (Math.sin(t / 700) + 1) / 2;
+    const cx = bx + bw / 2;
+    const cy = by + bh / 2;
 
-    // Highlight selected cell
-    if (g.highlighted_cell && g.highlighted_cell.length >= 2) {
-      const row = g.highlighted_cell.charCodeAt(0) - "A".charCodeAt(0);
-      const col = parseInt(g.highlighted_cell.slice(1), 10) - 1;
-      if (row >= 0 && row < g.rows && col >= 0 && col < g.cols) {
-        ctx.fillStyle = "rgba(255, 107, 53, 0.30)";
-        ctx.fillRect(gx + col * cellW, gy + row * cellH, cellW, cellH);
-        ctx.strokeStyle = "rgba(255, 107, 53, 0.85)";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([]);
-        ctx.strokeRect(gx + col * cellW + 1, gy + row * cellH + 1, cellW - 2, cellH - 2);
-      }
+    // ── RIPPLE RINGS — same animation as drawBox, slightly fainter ──
+    const baseR = Math.max(bw, bh) / 2 + 8;
+    for (let i = 0; i < 3; i++) {
+      const phase = ((t / 1500 + i / 3) % 1);
+      const radius = baseR + phase * Math.max(bw, bh) * 0.7;
+      const alpha  = (1 - phase) * 0.40;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      ctx.lineWidth = 2 - phase * 1.4;
+      ctx.shadowColor = theme.color;
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
     }
 
-    // Grid lines (dashed white)
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    for (let c = 1; c < g.cols; c++) {
-      const x = gx + c * cellW;
-      ctx.beginPath(); ctx.moveTo(x, gy); ctx.lineTo(x, gy + gh); ctx.stroke();
+    // ── DASHED CORNER BRACKETS — looser, more tentative than drawBox ──
+    const arm = Math.min(26, Math.max(14, Math.min(bw * 0.38, bh * 0.5)));
+    ctx.save();
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "miter";
+    ctx.setLineDash([5, 4]);
+
+    function bracket(ox: number, oy: number, dx: number, dy: number) {
+      // Shadow layer for contrast on any background
+      ctx.strokeStyle = "rgba(0,0,0,0.65)";
+      ctx.lineWidth = 4.5;
+      ctx.beginPath();
+      ctx.moveTo(ox + dx * arm, oy); ctx.lineTo(ox, oy); ctx.lineTo(ox, oy + dy * arm);
+      ctx.stroke();
+      // Accent layer
+      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${0.72 + pulse * 0.15})`;
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = theme.color;
+      ctx.shadowBlur = 6 + pulse * 8;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
     }
-    for (let r = 1; r < g.rows; r++) {
-      const y = gy + r * cellH;
-      ctx.beginPath(); ctx.moveTo(gx, y); ctx.lineTo(gx + gw, y); ctx.stroke();
-    }
+
+    bracket(bx,      by,      1, 1);
+    bracket(bx + bw, by,     -1, 1);
+    bracket(bx,      by + bh, 1, -1);
+    bracket(bx + bw, by + bh,-1, -1);
+    ctx.restore();
+  }
+
+  /**
+   * Developer overlay — draw the raw AI-returned bounding box.
+   *
+   * Visually distinct from the production pointer:
+   *   - Cyan (#00D9FF) instead of accent orange
+   *   - Animated marching-ants dashed border (no corner brackets, no rings)
+   *   - "AI" tag in the top-left corner
+   *
+   * Purpose: compare the AI's spatial prediction against the local locator's
+   * actual finding. When they disagree, the locator may be picking the wrong
+   * element OR the AI's coordinate output may be miscalibrated.
+   */
+  function drawAiBbox(
+    ctx: CanvasRenderingContext2D,
+    bx: number, by: number, bw: number, bh: number,
+    t: number,
+  ) {
+    const cyan = "#00D9FF";
+
+    // Marching-ants dash offset (animated leftward to make the box feel "live")
+    const dashOffset = -((t / 35) % 16);
+
+    // Outer dark stroke for contrast against any background
+    ctx.save();
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "miter";
+
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+    ctx.lineWidth = 4;
+    ctx.setLineDash([]);
+    ctx.strokeRect(bx, by, bw, bh);
+
+    // Cyan dashed accent
+    ctx.strokeStyle = cyan;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([10, 6]);
+    ctx.lineDashOffset = dashOffset;
+    ctx.shadowColor = cyan;
+    ctx.shadowBlur = 6;
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.shadowBlur = 0;
     ctx.setLineDash([]);
 
-    // Cell labels (top-left corner of each cell)
-    ctx.font = "bold 10px monospace";
+    // "AI" tag — top-left corner, slightly outside the box
+    const tagPad = 6;
+    const tagFont = "bold 11px 'JetBrains Mono', ui-monospace, monospace";
+    ctx.font = tagFont;
+    const label = "AI";
+    const labelW = ctx.measureText(label).width;
+    const tagW = labelW + tagPad * 2;
+    const tagH = 18;
+    const tagX = bx;
+    const tagY = by - tagH - 2;
+
+    ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+    ctx.fillRect(tagX, tagY, tagW, tagH);
+    ctx.strokeStyle = cyan;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tagX + 0.5, tagY + 0.5, tagW - 1, tagH - 1);
+
+    ctx.fillStyle = cyan;
     ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    for (let r = 0; r < g.rows; r++) {
-      for (let c = 0; c < g.cols; c++) {
-        const label = String.fromCharCode("A".charCodeAt(0) + r) + (c + 1);
-        const lx = gx + c * cellW + 2;
-        const ly = gy + r * cellH + 2;
-        ctx.fillStyle = "rgba(0,0,0,0.55)";
-        ctx.fillText(label, lx + 1, ly + 1);
-        ctx.fillStyle = "rgba(255,255,255,0.75)";
-        ctx.fillText(label, lx, ly);
-      }
-    }
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, tagX + tagPad, tagY + tagH / 2);
+
+    ctx.restore();
   }
 
   function renderFrame(timestamp: number) {
@@ -382,21 +468,17 @@
     }
     ctx.clearRect(0, 0, vw, vh);
 
-    // Draw grid test overlay beneath other elements (drawn every frame so it
-    // persists alongside animated arrows/boxes without a separate rAF loop).
-    if (gridUpdate) drawGrid(ctx, gridUpdate, vw, vh);
-
     let needNextFrame = false;
 
     // Phase 0.2: app-boundary flash overlay — sits beneath the locator
     // highlight, auto-clears after APP_BOUNDARY_DURATION_MS.
     if (appBoundary && appBoundary.bbox) {
       const ageMs = timestamp - appBoundaryStart;
-      const ab = appBoundary;
-      const abx = ab.bbox.x - ox;
-      const aby = ab.bbox.y - oy;
-      const abw = ab.bbox.width;
-      const abh = ab.bbox.height;
+      const abBox = appBoundary.bbox;
+      const abx = abBox.x - ox;
+      const aby = abBox.y - oy;
+      const abw = abBox.width;
+      const abh = abBox.height;
       const stillRunning = drawAppBoundary(ctx, abx, aby, abw, abh, ageMs);
       if (stillRunning) {
         needNextFrame = true;
@@ -415,18 +497,34 @@
         if (theme.subtitle_enabled && u.text) {
           drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.text);
         }
-        if (gridUpdate || needNextFrame) animFrame = requestAnimationFrame(renderFrame);
+        // Developer: still draw the AI-bbox even when the locator failed —
+        // this is the case where the comparison is most useful.
+        if (theme.show_ai_bbox && u.ai_bbox) {
+          const ax = u.ai_bbox.x - ox;
+          const ay = u.ai_bbox.y - oy;
+          drawAiBbox(ctx, ax, ay, u.ai_bbox.width, u.ai_bbox.height, t);
+          animFrame = requestAnimationFrame(renderFrame);
+          return;
+        }
+        if (needNextFrame) animFrame = requestAnimationFrame(renderFrame);
         return;
       }
 
-      // Subtitle is drawn alongside every overlay type (arrow, box, subtitle-only).
+      // Subtitle is drawn alongside every overlay type (arrow, box, hint, subtitle).
       // Rust always passes step.instruction as u.text.
       if (theme.subtitle_enabled && u.text) {
         drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.text);
       }
 
-      // Subtitle-only step — no bbox to locate, no animation loop needed.
+      // Subtitle-only step — no bbox to locate, but AI bbox dev toggle may still apply.
       if (u.kind === "subtitle") {
+        if (theme.show_ai_bbox && u.ai_bbox) {
+          const ax = u.ai_bbox.x - ox;
+          const ay = u.ai_bbox.y - oy;
+          drawAiBbox(ctx, ax, ay, u.ai_bbox.width, u.ai_bbox.height, t);
+          animFrame = requestAnimationFrame(renderFrame);
+          return;
+        }
         if (needNextFrame) animFrame = requestAnimationFrame(renderFrame);
         return;
       }
@@ -439,7 +537,19 @@
         const bh = u.bbox.height + padding * 2;
 
         if (u.kind === "arrow") drawArrow(ctx, bx, by, bw, bh, t);
+        else if (u.kind === "hint") drawHint(ctx, bx, by, bw, bh, t);
         else if (u.kind !== "app_boundary") drawBox(ctx, bx, by, bw, bh, t);
+      }
+
+      // Developer: AI-returned bbox in cyan dashed alongside the production pointer.
+      // No padding — show exactly what the AI returned, to-the-pixel.
+      if (theme.show_ai_bbox && u.ai_bbox) {
+        const ax = u.ai_bbox.x - ox;
+        const ay = u.ai_bbox.y - oy;
+        drawAiBbox(ctx, ax, ay, u.ai_bbox.width, u.ai_bbox.height, t);
+      }
+
+      if (u.bbox || (theme.show_ai_bbox && u.ai_bbox)) {
         animFrame = requestAnimationFrame(renderFrame);
         return;
       }
@@ -452,18 +562,12 @@
     if (animFrame !== null) { cancelAnimationFrame(animFrame); animFrame = null; }
     currentUpdate = update;
 
-    if (update.kind === "none") {
+    // Kind=none AND no AI-bbox dev overlay to draw → real clear path.
+    const hasAiBboxToDraw = theme.show_ai_bbox && update.ai_bbox;
+    if (update.kind === "none" && !hasAiBboxToDraw) {
       if (canvas) {
         const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          // Re-draw the grid even when the regular overlay is cleared.
-          if (gridUpdate) {
-            const [vw, vh] = gridUpdate.virtual_size;
-            if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
-            drawGrid(ctx, gridUpdate, vw, vh);
-          }
-        }
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
       return;
     }
@@ -489,26 +593,7 @@
       theme.color = event.payload.color;
       theme.thickness = event.payload.thickness;
       theme.subtitle_enabled = event.payload.subtitle_enabled;
-    });
-    await listen<GridUpdate>("overlay:grid", (event) => {
-      gridUpdate = event.payload;
-      // If no animation loop is running, draw the grid immediately.
-      if (animFrame === null && canvas) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          const [vw, vh] = gridUpdate.virtual_size;
-          if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
-          ctx.clearRect(0, 0, vw, vh);
-          drawGrid(ctx, gridUpdate, vw, vh);
-        }
-      }
-    });
-    await listen<void>("overlay:grid_clear", () => {
-      gridUpdate = null;
-      if (animFrame === null && canvas) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
+      theme.show_ai_bbox = event.payload.show_ai_bbox ?? false;
     });
   });
 </script>

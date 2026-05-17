@@ -8,7 +8,7 @@ use crate::ai::types::NavigateStepResponse;
 use crate::ai::anthropic::{AnthropicClient, build_messages as build_anthropic};
 use crate::ai::gemini::{GeminiClient, build_messages as build_gemini};
 use crate::ai::ollama::{OllamaClient, build_messages as build_ollama};
-use crate::ai::deepseek::{DeepSeekClient, build_messages as build_deepseek, build_qwen_messages as build_qwen};
+use crate::ai::deepseek::{DeepSeekClient, build_messages as build_deepseek, build_openai_messages as build_openai};
 use crate::ai::managed::{ManagedClient, build_messages as build_managed};
 
 pub enum ApiClient {
@@ -239,12 +239,15 @@ impl AiRouter {
                 let msgs = build_ollama(user_text, screenshot_b64, state_summary, &conversation);
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
-            Some(ApiClient::DeepSeek(c)) | Some(ApiClient::OpenAI(c)) => {
+            Some(ApiClient::DeepSeek(c)) => {
+                // api.deepseek.com is text-only — image_url is rejected with 400.
                 let msgs = build_deepseek(user_text, screenshot_b64, state_summary, &conversation);
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
-            Some(ApiClient::Qwen(c)) => {
-                let msgs = build_qwen(user_text, screenshot_b64, state_summary, &conversation);
+            Some(ApiClient::OpenAI(c)) | Some(ApiClient::Qwen(c)) => {
+                // OpenAI (api.openai.com) and Qwen (DashScope) are both OpenAI-compat
+                // vision endpoints — they accept image_url and need the screenshot.
+                let msgs = build_openai(user_text, screenshot_b64, state_summary, &conversation);
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
             Some(ApiClient::Managed(c)) => {

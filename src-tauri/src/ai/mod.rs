@@ -10,4 +10,5 @@ pub mod deepseek;
 pub mod managed;
 pub mod router;
 pub mod streaming;
+pub mod bbox;
 

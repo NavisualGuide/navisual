@@ -37,6 +37,7 @@ Step fields (inside "steps" array only):
 - overlay_type: "arrow" for clickable targets, "subtitle" for keyboard/scroll steps with no target (default arrow)
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
 - clipboard: text to copy to clipboard (optional)
+- target_bbox: [ymin, xmin, ymax, xmax] absolute pixel coordinates of the target element in the screenshot (optional, omit when no target_text)
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
@@ -190,7 +191,7 @@ impl OllamaClient {
                 overlay_type: OverlayType::None,
                 clipboard: None,
                 checkpoint: true,
-                grid_cell: None,
+                target_bbox: None,
             }],
             state_summary: "Continuing task...".to_string(),
             needs_input: false,

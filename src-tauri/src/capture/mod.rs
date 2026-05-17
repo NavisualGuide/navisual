@@ -227,6 +227,19 @@ pub fn list_target_windows() -> Vec<win::TargetWindowInfo> {
 }
 
 
+/// Predict the dimensions of the AI-image after `cap_size()` would be applied
+/// to a source of (`src_w`, `src_h`). Mirrors `cap_size` exactly so the AI-bbox
+/// converter knows the pixel space the model actually sees.
+pub fn ai_image_dims(src_w: u32, src_h: u32) -> (u32, u32) {
+    if src_w <= MAX_CAP_W && src_h <= MAX_CAP_H {
+        return (src_w, src_h);
+    }
+    let scale = (MAX_CAP_W as f32 / src_w as f32).min(MAX_CAP_H as f32 / src_h as f32);
+    let nw = ((src_w as f32 * scale).round() as u32).max(1);
+    let nh = ((src_h as f32 * scale).round() as u32).max(1);
+    (nw, nh)
+}
+
 /// Downscale `img` to fit within MAX_CAP_W × MAX_CAP_H, preserving aspect ratio.
 /// Returns the original unchanged if already within bounds.
 fn cap_size(img: ImageBuffer<Rgba<u8>, Vec<u8>>) -> ImageBuffer<Rgba<u8>, Vec<u8>> {

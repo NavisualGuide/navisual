@@ -74,9 +74,12 @@ impl GeminiClient {
                                 },
                                 "clipboard": {"type": "string"},
                                 "checkpoint": {"type": "boolean"},
-                                "grid_cell": {
-                                    "type": "string",
-                                    "description": "Cell label for this step's target element (e.g. 'D7'). Rows A-I (A=top, I=bottom), cols 1-16 (1=left, 16=right). Never return a row letter beyond I or a col number beyond 16."
+                                "target_bbox": {
+                                    "type": "array",
+                                    "items": {"type": "number"},
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                    "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax] in your native object-detection coordinate system (normalized 0-1000). The box should tightly wrap the target element. Omit when no target_text."
                                 }
                             }
                         }
@@ -215,15 +218,6 @@ impl GeminiClient {
                     needs_input = true;
                 }
 
-                let mut grid_cell = None;
-                if let Some(idx) = raw_text.find(r#"grid_cell: ""#).or_else(|| raw_text.find(r#""grid_cell": ""#)) {
-                    let offset = if raw_text[idx..].starts_with("\"grid_cell") { 14 } else { 12 };
-                    let after = &raw_text[idx + offset..];
-                    if let Some(end) = after.find('"') {
-                        grid_cell = Some(after[..end].to_string());
-                    }
-                }
-
                 let mut target_role = None;
                 if let Some(idx) = raw_text.find(r#"target_role: ""#).or_else(|| raw_text.find(r#""target_role": ""#)) {
                     let offset = if raw_text[idx..].starts_with("\"target_role") { 16 } else { 14 };
@@ -253,7 +247,7 @@ impl GeminiClient {
                         overlay_type: crate::ai::types::OverlayType::None,
                         clipboard: None,
                         checkpoint,
-                        grid_cell,
+                        target_bbox: None,
                     }],
                     state_summary,
                     needs_input,

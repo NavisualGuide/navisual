@@ -214,13 +214,11 @@ pub fn find_element(
     // from redirecting us to the wrong window — common when the AI takes a
     // long time (e.g. local Ollama models) and the user switches focus.
     let our_pid = own_pid();
-    let mut win_rect = RECT::default();
 
     let search_roots: Vec<UIElement> = if let Some(hwnd_raw) = opts.target_hwnd {
         let hwnd = HWND(hwnd_raw as *mut _);
         unsafe {
             if !hwnd.0.is_null() && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
-                let _ = GetWindowRect(hwnd, &mut win_rect);
                 match automation.element_from_handle(hwnd.into()) {
                     Ok(el) => vec![el],
                     Err(_) => Vec::new(),
@@ -231,20 +229,13 @@ pub fn find_element(
         }
     } else {
         let (fg_hwnd, fg_pid) = foreground_pid();
-        if !fg_hwnd.0.is_null() {
-            unsafe { let _ = GetWindowRect(fg_hwnd, &mut win_rect); }
-        }
         if fg_pid != 0 && fg_pid != our_pid {
             match automation.element_from_handle(fg_hwnd.into()) {
                 Ok(el) => vec![el],
                 Err(_) => Vec::new(),
             }
         } else {
-            let hwnds = collect_visible_top_windows(our_pid, 8);
-            if let Some(&first) = hwnds.first() {
-                unsafe { let _ = GetWindowRect(first, &mut win_rect); }
-            }
-            hwnds
+            collect_visible_top_windows(our_pid, 8)
                 .into_iter()
                 .filter_map(|h| automation.element_from_handle(h.into()).ok())
                 .collect()
@@ -290,14 +281,11 @@ pub fn find_element(
         return Ok((None, trace));
     }
 
-    // Sort by grid proximity if zone is provided
-    if let Some((zx, zy)) = opts.zone {
-        let w = (win_rect.right - win_rect.left).max(1) as f32;
-        let h = (win_rect.bottom - win_rect.top).max(1) as f32;
-        let cw = w / 16.0;
-        let ch = h / 9.0;
-        let target_x = win_rect.left as f32 + (zx as f32 + 0.5) * cw;
-        let target_y = win_rect.top as f32 + (zy as f32 + 0.5) * ch;
+    // Sort by AI-bbox proximity if a predicted bbox is provided. Both bboxes
+    // are already in virtual-desktop physical pixels so the comparison is direct.
+    if let Some(ai) = opts.ai_bbox {
+        let target_x = ai.x as f32 + ai.width as f32 / 2.0;
+        let target_y = ai.y as f32 + ai.height as f32 / 2.0;
 
         candidates.sort_by(|a, b| {
             let acx = a.bbox.x as f32 + a.bbox.width as f32 / 2.0;
@@ -310,9 +298,9 @@ pub fn find_element(
         });
     }
 
-    // Record candidates in the trace. The first one is selected; the rest
-    // are listed as "lower zone proximity" or "duplicate match" so the
-    // debug drawer can show why they weren't chosen.
+    // Record candidates in the trace. The first one is selected; the rest are
+    // listed with their reject reason so the debug drawer can show why they
+    // weren't chosen.
     for (i, c) in candidates.iter().enumerate() {
         trace.candidates.push(A11yCandidate {
             name: c.name.clone(),
@@ -321,8 +309,8 @@ pub fn find_element(
             selected: i == 0,
             reject_reason: if i == 0 {
                 None
-            } else if opts.zone.is_some() {
-                Some("not closest to zone".to_string())
+            } else if opts.ai_bbox.is_some() {
+                Some("farther from AI bbox".to_string())
             } else {
                 Some("not first match".to_string())
             },

@@ -173,7 +173,7 @@ pub fn run_ocr(image_bytes: &[u8]) -> Result<Vec<OcrResult>> {
 // 3. Fuzzy SequenceMatcher fallback (> 0.85 ratio).
 //
 // Supporting: 4%-height button cap, MAX_LABEL_LEN=60, nearby_text anchor,
-// 16×9 zone filter, role-aware size preference.
+// AI-bbox proximity filter (±300%), role-aware size preference.
 
 const MAX_LABEL_LEN: usize = 60;
 
@@ -211,8 +211,11 @@ pub struct FindOptions<'a> {
     pub nearby_text: Option<&'a str>,
     pub screen_width: u32,
     pub screen_height: u32,
-    /// 16×9 zone filter cell coordinates (0..16, 0..9), or None.
-    pub zone: Option<(u32, u32)>,
+    /// AI-predicted target bbox in **OCR-image-pixel space**: `(x, y, w, h)`.
+    /// Candidates whose centre falls inside this bbox expanded ±300% on each
+    /// side are kept. If none survive the filter, the matcher falls back to
+    /// the full pool (see `nb-*` retry in `find_text`).
+    pub ai_bbox: Option<(i32, i32, u32, u32)>,
     pub min_confidence: f32,
 }
 
@@ -249,16 +252,19 @@ pub fn find_text<'a>(
         .filter(|r| r.confidence >= min_conf && r.text.trim().chars().count() <= MAX_LABEL_LEN)
         .collect();
 
-    // 16×9 zone filter — keep candidates whose centre falls within ±1 cell
-    // of the AI-reported zone. Fall back to full pool if nothing survives.
-    if let Some((zx, zy)) = opts.zone {
-        if opts.screen_width > 0 && opts.screen_height > 0 {
-            let cw = opts.screen_width as f32 / 16.0;
-            let ch = opts.screen_height as f32 / 9.0;
-            let x0 = 0f32.max((zx as f32 - 1.0) * cw);
-            let x1 = (opts.screen_width as f32).min((zx as f32 + 2.0) * cw);
-            let y0 = 0f32.max((zy as f32 - 1.0) * ch);
-            let y1 = (opts.screen_height as f32).min((zy as f32 + 2.0) * ch);
+    // AI-bbox proximity filter — keep candidates whose centre falls inside the
+    // AI bbox expanded ±300% on each side (final keep-rect is 7× the AI bbox
+    // width and height, centred on the AI bbox). Generous enough to forgive
+    // significant AI imprecision while still excluding the unrelated half of
+    // the screen. Fall back to full pool if nothing survives.
+    if let Some((ax, ay, aw, ah)) = opts.ai_bbox {
+        if aw > 0 && ah > 0 && opts.screen_width > 0 && opts.screen_height > 0 {
+            let pad_x = aw as f32 * 3.0;
+            let pad_y = ah as f32 * 3.0;
+            let x0 = 0f32.max(ax as f32 - pad_x);
+            let y0 = 0f32.max(ay as f32 - pad_y);
+            let x1 = (opts.screen_width as f32).min((ax + aw as i32) as f32 + pad_x);
+            let y1 = (opts.screen_height as f32).min((ay + ah as i32) as f32 + pad_y);
             let filtered: Vec<&OcrResult> = candidates
                 .iter()
                 .copied()
@@ -304,10 +310,17 @@ pub fn find_text<'a>(
     let want_largest = prefer_largest(opts.role);
     let want_smallest = prefer_smallest(opts.role);
 
+    // AI-bbox centre (OCR-image-pixel space). When set, used as the dominant
+    // tie-breaker among matches — same idea as A11y's proximity sort.
+    let ai_center: Option<(f32, f32)> = opts.ai_bbox.map(|(x, y, w, h)| {
+        (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0)
+    });
+
     let pick_best = |pool: &[&'a OcrResult]| -> Option<&'a OcrResult> {
         if pool.is_empty() {
             return None;
         }
+        // 1. nearby_text anchor — strongest signal, user-provided.
         if let Some((ax, ay)) = anchor {
             return pool
                 .iter()
@@ -318,6 +331,27 @@ pub fn find_text<'a>(
                     da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
                 });
         }
+        // 2. AI-bbox proximity — sort by distance to the AI's predicted centre.
+        //    For button-like roles, apply the 4%-height plausibility filter
+        //    first so a heading-sized match next to the AI bbox can't beat the
+        //    real button that's slightly further away.
+        if let Some((bx, by)) = ai_center {
+            let plausible: Vec<&OcrResult> = if want_largest {
+                let p: Vec<&OcrResult> = pool.iter().copied()
+                    .filter(|r| r.bbox.3 <= button_height_cap)
+                    .collect();
+                if !p.is_empty() { p } else { pool.to_vec() }
+            } else {
+                pool.to_vec()
+            };
+            return plausible.into_iter().min_by(|a, b| {
+                let da = proximity_sq(a, bx, by);
+                let db = proximity_sq(b, bx, by);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        // 3. Fallback — role-aware size preference (legacy behaviour when the
+        //    AI did not return a target_bbox).
         if pool.len() > 1 {
             if want_largest {
                 let plausible: Vec<&OcrResult> = pool
@@ -482,9 +516,19 @@ pub fn find_text<'a>(
         if pool.is_empty() {
             continue;
         }
-        // Tier 3 ignores role-size preference — take the highest scorer directly.
+        // Tier 3 ignores role-size preference. When AI bbox is set, pick the
+        // closest-to-AI-bbox among the top-scored to break ties; otherwise
+        // take the highest scorer directly.
         let chosen = if label == "fuzzy-t3" {
-            pool.into_iter().next()
+            if let Some((bx, by)) = ai_center {
+                pool.into_iter().min_by(|a, b| {
+                    let da = proximity_sq(a, bx, by);
+                    let db = proximity_sq(b, bx, by);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+            } else {
+                pool.into_iter().next()
+            }
         } else {
             pick_best(&pool)
         };
@@ -513,19 +557,19 @@ pub fn find_text<'a>(
     }
     outcome.winner = winner;
 
-    // Zone-filter fallback: if a zone was active and no strategy found a winner,
-    // the AI's grid_cell estimate may be wrong (e.g. nav-sidebar items are in
-    // col 1 but AI reports col 4). Retry on the full unfiltered pool so the
-    // correct element is not silently excluded.
-    if outcome.winner.is_none() && opts.zone.is_some() {
-        let no_zone = FindOptions { zone: None, ..*opts };
-        let mut fallback = find_text(target_text, results, &no_zone);
-        // Prefix strategy with "nz-" so the debug drawer shows the retry.
+    // AI-bbox fallback: if an AI bbox filter was active and no strategy found a
+    // winner, the AI's predicted location may be off (rare but happens — e.g.
+    // model confuses sibling controls). Retry on the full unfiltered pool so
+    // the correct element is not silently excluded. The "nb-" prefix (no-bbox)
+    // shows up in the debug drawer.
+    if outcome.winner.is_none() && opts.ai_bbox.is_some() {
+        let no_bbox = FindOptions { ai_bbox: None, ..*opts };
+        let mut fallback = find_text(target_text, results, &no_bbox);
         if let Some(ref s) = fallback.strategy_used.clone() {
-            fallback.strategy_used = Some(format!("nz-{s}"));
+            fallback.strategy_used = Some(format!("nb-{s}"));
         }
         for c in &mut fallback.candidates {
-            c.strategy = format!("nz-{}", c.strategy);
+            c.strategy = format!("nb-{}", c.strategy);
         }
         return fallback;
     }

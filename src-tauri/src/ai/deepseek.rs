@@ -36,6 +36,7 @@ Step fields (inside "steps" array only):
 - overlay_type: "arrow" for clickable targets, "subtitle" for keyboard/scroll steps with no target (default arrow)
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
 - clipboard: text to copy to clipboard (optional)
+- target_bbox: [ymin, xmin, ymax, xmax] absolute pixel coordinates of the target element in the screenshot (optional, omit when no target_text)
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
@@ -178,12 +179,16 @@ impl DeepSeekClient {
             .trim_end_matches("```")
             .trim();
 
-        let json_text = match (stripped.find('{'), stripped.rfind('}')) {
-            (Some(s), Some(e)) if e > s => &stripped[s..=e],
-            _ => stripped,
-        };
-
-        if let Ok(step_response) = serde_json::from_str::<NavigateStepResponse>(json_text) {
+        // Walk the accumulated text as a stream of JSON values. Models
+        // occasionally emit duplicate / trailing JSON (especially when
+        // stressed by missing context, hallucinating a retry, or appending
+        // explanatory prose). Take the first value that parses into our
+        // schema and discard everything after it, so the user never sees raw
+        // JSON in chat just because the model emitted `{...} {...}` or
+        // `{...} Let me know if you need anything else!`.
+        let mut stream = serde_json::Deserializer::from_str(stripped)
+            .into_iter::<NavigateStepResponse>();
+        if let Some(Ok(step_response)) = stream.next() {
             if !step_response.steps.is_empty() {
                 if emitted_instruction_len == 0 {
                     on_chunk(&step_response.steps[0].instruction);
@@ -202,7 +207,7 @@ impl DeepSeekClient {
                 overlay_type: OverlayType::None,
                 clipboard: None,
                 checkpoint: true,
-                grid_cell: None,
+                target_bbox: None,
             }],
             state_summary: "Continuing task...".to_string(),
             needs_input: false,
@@ -248,9 +253,14 @@ pub fn build_messages(
     messages
 }
 
-/// Build messages for Qwen (DashScope OpenAI-compat endpoint).
-/// Qwen VL models accept image_url with base64 data URLs — include the screenshot.
-pub fn build_qwen_messages(
+/// Build messages for OpenAI-compatible vision endpoints — used by both the
+/// real OpenAI API (api.openai.com) and Qwen's DashScope OpenAI-compat
+/// endpoint. Both accept the standard `image_url` content part with a base64
+/// data URL, so the screenshot is included.
+///
+/// Do NOT use this for the literal DeepSeek API (api.deepseek.com), which
+/// rejects image_url with HTTP 400 — that one needs `build_messages` instead.
+pub fn build_openai_messages(
     user_text: &str,
     screenshot_b64: Option<&str>,
     state_summary: Option<&str>,

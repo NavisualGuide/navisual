@@ -37,10 +37,10 @@ See the LICENSE file in the root of this repository for complete details.
     request_full_screen: boolean;
     provider: string;
     error: string | null;
-    grid_cell: string | null;
     debug_screenshot_path: string | null;
     chat_thumb_b64: string | null;
     locate_trace: LocateTrace | null;
+    ai_bbox: Rect | null;
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "consent_prompt" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
@@ -75,11 +75,11 @@ See the LICENSE file in the root of this repository for complete details.
     hotkey_wrong: string;
     hotkey_pause: string;
     hotkey_icon: string;
-    grid_test_enabled: boolean;
     debug_screenshot_enabled: boolean;
     debug_show_response_info: boolean;
     debug_locate_trace_enabled: boolean;
     debug_locate_log_file_enabled: boolean;
+    debug_show_ai_bbox: boolean;
   };
 
   // ---- Locator trace types (mirror src-tauri/src/locator/trace.rs) ----
@@ -128,7 +128,7 @@ See the LICENSE file in the root of this repository for complete details.
     target_text: string;
     target_role: string | null;
     nearby_text: string | null;
-    grid_cell: [number, number] | null;
+    ai_bbox: { x: number; y: number; width: number; height: number } | null;
     a11y: A11yTrace;
     ocr: OcrTrace;
     final_decision: FinalDecision;
@@ -149,13 +149,6 @@ See the LICENSE file in the root of this repository for complete details.
   let debugDrawerOpen = $state(false);
   let sessionId = $state("");
   let provider = $state("");
-  let gridCell = $state<string | null>(null);
-
-  // Strip AI self-references to grid_cell from instruction text (debug field, not for users).
-  function stripGridRef(text: string): string {
-    return text.replace(/\s*\(grid cell [A-I]\d{1,2}\)\.?/gi, '').trimEnd();
-  }
-
   // Managed provider (S.1) state
   let freeRemaining = $state<number | null>(null);
   let showTrialExhausted = $state(false);
@@ -241,11 +234,11 @@ See the LICENSE file in the root of this repository for complete details.
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "en-US",
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
     hotkey_pause: "Ctrl+KeyS", hotkey_icon: "Ctrl+KeyQ",
-    grid_test_enabled: false,
     debug_screenshot_enabled: false,
     debug_show_response_info: false,
     debug_locate_trace_enabled: false,
     debug_locate_log_file_enabled: false,
+    debug_show_ai_bbox: false,
   };
   let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
   let settingsSaving = $state(false);
@@ -509,6 +502,7 @@ See the LICENSE file in the root of this repository for complete details.
       color: settingsForm.overlay_color,
       thickness: settingsForm.overlay_thickness,
       subtitle_enabled: settingsForm.subtitle_enabled,
+      show_ai_bbox: settingsForm.debug_show_ai_bbox,
     });
     showQuickMenu = false;
   }
@@ -526,6 +520,7 @@ See the LICENSE file in the root of this repository for complete details.
       color: settingsForm.overlay_color,
       thickness: settingsForm.overlay_thickness,
       subtitle_enabled: settingsForm.subtitle_enabled,
+      show_ai_bbox: settingsForm.debug_show_ai_bbox,
     });
     showQuickMenu = false;
   }
@@ -590,10 +585,17 @@ See the LICENSE file in the root of this repository for complete details.
     settingsSaved = false;
     showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false;
     showSettings = true;
-    // Load voice list in background — non-blocking, shows "Loading…" until done.
-    invoke<VoiceInfo[]>("list_tts_voices").then(v => { availableVoices = v; }).catch(() => {});
+    // Load voices and settings in parallel, but wait for both before assigning
+    // settingsForm. If we assign settingsForm while availableVoices is still empty,
+    // the <select bind:value> finds no matching <option> for the saved tts_voice
+    // and silently resets it to "" (system default). The bound value then
+    // overwrites the saved choice the next time the user clicks Apply.
     try {
-      const data = await invoke<SettingsPayload>("get_settings");
+      const [data, voices] = await Promise.all([
+        invoke<SettingsPayload>("get_settings"),
+        invoke<VoiceInfo[]>("list_tts_voices").catch(() => [] as VoiceInfo[]),
+      ]);
+      availableVoices = voices;
       // Keep the live auto_advance state — the Pause/Resume button may have
       // changed it since the last disk save, and the button is the source of truth.
       settingsForm = { ...data, auto_advance: autoAdvanceEnabled };
@@ -650,6 +652,12 @@ See the LICENSE file in the root of this repository for complete details.
       if (autoAdvanceEnabled) startAutopilotPolling(); else stopAutopilotPolling();
       isMuted = !settingsForm.tts_enabled;
       debugShowInfo = settingsForm.debug_show_response_info;
+      await emitTo("overlay", "overlay:theme", {
+        color: settingsForm.overlay_color,
+        thickness: settingsForm.overlay_thickness,
+        subtitle_enabled: settingsForm.subtitle_enabled,
+        show_ai_bbox: settingsForm.debug_show_ai_bbox,
+      });
       const hkErrors = await registerShortcuts(settingsForm);
       if (hkErrors.length) {
         settingsError = `Saved, but hotkey registration failed: ${hkErrors.join("; ")}`;
@@ -685,11 +693,10 @@ See the LICENSE file in the root of this repository for complete details.
     if (token !== requestToken) return;
     steps = res.steps;
     stepIndex = idx;
-    currentInstruction = stripGridRef(res.instruction);
+    currentInstruction = res.instruction;
     locateResult = res.located;
     locateTrace = res.locate_trace;
     sessionId = res.session_id;
-    gridCell = res.grid_cell ?? null;
     if (res.provider) provider = res.provider;
     if (res.request_full_screen) {
       phase = "consent_prompt";
@@ -697,7 +704,7 @@ See the LICENSE file in the root of this repository for complete details.
       phase = res.needs_input ? "needs_input" : "guiding";
     }
     if (res.instruction) {
-      const cleanInstruction = stripGridRef(res.instruction);
+      const cleanInstruction = res.instruction;
       let meta: string | undefined;
       if (res.located) {
         meta = `${res.located.role} · ${(res.located.confidence * 100).toFixed(0)}% · ${res.located.name}`;
@@ -913,6 +920,16 @@ See the LICENSE file in the root of this repository for complete details.
     } catch (_) {}
     try { await getCurrentWindow().show(); } catch (_) {}
 
+    // Sync the overlay theme from saved settings so the show_ai_bbox toggle
+    // is active from the first guide call without requiring the user to open
+    // Settings → Apply every session.
+    emitTo("overlay", "overlay:theme", {
+      color: settingsForm.overlay_color,
+      thickness: settingsForm.overlay_thickness,
+      subtitle_enabled: settingsForm.subtitle_enabled,
+      show_ai_bbox: settingsForm.debug_show_ai_bbox,
+    }).catch(() => {});
+
     listen<{ delta: string }>("stream_chunk", (event) => {
       if (phase === "thinking" || phase === "guiding") {
         currentInstruction += event.payload.delta;
@@ -1027,9 +1044,6 @@ See the LICENSE file in the root of this repository for complete details.
           {#if steps[stepIndex]?.clipboard}
             <span class="badge badge-clip" title="Text copied to clipboard">📋 copied</span>
           {/if}
-          {#if settingsForm.grid_test_enabled && gridCell}
-            <span class="badge badge-grid" title="AI-identified grid cell">⊞ {gridCell}</span>
-          {/if}
           {#if locateResult}
             <span class="badge badge-{locateResult.role === 'Ocr' ? 'warn' : 'ok'}">
               {locateResult.role}
@@ -1039,7 +1053,7 @@ See the LICENSE file in the root of this repository for complete details.
             <span class="badge badge-miss">not located</span>
           {/if}
         </div>
-        <p class="latest-text">{stripGridRef(currentInstruction)}</p>
+        <p class="latest-text">{currentInstruction}</p>
 
         <!-- D6: subtle miss note — only when a target was expected but not found -->
         {#if !locateResult && steps[stepIndex]?.target_text && phase === "guiding"}
@@ -1070,10 +1084,10 @@ See the LICENSE file in the root of this repository for complete details.
                     <span class="debug-val">"{locateTrace.nearby_text}"</span>
                   </div>
                 {/if}
-                {#if locateTrace.grid_cell}
+                {#if locateTrace.ai_bbox}
                   <div class="debug-row">
-                    <span class="debug-key">grid_cell</span>
-                    <span class="debug-val">col {locateTrace.grid_cell[0] + 1}, row {String.fromCharCode(65 + locateTrace.grid_cell[1])}</span>
+                    <span class="debug-key">ai_bbox</span>
+                    <span class="debug-val">{locateTrace.ai_bbox.x}, {locateTrace.ai_bbox.y} · {locateTrace.ai_bbox.width}×{locateTrace.ai_bbox.height}</span>
                   </div>
                 {/if}
 
@@ -1636,13 +1650,6 @@ See the LICENSE file in the root of this repository for complete details.
               </label>
             </div>
             <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
-              <p class="setting-label">Grid test</p>
-              <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.grid_test_enabled} />
-                <span>Draw 16×9 grid on screenshots and show AI cell label in response</span>
-              </label>
-            </div>
-            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
               <p class="setting-label">Locate diagnostics</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.debug_locate_trace_enabled} />
@@ -1653,6 +1660,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <span>Append every locate to locate_log.jsonl</span>
               </label>
               <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\locate_log.jsonl</p>
+            </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">AI bounding box</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.debug_show_ai_bbox} />
+                <span>Draw the AI-returned target_bbox on the overlay (cyan dashed)</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">Drawn alongside the production pointer for visual comparison. Coordinate-system per provider — Gemini normalized 0–1000, others absolute pixels.</p>
             </div>
 
           {:else}
@@ -2539,7 +2554,6 @@ See the LICENSE file in the root of this repository for complete details.
   .badge-ok   { background: rgba(34, 197, 94, 0.15); color: var(--success); }
   .badge-warn { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
   .badge-miss { background: rgba(239, 68, 68, 0.12); color: var(--danger); }
-  .badge-grid { background: rgba(99, 102, 241, 0.18); color: #a5b4fc; font-family: "JetBrains Mono", ui-monospace, monospace; }
   .conf { font-size: 10px; color: var(--text-tertiary); font-family: "JetBrains Mono", ui-monospace, monospace; }
 
   /* ── Settings modal ──────────────────────────────── */

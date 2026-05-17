@@ -1,5 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+/// Lax `Option<T>` deserializer used on AI-response fields that models
+/// commonly emit as `""` or as a non-enum string instead of omitting them.
+///
+/// Behaviour: JSON `null` → `None`; JSON `""` (empty / whitespace) → `None`;
+/// any other value that fails to deserialize → `None` (swallowed, never
+/// errors); anything that parses cleanly → `Some(T)`.
+///
+/// This stops a single malformed field (e.g. `"target_role": ""` instead of
+/// a valid enum variant) from blowing up the whole response and dropping the
+/// user into the raw-JSON-as-instruction fallback path.
+fn lax_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(ref s) if s.trim().is_empty() => Ok(None),
+        v => Ok(serde_json::from_value::<T>(v).ok()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OverlayType {
@@ -44,18 +67,31 @@ pub enum TargetRegion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuidanceStep {
     pub instruction: String,
+    #[serde(default, deserialize_with = "lax_option")]
     pub target_text: Option<String>,
+    #[serde(default, deserialize_with = "lax_option")]
     pub target_role: Option<TargetRole>,
+    #[serde(default, deserialize_with = "lax_option")]
     pub target_region: Option<TargetRegion>,
+    #[serde(default, deserialize_with = "lax_option")]
     pub target_nearby_text: Option<String>,
     #[serde(default = "default_overlay")]
     pub overlay_type: OverlayType,
+    #[serde(default, deserialize_with = "lax_option")]
     pub clipboard: Option<String>,
     #[serde(default = "default_true")]
     pub checkpoint: bool,
-    /// Cell label (e.g. "D7") for the target element: row A–I (top→bottom),
-    /// col 1–16 (left→right). Used by the locator as the zone hint.
-    pub grid_cell: Option<String>,
+    /// Bounding box returned by the AI as `[ymin, xmin, ymax, xmax]`. Drives
+    /// the locator (A11y proximity sort + OCR overlap filter) and the
+    /// developer "show AI bbox" overlay.
+    ///
+    /// Coordinate system depends on the provider:
+    /// - Gemini: normalized 0–1000
+    /// - Others: absolute pixels of the AI-image
+    ///
+    /// Converted to virtual-desktop screen coords by the backend before use.
+    #[serde(default)]
+    pub target_bbox: Option<[f64; 4]>,
 }
 
 fn default_overlay() -> OverlayType {

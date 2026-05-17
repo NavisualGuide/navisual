@@ -80,9 +80,12 @@ impl AnthropicClient {
                                 },
                                 "clipboard": {"type": "string"},
                                 "checkpoint": {"type": "boolean"},
-                                "grid_cell": {
-                                    "type": "string",
-                                    "description": "Cell label for this step's target element (e.g. 'D7'). Rows A-I (A=top, I=bottom), cols 1-16 (1=left, 16=right). Never return a row letter beyond I or a col number beyond 16."
+                                "target_bbox": {
+                                    "type": "array",
+                                    "items": {"type": "number"},
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                    "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax]. Use absolute pixel coordinates of the screenshot you see (NOT normalized). The box should tightly wrap the target element. Omit when no target_text."
                                 }
                             }
                         }

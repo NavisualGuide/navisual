@@ -21,7 +21,10 @@ use std::time::Instant;
 pub struct LocateOptions {
     pub role: Option<String>,
     pub nearby_text: Option<String>,
-    pub zone: Option<(u32, u32)>,
+    /// AI-predicted target bounding box in **virtual-desktop physical pixels**.
+    /// Used by A11y (proximity sort) and OCR (overlap filter with ±300%
+    /// expansion). When `None`, both tiers run unfiltered.
+    pub ai_bbox: Option<Rect>,
     pub a11y_timeout_ms: u64,
     pub min_confidence: f32,
     /// Raw HWND captured at AI-call time. When set, A11y searches this HWND
@@ -39,7 +42,7 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
     let mut trace = LocateTrace::new(target_text);
     trace.target_role = opts.role.clone();
     trace.nearby_text = opts.nearby_text.clone();
-    trace.grid_cell = opts.zone;
+    trace.ai_bbox = opts.ai_bbox;
 
     // Pass 1 — A11y.
     let mut a11y_opts = opts.clone();
@@ -146,12 +149,29 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
         ..Default::default()
     };
 
+    // Convert the VD-space AI bbox into OCR-image-pixel space so the matcher
+    // can filter candidates by overlap. Reverses the post-OCR scale-and-offset
+    // step below: img = (vd - crop_origin) * (img / crop). When `crop_rect.width`
+    // is 0 (full-screen JPEG fallback) we keep the bbox in image space as-is.
+    let ai_bbox_img: Option<(i32, i32, u32, u32)> = opts.ai_bbox.map(|b| {
+        if crop_rect.width == 0 || crop_rect.height == 0 || img_w == 0 || img_h == 0 {
+            return (b.x, b.y, b.width, b.height);
+        }
+        let inv_sx = img_w as f32 / crop_rect.width as f32;
+        let inv_sy = img_h as f32 / crop_rect.height as f32;
+        let x = ((b.x - crop_rect.x) as f32 * inv_sx).round() as i32;
+        let y = ((b.y - crop_rect.y) as f32 * inv_sy).round() as i32;
+        let w = (b.width as f32 * inv_sx).round() as u32;
+        let h = (b.height as f32 * inv_sy).round() as u32;
+        (x, y, w, h)
+    });
+
     let find_opts = ocr::FindOptions {
         role: opts.role.as_deref(),
         nearby_text: opts.nearby_text.as_deref(),
         screen_width: img_w,
         screen_height: img_h,
-        zone: opts.zone,
+        ai_bbox: ai_bbox_img,
         min_confidence: opts.min_confidence,
     };
 

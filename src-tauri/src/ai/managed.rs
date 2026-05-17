@@ -226,7 +226,13 @@ fn navigate_step_tool() -> Value {
                                 },
                                 "clipboard": {"type": "string"},
                                 "checkpoint": {"type": "boolean"},
-                                "grid_cell": {"type": "string"}
+                                "target_bbox": {
+                                    "type": "array",
+                                    "items": {"type": "number"},
+                                    "minItems": 4,
+                                    "maxItems": 4,
+                                    "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax]. Absolute pixel coordinates of the screenshot. Omit when no target_text."
+                                }
                             }
                         }
                     },
