@@ -1483,36 +1483,15 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
         .map_err(|e| e.to_string())
 }
 
-/// Called from the frontend after the NSIS installer has been downloaded.
+/// Called from the frontend after `downloadAndInstall()` has spawned the NSIS
+/// installer in the background. NSIS is waiting for us to exit so it can
+/// replace the locked binary; it re-launches the new app itself via /UPDATE.
 ///
-/// Strategy:
-/// 1. Spawn the current executable path — NSIS has already replaced (or is
-///    replacing) the binary at that path, so the spawned process will be the
-///    updated version.
-/// 2. Exit the current process so any file locks are released and the NSIS
-///    installer can overwrite whatever it hasn't yet replaced.
-///
-/// This handles both the "NSIS already finished installing" case (spawn gets
-/// the new binary immediately) and the "NSIS is still running" case (exit
-/// releases the lock so NSIS can finish, and NSIS will launch the new app).
+/// Do NOT re-spawn current_exe() here — it would lock the (still-old) binary
+/// again before NSIS could replace it, leaving the user on the old version.
 #[tauri::command]
 fn exit_for_update(app: tauri::AppHandle) {
-    if let Ok(exe) = std::env::current_exe() {
-        // Spawn detached so the child survives after we exit.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            let _ = std::process::Command::new(&exe)
-                .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-                .spawn();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = std::process::Command::new(&exe).spawn();
-        }
-    }
+    log::info!("exit_for_update invoked — exiting so NSIS can replace binary");
     app.exit(0);
 }
 
@@ -1528,6 +1507,20 @@ async fn get_session_status(state: State<'_, AppState>) -> Result<SessionStatus,
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .level_for("tauri_plugin_updater", log::LevelFilter::Debug)
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .max_file_size(2_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
