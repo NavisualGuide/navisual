@@ -430,14 +430,14 @@ See the LICENSE file in the root of this repository for complete details.
           downloadedBytes += event.data.chunkLength ?? 0;
           if (totalBytes > 0) updateProgress = Math.round((downloadedBytes / totalBytes) * 100);
         } else if (event.event === "Finished") {
+          // "Finished" = DOWNLOAD finished. The plugin then calls install()
+          // on the next line internally. Do NOT exit here — we'd kill the
+          // process before NSIS gets spawned.
           updateStatus = "done";
-          // Fire-and-forget — don't await the promise because downloadAndInstall()
-          // may never resolve on Windows (NSIS holds the lock; we must exit first).
-          // exit_for_update spawns the new binary then exits.
-          invoke("exit_for_update").catch(() => {});
         }
       });
-      // Safety net: if downloadAndInstall() did resolve without Finished firing.
+      // downloadAndInstall has resolved → NSIS has been spawned and is
+      // waiting for us to exit so it can replace the locked binary.
       invoke("exit_for_update").catch(() => {});
     } catch (_) {
       updateStatus = "idle";
