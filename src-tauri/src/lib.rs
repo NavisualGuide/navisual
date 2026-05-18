@@ -56,22 +56,22 @@ struct GuidanceState {
 /// Shared app state.
 struct AppState {
     ai_router: Mutex<AiRouter>,
-    guidance: std::sync::Mutex<GuidanceState>,
+    guidance: parking_lot::Mutex<GuidanceState>,
     tts: tts::TtsEngine,
     tracker: track::WindowTracker,
     /// Last non-None overlay emitted — used by restore_overlay to bring it back after Clear.
-    last_overlay: std::sync::Mutex<Option<LastOverlay>>,
+    last_overlay: parking_lot::Mutex<Option<LastOverlay>>,
     /// Resolved path to the .env settings file — always writable (app data dir).
     env_path: PathBuf,
     /// Path to the Supabase session JSON file (managed provider only).
     supabase_session_path: PathBuf,
     /// Previous aHash for Autopilot on-demand screen-change polling.
-    screen_hash: std::sync::Mutex<Option<u64>>,
+    screen_hash: parking_lot::Mutex<Option<u64>>,
     /// Most-recent AI-image JPEG bytes (the one sent to the AI on the latest
     /// `guide`/`next_step`/`send_correction`). Held in RAM only — never
     /// written to disk — so the lightbox can re-open it without persisting
     /// the user's screen content to storage. Cleared on new task / on quit.
-    chat_full_jpeg: std::sync::Mutex<Option<Vec<u8>>>,
+    chat_full_jpeg: parking_lot::Mutex<Option<Vec<u8>>>,
 }
 
 /// Snapshot of the most recent non-clear overlay. Stored so `restore_overlay`
@@ -82,6 +82,21 @@ struct LastOverlay {
     bbox: Option<capture::Rect>,
     text: Option<String>,
     ai_bbox: Option<capture::Rect>,
+}
+
+/// Return true when `text` looks like a keyboard shortcut (e.g. "Ctrl+A",
+/// "Alt+Tab", "Win+D"). These are button combos — pasting them does nothing.
+fn looks_like_shortcut(text: &str) -> bool {
+    let t = text.trim();
+    // Any token sequence joined by '+' where at least one token is a known
+    // modifier key is almost certainly a keyboard shortcut.
+    let modifier_keys = ["ctrl", "control", "alt", "shift", "win", "cmd",
+                         "super", "meta", "fn", "hyper"];
+    let parts: Vec<&str> = t.split('+').map(str::trim).collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    parts.iter().any(|p| modifier_keys.contains(&p.to_ascii_lowercase().as_str()))
 }
 
 /// Slightly enlarge the AI bbox so the hint pointer reads as a thin collar
@@ -145,7 +160,7 @@ fn execute_step(
     target_hwnd: Option<usize>,
     debug_ocr_path: Option<std::path::PathBuf>,
     tracker: &track::WindowTracker,
-    last_overlay: &std::sync::Mutex<Option<LastOverlay>>,
+    last_overlay: &parking_lot::Mutex<Option<LastOverlay>>,
     ai_bbox: Option<capture::Rect>,
     capture_rect: Option<capture::Rect>,
 ) -> Result<(Option<locator::LocateResult>, Option<locator::trace::LocateTrace>), String> {
@@ -206,7 +221,7 @@ fn execute_step(
 
     // Persist for restore_overlay — the AI bbox alone is a valid state too.
     if !matches!(kind, overlay::OverlayKind::None) || ai_bbox.is_some() {
-        *last_overlay.lock().unwrap() = Some(LastOverlay {
+        *last_overlay.lock() = Some(LastOverlay {
             kind,
             bbox,
             text: text_for_overlay.clone(),
@@ -224,10 +239,16 @@ fn execute_step(
 
     // E.4 — Clipboard: if the AI supplied text to copy, write it now so
     // it's in the clipboard before the user acts on the instruction.
+    // Guard: skip values that look like keyboard shortcuts (e.g. "Ctrl+A",
+    // "Alt+Tab") — pressing a shortcut cannot be assisted by clipboard paste.
     if let Some(ref clip_text) = step.clipboard {
-        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(clip_text.clone())) {
-            Ok(()) => log::info!("clipboard: wrote {} chars", clip_text.len()),
-            Err(e) => log::warn!("clipboard write failed: {e}"),
+        if !looks_like_shortcut(clip_text) {
+            match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(clip_text.clone())) {
+                Ok(()) => log::info!("clipboard: wrote {} chars", clip_text.len()),
+                Err(e) => log::warn!("clipboard write failed: {e}"),
+            }
+        } else {
+            log::info!("clipboard: skipped shortcut-like value '{clip_text}'");
         }
     }
 
@@ -272,7 +293,7 @@ fn hamming64(a: u64, b: u64) -> u32 {
 #[tauri::command]
 async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let hash = ahash_of_screen();
-    let mut prev_opt = state.screen_hash.lock().unwrap();
+    let mut prev_opt = state.screen_hash.lock();
     let changed = match (hash, *prev_opt) {
         (Some(h), Some(prev)) => hamming64(prev, h) >= AUTOPILOT_CHANGE_THRESHOLD,
         _ => false,
@@ -466,7 +487,7 @@ fn make_chat_thumbnail(jpeg_bytes: &[u8]) -> Option<String> {
 /// screenshot has been captured yet this session.
 #[tauri::command]
 fn get_chat_full_screenshot(state: State<'_, AppState>) -> Option<String> {
-    let bytes = state.chat_full_jpeg.lock().unwrap().clone()?;
+    let bytes = state.chat_full_jpeg.lock().clone()?;
     Some(capture::to_base64(&bytes))
 }
 
@@ -481,13 +502,13 @@ async fn guide(
     let is_next_requery = task.starts_with("[User completed:");
     // Only reset session state for a genuine new task (not resume, not reply, not next-requery).
     if !task.is_empty() && !is_reply && !is_next_requery {
-        let mut g = state.guidance.lock().unwrap();
+        let mut g = state.guidance.lock();
         g.session_id = None;
         g.steps = vec![];
         g.state_summary = String::new();
         g.target_hwnd = None;
         // Drop the previous screenshot from RAM — new task starts fresh.
-        *state.chat_full_jpeg.lock().unwrap() = None;
+        *state.chat_full_jpeg.lock() = None;
     }
 
     let session_id = {
@@ -507,7 +528,7 @@ async fn guide(
     let debug_screenshot_enabled = { state.ai_router.lock().await.config.debug_screenshot_enabled };
 
     let stored_hwnd = {
-        let g = state.guidance.lock().unwrap();
+        let g = state.guidance.lock();
         g.pinned_hwnd.or(g.target_hwnd)
     };
 
@@ -594,7 +615,7 @@ async fn guide(
 
     let (screenshot_b64, capture_rect_opt, new_hwnd_opt, debug_screenshot_path, chat_thumb_b64) = match capture_result {
         Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes)) => {
-            *state.chat_full_jpeg.lock().unwrap() = Some(full_bytes);
+            *state.chat_full_jpeg.lock() = Some(full_bytes);
             (b64, rect_opt, hwnd_opt, dbg, thumb)
         }
         Err(()) => {
@@ -651,7 +672,7 @@ async fn guide(
 
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let summary = {
-            let g = state.guidance.lock().unwrap();
+            let g = state.guidance.lock();
             g.state_summary.clone()
         };
         let base = if task.is_empty() {
@@ -666,7 +687,7 @@ async fn guide(
         (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
     } else if is_reply {
         let summary = {
-            let g = state.guidance.lock().unwrap();
+            let g = state.guidance.lock();
             g.state_summary.clone()
         };
         let prompt = add_grid(task.clone());
@@ -731,7 +752,7 @@ async fn guide(
     drop(router);
 
     {
-        let mut g = state.guidance.lock().unwrap();
+        let mut g = state.guidance.lock();
         g.session_id = Some(session_id.clone());
         g.steps = steps.clone();
         g.state_summary = state_summary;
@@ -797,7 +818,7 @@ async fn next_step(
     step_index: usize,
 ) -> Result<GuideResponse, String> {
     let (steps, session_id, needs_input, provider, capture_rect) = {
-        let g = state.guidance.lock().unwrap();
+        let g = state.guidance.lock();
         (
             g.steps.clone(),
             g.session_id.clone().unwrap_or_default(),
@@ -816,7 +837,7 @@ async fn next_step(
         (cfg.debug_locate_log_file_enabled, cfg.debug_screenshot_enabled)
     };
     let stored_hwnd = {
-        let g = state.guidance.lock().unwrap();
+        let g = state.guidance.lock();
         g.pinned_hwnd.or(g.target_hwnd)
     };
     let debug_ocr_path = if debug_screenshot_enabled {
@@ -855,7 +876,7 @@ async fn send_correction(
     note: Option<String>,
 ) -> Result<GuideResponse, String> {
     let session_id = {
-        let g = state.guidance.lock().unwrap();
+        let g = state.guidance.lock();
         g.session_id.clone()
     };
     let session_id = session_id.ok_or("no active session")?;
@@ -865,7 +886,7 @@ async fn send_correction(
     // the user can switch focus to the right app then press Wrong and the next
     // capture will find the correct window.
     {
-        let mut g = state.guidance.lock().unwrap();
+        let mut g = state.guidance.lock();
         g.target_hwnd = None;
     }
 
@@ -925,7 +946,7 @@ async fn send_correction(
     .map_err(|e| format!("capture task join: {e}"))?;
 
     if let Some(bytes) = full_jpeg_opt {
-        *state.chat_full_jpeg.lock().unwrap() = Some(bytes);
+        *state.chat_full_jpeg.lock() = Some(bytes);
     }
 
     // Phase 0.2 — show shared-app boundary on correction too.
@@ -935,7 +956,7 @@ async fn send_correction(
 
     let mut router = state.ai_router.lock().await;
     let summary = {
-        let g = state.guidance.lock().unwrap();
+        let g = state.guidance.lock();
         g.state_summary.clone()
     };
 
@@ -1000,7 +1021,7 @@ async fn send_correction(
     drop(router);
 
     {
-        let mut g = state.guidance.lock().unwrap();
+        let mut g = state.guidance.lock();
         g.steps = steps.clone();
         g.state_summary = state_summary;
         g.needs_input = needs_input;
@@ -1076,7 +1097,7 @@ async fn clear_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 
 #[tauri::command]
 async fn restore_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(last) = state.last_overlay.lock().unwrap().clone() {
+    if let Some(last) = state.last_overlay.lock().clone() {
         match overlay::make_update_with_ai_bbox(last.kind, last.bbox, last.text, last.ai_bbox) {
             Ok(update) => overlay::emit_update(&app, update).map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
@@ -1106,7 +1127,7 @@ fn list_target_windows() -> Vec<capture::TargetWindowInfo> {
 #[tauri::command]
 fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
     {
-        let mut g = state.guidance.lock().unwrap();
+        let mut g = state.guidance.lock();
         g.pinned_hwnd = Some(hwnd);
         g.target_hwnd = Some(hwnd);
     }
@@ -1119,7 +1140,7 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
 /// Item 1 — clear the pinned window and return to auto-detection.
 #[tauri::command]
 fn unpin_target_window(state: State<'_, AppState>) {
-    let mut g = state.guidance.lock().unwrap();
+    let mut g = state.guidance.lock();
     g.pinned_hwnd = None;
     // target_hwnd retains the last auto-discovered window for the current session.
 }
@@ -1131,7 +1152,7 @@ fn get_shared_app_info(state: State<'_, AppState>) -> Option<SharedAppInfoPayloa
     #[cfg(windows)]
     {
         let stored = {
-            let g = state.guidance.lock().unwrap();
+            let g = state.guidance.lock();
             g.pinned_hwnd.or(g.target_hwnd)
         };
         let info = match stored {
@@ -1597,14 +1618,14 @@ pub fn run() {
             log::info!("AiRouter ready (provider: {})", router.config.api_provider);
             handle.manage(AppState {
                 ai_router: tokio::sync::Mutex::new(router),
-                guidance: std::sync::Mutex::new(GuidanceState::default()),
+                guidance: parking_lot::Mutex::new(GuidanceState::default()),
                 tts,
                 tracker,
-                last_overlay: std::sync::Mutex::new(None),
+                last_overlay: parking_lot::Mutex::new(None),
                 env_path,
                 supabase_session_path,
-                screen_hash: std::sync::Mutex::new(None),
-                chat_full_jpeg: std::sync::Mutex::new(None),
+                screen_hash: parking_lot::Mutex::new(None),
+                chat_full_jpeg: parking_lot::Mutex::new(None),
             });
 
             Ok(())

@@ -12,6 +12,13 @@ Rules:
    SHORT — 1-5 distinctive words maximum. For product titles, use only the brand
    and first 2-3 words (e.g., "Anker USB-C" not the full title). Also describe
    the element's visual appearance and position in the instruction.
+   SINGLE-CHARACTER target_text: Never use a single letter or glyph as target_text
+   for toolbar or ribbon buttons — the locator cannot distinguish "A" from any
+   word containing "a". Instead, use the semantic accessible name shown in the
+   button's tooltip: "Increase Font Size" not "A↑", "Bold" not "B", "Italic"
+   not "I", "Underline" not "U", "Save" not 💾, "Undo" not ↩. Single characters
+   are acceptable ONLY when the label IS the full semantic identity — e.g. a tab
+   labeled "1" in a numbered tab strip, or a keyboard key labeled "A".
    When target_text appears more than once on screen, set target_nearby_text to
    a short unique string visible adjacent to the correct element AND mention it
    in the instruction. This applies to: multiple similar buttons in a list;
@@ -36,6 +43,10 @@ Rules:
    command, search box, filename, or any other input — ALWAYS put that exact text
    in the clipboard field so the user can paste it instead of typing. This applies
    to ALL apps and ALL input types, not just CLI commands.
+   EXCEPTION: NEVER put keyboard shortcuts in the clipboard field. Shortcuts like
+   "Ctrl+A", "Alt+Tab", "Win+D", "Ctrl+Shift+Esc" are pressed on the keyboard —
+   they cannot be pasted and putting them in the clipboard is useless and confusing.
+   Only use clipboard for text the user will type or paste into an input field.
 7. Output a state_summary for internal context tracking (not shown to the user).
 8. If you need clarification, set needs_input=true and ask a short question in
    the instruction field.

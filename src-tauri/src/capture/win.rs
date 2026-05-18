@@ -11,12 +11,14 @@ use super::Rect;
 use anyhow::{anyhow, Result};
 use image::{ImageBuffer, Rgba};
 use std::mem;
-use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, POINT, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-    GetDIBits, SelectObject, GetDC, ReleaseDC,
-    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
+    GetDIBits, GetMonitorInfoW, MonitorFromPoint,
+    SelectObject, GetDC, ReleaseDC,
+    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, SRCCOPY,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW,
@@ -402,6 +404,171 @@ fn frame_rect_of(hwnd: HWND) -> Option<Rect> {
             height,
         })
     }
+}
+
+/// Return the monitor rect containing the point `(x, y)`. Falls back to the
+/// nearest monitor if the point is outside any monitor's bounds. Used to clamp
+/// the PID-union rect so windows scattered across multiple monitors don't
+/// inflate the capture region.
+fn monitor_rect_containing(x: i32, y: i32) -> Option<Rect> {
+    unsafe {
+        let hmon: HMONITOR = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        if hmon.0.is_null() {
+            return None;
+        }
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return None;
+        }
+        let r = mi.rcMonitor;
+        Some(Rect {
+            x: r.left,
+            y: r.top,
+            width: (r.right - r.left).max(0) as u32,
+            height: (r.bottom - r.top).max(0) as u32,
+        })
+    }
+}
+
+/// Compute the bounding rect of all visible top-level windows belonging to the
+/// same process as `target`, clamped to the monitor containing the target.
+///
+/// Catches modal dialogs and popups that are separate top-level HWNDs but part
+/// of the same logical "app" — e.g. WeChat's Storage settings dialog floating
+/// outside the main window, or Word's Find & Replace dialog. Without this the
+/// capture would include only the main window's frame and any UI in the dialog
+/// would be silently cropped out (and the AI would hallucinate coordinates for
+/// content it couldn't see).
+///
+/// Same-monitor clamp: windows whose centre is on a different monitor are
+/// excluded, so a WeChat instance with chat windows scattered across three
+/// displays does not blow up the capture to the full virtual desktop.
+///
+/// Returns `target`'s own frame rect if no extension is possible.
+pub fn pid_union_rect(target: HWND) -> Option<Rect> {
+    let target_rect = frame_rect_of(target)?;
+
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(target, Some(&mut pid)); }
+    if pid == 0 {
+        return Some(target_rect);
+    }
+
+    let target_cx = target_rect.x + target_rect.width as i32 / 2;
+    let target_cy = target_rect.y + target_rect.height as i32 / 2;
+    let monitor = monitor_rect_containing(target_cx, target_cy).unwrap_or(target_rect);
+
+    struct State {
+        target_pid: u32,
+        our_pid: u32,
+        monitor: Rect,
+        union: Rect,
+    }
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return TRUE;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != state.target_pid || pid == state.our_pid {
+            return TRUE;
+        }
+
+        // Skip cloaked windows (UWP hidden, etc.)
+        let mut cloaked: u32 = 0;
+        let _ = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        );
+        if cloaked != 0 {
+            return TRUE;
+        }
+
+        // Skip tool windows (taskbar icons / hidden helpers) and click-through
+        // overlays (transparent), they are never the user's target.
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex_style & WS_EX_TOOLWINDOW.0) != 0 || (ex_style & WS_EX_TRANSPARENT.0) != 0 {
+            return TRUE;
+        }
+
+        // Skip shell / IME classes (defence in depth — same PID is unlikely to
+        // hit these but the cost is one strcmp).
+        let mut buf = [0u16; 128];
+        let n = GetClassNameW(hwnd, &mut buf);
+        let class = String::from_utf16_lossy(&buf[..n as usize]);
+        if SKIP_CLASSES.iter().any(|c| *c == class) {
+            return TRUE;
+        }
+
+        let Some(r) = frame_rect_of(hwnd) else { return TRUE; };
+
+        // Reject tiny windows (zombie/glitch hidden popups occasionally have
+        // 0–50 px dimensions even when WS_VISIBLE).
+        if r.width < 50 || r.height < 50 {
+            return TRUE;
+        }
+
+        // Same-monitor filter — keeps the union compact when the app has
+        // multiple windows spread across displays.
+        let cx = r.x + r.width as i32 / 2;
+        let cy = r.y + r.height as i32 / 2;
+        let m = &state.monitor;
+        if cx < m.x || cx >= m.x + m.width as i32
+            || cy < m.y || cy >= m.y + m.height as i32 {
+            return TRUE;
+        }
+
+        // Extend the running union.
+        let u_left = state.union.x.min(r.x);
+        let u_top = state.union.y.min(r.y);
+        let u_right = (state.union.x + state.union.width as i32).max(r.x + r.width as i32);
+        let u_bottom = (state.union.y + state.union.height as i32).max(r.y + r.height as i32);
+        state.union = Rect {
+            x: u_left,
+            y: u_top,
+            width: (u_right - u_left).max(0) as u32,
+            height: (u_bottom - u_top).max(0) as u32,
+        };
+        TRUE
+    }
+
+    let our_pid = std::process::id();
+    let mut state = State {
+        target_pid: pid,
+        our_pid,
+        monitor,
+        union: target_rect,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+
+    // Clamp final union to the monitor (defence — frame_rect_of can extend a
+    // pixel or two beyond the monitor on DWM-aware borderless windows).
+    let m = state.monitor;
+    let u = state.union;
+    let left = u.x.max(m.x);
+    let top = u.y.max(m.y);
+    let right = (u.x + u.width as i32).min(m.x + m.width as i32);
+    let bottom = (u.y + u.height as i32).min(m.y + m.height as i32);
+    let width = (right - left).max(0) as u32;
+    let height = (bottom - top).max(0) as u32;
+    if width == 0 || height == 0 {
+        return Some(target_rect);
+    }
+    Some(Rect { x: left, y: top, width, height })
+}
+
+/// Convenience wrapper for callers that hold a raw HWND value (usize).
+pub fn pid_union_rect_raw(hwnd_raw: usize) -> Option<Rect> {
+    pid_union_rect(HWND(hwnd_raw as *mut _))
 }
 
 /// Returns true when `pid` belongs to Tauri's embedded WebView2 renderer

@@ -230,7 +230,7 @@ See the LICENSE file in the root of this repository for complete details.
     anthropic_api_key: "", anthropic_model: "claude-sonnet-4-6", anthropic_fast_model: "claude-haiku-4-5-20251001",
     gemini_api_key: "", gemini_model: "gemini-2.5-flash", gemini_fast_model: "gemini-2.5-flash-lite",
     ollama_base_url: "http://localhost:11434", ollama_model: "llama3.2-vision",
-    openai_api_key: "", openai_model: "gpt-5.4",
+    openai_api_key: "", openai_model: "gpt-5.5",
     deepseek_api_key: "", deepseek_model: "deepseek-v4-flash",
     qwen_api_key: "", qwen_model: "qwen3.6-plus",
     qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -250,6 +250,12 @@ See the LICENSE file in the root of this repository for complete details.
   let settingsSaving = $state(false);
   let settingsError = $state<string | null>(null);
   let settingsSaved = $state(false);
+  const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-4-6","claude-opus-4-7"];
+  const MODEL_PRESETS_GEMINI    = ["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-3.1-flash-lite-preview","gemini-3.1-pro-preview"];
+  const MODEL_PRESETS_OPENAI    = ["gpt-5.5","gpt-5.4-mini"];
+  const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro"];
+  const MODEL_PRESETS_QWEN      = ["qwen3.6-plus","qwen3.5-omni-plus"];
+
   let showKeyAnthropic = $state(false);
   let showKeyGemini = $state(false);
   let showKeyOpenAI = $state(false);
@@ -1475,6 +1481,25 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
             </div>
 
+            <!-- Per-provider contextual hint -->
+            <p class="setting-hint provider-hint">
+              {#if settingsForm.api_provider === "managed"}
+                Free · 50 requests included. Powered by NVIDIA Nemotron via the Navisual relay. May be slower than BYOK providers — ideal for getting started.
+              {:else if settingsForm.api_provider === "gemini"}
+                Recommended for most users outside mainland China. Free API key available at aistudio.google.com.
+              {:else if settingsForm.api_provider === "anthropic"}
+                Pay per use · highest quality. API key at console.anthropic.com.
+              {:else if settingsForm.api_provider === "openai"}
+                Pay per use. API key at platform.openai.com.
+              {:else if settingsForm.api_provider === "deepseek"}
+                Recommended for mainland China users — US AI services (Gemini, Anthropic, OpenAI) are geoblocked there. Note: DeepSeek is text-only and does not analyze screenshots. Use Qwen if you need image analysis.
+              {:else if settingsForm.api_provider === "qwen"}
+                Recommended for mainland China users — US AI services (Gemini, Anthropic, OpenAI) are geoblocked there. Qwen supports image analysis.
+              {:else if settingsForm.api_provider === "ollama"}
+                Free · runs locally · no data leaves your machine. Requires Ollama installed with a vision model (e.g. llama3.2-vision).
+              {/if}
+            </p>
+
             {#if settingsForm.api_provider === "anthropic"}
               <div class="setting-group">
                 <label class="setting-label" for="anthropic-key">API Key</label>
@@ -1495,11 +1520,18 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <div class="setting-group">
                 <label class="setting-label" for="anthropic-model">Model</label>
-                <select id="anthropic-model" class="setting-select" bind:value={settingsForm.anthropic_model}>
-                  <option value="claude-haiku-4-5-20251001">claude-haiku-4-5</option>
-                  <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-                  <option value="claude-opus-4-7">claude-opus-4-7</option>
+                <select id="anthropic-model" class="setting-select"
+                  value={MODEL_PRESETS_ANTHROPIC.includes(settingsForm.anthropic_model) ? settingsForm.anthropic_model : "__custom__"}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.anthropic_model = v; else settingsForm.anthropic_model = ""; }}>
+                  <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fast)</option>
+                  <option value="claude-sonnet-4-6">claude-sonnet-4-6 (recommended)</option>
+                  <option value="claude-opus-4-7">claude-opus-4-7 (best quality)</option>
+                  <option value="__custom__">Custom model…</option>
                 </select>
+                {#if !MODEL_PRESETS_ANTHROPIC.includes(settingsForm.anthropic_model)}
+                  <input class="setting-input" type="text" bind:value={settingsForm.anthropic_model}
+                    placeholder="e.g. claude-sonnet-4-6" spellcheck="false" style="margin-top:6px" />
+                {/if}
               </div>
 
             {:else if settingsForm.api_provider === "gemini"}
@@ -1522,13 +1554,19 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <div class="setting-group">
                 <label class="setting-label" for="gemini-model">Model</label>
-                <select id="gemini-model" class="setting-select" bind:value={settingsForm.gemini_model}>
-                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+                <select id="gemini-model" class="setting-select"
+                  value={MODEL_PRESETS_GEMINI.includes(settingsForm.gemini_model) ? settingsForm.gemini_model : "__custom__"}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.gemini_model = v; else settingsForm.gemini_model = ""; }}>
+                  <option value="gemini-2.5-flash">gemini-2.5-flash (recommended)</option>
+                  <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (fast)</option>
                   <option value="gemini-3.1-flash-lite-preview">gemini-3.1-flash-lite-preview</option>
-                  <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
-                  <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                  <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+                  <option value="__custom__">Custom model…</option>
                 </select>
+                {#if !MODEL_PRESETS_GEMINI.includes(settingsForm.gemini_model)}
+                  <input class="setting-input" type="text" bind:value={settingsForm.gemini_model}
+                    placeholder="e.g. gemini-2.5-pro" spellcheck="false" style="margin-top:6px" />
+                {/if}
               </div>
 
             {:else if settingsForm.api_provider === "ollama"}
@@ -1569,12 +1607,17 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <div class="setting-group">
                 <label class="setting-label" for="openai-model">Model</label>
-                <select id="openai-model" class="setting-select" bind:value={settingsForm.openai_model}>
-                  <option value="gpt-5.4">gpt-5.4 (recommended)</option>
+                <select id="openai-model" class="setting-select"
+                  value={MODEL_PRESETS_OPENAI.includes(settingsForm.openai_model) ? settingsForm.openai_model : "__custom__"}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.openai_model = v; else settingsForm.openai_model = ""; }}>
+                  <option value="gpt-5.5">gpt-5.5 (recommended)</option>
                   <option value="gpt-5.4-mini">gpt-5.4-mini (fast)</option>
-                  <option value="gpt-5.5">gpt-5.5 (best quality)</option>
-                  <option value="gpt-4.1">gpt-4.1 (stable fallback)</option>
+                  <option value="__custom__">Custom model…</option>
                 </select>
+                {#if !MODEL_PRESETS_OPENAI.includes(settingsForm.openai_model)}
+                  <input class="setting-input" type="text" bind:value={settingsForm.openai_model}
+                    placeholder="e.g. gpt-4o" spellcheck="false" style="margin-top:6px" />
+                {/if}
               </div>
 
             {:else if settingsForm.api_provider === "deepseek"}
@@ -1597,10 +1640,17 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <div class="setting-group">
                 <label class="setting-label" for="deepseek-model">Model</label>
-                <select id="deepseek-model" class="setting-select" bind:value={settingsForm.deepseek_model}>
+                <select id="deepseek-model" class="setting-select"
+                  value={MODEL_PRESETS_DEEPSEEK.includes(settingsForm.deepseek_model) ? settingsForm.deepseek_model : "__custom__"}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.deepseek_model = v; else settingsForm.deepseek_model = ""; }}>
                   <option value="deepseek-v4-flash">deepseek-v4-flash (recommended)</option>
                   <option value="deepseek-v4-pro">deepseek-v4-pro (best quality)</option>
+                  <option value="__custom__">Custom model…</option>
                 </select>
+                {#if !MODEL_PRESETS_DEEPSEEK.includes(settingsForm.deepseek_model)}
+                  <input class="setting-input" type="text" bind:value={settingsForm.deepseek_model}
+                    placeholder="e.g. deepseek-v4-flash" spellcheck="false" style="margin-top:6px" />
+                {/if}
               </div>
 
             {:else if settingsForm.api_provider === "qwen"}
@@ -1623,11 +1673,17 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <div class="setting-group">
                 <label class="setting-label" for="qwen-model">Model</label>
-                <select id="qwen-model" class="setting-select" bind:value={settingsForm.qwen_model}>
+                <select id="qwen-model" class="setting-select"
+                  value={MODEL_PRESETS_QWEN.includes(settingsForm.qwen_model) ? settingsForm.qwen_model : "__custom__"}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.qwen_model = v; else settingsForm.qwen_model = ""; }}>
                   <option value="qwen3.6-plus">qwen3.6-plus (recommended)</option>
-                  <option value="qwen3.6-flash">qwen3.6-flash (fast)</option>
                   <option value="qwen3.5-omni-plus">qwen3.5-omni-plus (multimodal)</option>
+                  <option value="__custom__">Custom model…</option>
                 </select>
+                {#if !MODEL_PRESETS_QWEN.includes(settingsForm.qwen_model)}
+                  <input class="setting-input" type="text" bind:value={settingsForm.qwen_model}
+                    placeholder="e.g. qwen3.6-plus" spellcheck="false" style="margin-top:6px" />
+                {/if}
               </div>
               <div class="setting-group">
                 <label class="setting-label" for="qwen-url">Base URL</label>
@@ -1779,18 +1835,22 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
 
         <div class="modal-footer">
-          <button class="btn-ghost btn-reset" onclick={resetSettings} title="Restore all settings to defaults (API keys are preserved)">Reset to defaults</button>
-          {#if settingsError}
-            <span class="settings-error">{settingsError}</span>
-          {:else if settingsSaved}
-            <span class="settings-ok">✓ Saved — no restart required</span>
-          {:else}
-            <span class="settings-note">All settings apply on Save</span>
-          {/if}
-          <button class="btn-ghost" onclick={() => (showSettings = false)}>Cancel</button>
-          <button class="btn-primary" onclick={applySettings} disabled={settingsSaving}>
-            {settingsSaving ? "Saving…" : "Apply"}
-          </button>
+          <div class="footer-status">
+            {#if settingsError}
+              <span class="settings-error">{settingsError}</span>
+            {:else if settingsSaved}
+              <span class="settings-ok">✓ Saved — no restart required</span>
+            {:else}
+              <span class="settings-note">Changes take effect when you click Apply</span>
+            {/if}
+          </div>
+          <div class="footer-actions">
+            <button class="btn-ghost btn-reset" onclick={resetSettings} title="Restore all settings to defaults (API keys are preserved)">Reset to defaults</button>
+            <button class="btn-ghost" onclick={() => (showSettings = false)}>Cancel</button>
+            <button class="btn-primary" onclick={applySettings} disabled={settingsSaving}>
+              {settingsSaving ? "Saving…" : "Apply"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -2631,8 +2691,9 @@ See the LICENSE file in the root of this repository for complete details.
     background: var(--surface-1);
     border: 1px solid var(--border);
     border-radius: 12px;
-    width: 320px;
-    max-height: 80vh;
+    width: calc(100% - 32px);
+    max-width: 400px;
+    max-height: 92vh;
     display: flex;
     flex-direction: column;
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
@@ -2673,25 +2734,42 @@ See the LICENSE file in the root of this repository for complete details.
   .tab-active { color: var(--accent-500) !important; border-bottom-color: var(--accent-500) !important; }
 
   .modal-body {
-    padding: 16px;
+    padding: 12px 14px;
     flex: 1;
     overflow-y: auto;
   }
 
-  .stub-hint {
+  .stub-hint, .setting-hint {
     font-size: 12px;
     color: var(--text-tertiary);
     margin: 0;
   }
 
+  .provider-hint {
+    margin: 4px 0 10px;
+    padding: 6px 8px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    line-height: 1.5;
+  }
+
   .modal-footer {
-    padding: 10px 14px;
+    padding: 8px 14px 10px;
     border-top: 1px solid var(--border);
     display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
+    flex-direction: column;
+    gap: 6px;
     flex-shrink: 0;
+  }
+  .footer-status {
+    min-height: 16px;
+    display: flex;
+    align-items: center;
+  }
+  .footer-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .btn-reset { margin-right: auto; font-size: 12px; opacity: 0.75; }
   .btn-reset:hover { opacity: 1; }
@@ -2701,8 +2779,8 @@ See the LICENSE file in the root of this repository for complete details.
   .setting-group {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin-bottom: 14px;
+    gap: 5px;
+    margin-bottom: 12px;
   }
   .setting-group:last-child { margin-bottom: 0; }
 

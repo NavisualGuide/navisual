@@ -35,6 +35,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 log = "0.4"
+parking_lot = "0.12"
 
 # Phase C — screen capture + Windows APIs
 xcap = "0.8"

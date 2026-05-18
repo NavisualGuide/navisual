@@ -477,12 +477,14 @@ pub fn find_text<'a>(
     //
     // Tier 1 (fuzzy-t1): ≥ 0.85 — same strict bar as before.
     // Tier 2 (fuzzy-t2): ≥ 0.75 — catches OCR misreads ("Commit ✓", glyph noise).
-    // Tier 3 (fuzzy-t3): ≥ 0.65 — last resort; role-size preference is dropped,
-    //                    highest scorer wins directly.
+    // Tier 3 (fuzzy-t3): ≥ 0.70 — last resort; role-size preference is dropped,
+    //                    highest scorer wins directly. Floor raised from 0.65 to
+    //                    prevent short-word false positives (e.g. "change" scoring
+    //                    0.67 against target "manage" via shared LCS "ange").
     const FUZZY_TIERS: &[(f32, &str)] = &[
         (0.85, "fuzzy-t1"),
         (0.75, "fuzzy-t2"),
-        (0.65, "fuzzy-t3"),
+        (0.70, "fuzzy-t3"),
     ];
 
     // Score every candidate once, sorted best-first.
@@ -545,8 +547,8 @@ pub fn find_text<'a>(
         let selected = winner.map(|w| std::ptr::eq(*r, w)).unwrap_or(false);
         let reject = if selected {
             None
-        } else if *score < 0.65 {
-            Some("score below 0.65")
+        } else if *score < 0.70 {
+            Some("score below 0.70")
         } else {
             Some("not chosen")
         };

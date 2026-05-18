@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "Minimal capability for the transparent overlay window",
+  "windows": ["overlay"],
+  "permissions": [
+    "core:event:default"
+  ]
+}

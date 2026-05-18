@@ -48,13 +48,20 @@ pub fn capture_primary_monitor_jpeg(quality: u8) -> Result<Vec<u8>> {
 /// `GA_ROOTOWNER` is applied to dialogs so the stored HWND is always the
 /// stable main-window handle, not an owned dialog that may close at any time.
 ///
-/// Returns (jpeg bytes, window rect in physical pixels, raw HWND as usize).
+/// The capture rect is the **union of all visible same-PID top-level windows
+/// on the target's monitor**, not just the foreground window's frame. This
+/// catches modal dialogs and popups that float outside the main window (e.g.
+/// WeChat's Storage dialog, Word's Find & Replace) — otherwise those would be
+/// silently cropped out and the AI would hallucinate coordinates.
+///
+/// Returns (jpeg bytes, capture rect in physical pixels, raw HWND as usize).
 /// Store the HWND and pass it to `recapture_window_jpeg` on subsequent calls.
 pub fn capture_active_window_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Vec<u8>, Rect, usize)> {
     #[cfg(windows)]
     {
-        let (hwnd, rect) = win::get_foreground_target()
+        let (hwnd, frame_rect) = win::get_foreground_target()
             .ok_or_else(|| anyhow!("no foreground window found"))?;
+        let rect = win::pid_union_rect(hwnd).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
         win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;
@@ -95,8 +102,9 @@ pub fn capture_virtual_desktop_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Ve
 pub fn capture_active_window_raw(exclude: &[Rect]) -> Result<(ImageBuffer<Rgba<u8>, Vec<u8>>, Rect, usize)> {
     #[cfg(windows)]
     {
-        let (hwnd, rect) = win::get_foreground_target()
+        let (hwnd, frame_rect) = win::get_foreground_target()
             .ok_or_else(|| anyhow!("no foreground window found"))?;
+        let rect = win::pid_union_rect(hwnd).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
         win::blank_rects(&mut img, &rect, exclude);
         Ok((img, rect, hwnd.0 as usize))
@@ -141,8 +149,9 @@ pub fn recapture_window_raw(
 ) -> Result<(ImageBuffer<Rgba<u8>, Vec<u8>>, Rect)> {
     #[cfg(windows)]
     {
-        let rect = win::validate_hwnd_raw(hwnd_raw)
+        let frame_rect = win::validate_hwnd_raw(hwnd_raw)
             .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
+        let rect = win::pid_union_rect_raw(hwnd_raw).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
         win::blank_rects(&mut img, &rect, exclude);
         Ok((img, rect))
@@ -164,8 +173,9 @@ pub fn recapture_window_raw(
 pub fn recapture_window_jpeg(hwnd_raw: usize, quality: u8, exclude: &[Rect]) -> Result<(Vec<u8>, Rect)> {
     #[cfg(windows)]
     {
-        let rect = win::validate_hwnd_raw(hwnd_raw)
+        let frame_rect = win::validate_hwnd_raw(hwnd_raw)
             .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
+        let rect = win::pid_union_rect_raw(hwnd_raw).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
         win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;

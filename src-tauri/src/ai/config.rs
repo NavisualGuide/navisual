@@ -40,12 +40,6 @@ pub struct Config {
 
     // Shared
     pub api_timeout_sec: u64,
-    pub api_max_retries: u32,
-
-    // Managed Key
-    pub managed_api_key: Option<String>,
-    pub managed_provider: String,
-    pub managed_token_cap: u64,
 
     // Token Budget
     pub daily_token_cap: u64,
@@ -99,7 +93,7 @@ impl Default for Config {
             ollama_model: "llama3.2-vision".to_string(),
             ollama_timeout_sec: 120,
             openai_api_key: None,
-            openai_model: "gpt-5.4".to_string(),
+            openai_model: "gpt-5.5".to_string(),
             deepseek_api_key: None,
             deepseek_model: "deepseek-v4-flash".to_string(),
             qwen_api_key: None,
@@ -109,10 +103,6 @@ impl Default for Config {
             supabase_anon_key: Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3ZWt6YmVycGZ1eHNvZGR3d3FqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMTUxMjEsImV4cCI6MjA5MzY5MTEyMX0.gCXLsnFq3NMv8_JvZGcR9TB9bAfyjCnEnj4u0RZnRbg".to_string()),
             managed_model: "nvidia/nemotron-nano-12b-v2-vl:free".to_string(),
             api_timeout_sec: 90,
-            api_max_retries: 3,
-            managed_api_key: None,
-            managed_provider: "gemini".to_string(),
-            managed_token_cap: 500_000,
             daily_token_cap: 100_000,
             monthly_token_cap: 5_000_000,
             cost_safety_margin: 2.5,
@@ -182,7 +172,6 @@ impl Config {
         if let Ok(v) = env::var("SUPABASE_ANON_KEY") { if !v.is_empty() { config.supabase_anon_key = Some(v); } }
         if let Ok(v) = env::var("MANAGED_MODEL") { if !v.is_empty() { config.managed_model = v; } }
 
-        if let Ok(v) = env::var("MANAGED_API_KEY") { if !v.is_empty() { config.managed_api_key = Some(v); } }
         if let Ok(v) = env::var("OVERLAY_COLOR") { config.overlay_color = v; }
         if let Ok(v) = env::var("OVERLAY_THICKNESS") {
             if let Ok(n) = v.parse::<u32>() { config.overlay_thickness = n; }
@@ -202,11 +191,6 @@ impl Config {
         if let Ok(v) = env::var("DEBUG_LOCATE_TRACE_ENABLED") { config.debug_locate_trace_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") { config.debug_locate_log_file_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") { config.debug_show_ai_bbox = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("MANAGED_PROVIDER") { config.managed_provider = v; }
-        if let Ok(v) = env::var("MANAGED_TOKEN_CAP") { 
-            if let Ok(n) = v.parse() { config.managed_token_cap = n; }
-        }
-
         if let Ok(v) = env::var("DAILY_TOKEN_CAP") { 
             if let Ok(n) = v.parse() { config.daily_token_cap = n; }
         }
