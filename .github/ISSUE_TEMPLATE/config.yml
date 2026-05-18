@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security disclosure
+    url: https://github.com/NavisualGuide/navisual/blob/main/SECURITY.md
+    about: Please report security issues privately, not as a public GitHub issue

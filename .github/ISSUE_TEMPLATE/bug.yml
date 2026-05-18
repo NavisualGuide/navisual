@@ -1,0 +1,45 @@
+name: Bug report
+description: Something doesn't work
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what actually happened
+      placeholder: |
+        1. I clicked …
+        2. I typed …
+        3. Expected: …
+        4. Actually: …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Navisual version
+      placeholder: e.g. v0.5.4 — see Settings → About
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 23H2 / Windows 10 22H2
+  - type: dropdown
+    id: provider
+    attributes:
+      label: AI provider in use
+      options:
+        - Managed (free)
+        - Anthropic
+        - Gemini
+        - OpenAI
+        - DeepSeek
+        - Qwen
+        - Ollama
+        - Other / unsure
+  - type: textarea
+    id: extras
+    attributes:
+      label: Anything else?
+      description: Logs, screenshots, the app it was guiding, etc.
