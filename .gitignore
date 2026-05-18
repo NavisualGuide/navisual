@@ -26,7 +26,13 @@ htmlcov/
 
 # IDE / local
 .vscode/
+.idea/
 .claude/
+*.swp
+*.swo
+
+# Internal development docs (CLAUDE.md = local-only dev notes)
+CLAUDE.md
 
 # Internal — goes to NavisualGuide/navisual-internal (private repo)
 # Push workflow: see REPOS.md in navisual-internal, or run:
