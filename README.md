@@ -4,7 +4,7 @@
 
 Navisual is a Windows desktop app that watches your screen and gives real-time step-by-step instructions via on-screen overlays and audio. The AI never clicks, types, or takes control — every action is yours.
 
-**Status:** v0.5.0-alpha — developer preview. No installer yet; build from source.  
+**Status:** v0.5.x — public beta. Signed Windows installer at [navisualguide.com](https://navisualguide.com).  
 **Website:** [navisualguide.com](https://navisualguide.com)
 
 ---
@@ -80,10 +80,10 @@ All settings are also configurable in-app via **Settings** (gear icon) — no `.
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+`` | Next step / confirm completed |
-| `Ctrl+E` | Wrong — re-analyze the current screen |
-| `Ctrl+S` | Pause / resume |
-| `Ctrl+Q` | Show / hide the panel |
+| <kbd>Ctrl</kbd>+<kbd>`</kbd> | Next step / confirm completed |
+| <kbd>Ctrl</kbd>+<kbd>E</kbd> | Wrong — re-analyze the current screen |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Pause / resume |
+| <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Show / hide the panel |
 
 All hotkeys are configurable in **Settings → Hotkeys**.
 

@@ -212,6 +212,10 @@ See the LICENSE file in the root of this repository for complete details.
   let iconMode = $state(false);
   let showSettings = $state(false);
   let showAbout = $state(false);
+  // First-run privacy disclosure (S5). One-shot; persisted in localStorage so
+  // it never fires again on the same install.
+  let showPrivacyDisclosure = $state(false);
+  const PRIVACY_DISCLOSURE_KEY = "navisual-privacy-disclosed-v1";
   let appVersion = $state("…");
   let pendingUpdate = $state<Update | null>(null);
   let updateStatus = $state<"idle" | "checking" | "downloading" | "done">("idle");
@@ -893,6 +897,15 @@ See the LICENSE file in the root of this repository for complete details.
     getVersion().then(v => { appVersion = v; }).catch(() => {});
     setTimeout(() => checkForUpdates(), 5000);
 
+    // S5 — first-run privacy disclosure. Shown once per install; the user's
+    // acknowledgement is persisted in localStorage (lives in WebView2 user
+    // data, removed by uninstall).
+    try {
+      if (!localStorage.getItem(PRIVACY_DISCLOSURE_KEY)) {
+        showPrivacyDisclosure = true;
+      }
+    } catch (_) {}
+
     // Position bottom-right then show — panel starts hidden (visible:false in
     // tauri.conf.json) so the user never sees a blank frame at 0,0 while
     // WebView2 initialises. We show only once the UI is fully painted.
@@ -1338,6 +1351,47 @@ See the LICENSE file in the root of this repository for complete details.
         />
         <span class="lightbox-hint">Click outside to close</span>
       {/if}
+    </div>
+  {/if}
+
+  <!-- First-run privacy disclosure (S5) — one-shot, persisted in localStorage. -->
+  {#if showPrivacyDisclosure}
+    <div class="modal-backdrop" role="presentation">
+      <div
+        class="modal"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label="Privacy notice"
+        style="max-width: 360px;"
+      >
+        <div class="modal-header">
+          <span class="modal-title">Before your first task</span>
+        </div>
+        <div class="modal-body" style="padding: 18px 20px; line-height: 1.5;">
+          <p style="margin: 0 0 10px 0;">
+            Navisual captures your active window and sends it to the AI provider you've selected.
+          </p>
+          <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
+            <li>Screenshots are held in memory only — never written to disk by Navisual.</li>
+            <li>Only the active window is captured by default; full-screen needs your permission each time.</li>
+            <li>Your selected provider may log requests per their own terms.</li>
+            <li>For zero data sharing, use the Ollama provider — it runs locally.</li>
+          </ul>
+          <p style="margin: 0 0 14px 0; font-size: 0.85em; color: var(--text-tertiary);">
+            Press <kbd>Ctrl</kbd>+<kbd>S</kbd> at any time to pause all capture.
+          </p>
+          <button
+            class="btn-primary btn-full"
+            onclick={() => {
+              try { localStorage.setItem(PRIVACY_DISCLOSURE_KEY, "1"); } catch (_) {}
+              showPrivacyDisclosure = false;
+            }}
+          >
+            I understand — continue
+          </button>
+        </div>
+      </div>
     </div>
   {/if}
 
