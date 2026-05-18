@@ -401,6 +401,11 @@ struct SettingsPayload {
     /// whether to draw the cyan dashed box.
     #[serde(default)]
     debug_show_ai_bbox: bool,
+    /// Read-only — true when the process was launched with NAVISUAL_DEV=true.
+    /// Frontend uses this to show/hide the Developer settings tab. Never
+    /// written by save_settings (it's deserialized but ignored on the way in).
+    #[serde(default)]
+    developer_mode: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1292,8 +1297,12 @@ async fn capture_active_window(quality: Option<u8>) -> Result<CaptureResult, Str
 }
 
 /// Open the debug screenshot folder in Windows Explorer (creates it if missing).
+/// Gated behind NAVISUAL_DEV — public installs reject the call.
 #[tauri::command]
 async fn open_debug_folder(app: AppHandle) -> Result<(), String> {
+    if !developer_mode_enabled() {
+        return Err("Developer mode not enabled".into());
+    }
     let dir = app.path().app_data_dir()
         .map_err(|e| format!("app_data_dir: {e}"))?
         .join("debug");
@@ -1346,7 +1355,14 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
         debug_show_ai_bbox: c.debug_show_ai_bbox,
+        developer_mode: developer_mode_enabled(),
     })
+}
+
+/// Returns true when the process was launched with NAVISUAL_DEV=true or =1.
+/// Read live so unsetting + relaunching reverts the gate without a save.
+fn developer_mode_enabled() -> bool {
+    matches!(std::env::var("NAVISUAL_DEV").as_deref(), Ok("true") | Ok("1"))
 }
 
 #[tauri::command]

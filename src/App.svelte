@@ -80,6 +80,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_locate_trace_enabled: boolean;
     debug_locate_log_file_enabled: boolean;
     debug_show_ai_bbox: boolean;
+    developer_mode: boolean;
   };
 
   // ---- Locator trace types (mirror src-tauri/src/locator/trace.rs) ----
@@ -221,7 +222,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Settings form state
   const SETTINGS_DEFAULTS: SettingsPayload = {
-    api_provider: "anthropic",
+    api_provider: "managed",
     anthropic_api_key: "", anthropic_model: "claude-sonnet-4-6", anthropic_fast_model: "claude-haiku-4-5-20251001",
     gemini_api_key: "", gemini_model: "gemini-2.5-flash", gemini_fast_model: "gemini-2.5-flash-lite",
     ollama_base_url: "http://localhost:11434", ollama_model: "llama3.2-vision",
@@ -239,6 +240,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_locate_trace_enabled: false,
     debug_locate_log_file_enabled: false,
     debug_show_ai_bbox: false,
+    developer_mode: false,
   };
   let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
   let settingsSaving = $state(false);
@@ -997,7 +999,7 @@ See the LICENSE file in the root of this repository for complete details.
     onclick={handleIconClick}
     onpointerdown={handleIconPointerdown}
     onpointermove={handleIconPointermove}
-    title="Expand Navisual (Alt+Q)"
+    title="Expand Navisual (Ctrl+Q)"
   >
     <img src="/goldfish.svg" class="icon-fish" alt="Navisual" draggable="false" />
   </button>
@@ -1031,7 +1033,7 @@ See the LICENSE file in the root of this repository for complete details.
       <div class="header-actions">
         <button class="hdr-btn" onclick={() => (showAbout = true)} title="About Navisual">ⓘ</button>
         <button class="hdr-btn" onclick={openSettings} title="Settings">⚙</button>
-        <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to icon (Alt+Q)">⊟</button>
+        <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to icon (Ctrl+Q)">⊟</button>
         <button class="hdr-btn hdr-btn-close" onclick={closeWindow} title="Quit">✕</button>
       </div>
     </div>
@@ -1230,7 +1232,7 @@ See the LICENSE file in the root of this repository for complete details.
     <!-- Quick-action menu (opened by ··· button) -->
     {#if showQuickMenu}
       <div class="quick-menu">
-        <button class="qm-btn qm-wrong" onclick={wrongAndClose} disabled={actionDisabled} title="Alt+E">
+        <button class="qm-btn qm-wrong" onclick={wrongAndClose} disabled={actionDisabled} title="Ctrl+E">
           ✗ Wrong
         </button>
         <button class="qm-btn" class:qm-active={isMuted} onclick={toggleMute}>
@@ -1253,7 +1255,7 @@ See the LICENSE file in the root of this repository for complete details.
 
     <!-- Action row: Next · Autopilot · New Task · 🎤 · ··· -->
     <div class="action-row">
-      <button class="btn-action btn-next" onclick={nextStep} disabled={actionDisabled} title="Next step (Alt+`)">
+      <button class="btn-action btn-next" onclick={nextStep} disabled={actionDisabled} title="Next step (Ctrl+`)">
         → Next
       </button>
       <button class="btn-action {autoAdvanceEnabled ? 'btn-pause' : 'btn-resume'}"
@@ -1399,7 +1401,9 @@ See the LICENSE file in the root of this repository for complete details.
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
-          <button class="tab-btn {settingsTab === 'developer' ? 'tab-active' : ''}" onclick={() => (settingsTab = "developer")}>Developer</button>
+          {#if settingsForm.developer_mode}
+            <button class="tab-btn {settingsTab === 'developer' ? 'tab-active' : ''}" onclick={() => (settingsTab = "developer")}>Developer</button>
+          {/if}
         </div>
 
         <div class="modal-body">
@@ -1628,8 +1632,8 @@ See the LICENSE file in the root of this repository for complete details.
               <HotkeyInput bind:value={settingsForm.hotkey_icon} />
             </div>
 
-          {:else if settingsTab === "developer"}
-            <!-- Developer tab -->
+          {:else if settingsTab === "developer" && settingsForm.developer_mode}
+            <!-- Developer tab — gated by NAVISUAL_DEV=true -->
             <div class="setting-group">
               <p class="setting-label">Debug captures</p>
               <label class="toggle-row">

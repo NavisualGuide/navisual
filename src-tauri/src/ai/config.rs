@@ -88,7 +88,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            api_provider: "anthropic".to_string(),
+            api_provider: "managed".to_string(),
             anthropic_api_key: None,
             anthropic_model: "claude-sonnet-4-6".to_string(),
             anthropic_fast_model: "claude-haiku-4-5-20251001".to_string(),

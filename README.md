@@ -148,11 +148,11 @@ v1.x    macOS port + Linux port
 
 ## Privacy
 
-- Screenshots are processed in RAM and never written to disk
 - Only the active window is sent to the AI by default (not your full desktop)
 - Full-screen capture requires explicit permission each time
 - Use `Ctrl+S` (Pause) to stop all capture instantly
 - Run fully offline with Ollama — no data leaves your machine
+- The most recent screenshot is cached on disk under `%APPDATA%\com.navisual.app\` so you can re-open the lightbox preview; it is deleted when you start a new task or close the app
 
 ---
 
