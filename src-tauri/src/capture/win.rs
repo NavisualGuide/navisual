@@ -8,18 +8,14 @@
 //! panel contents.
 
 use super::Rect;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use image::{ImageBuffer, Rgba};
-use std::mem;
 use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, POINT, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-    GetDIBits, GetMonitorInfoW, MonitorFromPoint,
-    SelectObject, GetDC, ReleaseDC,
-    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HMONITOR, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, SRCCOPY,
+    GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use xcap::Monitor;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -796,82 +792,87 @@ pub fn get_foreground_target() -> Option<(HWND, Rect)> {
 // Call capture::start_foreground_tracking() from lib.rs setup (#[cfg(windows)]).
 // END SHELVED
 
-/// Capture a region of the desktop using a per-monitor device context.
+/// Capture a region of the desktop using DXGI Desktop Duplication (via xcap).
 ///
-/// Why per-monitor `CreateDCW(L"DISPLAY", deviceName, ...)` instead of
-/// `GetDC(NULL)` or `CreateDCW(L"DISPLAY", NULL, ...)`?
-///   - The "whole virtual desktop" DCs are documented as primary-monitor-only
-///     on many systems and silently fail to capture content from secondary
-///     monitors at negative coordinates (xcap exhibits the same issue).
-///   - A DC scoped to a specific display device works regardless of where the
-///     monitor sits in virtual space — source coords are monitor-relative
-///     (always non-negative), so the negative-x problem disappears entirely.
+/// DXGI reads the composited GPU surface directly and works on both Windows 10
+/// and Windows 11. The old GDI `GetDC(NULL)` + `BitBlt` path returned blank
+/// pixels on Windows 10 with hardware-accelerated windows because `GetDC(NULL)`
+/// is documented as primary-monitor-only on many systems and doesn't access
+/// GPU-rendered content reliably.
 ///
-/// Why not `PrintWindow`? It renders a single window's surface only — owned
-/// dialogs (separate top-level windows like Word's Phonetic Guide) are
-/// invisible. BitBlt from the screen DC reads the composited image, so any
-/// dialog/popup/tooltip drawn on top of the target window is captured naturally.
+/// For rects that span a single monitor (the common case) this is a full
+/// monitor DXGI capture followed by a crop. For rects spanning multiple monitors
+/// (virtual-desktop full-screen requests) each overlapping monitor is captured
+/// and stitched into a single canvas.
 pub fn capture_desktop_region(rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
-    let w = rect.width as i32;
-    let h = rect.height as i32;
-    if w <= 0 || h <= 0 {
+    let w = rect.width;
+    let h = rect.height;
+    if w == 0 || h == 0 {
         return Err(anyhow!("zero dimensions {}×{}", w, h));
     }
-    unsafe {
-        // Use GetDC(NULL) to get the true Virtual Desktop DC that spans all monitors.
-        // CreateDCW("DISPLAY", NULL) only returns the primary monitor DC.
-        let hdc_screen = GetDC(None);
-        if hdc_screen.is_invalid() {
-            return Err(anyhow!("GetDC failed for virtual desktop"));
+
+    let monitors = Monitor::all().context("enumerate monitors for DXGI capture")?;
+
+    // xcap monitor accessors return Result — unwrap with fallback so filter
+    // closures stay concise.
+    let mon_bounds = |m: &Monitor| -> (i32, i32, i32, i32) {
+        let mx = m.x().unwrap_or(0);
+        let my = m.y().unwrap_or(0);
+        let mw = m.width().unwrap_or(0) as i32;
+        let mh = m.height().unwrap_or(0) as i32;
+        (mx, my, mw, mh)
+    };
+
+    // Collect monitors whose screen rects overlap with the requested region.
+    let overlapping: Vec<_> = monitors.iter().filter(|m| {
+        let (mx, my, mw, mh) = mon_bounds(m);
+        rect.x < mx + mw && rect.x + w as i32 > mx
+            && rect.y < my + mh && rect.y + h as i32 > my
+    }).collect();
+
+    // Single-monitor fast path (the overwhelmingly common case).
+    // Prefer the monitor containing the rect's centre; fall back to the first monitor.
+    if overlapping.len() <= 1 {
+        let cx = rect.x + w as i32 / 2;
+        let cy = rect.y + h as i32 / 2;
+        let m = monitors.iter()
+            .find(|m| {
+                let (mx, my, mw, mh) = mon_bounds(m);
+                cx >= mx && cx < mx + mw && cy >= my && cy < my + mh
+            })
+            .or_else(|| monitors.first())
+            .ok_or_else(|| anyhow!("no monitors found"))?;
+
+        let (mx, my, _, _) = mon_bounds(m);
+        let full = m.capture_image().context("DXGI capture")?;
+        let crop_x = (rect.x - mx).max(0) as u32;
+        let crop_y = (rect.y - my).max(0) as u32;
+        let crop_w = w.min(full.width().saturating_sub(crop_x));
+        let crop_h = h.min(full.height().saturating_sub(crop_y));
+        if crop_w == 0 || crop_h == 0 {
+            return Err(anyhow!("crop region is empty after clamping to monitor"));
         }
-
-        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-        let h_bmp = CreateCompatibleBitmap(hdc_screen, w, h);
-        let prev = SelectObject(hdc_mem, h_bmp.into());
-
-        // Source coords are absolute virtual desktop coordinates.
-        let src_x = rect.x;
-        let src_y = rect.y;
-        let blt_ok = BitBlt(
-            hdc_mem, 0, 0, w, h,
-            Some(hdc_screen), src_x, src_y, SRCCOPY,
-        ).is_ok();
-
-        let buf_len = (w * h * 4) as usize;
-        let mut buf = vec![0u8; buf_len];
-        let mut bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: w,
-                biHeight: -h, // negative = top-down row order
-                biPlanes: 1,
-                biBitCount: 32,
-                biSizeImage: buf_len as u32,
-                biCompression: 0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        GetDIBits(
-            hdc_mem, h_bmp, 0, h as u32,
-            Some(buf.as_mut_ptr() as *mut _),
-            &mut bmi, DIB_RGB_COLORS,
-        );
-
-        // GDI returns BGRA; swap B↔R to produce RGBA expected by the image crate.
-        for px in buf.chunks_exact_mut(4) {
-            px.swap(0, 2);
-        }
-
-        SelectObject(hdc_mem, prev);
-        let _ = DeleteObject(h_bmp.into());
-        let _ = DeleteDC(hdc_mem);
-        let _ = ReleaseDC(None, hdc_screen);
-
-        if !blt_ok {
-            return Err(anyhow!("BitBlt failed"));
-        }
-        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(rect.width, rect.height, buf)
-            .ok_or_else(|| anyhow!("ImageBuffer::from_raw failed"))
+        return Ok(image::imageops::crop_imm(&full, crop_x, crop_y, crop_w, crop_h).to_image());
     }
+
+    // Multi-monitor path: stitch each overlapping monitor's portion onto a canvas.
+    let mut canvas = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(w, h, Rgba([0, 0, 0, 255]));
+    for m in &overlapping {
+        let (mx, my, _, _) = mon_bounds(m);
+        let mw = m.width().unwrap_or(0);
+        let mh = m.height().unwrap_or(0);
+        let full = m.capture_image().context("DXGI capture (multi-monitor)")?;
+        let dst_x = (mx - rect.x).max(0) as i64;
+        let dst_y = (my - rect.y).max(0) as i64;
+        let src_x = (rect.x - mx).max(0) as u32;
+        let src_y = (rect.y - my).max(0) as u32;
+        let src_w = mw.min(full.width().saturating_sub(src_x));
+        let src_h = mh.min(full.height().saturating_sub(src_y));
+        if src_w == 0 || src_h == 0 {
+            continue;
+        }
+        let piece = image::imageops::crop_imm(&full, src_x, src_y, src_w, src_h).to_image();
+        image::imageops::overlay(&mut canvas, &piece, dst_x, dst_y);
+    }
+    Ok(canvas)
 }
