@@ -67,6 +67,11 @@ struct AppState {
     supabase_session_path: PathBuf,
     /// Previous aHash for Autopilot on-demand screen-change polling.
     screen_hash: std::sync::Mutex<Option<u64>>,
+    /// Most-recent AI-image JPEG bytes (the one sent to the AI on the latest
+    /// `guide`/`next_step`/`send_correction`). Held in RAM only — never
+    /// written to disk — so the lightbox can re-open it without persisting
+    /// the user's screen content to storage. Cleared on new task / on quit.
+    chat_full_jpeg: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 /// Snapshot of the most recent non-clear overlay. Stored so `restore_overlay`
@@ -441,16 +446,10 @@ fn update_env_file(path: &std::path::Path, updates: &[(&str, &str)]) -> Result<(
     Ok(())
 }
 
-/// Save one 160×90 thumbnail + one full-resolution screenshot to the app data dir.
-/// Both files share the same lifecycle: overwritten together, deleted together.
-/// Completely separate from the developer debug screenshot path.
-fn make_chat_thumbnail(jpeg_bytes: &[u8], app_data_dir: &std::path::Path) -> Option<String> {
-    let thumb_path = app_data_dir.join("chat_thumb.jpg");
-    let full_path  = app_data_dir.join("chat_full.jpg");
-    // Replace both files atomically (old ones deleted first).
-    let _ = std::fs::remove_file(&thumb_path);
-    let _ = std::fs::remove_file(&full_path);
-    let _ = std::fs::write(&full_path, jpeg_bytes); // full AI screenshot for lightbox
+/// Encode a 160×90 thumbnail of the AI image as base64 — for the inline chat
+/// bubble in the panel. Pure in-memory: nothing is written to disk. The full
+/// JPEG is held in `AppState::chat_full_jpeg` for the lightbox.
+fn make_chat_thumbnail(jpeg_bytes: &[u8]) -> Option<String> {
     let img = image::load_from_memory(jpeg_bytes).ok()?;
     let thumb = img.resize(160, 90, image::imageops::FilterType::Nearest);
     let mut buf = Vec::new();
@@ -459,16 +458,15 @@ fn make_chat_thumbnail(jpeg_bytes: &[u8], app_data_dir: &std::path::Path) -> Opt
         let mut enc = JpegEncoder::new_with_quality(&mut buf, 40);
         enc.encode_image(&thumb).ok()?;
     }
-    let _ = std::fs::write(&thumb_path, &buf);
     Some(capture::to_base64(&buf))
 }
 
 /// Return the full-resolution chat screenshot as base64 (for the lightbox).
-/// Returns None if no screenshot has been taken yet this session.
+/// Read from in-memory state — never touched disk. Returns None if no
+/// screenshot has been captured yet this session.
 #[tauri::command]
-fn get_chat_full_screenshot(app: AppHandle) -> Option<String> {
-    let path = app.path().app_data_dir().ok()?.join("chat_full.jpg");
-    let bytes = std::fs::read(path).ok()?;
+fn get_chat_full_screenshot(state: State<'_, AppState>) -> Option<String> {
+    let bytes = state.chat_full_jpeg.lock().unwrap().clone()?;
     Some(capture::to_base64(&bytes))
 }
 
@@ -488,11 +486,8 @@ async fn guide(
         g.steps = vec![];
         g.state_summary = String::new();
         g.target_hwnd = None;
-        // Delete the previous chat thumbnail + full screenshot — new task starts fresh.
-        if let Ok(dir) = app.path().app_data_dir() {
-            let _ = std::fs::remove_file(dir.join("chat_thumb.jpg"));
-            let _ = std::fs::remove_file(dir.join("chat_full.jpg"));
-        }
+        // Drop the previous screenshot from RAM — new task starts fresh.
+        *state.chat_full_jpeg.lock().unwrap() = None;
     }
 
     let session_id = {
@@ -525,9 +520,6 @@ async fn guide(
         .map(|p| p.join("debug"))
         .ok();
 
-    // Chat thumbnail + full screenshot — single pair of files, separate from debug.
-    let chat_dir = app.path().app_data_dir().ok();
-
     // Clear the previous step's pointer before capture — prevents it from
     // appearing in the AI's screenshot. Stop the tracker first so it can't
     // re-emit the old overlay during the 33 ms DWM composite wait.
@@ -538,7 +530,7 @@ async fn guide(
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     #[allow(clippy::type_complexity)]
-    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>), ()> {
+    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>), ()> {
         let is_fs = full_screen.unwrap_or(false);
         let (bytes, rect_opt, hwnd_opt) = if is_fs {
             match capture::capture_virtual_desktop_jpeg(75, &exclude) {
@@ -593,15 +585,18 @@ async fn guide(
             None
         };
 
-        let thumb_b64 = chat_dir.as_ref()
-            .and_then(|d| make_chat_thumbnail(&final_bytes, d));
-        Ok((capture::to_base64(&final_bytes), rect_opt, hwnd_opt, debug_path, thumb_b64))
+        let thumb_b64 = make_chat_thumbnail(&final_bytes);
+        let b64 = capture::to_base64(&final_bytes);
+        Ok((b64, rect_opt, hwnd_opt, debug_path, thumb_b64, final_bytes))
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
     let (screenshot_b64, capture_rect_opt, new_hwnd_opt, debug_screenshot_path, chat_thumb_b64) = match capture_result {
-        Ok((b64, rect_opt, hwnd_opt, dbg, thumb)) => (b64, rect_opt, hwnd_opt, dbg, thumb),
+        Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes)) => {
+            *state.chat_full_jpeg.lock().unwrap() = Some(full_bytes);
+            (b64, rect_opt, hwnd_opt, dbg, thumb)
+        }
         Err(()) => {
             return Ok(GuideResponse {
                 ok: false,
@@ -881,7 +876,6 @@ async fn send_correction(
     drop(router); // Release lock before blocking capture
 
     let debug_dir = app.path().app_data_dir().map(|p| p.join("debug")).ok();
-    let chat_dir = app.path().app_data_dir().ok();
 
     // Clear the previous pointer before capture.
     state.tracker.clear();
@@ -891,7 +885,7 @@ async fn send_correction(
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     // Fresh capture — no stored HWND, always walks z-order to the focused window.
-    let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path, chat_thumb_b64) = tokio::task::spawn_blocking(move || {
+    let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path, chat_thumb_b64, full_jpeg_opt) = tokio::task::spawn_blocking(move || {
         if let Ok((bytes, rect, hwnd)) = capture::capture_active_window_jpeg(75, &exclude) {
             let final_bytes = bytes;
 
@@ -920,15 +914,19 @@ async fn send_correction(
                 None
             };
 
-            let thumb_b64 = chat_dir.as_ref()
-                .and_then(|d| make_chat_thumbnail(&final_bytes, d));
-            (capture::to_base64(&final_bytes), Some(rect), Some(hwnd), debug_path, thumb_b64)
+            let thumb_b64 = make_chat_thumbnail(&final_bytes);
+            let b64 = capture::to_base64(&final_bytes);
+            (b64, Some(rect), Some(hwnd), debug_path, thumb_b64, Some(final_bytes))
         } else {
-            (String::new(), None, None, None, None)
+            (String::new(), None, None, None, None, None)
         }
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
+
+    if let Some(bytes) = full_jpeg_opt {
+        *state.chat_full_jpeg.lock().unwrap() = Some(bytes);
+    }
 
     // Phase 0.2 — show shared-app boundary on correction too.
     if let Some(hwnd_raw) = new_hwnd {
@@ -1606,6 +1604,7 @@ pub fn run() {
                 env_path,
                 supabase_session_path,
                 screen_hash: std::sync::Mutex::new(None),
+                chat_full_jpeg: std::sync::Mutex::new(None),
             });
 
             Ok(())
@@ -1618,11 +1617,8 @@ pub fn run() {
             // on the next launch.
             if window.label() == "panel" {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
-                    // Clean up chat thumbnail + full screenshot before exit.
-                    if let Ok(dir) = window.app_handle().path().app_data_dir() {
-                        let _ = std::fs::remove_file(dir.join("chat_thumb.jpg"));
-                        let _ = std::fs::remove_file(dir.join("chat_full.jpg"));
-                    }
+                    // chat_full_jpeg lives only in process memory — exiting
+                    // drops it. No disk files to clean up.
                     window.app_handle().exit(0);
                 }
             }
