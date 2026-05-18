@@ -491,6 +491,47 @@ fn get_chat_full_screenshot(state: State<'_, AppState>) -> Option<String> {
     Some(capture::to_base64(&bytes))
 }
 
+/// On startup, delete debug-mode artifacts older than 7 days. Both flags
+/// (`DEBUG_SCREENSHOT_ENABLED`, `DEBUG_LOCATE_LOG_FILE_ENABLED`) are off
+/// by default — this is a safety net for developers who turn them on,
+/// forget, and accumulate window-title / OCR-text PII indefinitely.
+///
+/// Targets: `<app_data>/debug/*` and `<app_data>/locate_log.jsonl{,.1}`.
+fn cleanup_old_debug_artifacts(app_data_dir: &std::path::Path) {
+    use std::time::{Duration, SystemTime};
+    const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+
+    let mut try_remove = |p: &std::path::Path| {
+        if let Ok(meta) = std::fs::metadata(p) {
+            if let Ok(modified) = meta.modified() {
+                if now.duration_since(modified).map(|d| d > MAX_AGE).unwrap_or(false)
+                    && std::fs::remove_file(p).is_ok()
+                {
+                    removed += 1;
+                }
+            }
+        }
+    };
+
+    let debug_dir = app_data_dir.join("debug");
+    if let Ok(entries) = std::fs::read_dir(&debug_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                try_remove(&p);
+            }
+        }
+    }
+    try_remove(&app_data_dir.join("locate_log.jsonl"));
+    try_remove(&app_data_dir.join("locate_log.jsonl.1"));
+
+    if removed > 0 {
+        log::info!("debug cleanup: removed {removed} file(s) older than 7 days");
+    }
+}
+
 #[tauri::command]
 async fn guide(
     app: AppHandle,
@@ -1597,6 +1638,7 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
             std::fs::create_dir_all(&app_data_dir).ok();
+            cleanup_old_debug_artifacts(&app_data_dir);
             let env_path = app_data_dir.join(".env");
 
             // Init AI Router

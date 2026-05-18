@@ -108,6 +108,12 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 
 ---
 
+## Architecture
+
+For a short technical tour (data flow, element locator, key design decisions), see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
 ## Project Structure
 
 ```
@@ -148,11 +154,27 @@ v1.x    macOS port + Linux port
 
 ## Privacy
 
-- Screenshots are held in memory only — never written to disk
-- Only the active window is sent to the AI by default (not your full desktop)
-- Full-screen capture requires explicit permission each time
-- Use `Ctrl+S` (Pause) to stop all capture instantly
-- Run fully offline with Ollama — no data leaves your machine
+**What stays on your machine.** Local element matching (UI Automation + OCR), session history, settings, and cost tracking are all local-only. The AI returns *text* descriptions of UI elements; your machine finds the pixels — UIA / OCR coordinates are never sent to the AI.
+
+**What gets sent to the AI.** Only a screenshot of the **active window** (active-window crop, by default) plus the conversation text.
+
+| Provider | Where the screenshot + text go |
+|---|---|
+| **Managed (free, default)** | Supabase Edge Function → OpenRouter → NVIDIA Nemotron |
+| BYOK Anthropic | `api.anthropic.com` |
+| BYOK Gemini | `generativelanguage.googleapis.com` |
+| BYOK OpenAI | `api.openai.com` |
+| BYOK DeepSeek | `api.deepseek.com` (text only — no image is sent) |
+| BYOK Qwen | `dashscope.aliyuncs.com` (or your configured workspace URL) |
+| BYOK Ollama | `http://localhost:11434` (local — nothing leaves your machine) |
+
+**Other notes.**
+
+- Screenshots are held in memory only — never written to disk at default settings
+- Full-screen capture (multi-monitor) requires explicit one-time permission per AI call
+- Press <kbd>Ctrl</kbd>+<kbd>S</kbd> to stop all capture instantly
+- Settings, sessions, and the Supabase anonymous-auth token live in `%APPDATA%\com.navisual.app\`
+- Debug captures + locator traces are off by default; if enabled (developer-only `.env` flags), files older than 7 days are auto-deleted
 
 ---
 
