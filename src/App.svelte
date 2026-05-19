@@ -189,6 +189,26 @@ See the LICENSE file in the root of this repository for complete details.
     return EXE_DISPLAY[stem] ?? exeStem(exeName);
   }
 
+  // On a cold start (fresh Windows 10 install with no warm caches), WebView2
+  // can finish loading App.svelte and reach onMount invocations before Rust
+  // setup() finishes its cold-start I/O and calls handle.manage(AppState).
+  // Tauri then rejects state-touching commands with "state not managed".
+  // 8 × 150ms = 1.2s, comfortably longer than any observed cold start.
+  async function invokeReady<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    for (let i = 0; i < 8; i++) {
+      try {
+        return await invoke<T>(cmd, args);
+      } catch (e) {
+        if (String(e).includes("state not managed") && i < 7) {
+          await new Promise((r) => setTimeout(r, 150));
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw new Error("unreachable");
+  }
+
   type VoiceInfo = { id: string; name: string; };
   let availableVoices = $state<VoiceInfo[]>([]);
 
@@ -923,7 +943,7 @@ See the LICENSE file in the root of this repository for complete details.
       hotkey_icon: SETTINGS_DEFAULTS.hotkey_icon,
     };
     try {
-      const init = await invoke<SettingsPayload>("get_settings");
+      const init = await invokeReady<SettingsPayload>("get_settings");
       autoAdvanceEnabled = init.auto_advance;
       isMuted = !init.tts_enabled;
       if (init.api_provider) provider = init.api_provider;
@@ -963,7 +983,7 @@ See the LICENSE file in the root of this repository for complete details.
       sharedApp = event.payload;
     });
     try {
-      const initial = await invoke<SharedAppInfo | null>("get_shared_app_info");
+      const initial = await invokeReady<SharedAppInfo | null>("get_shared_app_info");
       if (initial) sharedApp = initial;
     } catch (_) {}
 
@@ -981,12 +1001,12 @@ See the LICENSE file in the root of this repository for complete details.
     // S.1 — Managed provider: anonymous sign-in on first launch.
     if (settingsForm.api_provider === "managed") {
       try {
-        await invoke("sign_in_anon");
+        await invokeReady("sign_in_anon");
       } catch (e) {
         addToHistory("system", "⚠️ Managed sign-in failed: " + String(e));
       }
       try {
-        const bal = await invoke<{ tier: string; free_remaining: number }>("get_balance");
+        const bal = await invokeReady<{ tier: string; free_remaining: number }>("get_balance");
         freeRemaining = bal.free_remaining;
       } catch (_) {}
     }
