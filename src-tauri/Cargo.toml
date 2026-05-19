@@ -37,8 +37,10 @@ anyhow = "1"
 log = "0.4"
 parking_lot = "0.12"
 
-# Phase C — screen capture + Windows APIs
-xcap = "0.8"
+# Phase C — screen capture + Windows APIs.
+# xcap was tried briefly (commit 339eb71) but reverted: silently fails on
+# left-secondary monitors at negative virtual-desktop x. Per-monitor CreateDCW
+# in src/capture/win.rs is the correct path. See SDD §2.5 and §A v2.2.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
 regex = "1"
@@ -78,8 +80,6 @@ debug = 1
 [profile.dev.package."windows"]
 opt-level = 2
 [profile.dev.package."uiautomation"]
-opt-level = 2
-[profile.dev.package."xcap"]
 opt-level = 2
 [profile.dev.package."image"]
 opt-level = 2

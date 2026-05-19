@@ -10,7 +10,7 @@
 //! Rust emits an `overlay:update` event whenever the target changes; the
 //! frontend consumes it to redraw the arrow/box/subtitle.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde::Serialize;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -66,21 +66,18 @@ pub struct OverlayUpdate {
 /// active screen instead of jumping to monitor-nearest-origin — otherwise the
 /// subtitle visibly shifts between monitors mid-session.
 fn active_screen_for_bbox(bbox: Option<&Rect>) -> Option<Rect> {
-    let monitors = xcap::Monitor::all().ok()?;
+    let monitors = crate::capture::enumerate_monitor_rects();
     if monitors.is_empty() { return None; }
 
     if let Some(b) = bbox {
         let cx = b.x + (b.width as i32) / 2;
         let cy = b.y + (b.height as i32) / 2;
         for m in &monitors {
-            let mx = m.x().unwrap_or(0);
-            let my = m.y().unwrap_or(0);
-            let mw = m.width().unwrap_or(0) as i32;
-            let mh = m.height().unwrap_or(0) as i32;
-            if cx >= mx && cx < mx + mw && cy >= my && cy < my + mh {
-                let rect = Rect { x: mx, y: my, width: mw as u32, height: mh as u32 };
-                *LAST_ACTIVE_SCREEN.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(rect);
-                return Some(rect);
+            if cx >= m.x && cx < m.x + m.width as i32
+                && cy >= m.y && cy < m.y + m.height as i32
+            {
+                *LAST_ACTIVE_SCREEN.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(*m);
+                return Some(*m);
             }
         }
     }
@@ -93,13 +90,8 @@ fn active_screen_for_bbox(bbox: Option<&Rect>) -> Option<Rect> {
 
     // First-ever call with no bbox: fall back to the monitor closest to (0, 0).
     monitors.iter()
-        .min_by_key(|m| m.x().unwrap_or(0).abs() + m.y().unwrap_or(0).abs())
-        .map(|m| Rect {
-            x: m.x().unwrap_or(0),
-            y: m.y().unwrap_or(0),
-            width: m.width().unwrap_or(1920),
-            height: m.height().unwrap_or(1080),
-        })
+        .min_by_key(|m| m.x.abs() + m.y.abs())
+        .copied()
 }
 
 /// Last monitor a bbox-bearing OverlayUpdate landed on. Used to stabilise the
@@ -115,8 +107,9 @@ static VD_CACHE: OnceLock<Mutex<Option<CachedVd>>> = OnceLock::new();
 
 /// Compute the union rect of all monitors, cached for 30 s.
 /// Monitor topology changes are extremely rare; re-enumerating on every
-/// 200 ms window-tracker tick (xcap::Monitor::all syscall) adds ~2–5 ms
-/// per call unnecessarily.
+/// 200 ms window-tracker tick adds latency unnecessarily. The underlying
+/// `enumerate_monitor_rects` call is sub-millisecond, but the cache keeps
+/// the hot path allocation-free.
 pub fn virtual_desktop_rect() -> Result<Rect> {
     let cache = VD_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap();
@@ -125,7 +118,7 @@ pub fn virtual_desktop_rect() -> Result<Rect> {
             return Ok(c.rect);
         }
     }
-    let monitors = xcap::Monitor::all().context("enumerate monitors")?;
+    let monitors = crate::capture::enumerate_monitor_rects();
     if monitors.is_empty() {
         return Err(anyhow!("no monitors found"));
     }
@@ -134,14 +127,10 @@ pub fn virtual_desktop_rect() -> Result<Rect> {
     let mut max_x = i32::MIN;
     let mut max_y = i32::MIN;
     for m in &monitors {
-        let x = m.x().unwrap_or(0);
-        let y = m.y().unwrap_or(0);
-        let w = m.width().unwrap_or(0) as i32;
-        let h = m.height().unwrap_or(0) as i32;
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x + w);
-        max_y = max_y.max(y + h);
+        min_x = min_x.min(m.x);
+        min_y = min_y.min(m.y);
+        max_x = max_x.max(m.x + m.width as i32);
+        max_y = max_y.max(m.y + m.height as i32);
     }
     let rect = Rect {
         x: min_x,

@@ -14,7 +14,6 @@
 
 use anyhow::{anyhow, Context, Result};
 use image::{codecs::jpeg::JpegEncoder, ColorType, ImageBuffer, Rgba};
-use xcap::Monitor;
 
 const MAX_CAP_W: u32 = 1536;
 const MAX_CAP_H: u32 = 768;
@@ -30,15 +29,35 @@ pub struct Rect {
     pub height: u32,
 }
 
-/// Capture the primary monitor and encode as JPEG.
+/// Enumerate every connected monitor's rect in virtual-desktop coordinates.
+/// Stable cross-platform signature so callers don't reach for xcap directly.
+pub fn enumerate_monitor_rects() -> Vec<Rect> {
+    #[cfg(windows)]
+    { win::enumerate_monitor_rects() }
+    #[cfg(not(windows))]
+    { Vec::new() }
+}
+
+/// Capture the primary monitor and encode as JPEG. The primary monitor is, by
+/// Windows convention, the monitor whose top-left is at (0, 0) in virtual-
+/// desktop coordinates.
 pub fn capture_primary_monitor_jpeg(quality: u8) -> Result<Vec<u8>> {
-    let monitors = Monitor::all().context("enumerate monitors")?;
-    let primary = monitors
-        .into_iter()
-        .find(|m| m.is_primary().unwrap_or(false))
-        .ok_or_else(|| anyhow!("no primary monitor"))?;
-    let img = primary.capture_image().context("capture primary monitor")?;
-    encode_jpeg(&cap_size(img), quality)
+    #[cfg(windows)]
+    {
+        let primary = win::enumerate_monitor_rects()
+            .into_iter()
+            .find(|r| r.x == 0 && r.y == 0)
+            .ok_or_else(|| anyhow!("no primary monitor"))?;
+        let img = win::capture_desktop_region(&primary)
+            .context("capture primary monitor")?;
+        encode_jpeg(&cap_size(img), quality)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = quality;
+        Err(anyhow!("primary monitor capture only implemented for Windows"))
+    }
 }
 
 /// Capture the active foreground window area as JPEG.

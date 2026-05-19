@@ -296,6 +296,22 @@ pub fn window_screen_rect(hwnd: HWND) -> Option<Rect> {
     frame_rect_of(hwnd)
 }
 
+/// Enumerate every connected monitor and return its rect in virtual-desktop
+/// coordinates. Replaces ad-hoc `xcap::Monitor::all()` enumeration elsewhere
+/// in the crate — we already have a per-monitor pipeline for capture, so
+/// monitor enumeration goes through the same code path.
+pub fn enumerate_monitor_rects() -> Vec<Rect> {
+    collect_all_monitors().iter().map(|info| {
+        let r = info.monitorInfo.rcMonitor;
+        Rect {
+            x: r.left,
+            y: r.top,
+            width: (r.right - r.left).max(0) as u32,
+            height: (r.bottom - r.top).max(0) as u32,
+        }
+    }).collect()
+}
+
 /// Returns the rect of the entire multi-monitor virtual desktop.
 pub fn get_virtual_desktop_rect() -> Rect {
     unsafe {
