@@ -872,18 +872,19 @@ fn collect_all_monitors() -> Vec<MONITORINFOEXW> {
     }).collect()
 }
 
+/// `(dst_x, dst_y, image)` — a piece captured from a single monitor and where
+/// to place it within the caller's output canvas.
+type MonitorPiece = (i64, i64, ImageBuffer<Rgba<u8>, Vec<u8>>);
+
 /// Capture the portion of `rect` that overlaps with monitor `info` using a
 /// per-monitor GDI DC created with `CreateDCW`. Source coordinates are
 /// monitor-relative (always non-negative), which is why this works for
 /// left-secondary monitors at negative virtual-desktop x — unlike `GetDC(NULL)`
 /// (primary-only) or xcap/DXGI (silently fails on negative-x monitors).
-///
-/// Returns `(dst_x, dst_y, image)` where `dst_*` is the pixel offset of the
-/// captured piece within the caller's output canvas.
 unsafe fn capture_from_monitor(
     rect: &Rect,
     info: &MONITORINFOEXW,
-) -> Result<(i64, i64, ImageBuffer<Rgba<u8>, Vec<u8>>)> {
+) -> Result<MonitorPiece> {
     let mr = info.monitorInfo.rcMonitor;
     let clip_left = rect.x.max(mr.left);
     let clip_top = rect.y.max(mr.top);
