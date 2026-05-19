@@ -406,10 +406,49 @@ fn frame_rect_of(hwnd: HWND) -> Option<Rect> {
     }
 }
 
+/// Return the bounding rect of all monitors that intersect with `rect`. For a
+/// window straddling two monitors this returns the bounding box covering both,
+/// so the full window can be captured. Falls back to the monitor containing
+/// the rect's centre if no monitor intersects (shouldn't happen for visible
+/// windows).
+fn monitor_union_for(rect: &Rect) -> Rect {
+    let r_right = rect.x + rect.width as i32;
+    let r_bottom = rect.y + rect.height as i32;
+    let mut bounds: Option<Rect> = None;
+    for info in collect_all_monitors() {
+        let mr = info.monitorInfo.rcMonitor;
+        if rect.x < mr.right && r_right > mr.left && rect.y < mr.bottom && r_bottom > mr.top {
+            bounds = Some(match bounds {
+                None => Rect {
+                    x: mr.left,
+                    y: mr.top,
+                    width: (mr.right - mr.left) as u32,
+                    height: (mr.bottom - mr.top) as u32,
+                },
+                Some(b) => {
+                    let left = b.x.min(mr.left);
+                    let top = b.y.min(mr.top);
+                    let right = (b.x + b.width as i32).max(mr.right);
+                    let bottom = (b.y + b.height as i32).max(mr.bottom);
+                    Rect {
+                        x: left,
+                        y: top,
+                        width: (right - left).max(0) as u32,
+                        height: (bottom - top).max(0) as u32,
+                    }
+                }
+            });
+        }
+    }
+    bounds.unwrap_or_else(|| {
+        let cx = rect.x + rect.width as i32 / 2;
+        let cy = rect.y + rect.height as i32 / 2;
+        monitor_rect_containing(cx, cy).unwrap_or(*rect)
+    })
+}
+
 /// Return the monitor rect containing the point `(x, y)`. Falls back to the
-/// nearest monitor if the point is outside any monitor's bounds. Used to clamp
-/// the PID-union rect so windows scattered across multiple monitors don't
-/// inflate the capture region.
+/// nearest monitor if the point is outside any monitor's bounds.
 fn monitor_rect_containing(x: i32, y: i32) -> Option<Rect> {
     unsafe {
         let hmon: HMONITOR = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
@@ -457,9 +496,9 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
         return Some(target_rect);
     }
 
-    let target_cx = target_rect.x + target_rect.width as i32 / 2;
-    let target_cy = target_rect.y + target_rect.height as i32 / 2;
-    let monitor = monitor_rect_containing(target_cx, target_cy).unwrap_or(target_rect);
+    // Cover all monitors the target overlaps — keeps a window that straddles
+    // two screens captured in full instead of clamping to the centre monitor.
+    let monitor = monitor_union_for(&target_rect);
 
     struct State {
         target_pid: u32,
@@ -550,8 +589,8 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
 
-    // Clamp final union to the monitor (defence — frame_rect_of can extend a
-    // pixel or two beyond the monitor on DWM-aware borderless windows).
+    // Clamp final union to the target's monitor bounds (defence — frame_rect_of
+    // can extend a pixel or two beyond on DWM-aware borderless windows).
     let m = state.monitor;
     let u = state.union;
     let left = u.x.max(m.x);
