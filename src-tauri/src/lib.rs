@@ -1517,9 +1517,24 @@ struct SessionStatus {
     free_remaining: Option<u32>,
 }
 
-/// Sign in anonymously to Supabase (managed provider). Safe to call even if already signed in.
+/// Sign in anonymously to Supabase (managed provider). Idempotent — if a
+/// session is already loaded (from `supabase_session.json` or a previous
+/// call), this returns immediately. Without this guard every onMount would
+/// mint a brand-new anon user (and a fresh 50-request quota), defeating
+/// the trial cap. Refresh of expired sessions is handled by ensure_token()
+/// before each AI call.
 #[tauri::command]
 async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, String> {
+    {
+        let router = state.ai_router.lock().await;
+        if router.has_managed_session() {
+            return Ok(SessionStatus {
+                signed_in: true,
+                free_remaining: router.get_managed_free_remaining(),
+            });
+        }
+    }
+
     let (supabase_url, anon_key) = {
         let router = state.ai_router.lock().await;
         let url = router.config.supabase_url.clone().ok_or("SUPABASE_URL not configured")?;
