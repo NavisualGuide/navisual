@@ -308,10 +308,15 @@ pub fn get_virtual_desktop_rect() -> Rect {
     }
 }
 
-/// Find all visible top-level windows belonging to our own process that are
-/// small enough to be the panel (< 2000 px on either axis — excludes the
-/// always-visible overlay window which spans the virtual desktop).
-/// Returns the DWM extended frame rect of each matched window.
+/// Find visible top-level panel windows belonging to our own process. Excludes
+/// the overlay window (which is click-through via `WS_EX_TRANSPARENT`) so we
+/// don't blank the screen guide's full canvas over the captured image.
+///
+/// The previous size-based filter (`< 2000 px`) silently failed on Windows 10
+/// single-monitor setups where the overlay is exactly 1920×1080 — small enough
+/// to slip through, large enough to cover the entire capture in light grey.
+/// `WS_EX_TRANSPARENT` is the precise way to identify our overlay regardless
+/// of monitor configuration.
 pub fn own_panel_rects() -> Vec<Rect> {
     let our_pid = std::process::id();
 
@@ -330,12 +335,14 @@ pub fn own_panel_rects() -> Vec<Rect> {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             return TRUE;
         }
+        // Skip the overlay — it's a click-through canvas that covers the whole
+        // virtual desktop; blanking it would wipe the entire captured image.
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex_style & WS_EX_TRANSPARENT.0) != 0 {
+            return TRUE;
+        }
         if let Some(r) = frame_rect_of(hwnd) {
-            // Overlay spans the virtual desktop (thousands of px wide).
-            // The panel is at most a few hundred px in each direction.
-            if r.width < 2000 && r.height < 2000 {
-                state.rects.push(r);
-            }
+            state.rects.push(r);
         }
         TRUE
     }
