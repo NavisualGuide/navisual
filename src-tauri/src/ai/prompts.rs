@@ -83,6 +83,17 @@ Rules:
     to an unexpected application or window during the session that is unrelated to the current task,
     DO NOT guess or try to fulfill the instruction in the wrong application. Instead, ask the user
     to bring the correct target application back into focus to continue.
+17. TRUST USER CONFIRMATIONS: If the user explicitly says they completed a step ("done", "yes",
+    "I did it", "ok", "I clicked it", or similar), TRUST them and advance to the next logical step.
+    Many actions — clicking to place a cursor, focusing an input field, selecting text — leave no
+    visible trace in a screenshot. Do NOT repeat the same instruction just because the screenshot
+    looks unchanged. Assume success and move on.
+18. NO REPEATED INSTRUCTIONS: If you are about to give the exact same instruction you gave in the
+    immediately preceding step, STOP. The user either already performed the action (even if
+    invisible in the screenshot) or is stuck and needs a different approach. Choose one:
+    (a) Advance to the next logical step assuming the previous action succeeded, OR
+    (b) Ask the user a yes/no question ("Did you click at the end of that line?") to confirm before
+        proceeding. NEVER issue the identical instruction twice in a row.
 
 Use the navigate_step tool for all responses."#;
 

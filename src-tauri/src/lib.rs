@@ -262,15 +262,23 @@ fn execute_step(
     Ok((located, trace))
 }
 
-// ---------- Autopilot on-demand screen-change polling ----------
+// ---------- Autopilot screen-change polling + stale-response detection ----------
 
-const AUTOPILOT_CHANGE_THRESHOLD: u32 = 6;
+/// Hamming distance (out of 64) at which Autopilot considers the screen to have
+/// "changed" relative to the state the AI last gave guidance for.
+/// 10/64 ≈ 16% — high enough to ignore JPEG noise, blinking carets, small live
+/// content (Slack typing indicators, etc.); low enough to catch a dialog
+/// opening, page navigation, or a new view.
+const AUTOPILOT_CHANGE_THRESHOLD: u32 = 10;
 
-fn ahash_of_screen() -> Option<u64> {
-    let exclude = capture::get_panel_rects();
-    let (jpeg, _rect, _hwnd) = capture::capture_active_window_jpeg(30, &exclude).ok()?;
-    let img = image::load_from_memory(&jpeg).ok()?;
-    let thumb = image::imageops::resize(&img.to_luma8(), 8, 8, image::imageops::FilterType::Triangle);
+/// Hamming distance at which an AI response is considered "stale" — i.e. the
+/// screen drifted enough during the 5–90 s of AI thinking that the rendered
+/// guidance may no longer apply. Set higher than the autopilot threshold so
+/// the interruptive banner only appears on clearly substantial drift.
+const STALE_RESPONSE_THRESHOLD: u32 = 13;
+
+fn ahash_from_luma8(luma: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>) -> u64 {
+    let thumb = image::imageops::resize(luma, 8, 8, image::imageops::FilterType::Triangle);
     let pixels: Vec<u8> = thumb.pixels().map(|p| p.0[0]).collect();
     let mean: u64 = pixels.iter().map(|&v| v as u64).sum::<u64>() / pixels.len().max(1) as u64;
     let mut hash: u64 = 0;
@@ -279,28 +287,58 @@ fn ahash_of_screen() -> Option<u64> {
             hash |= 1u64 << i;
         }
     }
-    Some(hash)
+    hash
+}
+
+fn ahash_of_jpeg(jpeg: &[u8]) -> Option<u64> {
+    let img = image::load_from_memory(jpeg).ok()?;
+    Some(ahash_from_luma8(&img.to_luma8()))
+}
+
+/// Capture the active window raw + compute aHash in one step. Used by both
+/// the autopilot polling loop and the post-AI-call baseline anchor. Skipping
+/// the JPEG roundtrip used elsewhere saves ~10 ms per call — meaningful at
+/// 2 captures/sec while autopilot is on.
+fn ahash_of_screen() -> Option<u64> {
+    let exclude = capture::get_panel_rects();
+    let (img, _rect, _hwnd) = capture::capture_active_window_raw(&exclude).ok()?;
+    let luma = image::imageops::grayscale(&img);
+    Some(ahash_from_luma8(&luma))
 }
 
 fn hamming64(a: u64, b: u64) -> u32 {
     (a ^ b).count_ones()
 }
 
-/// Called by the frontend Autopilot polling loop every 500 ms.
-/// Captures the active window, computes aHash, compares to the last stored hash.
-/// Updates the stored hash unconditionally so the baseline stays current.
-/// Returns `changed=true` when Hamming distance exceeds threshold.
+/// Capture a fresh active-window hash off the blocking pool and store it as
+/// the Autopilot baseline. Called at the end of every AI/local guidance event
+/// (`guide`, `next_step`, `send_correction`) so the baseline always reflects
+/// the screen the user is being directed against, not a drifting 500 ms-old
+/// sample. Returns the captured hash for the caller (used by stale detection).
+async fn anchor_autopilot_baseline(state: &AppState) -> Option<u64> {
+    let h = tokio::task::spawn_blocking(ahash_of_screen).await.ok().flatten();
+    *state.screen_hash.lock() = h;
+    h
+}
+
+/// Called by the frontend Autopilot polling loop every 500 ms while autopilot
+/// is on. Compares the current screen against the *anchored* baseline (set
+/// when the AI last gave guidance) — does NOT update the baseline. Without
+/// the anchor, the previous design compared each poll against the previous
+/// poll, which made the baseline drift with the screen and only caught sudden
+/// changes within a 500 ms window.
+///
+/// The screen capture happens on the blocking pool so it never ties up a tokio
+/// async worker — important because this fires twice per second and an in-flight
+/// AI streaming request shares those workers.
 #[tauri::command]
 async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let hash = ahash_of_screen();
-    let mut prev_opt = state.screen_hash.lock();
-    let changed = match (hash, *prev_opt) {
-        (Some(h), Some(prev)) => hamming64(prev, h) >= AUTOPILOT_CHANGE_THRESHOLD,
+    let hash = tokio::task::spawn_blocking(ahash_of_screen).await.ok().flatten();
+    let prev = *state.screen_hash.lock();
+    let changed = match (hash, prev) {
+        (Some(h), Some(p)) => hamming64(p, h) >= AUTOPILOT_CHANGE_THRESHOLD,
         _ => false,
     };
-    if let Some(h) = hash {
-        *prev_opt = Some(h);
-    }
     Ok(serde_json::json!({ "changed": changed }))
 }
 
@@ -592,7 +630,7 @@ async fn guide(
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     #[allow(clippy::type_complexity)]
-    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>), ()> {
+    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>, Option<u64>), ()> {
         let is_fs = full_screen.unwrap_or(false);
         let (bytes, rect_opt, hwnd_opt) = if is_fs {
             match capture::capture_virtual_desktop_jpeg(75, &exclude) {
@@ -648,16 +686,17 @@ async fn guide(
         };
 
         let thumb_b64 = make_chat_thumbnail(&final_bytes);
+        let pre_hash = ahash_of_jpeg(&final_bytes);
         let b64 = capture::to_base64(&final_bytes);
-        Ok((b64, rect_opt, hwnd_opt, debug_path, thumb_b64, final_bytes))
+        Ok((b64, rect_opt, hwnd_opt, debug_path, thumb_b64, final_bytes, pre_hash))
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
-    let (screenshot_b64, capture_rect_opt, new_hwnd_opt, debug_screenshot_path, chat_thumb_b64) = match capture_result {
-        Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes)) => {
+    let (screenshot_b64, capture_rect_opt, new_hwnd_opt, debug_screenshot_path, chat_thumb_b64, pre_hash) = match capture_result {
+        Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes, pre_hash)) => {
             *state.chat_full_jpeg.lock() = Some(full_bytes);
-            (b64, rect_opt, hwnd_opt, dbg, thumb)
+            (b64, rect_opt, hwnd_opt, dbg, thumb, pre_hash)
         }
         Err(()) => {
             return Ok(GuideResponse {
@@ -804,6 +843,15 @@ async fn guide(
     }
 
     if steps.is_empty() {
+        // Still anchor the autopilot baseline + run stale detection so that the
+        // needs_input branch behaves the same as a normal response.
+        let post_hash = anchor_autopilot_baseline(&state).await;
+        if let (Some(p), Some(q)) = (pre_hash, post_hash) {
+            let drift = hamming64(p, q);
+            if drift >= STALE_RESPONSE_THRESHOLD {
+                let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
+            }
+        }
         return Ok(GuideResponse {
             ok: true,
             session_id,
@@ -833,6 +881,16 @@ async fn guide(
     let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd_opt, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, capture_rect_opt)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
+
+    // Anchor autopilot baseline to the post-response screen + emit
+    // ai_response_stale if the screen drifted while the AI was thinking.
+    let post_hash = anchor_autopilot_baseline(&state).await;
+    if let (Some(p), Some(q)) = (pre_hash, post_hash) {
+        let drift = hamming64(p, q);
+        if drift >= STALE_RESPONSE_THRESHOLD {
+            let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
+        }
+    }
 
     Ok(GuideResponse {
         ok: true,
@@ -892,6 +950,12 @@ async fn next_step(
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
+    // Local step advance — no AI call, so no stale check. But anchor the
+    // autopilot baseline to the new pointer state so autopilot waits for the
+    // *next* change (user completing this step) rather than firing on the
+    // change that just triggered this advance.
+    let _ = anchor_autopilot_baseline(&state).await;
+
     Ok(GuideResponse {
         ok: true,
         session_id,
@@ -947,7 +1011,8 @@ async fn send_correction(
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     // Fresh capture — no stored HWND, always walks z-order to the focused window.
-    let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path, chat_thumb_b64, full_jpeg_opt) = tokio::task::spawn_blocking(move || {
+    #[allow(clippy::type_complexity)]
+    let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path, chat_thumb_b64, full_jpeg_opt, pre_hash): (String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Option<Vec<u8>>, Option<u64>) = tokio::task::spawn_blocking(move || {
         if let Ok((bytes, rect, hwnd)) = capture::capture_active_window_jpeg(75, &exclude) {
             let final_bytes = bytes;
 
@@ -977,10 +1042,11 @@ async fn send_correction(
             };
 
             let thumb_b64 = make_chat_thumbnail(&final_bytes);
+            let pre_hash = ahash_of_jpeg(&final_bytes);
             let b64 = capture::to_base64(&final_bytes);
-            (b64, Some(rect), Some(hwnd), debug_path, thumb_b64, Some(final_bytes))
+            (b64, Some(rect), Some(hwnd), debug_path, thumb_b64, Some(final_bytes), pre_hash)
         } else {
-            (String::new(), None, None, None, None, None)
+            (String::new(), None, None, None, None, None, None)
         }
     })
     .await
@@ -1071,6 +1137,13 @@ async fn send_correction(
     }
 
     if steps.is_empty() {
+        let post_hash = anchor_autopilot_baseline(&state).await;
+        if let (Some(p), Some(q)) = (pre_hash, post_hash) {
+            let drift = hamming64(p, q);
+            if drift >= STALE_RESPONSE_THRESHOLD {
+                let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
+            }
+        }
         return Ok(GuideResponse {
             ok: true,
             session_id,
@@ -1103,6 +1176,14 @@ async fn send_correction(
     let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, new_capture_rect)
         .unwrap_or((None, None));
     if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
+
+    let post_hash = anchor_autopilot_baseline(&state).await;
+    if let (Some(p), Some(q)) = (pre_hash, post_hash) {
+        let drift = hamming64(p, q);
+        if drift >= STALE_RESPONSE_THRESHOLD {
+            let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
+        }
+    }
 
     Ok(GuideResponse {
         ok: true,

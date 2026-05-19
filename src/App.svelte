@@ -150,6 +150,10 @@ See the LICENSE file in the root of this repository for complete details.
   let debugDrawerOpen = $state(false);
   let sessionId = $state("");
   let provider = $state("");
+  // Set when the screen drifted during the 5–90s AI thinking window.
+  // Surfaces a soft banner over the instruction so the user knows the
+  // guidance may be referring to state that no longer exists.
+  let staleResponse = $state(false);
   // Managed provider (S.1) state
   let freeRemaining = $state<number | null>(null);
   let showTrialExhausted = $state(false);
@@ -408,16 +412,23 @@ See the LICENSE file in the root of this repository for complete details.
   function startAutopilotPolling() {
     if (autopilotInterval !== null) return;
     autopilotInterval = setInterval(async () => {
+      // Bail cheaply BEFORE the invoke so we don't hammer GDI capture every
+      // 500 ms during AI thinking. The capture (~50 ms each) and IPC overhead
+      // were starving the SSE streaming reader and the WebView main thread,
+      // making the AI feel slow and the panel laggy whenever autopilot is on.
       if (!autoAdvanceEnabled) return;
+      if (phase !== "guiding") return;
+      if (steps.length === 0) return;
+      if (Date.now() - screenChangeDebounce < 5000) return;
       try {
         const res = await invoke<{ changed: boolean }>("check_screen_changed");
         if (!res.changed) return;
+        // Re-check phase after the await — guarding against the small race where
+        // a manual Cancel or new task fired while the capture was in flight.
         if (phase !== "guiding") return;
-        const now = Date.now();
-        if (now - screenChangeDebounce < 5000) return;
         const currentStep = steps[stepIndex];
         if (!currentStep) return;
-        screenChangeDebounce = now;
+        screenChangeDebounce = Date.now();
         addToHistory("system", "Screen changed — checking next step…");
         nextStep();
       } catch (_) {}
@@ -567,6 +578,7 @@ See the LICENSE file in the root of this repository for complete details.
     stopTimer();
     invoke("clear_overlay").catch(() => {});
     invoke("speak", { text: "" }).catch(() => {});
+    staleResponse = false;
     phase = "idle";
   }
 
@@ -717,6 +729,7 @@ See the LICENSE file in the root of this repository for complete details.
     locateResult = null;
     locateTrace = null;
     sessionId = "";
+    staleResponse = false;
     history = [];
     await addToHistory("system", "New session started");
   }
@@ -773,6 +786,7 @@ See the LICENSE file in the root of this repository for complete details.
     const prevPhase = phase;
     const userEntryId = await addToHistory("user", taskText);
     currentInstruction = "";
+    staleResponse = false;
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -860,6 +874,7 @@ See the LICENSE file in the root of this repository for complete details.
     const prevPhase = phase;
     const corrEntryId = await addToHistory("correction", note ? `Wrong — ${note}` : "Marked wrong — re-analysing…");
     currentInstruction = "";
+    staleResponse = false;
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -897,7 +912,7 @@ See the LICENSE file in the root of this repository for complete details.
   let statusLabel = $derived(
     isPaused              ? `paused · step ${stepIndex + 1}/${steps.length}`
     : phase === "idle"    ? "idle"
-    : phase === "thinking"  ? `thinking · ${(elapsedMs / 1000).toFixed(1)}s`
+    : phase === "thinking"  ? `thinking`
     : phase === "guiding"   ? `step ${stepIndex + 1}/${steps.length}`
     : phase === "needs_input" ? "needs input"
     : phase === "consent_prompt" ? "needs permission"
@@ -944,10 +959,13 @@ See the LICENSE file in the root of this repository for complete details.
     };
     try {
       const init = await invokeReady<SettingsPayload>("get_settings");
-      autoAdvanceEnabled = init.auto_advance;
+      // Autopilot always starts OFF — last-session state is intentionally not
+      // restored. Surprise-autopilot on launch is jarring and burns API credits
+      // before the user has a chance to opt in.
+      autoAdvanceEnabled = false;
       isMuted = !init.tts_enabled;
       if (init.api_provider) provider = init.api_provider;
-      settingsForm = { ...SETTINGS_DEFAULTS, ...init, auto_advance: init.auto_advance };
+      settingsForm = { ...SETTINGS_DEFAULTS, ...init, auto_advance: false };
       initHotkeys = init;
     } catch (_) {}
 
@@ -993,10 +1011,10 @@ See the LICENSE file in the root of this repository for complete details.
 
     await registerShortcuts(initHotkeys);
 
-    // Ctrl+A — push-to-talk voice input (E.7)
-    try {
-      await register("Ctrl+KeyA", () => { toggleVoiceInput(); });
-    } catch (_) {}
+    // (Removed: hardcoded Ctrl+A push-to-talk global shortcut. It hijacked the
+    // OS-wide "select all" combo so users couldn't Ctrl+A in Word or any other
+    // app while Navisual was running. Voice input remains available via the
+    // mic button in the action row.)
 
     // S.1 — Managed provider: anonymous sign-in on first launch.
     if (settingsForm.api_provider === "managed") {
@@ -1019,6 +1037,14 @@ See the LICENSE file in the root of this repository for complete details.
     listen("trial_exhausted", () => {
       freeRemaining = 0;
       showTrialExhausted = true;
+    });
+
+    // Backend detected the screen drifted enough during AI thinking
+    // (Hamming distance ≥ STALE_RESPONSE_THRESHOLD between pre-call and
+    // post-response captures) that the rendered guidance may not match
+    // what's on screen any more.
+    listen("ai_response_stale", () => {
+      staleResponse = true;
     });
 
     lastAppliedModel = activeModel;
@@ -1045,7 +1071,7 @@ See the LICENSE file in the root of this repository for complete details.
 {:else}
   <main>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
-    <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
+    <div class="titlebar" role="toolbar" tabindex="-1" data-tauri-drag-region onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
       <span class="header-title">Navisual</span>
       {#if sharedApp}
@@ -1094,6 +1120,14 @@ See the LICENSE file in the root of this repository for complete details.
             <span class="badge badge-miss">not located</span>
           {/if}
         </div>
+        {#if staleResponse && phase !== "thinking"}
+          <div class="stale-banner" role="status">
+            <span class="stale-icon">⚠</span>
+            <span class="stale-text">Screen changed while I was thinking — this guidance may be out of date.</span>
+            <button class="stale-action" onclick={() => { staleResponse = false; correction(); }} title="Re-analyse the current screen">↻ Re-analyse</button>
+            <button class="stale-dismiss" onclick={() => (staleResponse = false)} title="Dismiss">✕</button>
+          </div>
+        {/if}
         <p class="latest-text">{currentInstruction}</p>
 
         <!-- D6: subtle miss note — only when a target was expected but not found -->
@@ -1298,7 +1332,6 @@ See the LICENSE file in the root of this repository for complete details.
         → Next
       </button>
       <button class="btn-action {autoAdvanceEnabled ? 'btn-pause' : 'btn-resume'}"
-        disabled={!autoAdvanceEnabled && steps.length === 0}
         onclick={() => {
           autoAdvanceEnabled = !autoAdvanceEnabled;
           settingsForm = { ...settingsForm, auto_advance: autoAdvanceEnabled };
@@ -2219,6 +2252,45 @@ See the LICENSE file in the root of this repository for complete details.
     color: var(--text-muted, #6b7280);
     margin: 4px 0 0;
   }
+
+  /* Stale-response banner: screen drifted during AI thinking. */
+  .stale-banner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0 8px;
+    padding: 6px 8px;
+    background: rgba(255, 184, 0, 0.10);
+    border: 1px solid rgba(255, 184, 0, 0.32);
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--text-secondary, #c8c8c8);
+    line-height: 1.35;
+  }
+  .stale-icon { color: #ffb800; font-size: 13px; flex-shrink: 0; }
+  .stale-text { flex: 1; min-width: 0; }
+  .stale-action {
+    background: transparent;
+    border: 1px solid rgba(255, 184, 0, 0.45);
+    color: #ffb800;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .stale-action:hover { background: rgba(255, 184, 0, 0.14); }
+  .stale-dismiss {
+    background: transparent;
+    border: none;
+    color: var(--text-muted, #6b7280);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+  .stale-dismiss:hover { color: var(--text-primary); }
 
   /* ── Debug drawer (Phase 0.1) ────────────────────── */
 
