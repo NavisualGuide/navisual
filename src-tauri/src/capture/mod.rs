@@ -82,6 +82,9 @@ pub fn capture_active_window_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Vec<
             .ok_or_else(|| anyhow!("no foreground window found"))?;
         let rect = win::pid_union_rect(hwnd).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
+        // Grey gaps between the target's windows (other apps / desktop showing
+        // through the union bbox) so the AI only sees the target program.
+        win::blank_outside_rects(&mut img, &rect, &win::pid_member_rects(hwnd));
         win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;
         Ok((buf, rect, hwnd.0 as usize))
@@ -125,6 +128,7 @@ pub fn capture_active_window_raw(exclude: &[Rect]) -> Result<(ImageBuffer<Rgba<u
             .ok_or_else(|| anyhow!("no foreground window found"))?;
         let rect = win::pid_union_rect(hwnd).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_outside_rects(&mut img, &rect, &win::pid_member_rects(hwnd));
         win::blank_rects(&mut img, &rect, exclude);
         Ok((img, rect, hwnd.0 as usize))
     }
@@ -172,6 +176,7 @@ pub fn recapture_window_raw(
             .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
         let rect = win::pid_union_rect_raw(hwnd_raw).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_outside_rects(&mut img, &rect, &win::pid_member_rects_raw(hwnd_raw));
         win::blank_rects(&mut img, &rect, exclude);
         Ok((img, rect))
     }
@@ -196,6 +201,7 @@ pub fn recapture_window_jpeg(hwnd_raw: usize, quality: u8, exclude: &[Rect]) -> 
             .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
         let rect = win::pid_union_rect_raw(hwnd_raw).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_outside_rects(&mut img, &rect, &win::pid_member_rects_raw(hwnd_raw));
         win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;
         Ok((buf, rect))

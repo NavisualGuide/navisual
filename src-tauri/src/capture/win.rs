@@ -450,6 +450,86 @@ pub fn blank_rects(
     }
 }
 
+/// Grey every pixel of `img` that is NOT covered by at least one `keep_rect`.
+/// `keep_rects` and `capture_rect` are in virtual-desktop screen coords; `img`
+/// is the capture of `capture_rect`.
+///
+/// The capture region is the union *bounding box* of the target app's windows
+/// (`pid_union_rect`). When the app has non-adjacent windows (detached toolbar,
+/// floating palette, two-monitor spread) that bbox includes gaps that show
+/// whatever is behind — other apps, the desktop. This blanks those gaps so the
+/// AI only ever sees the target program.
+///
+/// No-op in the common single-window case (one keep rect covers the whole
+/// capture) and when `keep_rects` is empty (defensive — never produces an
+/// all-grey screenshot).
+pub fn blank_outside_rects(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    capture_rect: &Rect,
+    keep_rects: &[Rect],
+) {
+    const BLANK: Rgba<u8> = Rgba([220, 220, 220, 255]);
+    let iw = img.width() as i32;
+    let ih = img.height() as i32;
+    if iw <= 0 || ih <= 0 {
+        return;
+    }
+
+    // Keep rects → image-local pixel bounds, clipped to the image.
+    let locals: Vec<(i32, i32, i32, i32)> = keep_rects
+        .iter()
+        .filter_map(|k| {
+            let x0 = (k.x - capture_rect.x).max(0);
+            let y0 = (k.y - capture_rect.y).max(0);
+            let x1 = (k.x + k.width as i32 - capture_rect.x).min(iw);
+            let y1 = (k.y + k.height as i32 - capture_rect.y).min(ih);
+            if x1 <= x0 || y1 <= y0 { None } else { Some((x0, y0, x1, y1)) }
+        })
+        .collect();
+
+    // Nothing to key off — leave the image untouched rather than blanking all.
+    if locals.is_empty() {
+        return;
+    }
+
+    // Common case: one window already spans the whole capture — no gaps.
+    for &(x0, y0, x1, y1) in &locals {
+        if x0 <= 0 && y0 <= 0 && x1 >= iw && y1 >= ih {
+            return;
+        }
+    }
+
+    // Per-row: blank the x-runs not covered by any keep rect spanning that row.
+    for y in 0..ih {
+        let mut intervals: Vec<(i32, i32)> = locals
+            .iter()
+            .filter(|&&(_, y0, _, y1)| y >= y0 && y < y1)
+            .map(|&(x0, _, x1, _)| (x0, x1))
+            .collect();
+
+        if intervals.is_empty() {
+            for x in 0..iw {
+                img.put_pixel(x as u32, y as u32, BLANK);
+            }
+            continue;
+        }
+
+        intervals.sort_by_key(|&(a, _)| a);
+        let mut cursor = 0;
+        for (a, b) in intervals {
+            if a > cursor {
+                for x in cursor..a {
+                    img.put_pixel(x as u32, y as u32, BLANK);
+                }
+            }
+            cursor = cursor.max(b);
+        }
+        for x in cursor..iw {
+            img.put_pixel(x as u32, y as u32, BLANK);
+        }
+    }
+}
+
 /// Returns the DWM extended frame bounds of `hwnd`, or GetWindowRect as a
 /// fallback for classic/non-DWM windows. None if both fail.
 fn frame_rect_of(hwnd: HWND) -> Option<Rect> {
@@ -680,6 +760,70 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
 /// Convenience wrapper for callers that hold a raw HWND value (usize).
 pub fn pid_union_rect_raw(hwnd_raw: usize) -> Option<Rect> {
     pid_union_rect(HWND(hwnd_raw as *mut _))
+}
+
+/// Collect the frame rects of every visible, non-cloaked top-level window
+/// belonging to the SAME PROCESS as `target`. Fed to `blank_outside_rects` to
+/// grey the gaps in the union-bbox capture so the AI only sees the target app.
+///
+/// Deliberately MORE inclusive than `pid_union_rect`'s internal filter: it
+/// keeps tool windows (floating palettes, tooltips, dropdown popups) so a
+/// same-app popup sitting in a gap is preserved rather than blanked. Our own
+/// windows are a different PID and are naturally excluded. Falls back to the
+/// target's own frame if enumeration yields nothing, so the keep-set is never
+/// empty (which would otherwise blank the whole capture).
+pub fn pid_member_rects(target: HWND) -> Vec<Rect> {
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(target, Some(&mut pid)); }
+    if pid == 0 {
+        return frame_rect_of(target).into_iter().collect();
+    }
+
+    struct State {
+        target_pid: u32,
+        rects: Vec<Rect>,
+    }
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return TRUE;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != state.target_pid {
+            return TRUE;
+        }
+        // Skip cloaked (UWP hidden / virtual-desktop) windows.
+        let mut cloaked: u32 = 0;
+        let _ = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        );
+        if cloaked != 0 {
+            return TRUE;
+        }
+        if let Some(r) = frame_rect_of(hwnd) {
+            state.rects.push(r);
+        }
+        TRUE
+    }
+
+    let mut state = State { target_pid: pid, rects: Vec::new() };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+    if state.rects.is_empty() {
+        return frame_rect_of(target).into_iter().collect();
+    }
+    state.rects
+}
+
+/// Convenience wrapper for callers that hold a raw HWND value (usize).
+pub fn pid_member_rects_raw(hwnd_raw: usize) -> Vec<Rect> {
+    pid_member_rects(HWND(hwnd_raw as *mut _))
 }
 
 /// Returns true when `pid` belongs to Tauri's embedded WebView2 renderer
