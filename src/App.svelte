@@ -263,7 +263,7 @@ See the LICENSE file in the root of this repository for complete details.
     subtitle_enabled: true, auto_advance: false,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "en-US",
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
-    hotkey_pause: "Ctrl+KeyS", hotkey_icon: "Ctrl+KeyQ", hotkey_talk: "Ctrl+KeyD",
+    hotkey_pause: "", hotkey_icon: "", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
     debug_show_response_info: false,
     debug_locate_trace_enabled: false,
@@ -666,6 +666,7 @@ See the LICENSE file in the root of this repository for complete details.
     ];
     const errors: string[] = [];
     for (const [key, handler] of pairs) {
+      if (!key) continue;
       try { await register(key, handler); }
       catch (e) { errors.push(`${key}: ${e}`); console.warn("shortcut failed:", key, e); }
     }
@@ -1441,7 +1442,7 @@ See the LICENSE file in the root of this repository for complete details.
             <li>For zero data sharing, use the Ollama provider — it runs locally.</li>
           </ul>
           <p style="margin: 0 0 14px 0; font-size: 0.85em; color: var(--text-tertiary);">
-            Press <kbd>Ctrl</kbd>+<kbd>S</kbd> at any time to pause all capture.
+            Use the Pause hotkey (configurable in Settings → Hotkeys) to stop all capture instantly.
           </p>
           <button
             class="btn-primary btn-full"

@@ -64,8 +64,8 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 |-----|--------|
 | <kbd>Ctrl</kbd>+<kbd>`</kbd> | Next step — confirm completed and advance |
 | <kbd>Ctrl</kbd>+<kbd>E</kbd> | Wrong — re-analyze the current screen |
-| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Pause / resume capture |
-| <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Show / hide the panel |
+| *(not set)* | Pause / resume capture |
+| *(not set)* | Show / hide the panel |
 | <kbd>Ctrl</kbd>+<kbd>D</kbd> | Push-to-talk voice input |
 
 All hotkeys are configurable in **Settings → Hotkeys**.
@@ -91,7 +91,7 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 Additional notes:
 - Screenshots are held in memory only — never written to disk at default settings
 - Full-screen / multi-monitor capture requires explicit one-time permission each time
-- Press <kbd>Alt</kbd>+<kbd>S</kbd> to pause all capture instantly
+- Assign a Pause hotkey in **Settings → Hotkeys** to stop all capture instantly
 - Settings and auth token live in `%APPDATA%\com.navisual.app\`
 - Debug captures are off by default; when enabled, files older than 7 days are auto-deleted
 
