@@ -129,7 +129,7 @@ npm run tauri dev      # development (hot reload)
 npm run tauri build    # production binary → src-tauri/target/release/
 ```
 
-Dev settings are read from the project-root `.env`. Copy `.env.example` to get started.
+Settings (dev and production) are read from `%APPDATA%\com.navisual.app\.env`. Copy `.env.example` there to pre-configure. The project-root `.env` is not read.
 
 ---
 
