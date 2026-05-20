@@ -36,7 +36,7 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 2. Launch Navisual — it signs you in anonymously and gives you 50 free requests
 3. Type what you need help with: *"How do I export a PDF in Illustrator?"*
 4. Follow the on-screen arrows and spoken instructions
-5. Press <kbd>Alt</kbd>+<kbd>`</kbd> when you've completed each step to advance
+5. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> when you've completed each step to advance
 
 ---
 
@@ -62,11 +62,11 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 
 | Key | Action |
 |-----|--------|
-| <kbd>Alt</kbd>+<kbd>`</kbd> | Next step — confirm completed and advance |
-| <kbd>Alt</kbd>+<kbd>E</kbd> | Wrong — re-analyze the current screen |
-| <kbd>Alt</kbd>+<kbd>S</kbd> | Pause / resume capture |
-| <kbd>Alt</kbd>+<kbd>Q</kbd> | Show / hide the panel |
-| <kbd>Alt</kbd>+<kbd>A</kbd> | Push-to-talk voice input |
+| <kbd>Ctrl</kbd>+<kbd>`</kbd> | Next step — confirm completed and advance |
+| <kbd>Ctrl</kbd>+<kbd>E</kbd> | Wrong — re-analyze the current screen |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Pause / resume capture |
+| <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Show / hide the panel |
+| <kbd>Ctrl</kbd>+<kbd>D</kbd> | Push-to-talk voice input |
 
 All hotkeys are configurable in **Settings → Hotkeys**.
 

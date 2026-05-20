@@ -67,6 +67,7 @@ pub struct Config {
     pub hotkey_wrong: String,
     pub hotkey_pause: String,
     pub hotkey_icon: String,
+    pub hotkey_talk: String,
 
     // Developer / testing
     pub debug_screenshot_enabled: bool,
@@ -118,6 +119,7 @@ impl Default for Config {
             hotkey_wrong: "Ctrl+KeyE".to_string(),
             hotkey_pause: "Ctrl+KeyS".to_string(),
             hotkey_icon:  "Ctrl+KeyQ".to_string(),
+            hotkey_talk:  "Ctrl+KeyD".to_string(),
             debug_screenshot_enabled: false,
             debug_show_response_info: false,
             debug_locate_trace_enabled: false,
@@ -186,6 +188,7 @@ impl Config {
         if let Ok(v) = env::var("HOTKEY_WRONG") { if !v.is_empty() { config.hotkey_wrong = v; } }
         if let Ok(v) = env::var("HOTKEY_PAUSE") { if !v.is_empty() { config.hotkey_pause = v; } }
         if let Ok(v) = env::var("HOTKEY_ICON")  { if !v.is_empty() { config.hotkey_icon  = v; } }
+        if let Ok(v) = env::var("HOTKEY_TALK")  { if !v.is_empty() { config.hotkey_talk  = v; } }
         if let Ok(v) = env::var("DEBUG_SCREENSHOT_ENABLED") { config.debug_screenshot_enabled = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_SHOW_RESPONSE_INFO") { config.debug_show_response_info = v == "true" || v == "1"; }
         if let Ok(v) = env::var("DEBUG_LOCATE_TRACE_ENABLED") { config.debug_locate_trace_enabled = v == "true" || v == "1"; }

@@ -75,6 +75,7 @@ See the LICENSE file in the root of this repository for complete details.
     hotkey_wrong: string;
     hotkey_pause: string;
     hotkey_icon: string;
+    hotkey_talk: string;
     debug_screenshot_enabled: boolean;
     debug_show_response_info: boolean;
     debug_locate_trace_enabled: boolean;
@@ -262,7 +263,7 @@ See the LICENSE file in the root of this repository for complete details.
     subtitle_enabled: true, auto_advance: false,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "en-US",
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
-    hotkey_pause: "Ctrl+KeyS", hotkey_icon: "Ctrl+KeyQ",
+    hotkey_pause: "Ctrl+KeyS", hotkey_icon: "Ctrl+KeyQ", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
     debug_show_response_info: false,
     debug_locate_trace_enabled: false,
@@ -650,7 +651,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Re-register global shortcuts. Called on mount and after settings change.
-  async function registerShortcuts(hk: Pick<SettingsPayload, "hotkey_next"|"hotkey_wrong"|"hotkey_pause"|"hotkey_icon">) {
+  async function registerShortcuts(hk: Pick<SettingsPayload, "hotkey_next"|"hotkey_wrong"|"hotkey_pause"|"hotkey_icon"|"hotkey_talk">) {
     await unregisterAll().catch(() => {});
     function debounced(fn: () => void, ms = 350): () => void {
       let last = 0;
@@ -661,6 +662,7 @@ See the LICENSE file in the root of this repository for complete details.
       [hk.hotkey_wrong, debounced(() => { if (!actionDisabled) correction(); })],
       [hk.hotkey_pause, debounced(() => cancelRequest())],
       [hk.hotkey_icon,  debounced(() => { if (iconMode) expandToPanel(); else collapseToIcon(); })],
+      [hk.hotkey_talk,  debounced(() => { if (settingsForm.voice_input_enabled) toggleVoiceInput(); })],
     ];
     const errors: string[] = [];
     for (const [key, handler] of pairs) {
@@ -951,11 +953,12 @@ See the LICENSE file in the root of this repository for complete details.
     // tauri.conf.json) so the user never sees a blank frame at 0,0 while
     // WebView2 initialises. We show only once the UI is fully painted.
     // Load initial config so hotkeys, autoAdvance, and provider are correct from startup.
-    let initHotkeys: Pick<SettingsPayload, "hotkey_next"|"hotkey_wrong"|"hotkey_pause"|"hotkey_icon"> = {
+    let initHotkeys: Pick<SettingsPayload, "hotkey_next"|"hotkey_wrong"|"hotkey_pause"|"hotkey_icon"|"hotkey_talk"> = {
       hotkey_next: SETTINGS_DEFAULTS.hotkey_next,
       hotkey_wrong: SETTINGS_DEFAULTS.hotkey_wrong,
       hotkey_pause: SETTINGS_DEFAULTS.hotkey_pause,
       hotkey_icon: SETTINGS_DEFAULTS.hotkey_icon,
+      hotkey_talk: SETTINGS_DEFAULTS.hotkey_talk,
     };
     try {
       const init = await invokeReady<SettingsPayload>("get_settings");
@@ -1347,7 +1350,7 @@ See the LICENSE file in the root of this repository for complete details.
       <button class="btn-action btn-mic" class:btn-mic-active={isRecording}
         onclick={toggleVoiceInput}
         disabled={!settingsForm.voice_input_enabled}
-        title={settingsForm.voice_input_enabled ? (isRecording ? "Stop recording (Ctrl+A)" : "Voice input (Ctrl+A)") : "Enable voice input in Settings → Audio"}>
+        title={settingsForm.voice_input_enabled ? (isRecording ? `Stop recording (${settingsForm.hotkey_talk})` : `Voice input (${settingsForm.hotkey_talk})`) : "Enable voice input in Settings → Audio"}>
         🎤
       </button>
       <button class="btn-action btn-more" class:btn-more-open={showQuickMenu}
@@ -1793,6 +1796,10 @@ See the LICENSE file in the root of this repository for complete details.
             <div class="setting-group">
               <label class="setting-label">Toggle icon mode</label>
               <HotkeyInput bind:value={settingsForm.hotkey_icon} />
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">Voice input (push-to-talk)</label>
+              <HotkeyInput bind:value={settingsForm.hotkey_talk} />
             </div>
 
           {:else if settingsTab === "developer" && settingsForm.developer_mode}
