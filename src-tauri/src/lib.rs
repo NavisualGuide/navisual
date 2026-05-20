@@ -879,19 +879,27 @@ async fn guide(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[0], capture_rect_opt, &provider);
-    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd_opt, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, capture_rect_opt)
-        .unwrap_or((None, None));
-    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
-    // Anchor autopilot baseline to the post-response screen + emit
-    // ai_response_stale if the screen drifted while the AI was thinking.
-    let post_hash = anchor_autopilot_baseline(&state).await;
-    if let (Some(p), Some(q)) = (pre_hash, post_hash) {
+    // Stale detection must run BEFORE execute_step draws the new pointer.
+    // Capturing afterwards would include our own overlay pointer — a large
+    // visual change that trips the threshold on every response. The overlay
+    // was cleared before the AI capture, so the screen is pointer-free here
+    // too; any drift now reflects a real user change while the AI was thinking.
+    let stale_hash = tokio::task::spawn_blocking(ahash_of_screen).await.ok().flatten();
+    if let (Some(p), Some(q)) = (pre_hash, stale_hash) {
         let drift = hamming64(p, q);
         if drift >= STALE_RESPONSE_THRESHOLD {
             let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
         }
     }
+
+    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd_opt, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, capture_rect_opt)
+        .unwrap_or((None, None));
+    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
+
+    // Anchor the autopilot baseline AFTER the pointer is drawn so that
+    // check_screen_changed (which also sees the pointer) compares like-for-like.
+    let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
         ok: true,
@@ -1174,17 +1182,22 @@ async fn send_correction(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[0], new_capture_rect, &provider);
-    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, new_capture_rect)
-        .unwrap_or((None, None));
-    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
 
-    let post_hash = anchor_autopilot_baseline(&state).await;
-    if let (Some(p), Some(q)) = (pre_hash, post_hash) {
+    // Stale detection before the pointer is drawn — see guide() for rationale.
+    let stale_hash = tokio::task::spawn_blocking(ahash_of_screen).await.ok().flatten();
+    if let (Some(p), Some(q)) = (pre_hash, stale_hash) {
         let drift = hamming64(p, q);
         if drift >= STALE_RESPONSE_THRESHOLD {
             let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
         }
     }
+
+    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, new_capture_rect)
+        .unwrap_or((None, None));
+    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
+
+    // Anchor the autopilot baseline AFTER the pointer is drawn (pointer-inclusive).
+    let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
         ok: true,
