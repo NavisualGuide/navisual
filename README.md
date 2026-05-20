@@ -2,65 +2,15 @@
 
 **The AI guides, never overrides.**
 
-Navisual is a Windows desktop app that watches your screen and gives real-time step-by-step instructions via on-screen overlays and audio. The AI never clicks, types, or takes control — every action is yours.
+<!-- Replace with a 6–10 sec GIF of one real task end-to-end once recorded.
+     Save it as assets/demo.gif and the line below will auto-render on GitHub. -->
+<!-- ![Navisual demo](assets/demo.gif) -->
 
-**Status:** v0.5.x — public beta. Signed Windows installer at [navisualguide.com](https://navisualguide.com).  
-**Website:** [navisualguide.com](https://navisualguide.com)
+Navisual watches your screen and walks you through any task step by step — pointing at the exact button to click, narrating each action, and reading the current state of your app. The AI never moves your mouse, clicks, or types for you. Every action stays in your hands.
 
----
+**[Download for Windows](https://navisualguide.com)** · [View on GitHub](https://github.com/NavisualGuide/navisual) · [navisualguide.com](https://navisualguide.com)
 
-## Quick Start
-
-**No API key required.** The app includes 50 free AI requests out of the box. Just build, launch, and start guiding.
-
-1. Type your task — *"How do I export a PDF in Illustrator?"*
-2. Follow the arrows and audio instructions on screen
-3. Press ``Ctrl+` `` to confirm each step and advance
-
----
-
-## Build from Source (Windows)
-
-### Prerequisites
-
-- [Rust](https://rustup.rs/) (stable toolchain)
-- [Node.js](https://nodejs.org/) 18+
-- [Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (for Windows system crates)
-- [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) — pre-installed on Windows 11
-
-### Steps
-
-```powershell
-git clone https://github.com/NavisualGuide/navisual.git
-cd navisual
-npm install
-npm run tauri dev      # development (hot reload)
-npm run tauri build    # production binary
-```
-
-The production binary is placed in `src-tauri/target/release/`.
-
-### Configuration
-
-Settings are stored in `%APPDATA%\com.navisual.app\.env`. The app creates this file on first launch. You can also copy `.env.example` there to pre-configure it.
-
-In development (`npm run tauri dev`), the project-root `.env` is used instead.
-
-**To use your own API key** (optional — the free managed tier works without one):
-
-```env
-API_PROVIDER=gemini
-GEMINI_API_KEY=AIza-xxx        # Free key: https://aistudio.google.com/apikey
-```
-
-Or use Anthropic:
-
-```env
-API_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-xxx
-```
-
-All settings are also configurable in-app via **Settings** (gear icon) — no `.env` editing required.
+> **50 free requests included — no sign-up, no API key required.**
 
 ---
 
@@ -68,11 +18,43 @@ All settings are also configurable in-app via **Settings** (gear icon) — no `.
 
 | Provider | Setup | Cost |
 |----------|-------|------|
-| **Managed (free)** | None — works on first launch | 50 free requests, then paid |
-| Gemini | Free API key at [aistudio.google.com](https://aistudio.google.com/apikey) | Free tier available |
-| Anthropic | API key at [console.anthropic.com](https://console.anthropic.com) | Pay per use |
-| Ollama | [ollama.com](https://ollama.com) + `ollama pull llama3.2-vision` | Free, runs locally |
-| OpenAI | API key at [platform.openai.com](https://platform.openai.com) | Pay per use |
+| **Managed (free, default)** | None — works on first launch | 50 free requests, then paid |
+| Gemini | Free key at [aistudio.google.com](https://aistudio.google.com/apikey) | Free tier available |
+| Anthropic (Claude) | Key at [console.anthropic.com](https://console.anthropic.com) | Pay per use |
+| OpenAI | Key at [platform.openai.com](https://platform.openai.com) | Pay per use |
+| DeepSeek | Key at [platform.deepseek.com](https://platform.deepseek.com) | Pay per use |
+| Qwen | Key at [dashscope.aliyuncs.com](https://dashscope.aliyuncs.com) | Pay per use |
+| Ollama (local) | [ollama.com](https://ollama.com) + `ollama pull llama3.2-vision` | Free, nothing leaves your machine |
+
+Configure your provider in-app via **Settings → Provider** — no file editing required.
+
+---
+
+## Quick Start
+
+1. **[Download the installer](https://navisualguide.com)** and run `Navisual-Setup.exe`
+2. Launch Navisual — it signs you in anonymously and gives you 50 free requests
+3. Type what you need help with: *"How do I export a PDF in Illustrator?"*
+4. Follow the on-screen arrows and spoken instructions
+5. Press <kbd>Alt</kbd>+<kbd>`</kbd> when you've completed each step to advance
+
+---
+
+## Features
+
+- **Observe, never act** — reads your screen, never moves the mouse or types
+- **Screen Guide** — visual pointers land on the exact button, tab, or field
+- **Live captions** — subtitle strip shows the current instruction
+- **Audio narration** — TTS via Windows SAPI, no install required
+- **Voice input** — push-to-talk via Web Speech API
+- **Free managed tier** — 50 requests out of the box, no account needed
+- **Multi-provider AI** — 6 BYOK providers including DeepSeek and Qwen for Chinese users
+- **Windows UI Automation** — primary element locator, < 5ms for browsers
+- **Windows built-in OCR** — zero model downloads, works offline
+- **Active-window crop** — only the relevant window is sent to the AI
+- **Autopilot mode** — auto-advances when the screen changes, no hotkey needed
+- **Multi-step sequences** — groups related actions to reduce API calls
+- **Session persistence** — conversation and state survive app restarts
 
 ---
 
@@ -80,107 +62,80 @@ All settings are also configurable in-app via **Settings** (gear icon) — no `.
 
 | Key | Action |
 |-----|--------|
-| <kbd>Ctrl</kbd>+<kbd>`</kbd> | Next step / confirm completed |
-| <kbd>Ctrl</kbd>+<kbd>E</kbd> | Wrong — re-analyze the current screen |
-| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Pause / resume |
-| <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Show / hide the panel |
+| <kbd>Alt</kbd>+<kbd>`</kbd> | Next step — confirm completed and advance |
+| <kbd>Alt</kbd>+<kbd>E</kbd> | Wrong — re-analyze the current screen |
+| <kbd>Alt</kbd>+<kbd>S</kbd> | Pause / resume capture |
+| <kbd>Alt</kbd>+<kbd>Q</kbd> | Show / hide the panel |
+| <kbd>Alt</kbd>+<kbd>A</kbd> | Push-to-talk voice input |
 
 All hotkeys are configurable in **Settings → Hotkeys**.
 
 ---
 
-## Features
+## Privacy
 
-- **Observe, never act** — reads your screen, never moves the mouse or types
-- **Screen Guide** — overlay indicators pointing at the exact UI element
-- **Live captions** — subtitle strip showing the current instruction
-- **Audio narration** — TTS via Windows SAPI (no install required)
-- **Voice input** — push-to-talk via Web Speech API
-- **Free managed tier** — 50 requests out of the box, no account needed
-- **Multi-provider AI** — Gemini, Anthropic (Claude), Ollama (local), OpenAI, Managed
-- **Windows UI Automation** — primary element locator, < 5ms for browsers
-- **Windows OCR** — built-in fallback, zero model downloads
-- **Active-window crop** — sends only the relevant window to the AI
-- **Multi-step sequences** — groups sequential actions to reduce API calls
-- **Session persistence** — state preserved across app restarts
-- **Autopilot mode** — auto-advances on screen change without pressing next
-- **In-app settings** — configure everything without editing files
+**What stays on your machine:** element matching (UIA + OCR), session history, settings, and cost tracking. The AI returns *text descriptions* of UI elements; your machine finds the pixels — coordinates are never sent.
+
+**What gets sent to the AI:** a screenshot of the active window only (not the full desktop) plus your conversation text.
+
+| Provider | Where the screenshot goes |
+|---|---|
+| **Managed (default)** | Supabase Edge Function → OpenRouter → NVIDIA Nemotron |
+| Anthropic | `api.anthropic.com` |
+| Gemini | `generativelanguage.googleapis.com` |
+| OpenAI | `api.openai.com` |
+| DeepSeek | `api.deepseek.com` (text-only — screenshot not sent) |
+| Qwen | `dashscope.aliyuncs.com` (or your configured workspace URL) |
+| Ollama | `http://localhost:11434` — nothing leaves your machine |
+
+Additional notes:
+- Screenshots are held in memory only — never written to disk at default settings
+- Full-screen / multi-monitor capture requires explicit one-time permission each time
+- Press <kbd>Alt</kbd>+<kbd>S</kbd> to pause all capture instantly
+- Settings and auth token live in `%APPDATA%\com.navisual.app\`
+- Debug captures are off by default; when enabled, files older than 7 days are auto-deleted
 
 ---
 
 ## Architecture
 
-For a short technical tour (data flow, element locator, key design decisions), see [ARCHITECTURE.md](ARCHITECTURE.md).
-
----
-
-## Project Structure
-
-```
-navisual/
-├── src/                        # Svelte frontend
-│   ├── App.svelte              # Main panel UI
-│   └── Overlay.svelte          # Transparent overlay canvas
-├── src-tauri/                  # Rust backend
-│   ├── src/
-│   │   ├── lib.rs              # Tauri commands + guidance loop
-│   │   ├── ai/                 # AI router (Anthropic, Gemini, Ollama, Managed)
-│   │   ├── capture/            # Screen capture (BitBlt, active-window crop)
-│   │   ├── locator/            # Element locator (UIA + OCR)
-│   │   ├── overlay.rs          # Overlay pipeline
-│   │   ├── tts.rs              # Windows SAPI TTS
-│   │   ├── server.rs           # Supabase auth client
-│   │   ├── track.rs            # Window tracker (HWND focus detection)
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── index.html                  # Panel window entry point
-├── overlay.html                # Overlay window entry point
-└── .env.example                # Config template
-```
+For a short technical tour of the data flow, element locator, and key design decisions, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
 ## Roadmap
 
 ```
-v0.5    ✅ Free managed tier (Supabase relay, anonymous auth, 50 free requests)
-        🔜 Pay-as-you-go coin purchases + signed Windows installer
-v0.6    Template matching + Nav-Packs 
-v1.0    Microsoft Store + enterprise features + public launch
-v1.x    macOS port + Linux port
+v0.5    ✅ Free managed tier · auto-updater · signed installer · 6 BYOK providers
+        🔜 Pay-as-you-go coin purchases (Stripe)
+v0.6    Template matching · Nav-Packs for Blender / SolidWorks
+v1.0    Microsoft Store · enterprise features · public launch
+v1.x    macOS · Linux
 ```
 
 ---
 
-## Privacy
+## Build from Source
 
-**What stays on your machine.** Local element matching (UI Automation + OCR), session history, settings, and cost tracking are all local-only. The AI returns *text* descriptions of UI elements; your machine finds the pixels — UIA / OCR coordinates are never sent to the AI.
+For contributors or developers who want to run from source:
 
-**What gets sent to the AI.** Only a screenshot of the **active window** (active-window crop, by default) plus the conversation text.
+**Prerequisites:** [Rust](https://rustup.rs/) (stable), [Node.js](https://nodejs.org/) 18+, [Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/), [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11)
 
-| Provider | Where the screenshot + text go |
-|---|---|
-| **Managed (free, default)** | Supabase Edge Function → OpenRouter → NVIDIA Nemotron |
-| BYOK Anthropic | `api.anthropic.com` |
-| BYOK Gemini | `generativelanguage.googleapis.com` |
-| BYOK OpenAI | `api.openai.com` |
-| BYOK DeepSeek | `api.deepseek.com` (text only — no image is sent) |
-| BYOK Qwen | `dashscope.aliyuncs.com` (or your configured workspace URL) |
-| BYOK Ollama | `http://localhost:11434` (local — nothing leaves your machine) |
+```powershell
+git clone https://github.com/NavisualGuide/navisual.git
+cd navisual
+npm install
+npm run tauri dev      # development (hot reload)
+npm run tauri build    # production binary → src-tauri/target/release/
+```
 
-**Other notes.**
-
-- Screenshots are held in memory only — never written to disk at default settings
-- Full-screen capture (multi-monitor) requires explicit one-time permission per AI call
-- Press <kbd>Ctrl</kbd>+<kbd>S</kbd> to stop all capture instantly
-- Settings, sessions, and the Supabase anonymous-auth token live in `%APPDATA%\com.navisual.app\`
-- Debug captures + locator traces are off by default; if enabled (developer-only `.env` flags), files older than 7 days are auto-deleted
+Dev settings are read from the project-root `.env`. Copy `.env.example` to get started.
 
 ---
 
 ## Contributing
 
-Issues and pull requests welcome.
+Issues and pull requests are welcome. See [ARCHITECTURE.md](ARCHITECTURE.md) for an orientation to the codebase.
 
 ---
 
