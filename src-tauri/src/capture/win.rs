@@ -30,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     GA_ROOTOWNER,
+    SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -368,6 +369,54 @@ pub fn own_panel_rects() -> Vec<Rect> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
     state.rects
+}
+
+/// Re-assert the overlay window's TOPMOST z-order so the guidance pointer stays
+/// above transient popups (ribbon dropdowns, combo lists, context menus,
+/// tooltips) that other apps create as freshly-activated topmost windows.
+///
+/// Windows places a newly shown menu above existing topmost windows of equal
+/// band, so a one-time `alwaysOnTop` at window creation is not enough — the very
+/// menu the user just opened can cover the pointer. Calling this on the tracker's
+/// 200 ms tick (only while a pointer is active) keeps the overlay on top.
+///
+/// The overlay is the only own-process window with `WS_EX_TRANSPARENT`, so we
+/// identify it the same way `own_panel_rects` does. `SWP_NOACTIVATE` ensures we
+/// never steal focus from the app the user is working in.
+pub fn raise_overlay_topmost() {
+    let our_pid = std::process::id();
+
+    struct State {
+        pid: u32,
+    }
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != state.pid {
+            return TRUE;
+        }
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex_style & WS_EX_TRANSPARENT.0) != 0 && IsWindowVisible(hwnd).as_bool() {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            return FALSE; // overlay found — stop enumerating
+        }
+        TRUE
+    }
+
+    let mut state = State { pid: our_pid };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
 }
 
 /// Overwrite pixels in `img` that fall within any of `exclude_rects`.

@@ -318,6 +318,16 @@ pub fn get_panel_rects() -> Vec<Rect> {
     }
 }
 
+/// Re-assert the overlay window's TOPMOST z-order so the guidance pointer stays
+/// above transient popups (dropdown menus, combo lists, tooltips) created by
+/// other apps. No-op on non-Windows. See `win::raise_overlay_topmost`.
+pub fn raise_overlay_topmost() {
+    #[cfg(windows)]
+    {
+        win::raise_overlay_topmost();
+    }
+}
+
 /// Convenience: base64-encode JPEG bytes (suitable for AI API payloads).
 pub fn to_base64(bytes: &[u8]) -> String {
     use base64::Engine;

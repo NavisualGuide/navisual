@@ -146,6 +146,11 @@ fn poll_once(state: &Mutex<Option<TrackState>>) {
                 return;
             }
 
+            // A pointer is active and its window is visible — keep the overlay
+            // above any transient popup (ribbon dropdown, combo list, tooltip)
+            // the user just opened, which Windows would otherwise stack on top.
+            crate::capture::raise_overlay_topmost();
+
             let mut wr = windows::Win32::Foundation::RECT::default();
             if GetWindowRect(hwnd, &mut wr).is_err() {
                 return;
