@@ -31,6 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     GA_ROOTOWNER,
     SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE,
+    GetWindow, GW_OWNER,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -706,14 +707,20 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
             return TRUE;
         }
 
-        // Same-monitor filter — keeps the union compact when the app has
-        // multiple windows spread across displays.
-        let cx = r.x + r.width as i32 / 2;
-        let cy = r.y + r.height as i32 / 2;
-        let m = &state.monitor;
-        if cx < m.x || cx >= m.x + m.width as i32
-            || cy < m.y || cy >= m.y + m.height as i32 {
-            return TRUE;
+        // Owned windows (modal dialogs, popups) are part of the interaction and
+        // are kept regardless of which monitor they sit on — a Word "Find" or
+        // "Font" dialog dragged to a second screen must still be captured.
+        // Unowned top-level windows (e.g. a second document on another monitor)
+        // keep the same-monitor filter so the union stays compact.
+        let is_owned = GetWindow(hwnd, GW_OWNER).map(|o| !o.0.is_null()).unwrap_or(false);
+        if !is_owned {
+            let cx = r.x + r.width as i32 / 2;
+            let cy = r.y + r.height as i32 / 2;
+            let m = &state.monitor;
+            if cx < m.x || cx >= m.x + m.width as i32
+                || cy < m.y || cy >= m.y + m.height as i32 {
+                return TRUE;
+            }
         }
 
         // Extend the running union.
@@ -741,10 +748,12 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
 
-    // Clamp final union to the target's monitor bounds (defence — frame_rect_of
-    // can extend a pixel or two beyond on DWM-aware borderless windows).
-    let m = state.monitor;
+    // Clamp the final union to the bounds of every monitor it now touches.
+    // Using monitor_union_for(union) — not just the target's home monitor —
+    // lets an owned dialog on a second screen survive the clamp. For the common
+    // single-monitor union this is identical to the home monitor.
     let u = state.union;
+    let m = monitor_union_for(&u);
     let left = u.x.max(m.x);
     let top = u.y.max(m.y);
     let right = (u.x + u.width as i32).min(m.x + m.width as i32);
