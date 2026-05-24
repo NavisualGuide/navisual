@@ -562,9 +562,12 @@
     if (animFrame !== null) { cancelAnimationFrame(animFrame); animFrame = null; }
     currentUpdate = update;
 
-    // Kind=none AND no AI-bbox dev overlay to draw → real clear path.
+    // Kind=none AND nothing to draw → real clear path.
+    // Must also check for subtitle text: a completion step has no locator target
+    // (kind=none) but still carries instruction text that should appear as caption.
     const hasAiBboxToDraw = theme.show_ai_bbox && update.ai_bbox;
-    if (update.kind === "none" && !hasAiBboxToDraw) {
+    const hasSubtitleToDraw = theme.subtitle_enabled && update.text;
+    if (update.kind === "none" && !hasAiBboxToDraw && !hasSubtitleToDraw) {
       if (canvas) {
         const ctx = canvas.getContext("2d");
         if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);

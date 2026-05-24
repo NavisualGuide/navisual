@@ -82,10 +82,34 @@ impl DeepSeekClient {
             "response_format": { "type": "json_object" }
         });
 
+        // DeepSeek V4 is a reasoning model and intermittently ends a stream having
+        // emitted only `reasoning_content` and no answer `content` — surfaced as an
+        // "empty response". The empties are non-deterministic on identical input,
+        // so retry once before giving up. `stream_once` also salvages the answer
+        // out of reasoning_content when the model put its JSON there.
+        for attempt in 0..2 {
+            if let Some(out) = self.stream_once(&payload, &mut *on_chunk).await? {
+                return Ok(out);
+            }
+            if attempt == 0 {
+                log::warn!("{}: empty content from stream, retrying once", self.name);
+            }
+        }
+        bail!("{} returned an empty response", self.name);
+    }
+
+    /// One streamed request. Returns `Ok(None)` when the model produced no usable
+    /// answer (empty `content` and no recoverable JSON in `reasoning_content`), so
+    /// the caller can retry. Propagates transport / non-2xx HTTP errors.
+    async fn stream_once(
+        &self,
+        payload: &Value,
+        on_chunk: &mut impl FnMut(&str),
+    ) -> Result<Option<(NavigateStepResponse, u64, u64)>> {
         let response = self.client
             .post(&self.base_url)
             .bearer_auth(&self.api_key)
-            .json(&payload)
+            .json(payload)
             .send()
             .await?;
 
@@ -96,6 +120,8 @@ impl DeepSeekClient {
         }
 
         let mut accumulated_text = String::new();
+        let mut reasoning_text = String::new();
+        let mut finish_reason: Option<String> = None;
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
         let mut in_instruction = false;
@@ -136,10 +162,31 @@ impl DeepSeekClient {
                     }
                 }
 
-                if let Some(content) = data
+                if let Some(fr) = data
                     .get("choices")
                     .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|v| v.as_str())
+                {
+                    finish_reason = Some(fr.to_string());
+                }
+
+                let delta = data
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("delta"));
+
+                // Reasoning models stream the chain-of-thought in a separate
+                // `reasoning_content` field; capture it so the answer can be
+                // salvaged if no `content` ever arrives.
+                if let Some(rc) = delta
+                    .and_then(|d| d.get("reasoning_content"))
+                    .and_then(|c| c.as_str())
+                {
+                    reasoning_text.push_str(rc);
+                }
+
+                if let Some(content) = delta
                     .and_then(|d| d.get("content"))
                     .and_then(|c| c.as_str())
                 {
@@ -169,57 +216,98 @@ impl DeepSeekClient {
         }
 
         let text = accumulated_text.trim().to_string();
-        if text.is_empty() {
-            bail!("{} returned an empty response", self.name);
+
+        // Primary path — parse the JSON answer out of the content stream.
+        if !text.is_empty() {
+            if let Some(resp) = parse_first_nav_response(&text) {
+                if emitted_instruction_len == 0 {
+                    if let Some(step) = resp.steps.first() {
+                        on_chunk(&step.instruction);
+                    }
+                }
+                return Ok(Some((resp, input_tokens, output_tokens)));
+            }
+            // Content present but not parseable into the schema — wrap the raw
+            // text as a single instruction so the user still gets guidance.
+            let fallback = wrap_as_single_step(&text);
+            if emitted_instruction_len == 0 {
+                on_chunk(&fallback.steps[0].instruction);
+            }
+            return Ok(Some((fallback, input_tokens, output_tokens)));
         }
 
-        let stripped = text
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-
-        // Walk the accumulated text as a stream of JSON values. Models
-        // occasionally emit duplicate / trailing JSON (especially when
-        // stressed by missing context, hallucinating a retry, or appending
-        // explanatory prose). Take the first value that parses into our
-        // schema and discard everything after it, so the user never sees raw
-        // JSON in chat just because the model emitted `{...} {...}` or
-        // `{...} Let me know if you need anything else!`.
-        let mut stream = serde_json::Deserializer::from_str(stripped)
-            .into_iter::<NavigateStepResponse>();
-        if let Some(Ok(step_response)) = stream.next() {
-            if !step_response.steps.is_empty() {
-                if emitted_instruction_len == 0 {
-                    on_chunk(&step_response.steps[0].instruction);
+        // Salvage — reasoning models sometimes embed the JSON answer inside
+        // `reasoning_content` and never emit a `content` delta. Recover it.
+        if !reasoning_text.is_empty() {
+            if let Some(start) = reasoning_text.find('{') {
+                if let Some(resp) = parse_first_nav_response(&reasoning_text[start..]) {
+                    if let Some(step) = resp.steps.first() {
+                        on_chunk(&step.instruction);
+                    }
+                    log::info!("{}: recovered answer from reasoning_content", self.name);
+                    return Ok(Some((resp, input_tokens, output_tokens)));
                 }
-                return Ok((step_response, input_tokens, output_tokens));
             }
         }
 
-        let fallback = NavigateStepResponse {
-            steps: vec![GuidanceStep {
-                instruction: text.clone(),
-                target_text: None,
-                target_role: None,
-                target_region: None,
-                target_nearby_text: None,
-                overlay_type: OverlayType::None,
-                clipboard: None,
-                checkpoint: true,
-                target_bbox: None,
-            }],
-            state_summary: "Continuing task...".to_string(),
-            needs_input: false,
-            request_full_screen: false,
-        };
-        if emitted_instruction_len == 0 {
-            on_chunk(&fallback.steps[0].instruction);
-        }
-        Ok((fallback, input_tokens, output_tokens))
+        // Empty-response diagnostic. finish_reason=="stop" with content_chars==0
+        // and only reasoning means the reasoning model "answered" inside its CoT
+        // then stopped without emitting an answer — common for text-only DeepSeek
+        // on continuation prompts that reference a screen it can't see.
+        log::warn!(
+            "{}: empty answer — finish_reason={:?}, content_chars={}, reasoning_chars={}",
+            self.name, finish_reason, accumulated_text.len(), reasoning_text.len()
+        );
+
+        Ok(None)
     }
 }
 
+/// Parse the first complete `NavigateStepResponse` from `text`, tolerating code
+/// fences and trailing duplicate JSON / explanatory prose. Returns `None` if
+/// nothing with non-empty steps parses.
+fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
+    let stripped = text
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let mut stream = serde_json::Deserializer::from_str(stripped)
+        .into_iter::<NavigateStepResponse>();
+    if let Some(Ok(resp)) = stream.next() {
+        if !resp.steps.is_empty() {
+            return Some(resp);
+        }
+    }
+    None
+}
+
+/// Wrap arbitrary text as a single-step response so non-empty but unparseable
+/// model output still surfaces as guidance instead of an error.
+fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
+    NavigateStepResponse {
+        steps: vec![GuidanceStep {
+            instruction: text.to_string(),
+            target_text: None,
+            target_role: None,
+            target_region: None,
+            target_nearby_text: None,
+            overlay_type: OverlayType::None,
+            clipboard: None,
+            checkpoint: true,
+            target_bbox: None,
+        }],
+        state_summary: "Continuing task...".to_string(),
+        needs_input: false,
+        request_full_screen: false,
+    }
+}
+
+/// Text-only message builder (no screenshot) for the literal DeepSeek API.
+/// CONFIRMED 2026-05-24: api.deepseek.com rejects `image_url` content parts with
+/// HTTP 400 ("unknown variant `image_url`, expected `text`") on deepseek-v4-flash
+/// and deepseek-v4-pro — DeepSeek V4 has no vision via the official API. The
+/// screenshot is dropped here; DeepSeek guidance is inferred from text only.
 pub fn build_messages(
     user_text: &str,
     _screenshot_b64: Option<&str>,

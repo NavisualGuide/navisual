@@ -24,10 +24,10 @@ use std::time::{Duration, Instant};
 use uiautomation::controls::ControlType;
 use uiautomation::types::TreeScope;
 use uiautomation::{UIAutomation, UIElement};
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetTopWindow, GetWindow, GetWindowRect, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, GW_HWNDNEXT,
+    EnumWindows, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowRect,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_HWNDNEXT, GW_OWNER,
 };
 
 /// Map our schema roles → UIA ControlType. `None` means "any role".
@@ -180,6 +180,52 @@ fn element_to_result(el: &UIElement) -> Option<LocateResult> {
     })
 }
 
+/// Collect visible, non-minimised top-level windows that are OWNED by another
+/// window and belong to the same process as `target` — i.e. modal dialogs and
+/// popups (Excel's "PivotTable from table or range", Word's Find/Font/Save As,
+/// etc.). These are separate top-level windows, NOT children of the main
+/// window's UIA element, so a subtree walk rooted at the main window never
+/// reaches their controls. Without searching them, dialog buttons like "OK"
+/// and "Cancel" are reported NOT LOCATED and the locator falls back to the AI
+/// bbox hint. Mirrors the owned-window handling in `capture::pid_union_rect`.
+fn collect_owned_popups(target: HWND) -> Vec<HWND> {
+    let mut target_pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(target, Some(&mut target_pid)); }
+    if target_pid == 0 {
+        return Vec::new();
+    }
+
+    struct State {
+        pid: u32,
+        hwnds: Vec<HWND>,
+    }
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return TRUE;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != state.pid {
+            return TRUE;
+        }
+        // Owned windows only (GW_OWNER non-null) — dialogs/popups, not the
+        // main window itself or unrelated top-level documents.
+        let owned = GetWindow(hwnd, GW_OWNER).map(|o| !o.0.is_null()).unwrap_or(false);
+        if owned {
+            state.hwnds.push(hwnd);
+        }
+        TRUE
+    }
+
+    let mut state = State { pid: target_pid, hwnds: Vec::new() };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+    state.hwnds
+}
+
 /// Public entry point. Returns the first element whose accessible name
 /// satisfies the anchored regex and whose role matches (when specified),
 /// plus a trace recording every candidate considered.
@@ -217,16 +263,25 @@ pub fn find_element(
 
     let search_roots: Vec<UIElement> = if let Some(hwnd_raw) = opts.target_hwnd {
         let hwnd = HWND(hwnd_raw as *mut _);
+        let mut roots = Vec::new();
         unsafe {
-            if !hwnd.0.is_null() && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
-                match automation.element_from_handle(hwnd.into()) {
-                    Ok(el) => vec![el],
-                    Err(_) => Vec::new(),
+            // Owned dialogs/popups first — they sit on top of the main window
+            // and are the active interaction surface (e.g. an open "OK"/"Cancel"
+            // dialog). They are separate top-level windows, so they must be
+            // added as explicit search roots; the main window's subtree walk
+            // does not reach them.
+            for popup in collect_owned_popups(hwnd) {
+                if let Ok(el) = automation.element_from_handle(popup.into()) {
+                    roots.push(el);
                 }
-            } else {
-                Vec::new()
+            }
+            if !hwnd.0.is_null() && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
+                if let Ok(el) = automation.element_from_handle(hwnd.into()) {
+                    roots.push(el);
+                }
             }
         }
+        roots
     } else {
         let (fg_hwnd, fg_pid) = foreground_pid();
         if fg_pid != 0 && fg_pid != our_pid {

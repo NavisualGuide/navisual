@@ -725,6 +725,9 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function newSession() {
     cancelRequest();
+    // Reset Rust-side session state including target_hwnd so the next Guide me
+    // call re-discovers the foreground window instead of reusing a stale target.
+    await invoke("new_session").catch(() => {});
     task = "";
     steps = [];
     stepIndex = 0;
@@ -1115,14 +1118,6 @@ See the LICENSE file in the root of this repository for complete details.
           {#if steps[stepIndex]?.clipboard}
             <span class="badge badge-clip" title="Text copied to clipboard">📋 copied</span>
           {/if}
-          {#if locateResult}
-            <span class="badge badge-{locateResult.role === 'Ocr' ? 'warn' : 'ok'}">
-              {locateResult.role}
-            </span>
-            <span class="conf">{(locateResult.confidence * 100).toFixed(0)}%</span>
-          {:else if steps[stepIndex]?.target_text}
-            <span class="badge badge-miss">not located</span>
-          {/if}
         </div>
         {#if staleResponse && phase !== "thinking"}
           <div class="stale-banner" role="status">
@@ -1147,6 +1142,18 @@ See the LICENSE file in the root of this repository for complete details.
             </button>
             {#if debugDrawerOpen}
               <div class="debug-body">
+                <div class="debug-row">
+                  <span class="debug-key">located</span>
+                  {#if locateResult}
+                    <span class="debug-val">
+                      <span class="badge badge-{locateResult.role === 'Ocr' ? 'warn' : 'ok'}">{locateResult.role}</span>
+                      <span class="conf">{(locateResult.confidence * 100).toFixed(0)}%</span>
+                      · "{locateResult.name}"
+                    </span>
+                  {:else}
+                    <span class="debug-val">not located</span>
+                  {/if}
+                </div>
                 <div class="debug-row">
                   <span class="debug-key">target</span>
                   <span class="debug-val">"{locateTrace.target_text}"</span>
@@ -1549,7 +1556,7 @@ See the LICENSE file in the root of this repository for complete details.
               {:else if settingsForm.api_provider === "openai"}
                 Pay per use. API key at platform.openai.com.
               {:else if settingsForm.api_provider === "deepseek"}
-                Recommended for mainland China users — US AI services (Gemini, Anthropic, OpenAI) are geoblocked there. Note: DeepSeek is text-only and does not analyze screenshots. Use Qwen if you need image analysis.
+                ⚠ Text-only — DeepSeek cannot see your screen (its API rejects images). Guidance is inferred from your description, so it may be wrong on unfamiliar or custom apps. For mainland China <em>with</em> screen analysis, use Qwen instead.
               {:else if settingsForm.api_provider === "qwen"}
                 Recommended for mainland China users — US AI services (Gemini, Anthropic, OpenAI) are geoblocked there. Qwen supports image analysis.
               {:else if settingsForm.api_provider === "ollama"}

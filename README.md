@@ -2,9 +2,7 @@
 
 **The AI guides, never overrides.**
 
-<!-- Replace with a 6–10 sec GIF of one real task end-to-end once recorded.
-     Save it as assets/demo.gif and the line below will auto-render on GitHub. -->
-<!-- ![Navisual demo](assets/demo.gif) -->
+![Navisual demo](assets/demo.gif)
 
 Navisual watches your screen and walks you through any task step by step — pointing at the exact button to click, narrating each action, and reading the current state of your app. The AI never moves your mouse, clicks, or types for you. Every action stays in your hands.
 

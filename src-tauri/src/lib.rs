@@ -342,6 +342,37 @@ async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::
     Ok(serde_json::json!({ "changed": changed }))
 }
 
+/// Append one AI-call timing row to `%APPDATA%\com.navisual.app\model_timings.csv`
+/// so per-model latency can be pulled into a spreadsheet for comparison. Records
+/// the pure AI round-trip (capture + locate excluded). Best-effort — write
+/// failures are logged and ignored. `elapsed_ms` is the wall-clock AI time;
+/// `model` for the managed provider is the client-sent hint (the relay may
+/// override server-side).
+fn log_model_timing(
+    app: &AppHandle,
+    provider: &str,
+    model: &str,
+    elapsed_ms: u128,
+    ok: bool,
+    steps: usize,
+) {
+    use std::io::Write;
+    let Ok(dir) = app.path().app_data_dir() else { return };
+    let path = dir.join("model_timings.csv");
+    let new_file = !path.exists();
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let status = if ok { "ok" } else { "error" };
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if new_file {
+                let _ = writeln!(f, "timestamp,provider,model,elapsed_ms,status,steps");
+            }
+            let _ = writeln!(f, "{ts},{provider},{model},{elapsed_ms},{status},{steps}");
+        }
+        Err(e) => log::warn!("model_timings.csv write failed: {e}"),
+    }
+}
+
 /// Optionally append a trace to the rolling JSONL log when enabled in settings.
 fn maybe_log_trace(app: &AppHandle, trace: &locator::trace::LocateTrace, log_enabled: bool) {
     if !log_enabled {
@@ -581,12 +612,14 @@ async fn guide(
 ) -> Result<GuideResponse, String> {
     let is_next_requery = task.starts_with("[User completed:");
     // Only reset session state for a genuine new task (not resume, not reply, not next-requery).
+    // target_hwnd is intentionally NOT reset here — it persists across new sub-tasks in the same
+    // working context so recording tools in the foreground (OBS, ScreenToGif) can't steal the
+    // target. The "＋ New task" button calls `new_session` to reset target_hwnd explicitly.
     if !task.is_empty() && !is_reply && !is_next_requery {
         let mut g = state.guidance.lock();
         g.session_id = None;
         g.steps = vec![];
         g.state_summary = String::new();
-        g.target_hwnd = None;
         // Drop the previous screenshot from RAM — new task starts fresh.
         *state.chat_full_jpeg.lock() = None;
     }
@@ -746,10 +779,30 @@ async fn guide(
         }
     };
 
+    // Streaming-first surfacing: as the instruction streams in token-by-token,
+    // push it to BOTH the panel (stream_chunk) and the on-screen caption
+    // (overlay Subtitle). The caption used to appear only after the full
+    // response + locate (~7-10 s); now it forms live so perceived latency drops
+    // to first-token (~1-2 s). The overlay honours subtitle_enabled, so this is
+    // a no-op when captions are off. execute_step later replaces this transient
+    // caption with the real pointer + final instruction.
     let app_clone = app.clone();
+    let mut streamed = String::new();
     let on_chunk = move |chunk: &str| {
+        streamed.push_str(chunk);
         let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
+        if let Ok(update) =
+            overlay::make_update(overlay::OverlayKind::Subtitle, None, Some(streamed.clone()))
+        {
+            let _ = overlay::emit_update(&app_clone, update);
+        }
     };
+
+    // Measure the pure AI round-trip (excludes capture + locate) for the model
+    // latency log. Provider/model captured before the borrow by send_guidance_request.
+    let timing_provider = router.config.api_provider.clone();
+    let timing_model = router.active_model();
+    let ai_started = std::time::Instant::now();
 
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let summary = {
@@ -777,6 +830,13 @@ async fn guide(
         let prompt = add_grid(crate::ai::prompts::initial_context_template(&task));
         (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
     };
+
+    let ai_elapsed_ms = ai_started.elapsed().as_millis();
+    let (timing_ok, timing_steps) = match &resp {
+        Ok(r) => (true, r.steps.len()),
+        Err(_) => (false, 0),
+    };
+    log_model_timing(&app, &timing_provider, &timing_model, ai_elapsed_ms, timing_ok, timing_steps);
 
     // Emit balance update for managed provider before processing the result.
     if let Some(remaining) = router.get_managed_free_remaining() {
@@ -1094,12 +1154,37 @@ async fn send_correction(
     };
     let user_text = final_user_text.as_str();
 
+    // Streaming-first surfacing: as the instruction streams in token-by-token,
+    // push it to BOTH the panel (stream_chunk) and the on-screen caption
+    // (overlay Subtitle). The caption used to appear only after the full
+    // response + locate (~7-10 s); now it forms live so perceived latency drops
+    // to first-token (~1-2 s). The overlay honours subtitle_enabled, so this is
+    // a no-op when captions are off. execute_step later replaces this transient
+    // caption with the real pointer + final instruction.
     let app_clone = app.clone();
+    let mut streamed = String::new();
     let on_chunk = move |chunk: &str| {
+        streamed.push_str(chunk);
         let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
+        if let Ok(update) =
+            overlay::make_update(overlay::OverlayKind::Subtitle, None, Some(streamed.clone()))
+        {
+            let _ = overlay::emit_update(&app_clone, update);
+        }
     };
 
+    let timing_provider = router.config.api_provider.clone();
+    let timing_model = router.active_model();
+    let ai_started = std::time::Instant::now();
+
     let resp = router.send_guidance_request(user_text, Some(&screenshot_b64), Some(&summary), on_chunk).await;
+
+    let ai_elapsed_ms = ai_started.elapsed().as_millis();
+    let (timing_ok, timing_steps) = match &resp {
+        Ok(r) => (true, r.steps.len()),
+        Err(_) => (false, 0),
+    };
+    log_model_timing(&app, &timing_provider, &timing_model, ai_elapsed_ms, timing_ok, timing_steps);
 
     if let Some(remaining) = router.get_managed_free_remaining() {
         let _ = app.emit("balance_update", remaining);
@@ -1271,6 +1356,18 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
     announce_shared_app(&app, hwnd);
     #[cfg(not(windows))]
     let _ = app;
+}
+
+/// Reset target_hwnd (and session state) when the user explicitly starts a new task.
+/// Called by the "＋ New task" button in the panel. Preserves pinned_hwnd — the user
+/// explicitly chose that window and it should survive a session reset.
+#[tauri::command]
+fn new_session(state: State<'_, AppState>) {
+    let mut g = state.guidance.lock();
+    g.session_id = None;
+    g.steps = vec![];
+    g.state_summary = String::new();
+    g.target_hwnd = None;
 }
 
 /// Item 1 — clear the pinned window and return to auto-detection.
@@ -1823,6 +1920,7 @@ pub fn run() {
             list_target_windows,
             pin_target_window,
             unpin_target_window,
+            new_session,
             list_tts_voices,
             get_chat_full_screenshot,
         ])

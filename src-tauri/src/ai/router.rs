@@ -64,6 +64,22 @@ impl AiRouter {
         }
     }
 
+    /// The model string the active provider will use — for the latency/telemetry
+    /// log. For `managed` this is the client-sent hint; the relay may override it
+    /// server-side, so treat managed rows as "what the app requested".
+    pub fn active_model(&self) -> String {
+        match self.config.api_provider.as_str() {
+            "anthropic" => self.config.anthropic_model.clone(),
+            "gemini" => self.config.gemini_model.clone(),
+            "ollama" => self.config.ollama_model.clone(),
+            "openai" => self.config.openai_model.clone(),
+            "deepseek" => self.config.deepseek_model.clone(),
+            "qwen" => self.config.qwen_model.clone(),
+            "managed" => self.config.managed_model.clone(),
+            other => other.to_string(),
+        }
+    }
+
     /// Returns the number of free requests remaining for the managed provider,
     /// or None if the provider is not managed or no request has been made yet.
     pub fn get_managed_free_remaining(&self) -> Option<u32> {
@@ -240,7 +256,12 @@ impl AiRouter {
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
             Some(ApiClient::DeepSeek(c)) => {
-                // api.deepseek.com is text-only — image_url is rejected with 400.
+                // CONFIRMED 2026-05-24: api.deepseek.com rejects image_url with HTTP 400
+                // ("unknown variant `image_url`, expected `text`") for both
+                // deepseek-v4-flash and deepseek-v4-pro. DeepSeek V4 is text-only via
+                // the official API — it cannot see the screen, so guidance is inferred
+                // from the task text + history. For a China-native VISION option, use
+                // Qwen (Qwen3-VL via DashScope), which accepts the screenshot below.
                 let msgs = build_deepseek(user_text, screenshot_b64, state_summary, &conversation);
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
