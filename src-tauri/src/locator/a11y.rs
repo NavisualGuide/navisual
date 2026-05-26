@@ -66,8 +66,17 @@ fn norm_dashes(s: &str) -> String {
 /// Build the anchored regex used for name matching.
 /// `^[\W_]*<escaped_target>[\W_]*$`, case-insensitive.
 fn build_name_regex(target: &str) -> Result<Regex> {
-    let target_norm = norm_dashes(&target.to_ascii_lowercase());
-    let pattern = format!(r"(?i)^[\W_]*{}[\W_]*$", regex::escape(&target_norm));
+    // Truncated labels (model copied a clipped "…" name) become a prefix match:
+    // UIA accessible names are never visually truncated, so anchoring with `$`
+    // on the clipped text would never match the real full name.
+    let (core, prefix) = super::strip_trailing_ellipsis(target);
+    let target_norm = norm_dashes(&core.to_ascii_lowercase());
+    let escaped = regex::escape(&target_norm);
+    let pattern = if prefix {
+        format!(r"(?i)^[\W_]*{}", escaped)
+    } else {
+        format!(r"(?i)^[\W_]*{}[\W_]*$", escaped)
+    };
     Regex::new(&pattern).context("compile name regex")
 }
 
@@ -109,9 +118,9 @@ fn collect_visible_top_windows(our_pid: u32, max: usize) -> Vec<HWND> {
     use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
     // Class-name blocklist for system shell / IME / overlay windows.
     const SKIP_CLASSES: &[&str] = &[
-        "Progman",              // Desktop window
-        "WorkerW",              // Desktop worker
-        "Shell_TrayWnd",        // Taskbar
+        "Progman",       // Desktop window
+        "WorkerW",       // Desktop worker
+        "Shell_TrayWnd", // Taskbar
         "Shell_SecondaryTrayWnd",
         "NotifyIconOverflowWindow",
         "Windows.UI.Core.CoreWindow", // IME, Xaml islands
@@ -190,7 +199,9 @@ fn element_to_result(el: &UIElement) -> Option<LocateResult> {
 /// bbox hint. Mirrors the owned-window handling in `capture::pid_union_rect`.
 fn collect_owned_popups(target: HWND) -> Vec<HWND> {
     let mut target_pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(target, Some(&mut target_pid)); }
+    unsafe {
+        GetWindowThreadProcessId(target, Some(&mut target_pid));
+    }
     if target_pid == 0 {
         return Vec::new();
     }
@@ -212,14 +223,19 @@ fn collect_owned_popups(target: HWND) -> Vec<HWND> {
         }
         // Owned windows only (GW_OWNER non-null) — dialogs/popups, not the
         // main window itself or unrelated top-level documents.
-        let owned = GetWindow(hwnd, GW_OWNER).map(|o| !o.0.is_null()).unwrap_or(false);
+        let owned = GetWindow(hwnd, GW_OWNER)
+            .map(|o| !o.0.is_null())
+            .unwrap_or(false);
         if owned {
             state.hwnds.push(hwnd);
         }
         TRUE
     }
 
-    let mut state = State { pid: target_pid, hwnds: Vec::new() };
+    let mut state = State {
+        pid: target_pid,
+        hwnds: Vec::new(),
+    };
     unsafe {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
@@ -246,7 +262,11 @@ pub fn find_element(
     }
 
     let started = Instant::now();
-    let timeout_ms = if opts.a11y_timeout_ms == 0 { 150 } else { opts.a11y_timeout_ms };
+    let timeout_ms = if opts.a11y_timeout_ms == 0 {
+        150
+    } else {
+        opts.a11y_timeout_ms
+    };
     let automation = UIAutomation::new().map_err(|e| anyhow!("UIAutomation init: {e}"))?;
     let name_re = Arc::new(build_name_regex(target_text)?);
     trace.regex_used = name_re.as_str().to_string();
@@ -314,13 +334,31 @@ pub fn find_element(
             break;
         }
         // Pass 1
-        candidates.extend(match_in_subtree_all(&automation, root, &name_re, desired_ct, per_root_ms)?);
-        if Instant::now() > deadline { trace.timed_out = true; break; }
+        candidates.extend(match_in_subtree_all(
+            &automation,
+            root,
+            &name_re,
+            desired_ct,
+            per_root_ms,
+        )?);
+        if Instant::now() > deadline {
+            trace.timed_out = true;
+            break;
+        }
         // Pass 2
         if desired_ct.is_some() {
-            candidates.extend(match_in_subtree_all(&automation, root, &name_re, None, per_root_ms)?);
+            candidates.extend(match_in_subtree_all(
+                &automation,
+                root,
+                &name_re,
+                None,
+                per_root_ms,
+            )?);
         }
-        if Instant::now() > deadline { trace.timed_out = true; break; }
+        if Instant::now() > deadline {
+            trace.timed_out = true;
+            break;
+        }
         // Pass 3
         candidates.extend(manual_walk_all(
             root,
@@ -406,7 +444,10 @@ fn match_in_subtree_all(
         matcher = matcher.control_type(ct);
     }
     match matcher.find_all() {
-        Ok(els) => Ok(els.into_iter().filter_map(|e| element_to_result(&e)).collect()),
+        Ok(els) => Ok(els
+            .into_iter()
+            .filter_map(|e| element_to_result(&e))
+            .collect()),
         Err(_) => Ok(Vec::new()),
     }
 }
@@ -441,7 +482,10 @@ fn manual_walk_all(
         desired_ct,
         &mut candidates,
     );
-    candidates.into_iter().filter_map(|e| element_to_result(&e)).collect()
+    candidates
+        .into_iter()
+        .filter_map(|e| element_to_result(&e))
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -471,9 +515,12 @@ fn walk_recursive(
                     if target_len >= 4 {
                         is_match = true;
                     } else {
-                        is_match = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(target_norm_lower)))
-                            .map(|re| re.is_match(&name_norm))
-                            .unwrap_or(false);
+                        is_match = regex::Regex::new(&format!(
+                            r"(?i)\b{}\b",
+                            regex::escape(target_norm_lower)
+                        ))
+                        .map(|re| re.is_match(&name_norm))
+                        .unwrap_or(false);
                     }
                 }
                 if is_match {

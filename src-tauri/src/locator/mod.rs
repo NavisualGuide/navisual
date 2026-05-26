@@ -21,6 +21,27 @@ pub mod hit_test;
 
 pub mod trace;
 
+/// If `target` ends with an ellipsis ("…" or "..."), return the text before it
+/// (trimmed) plus whether callers should treat it as a *prefix*. Vision models
+/// often copy a visually-truncated UI label verbatim (e.g. "Sum of Output USD
+/// per…"), but the underlying accessible name / full on-screen text is not
+/// truncated — so prefix-matching the core lets the full name match. The prefix
+/// flag is only set when the core is ≥5 chars (so a short clip like "Re…" can't
+/// match half the screen); the ellipsis is stripped regardless.
+#[cfg(windows)]
+pub(crate) fn strip_trailing_ellipsis(target: &str) -> (String, bool) {
+    let trimmed = target.trim_end();
+    let core = trimmed
+        .strip_suffix('…')
+        .or_else(|| trimmed.strip_suffix("..."))
+        .map(|c| c.trim_end());
+    match core {
+        Some(c) if c.chars().count() >= 5 => (c.to_string(), true),
+        Some(c) => (c.to_string(), false),
+        None => (target.to_string(), false),
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LocateResult {
     /// Bounding box in physical pixels, virtual-desktop coords.

@@ -34,8 +34,7 @@ pub fn run_ocr(image_bytes: &[u8]) -> Result<Vec<OcrResult>> {
         .map_err(|e| anyhow!("OCR engine init: {e}"))?;
 
     // Wrap the bytes in an InMemoryRandomAccessStream via a DataWriter.
-    let stream =
-        InMemoryRandomAccessStream::new().map_err(|e| anyhow!("create stream: {e}"))?;
+    let stream = InMemoryRandomAccessStream::new().map_err(|e| anyhow!("create stream: {e}"))?;
     let output_stream = stream
         .GetOutputStreamAt(0)
         .map_err(|e| anyhow!("get output stream: {e}"))?;
@@ -202,7 +201,10 @@ fn prefer_largest(role: Option<&str>) -> bool {
 
 /// Roles whose real elements are smaller-font than headings that may share the word.
 fn prefer_smallest(role: Option<&str>) -> bool {
-    matches!(role.map(|s| s.to_ascii_lowercase()).as_deref(), Some("link"))
+    matches!(
+        role.map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("link")
+    )
 }
 
 #[derive(Debug, Clone, Default)]
@@ -238,6 +240,11 @@ pub fn find_text<'a>(
     if target_text.is_empty() || results.is_empty() {
         return outcome;
     }
+    // Strip a trailing ellipsis the model copied from a clipped label, then match
+    // on the de-truncated form so the word-boundary substring strategy matches
+    // the full text (e.g. "Sum of Output USD per…" → "Sum of Output USD per 1M").
+    let (target_core, _truncated) = super::strip_trailing_ellipsis(target_text);
+    let target_text = target_core.as_str();
     let target_lower = target_text.trim().to_ascii_lowercase();
 
     let min_conf = if opts.min_confidence <= 0.0 {
@@ -283,7 +290,8 @@ pub fn find_text<'a>(
     // Resolve nearby_text anchor (centre of the best-matching OCR result).
     let anchor = opts.nearby_text.and_then(|nt| {
         let nt_lower = nt.trim().to_ascii_lowercase();
-        let mut best_ratio = 0.5f32;
+        // 4.a: accept a slightly-misread nearby word as the anchor (was 0.5).
+        let mut best_ratio = 0.4f32;
         let mut best_pt: Option<(f32, f32)> = None;
         for r in results {
             let rc = strip_punct(&r.text).to_ascii_lowercase();
@@ -312,9 +320,9 @@ pub fn find_text<'a>(
 
     // AI-bbox centre (OCR-image-pixel space). When set, used as the dominant
     // tie-breaker among matches — same idea as A11y's proximity sort.
-    let ai_center: Option<(f32, f32)> = opts.ai_bbox.map(|(x, y, w, h)| {
-        (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0)
-    });
+    let ai_center: Option<(f32, f32)> = opts
+        .ai_bbox
+        .map(|(x, y, w, h)| (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0));
 
     let pick_best = |pool: &[&'a OcrResult]| -> Option<&'a OcrResult> {
         if pool.is_empty() {
@@ -322,14 +330,11 @@ pub fn find_text<'a>(
         }
         // 1. nearby_text anchor — strongest signal, user-provided.
         if let Some((ax, ay)) = anchor {
-            return pool
-                .iter()
-                .copied()
-                .min_by(|a, b| {
-                    let da = proximity_sq(a, ax, ay);
-                    let db = proximity_sq(b, ax, ay);
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                });
+            return pool.iter().copied().min_by(|a, b| {
+                let da = proximity_sq(a, ax, ay);
+                let db = proximity_sq(b, ax, ay);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         // 2. AI-bbox proximity — sort by distance to the AI's predicted centre.
         //    For button-like roles, apply the 4%-height plausibility filter
@@ -337,10 +342,16 @@ pub fn find_text<'a>(
         //    real button that's slightly further away.
         if let Some((bx, by)) = ai_center {
             let plausible: Vec<&OcrResult> = if want_largest {
-                let p: Vec<&OcrResult> = pool.iter().copied()
+                let p: Vec<&OcrResult> = pool
+                    .iter()
+                    .copied()
                     .filter(|r| r.bbox.3 <= button_height_cap)
                     .collect();
-                if !p.is_empty() { p } else { pool.to_vec() }
+                if !p.is_empty() {
+                    p
+                } else {
+                    pool.to_vec()
+                }
             } else {
                 pool.to_vec()
             };
@@ -378,7 +389,11 @@ pub fn find_text<'a>(
         Some(pool[0])
     };
 
-    let make_candidate = |r: &OcrResult, strategy: &str, score: Option<f32>, selected: bool, reject: Option<&str>| OcrCandidate {
+    let make_candidate = |r: &OcrResult,
+                          strategy: &str,
+                          score: Option<f32>,
+                          selected: bool,
+                          reject: Option<&str>| OcrCandidate {
         text: r.text.clone(),
         bbox: r.bbox,
         confidence: r.confidence,
@@ -401,7 +416,11 @@ pub fn find_text<'a>(
                 "exact",
                 None,
                 std::ptr::eq(*r, winner),
-                if std::ptr::eq(*r, winner) { None } else { Some("not preferred size") },
+                if std::ptr::eq(*r, winner) {
+                    None
+                } else {
+                    Some("not preferred size")
+                },
             ));
         }
         outcome.strategy_used = Some("exact".to_string());
@@ -426,9 +445,8 @@ pub fn find_text<'a>(
     //   Note: "Insert" still matches "Insert Space" (space IS a boundary) — the
     //   exact-match strategy wins first when both words appear in the OCR pool.
     let target_word_count = target_lower.split_whitespace().count();
-    let target_wb_re = regex::Regex::new(
-        &format!(r"(?i)\b{}\b", regex::escape(&target_lower))
-    ).ok();
+    let target_wb_re =
+        regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&target_lower))).ok();
     let substr: Vec<&OcrResult> = candidates
         .iter()
         .copied()
@@ -441,10 +459,10 @@ pub fn find_text<'a>(
             let target_contains_rc = rc.chars().count() >= 2 && {
                 let rc_word_count = rc.split_whitespace().count();
                 // Word-count guard: OCR token must cover more than half the target's words.
-                rc_word_count * 2 > target_word_count &&
-                regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&rc)))
-                    .map(|re| re.is_match(&target_lower))
-                    .unwrap_or(false)
+                rc_word_count * 2 > target_word_count
+                    && regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&rc)))
+                        .map(|re| re.is_match(&target_lower))
+                        .unwrap_or(false)
             };
             // Direction B: target as whole word inside OCR line.
             let rc_contains_target = target_wb_re
@@ -461,7 +479,11 @@ pub fn find_text<'a>(
                 "substring",
                 None,
                 std::ptr::eq(*r, winner),
-                if std::ptr::eq(*r, winner) { None } else { Some("not preferred size") },
+                if std::ptr::eq(*r, winner) {
+                    None
+                } else {
+                    Some("not preferred size")
+                },
             ));
         }
         outcome.strategy_used = Some("substring".to_string());
@@ -481,11 +503,8 @@ pub fn find_text<'a>(
     //                    highest scorer wins directly. Floor raised from 0.65 to
     //                    prevent short-word false positives (e.g. "change" scoring
     //                    0.67 against target "manage" via shared LCS "ange").
-    const FUZZY_TIERS: &[(f32, &str)] = &[
-        (0.85, "fuzzy-t1"),
-        (0.75, "fuzzy-t2"),
-        (0.70, "fuzzy-t3"),
-    ];
+    const FUZZY_TIERS: &[(f32, &str)] =
+        &[(0.85, "fuzzy-t1"), (0.75, "fuzzy-t2"), (0.70, "fuzzy-t3")];
 
     // Score every candidate once, sorted best-first.
     // Length guard: OCR text shorter than 2/3 of the target gets a zero score
@@ -542,7 +561,11 @@ pub fn find_text<'a>(
     }
 
     // Record top-5 for the debug drawer with the resolved tier label.
-    let tier_label = if winning_tier.is_empty() { "fuzzy" } else { winning_tier };
+    let tier_label = if winning_tier.is_empty() {
+        "fuzzy"
+    } else {
+        winning_tier
+    };
     for (r, score) in scored.iter().take(5) {
         let selected = winner.map(|w| std::ptr::eq(*r, w)).unwrap_or(false);
         let reject = if selected {
@@ -552,7 +575,13 @@ pub fn find_text<'a>(
         } else {
             Some("not chosen")
         };
-        outcome.candidates.push(make_candidate(r, tier_label, Some(*score), selected, reject));
+        outcome.candidates.push(make_candidate(
+            r,
+            tier_label,
+            Some(*score),
+            selected,
+            reject,
+        ));
     }
     if winner.is_some() {
         outcome.strategy_used = Some(winning_tier.to_string());
@@ -565,7 +594,10 @@ pub fn find_text<'a>(
     // the correct element is not silently excluded. The "nb-" prefix (no-bbox)
     // shows up in the debug drawer.
     if outcome.winner.is_none() && opts.ai_bbox.is_some() {
-        let no_bbox = FindOptions { ai_bbox: None, ..*opts };
+        let no_bbox = FindOptions {
+            ai_bbox: None,
+            ..*opts
+        };
         let mut fallback = find_text(target_text, results, &no_bbox);
         if let Some(ref s) = fallback.strategy_used.clone() {
             fallback.strategy_used = Some(format!("nb-{s}"));
