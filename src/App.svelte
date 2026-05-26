@@ -1527,9 +1527,8 @@ See the LICENSE file in the root of this repository for complete details.
           class="lightbox-img"
           src="data:image/jpeg;base64,{lightboxSrc}"
           alt="Full screenshot"
-          onclick={(e) => e.stopPropagation()}
         />
-        <span class="lightbox-hint">Click outside to close</span>
+        <span class="lightbox-hint">Click anywhere to close</span>
       {/if}
     </div>
   {/if}
@@ -2624,7 +2623,7 @@ See the LICENSE file in the root of this repository for complete details.
     max-height: 88vh;
     border-radius: 6px;
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7);
-    cursor: default;
+    cursor: zoom-out;
   }
   .lightbox-loading {
     color: var(--text-secondary);
