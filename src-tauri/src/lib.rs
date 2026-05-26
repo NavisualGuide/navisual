@@ -4,23 +4,23 @@
 
 //! Navisual — Rust/Tauri backend entry point.
 
+mod ai;
 mod capture;
 mod locator;
 mod overlay;
-mod ai;
-mod tts;
-mod track;
 mod server;
+mod track;
+mod tts;
 
-use ai::router::AiRouter;
 use ai::config::Config;
 use ai::cost_tracker::CostTracker;
+use ai::router::AiRouter;
 use ai::session::SessionManager;
 use ai::types::{GuidanceStep, OverlayType};
 
 use std::path::PathBuf;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Manager, State, Emitter};
 use tokio::time::Duration;
 
 #[derive(serde::Serialize)]
@@ -90,13 +90,16 @@ fn looks_like_shortcut(text: &str) -> bool {
     let t = text.trim();
     // Any token sequence joined by '+' where at least one token is a known
     // modifier key is almost certainly a keyboard shortcut.
-    let modifier_keys = ["ctrl", "control", "alt", "shift", "win", "cmd",
-                         "super", "meta", "fn", "hyper"];
+    let modifier_keys = [
+        "ctrl", "control", "alt", "shift", "win", "cmd", "super", "meta", "fn", "hyper",
+    ];
     let parts: Vec<&str> = t.split('+').map(str::trim).collect();
     if parts.len() < 2 {
         return false;
     }
-    parts.iter().any(|p| modifier_keys.contains(&p.to_ascii_lowercase().as_str()))
+    parts
+        .iter()
+        .any(|p| modifier_keys.contains(&p.to_ascii_lowercase().as_str()))
 }
 
 /// Slightly enlarge the AI bbox so the hint pointer reads as a thin collar
@@ -124,9 +127,18 @@ fn inflate_hint_bbox(
     let h = (new_h).min(max_y - y).max(1) as u32;
     log::info!(
         "hint fallback: ai_bbox={:?}, inflated to ({}, {}, {}, {})",
-        ai_bbox, x, y, w, h
+        ai_bbox,
+        x,
+        y,
+        w,
+        h
     );
-    Some(capture::Rect { x, y, width: w, height: h })
+    Some(capture::Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    })
 }
 
 /// Convert the AI's raw `target_bbox` from a step into a screen-coord Rect,
@@ -137,11 +149,22 @@ fn compute_ai_bbox_for_step(
     capture_rect: Option<capture::Rect>,
     provider: &str,
 ) -> Option<capture::Rect> {
+    // Diagnostic: surface exactly what the model sent for target_bbox (raw) so a
+    // missing cyan box can be attributed to the model omitting it vs a conversion
+    // drop. Shows up on stdout in `tauri dev` and in the app log file.
+    log::info!(
+        "[ai_bbox] provider={} target_text={:?} raw_target_bbox={:?}",
+        provider,
+        step.target_text,
+        step.target_bbox
+    );
     let raw = step.target_bbox?;
     let rect = capture_rect?;
     let (ai_w, ai_h) = capture::ai_image_dims(rect.width, rect.height);
     let format = ai::bbox::bbox_format_for_provider(provider);
-    ai::bbox::ai_bbox_to_screen_rect(raw, format, ai_w, ai_h, rect)
+    let out = ai::bbox::ai_bbox_to_screen_rect(raw, format, ai_w, ai_h, rect);
+    log::info!("[ai_bbox] converted={:?}", out);
+    out
 }
 
 fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
@@ -163,12 +186,21 @@ fn execute_step(
     last_overlay: &parking_lot::Mutex<Option<LastOverlay>>,
     ai_bbox: Option<capture::Rect>,
     capture_rect: Option<capture::Rect>,
-) -> Result<(Option<locator::LocateResult>, Option<locator::trace::LocateTrace>), String> {
+) -> Result<
+    (
+        Option<locator::LocateResult>,
+        Option<locator::trace::LocateTrace>,
+    ),
+    String,
+> {
     let (located, trace) = if let Some(ref text) = step.target_text {
         #[cfg(windows)]
         {
             let opts = locator::orchestrator::LocateOptions {
-                role: step.target_role.as_ref().map(|r| format!("{:?}", r).to_lowercase()),
+                role: step
+                    .target_role
+                    .as_ref()
+                    .map(|r| format!("{:?}", r).to_lowercase()),
                 nearby_text: step.target_nearby_text.clone(),
                 ai_bbox,
                 a11y_timeout_ms: 500,
@@ -316,7 +348,10 @@ fn hamming64(a: u64, b: u64) -> u32 {
 /// the screen the user is being directed against, not a drifting 500 ms-old
 /// sample. Returns the captured hash for the caller (used by stale detection).
 async fn anchor_autopilot_baseline(state: &AppState) -> Option<u64> {
-    let h = tokio::task::spawn_blocking(ahash_of_screen).await.ok().flatten();
+    let h = tokio::task::spawn_blocking(ahash_of_screen)
+        .await
+        .ok()
+        .flatten();
     *state.screen_hash.lock() = h;
     h
 }
@@ -333,7 +368,10 @@ async fn anchor_autopilot_baseline(state: &AppState) -> Option<u64> {
 /// AI streaming request shares those workers.
 #[tauri::command]
 async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let hash = tokio::task::spawn_blocking(ahash_of_screen).await.ok().flatten();
+    let hash = tokio::task::spawn_blocking(ahash_of_screen)
+        .await
+        .ok()
+        .flatten();
     let prev = *state.screen_hash.lock();
     let changed = match (hash, prev) {
         (Some(h), Some(p)) => hamming64(p, h) >= AUTOPILOT_CHANGE_THRESHOLD,
@@ -357,12 +395,18 @@ fn log_model_timing(
     steps: usize,
 ) {
     use std::io::Write;
-    let Ok(dir) = app.path().app_data_dir() else { return };
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
     let path = dir.join("model_timings.csv");
     let new_file = !path.exists();
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     let status = if ok { "ok" } else { "error" };
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         Ok(mut f) => {
             if new_file {
                 let _ = writeln!(f, "timestamp,provider,model,elapsed_ms,status,steps");
@@ -576,7 +620,10 @@ fn cleanup_old_debug_artifacts(app_data_dir: &std::path::Path) {
     let mut try_remove = |p: &std::path::Path| {
         if let Ok(meta) = std::fs::metadata(p) {
             if let Ok(modified) = meta.modified() {
-                if now.duration_since(modified).map(|d| d > MAX_AGE).unwrap_or(false)
+                if now
+                    .duration_since(modified)
+                    .map(|d| d > MAX_AGE)
+                    .unwrap_or(false)
                     && std::fs::remove_file(p).is_ok()
                 {
                     removed += 1;
@@ -650,9 +697,7 @@ async fn guide(
     let exclude = capture::get_panel_rects();
 
     // Debug folder is a sub-directory of the app data dir.
-    let debug_dir = app.path().app_data_dir()
-        .map(|p| p.join("debug"))
-        .ok();
+    let debug_dir = app.path().app_data_dir().map(|p| p.join("debug")).ok();
 
     // Clear the previous step's pointer before capture — prevents it from
     // appearing in the AI's screenshot. Stop the tracker first so it can't
@@ -727,7 +772,14 @@ async fn guide(
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
-    let (screenshot_b64, capture_rect_opt, new_hwnd_opt, debug_screenshot_path, chat_thumb_b64, pre_hash) = match capture_result {
+    let (
+        screenshot_b64,
+        capture_rect_opt,
+        new_hwnd_opt,
+        debug_screenshot_path,
+        chat_thumb_b64,
+        pre_hash,
+    ) = match capture_result {
         Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes, pre_hash)) => {
             *state.chat_full_jpeg.lock() = Some(full_bytes);
             (b64, rect_opt, hwnd_opt, dbg, thumb, pre_hash)
@@ -745,7 +797,8 @@ async fn guide(
                 provider: String::new(),
                 error: Some(
                     "No application window found. Please click on the program you want \
-                     help with to bring it into focus, then try Guide me again.".to_string()
+                     help with to bring it into focus, then try Guide me again."
+                        .to_string(),
                 ),
                 debug_screenshot_path: None,
                 chat_thumb_b64: None,
@@ -790,7 +843,12 @@ async fn guide(
     let mut streamed = String::new();
     let on_chunk = move |chunk: &str| {
         streamed.push_str(chunk);
-        let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
+        let _ = app_clone.emit(
+            "stream_chunk",
+            StreamChunkPayload {
+                delta: chunk.to_string(),
+            },
+        );
         if let Ok(update) =
             overlay::make_update(overlay::OverlayKind::Subtitle, None, Some(streamed.clone()))
         {
@@ -818,17 +876,32 @@ async fn guide(
             )
         };
         let prompt = add_grid(base);
-        (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
+        (
+            router
+                .send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk)
+                .await,
+            prompt,
+        )
     } else if is_reply {
         let summary = {
             let g = state.guidance.lock();
             g.state_summary.clone()
         };
         let prompt = add_grid(task.clone());
-        (router.send_guidance_request(&prompt, Some(&screenshot_b64), Some(&summary), on_chunk).await, prompt)
+        (
+            router
+                .send_guidance_request(&prompt, Some(&screenshot_b64), Some(&summary), on_chunk)
+                .await,
+            prompt,
+        )
     } else {
         let prompt = add_grid(crate::ai::prompts::initial_context_template(&task));
-        (router.send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk).await, prompt)
+        (
+            router
+                .send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk)
+                .await,
+            prompt,
+        )
     };
 
     let ai_elapsed_ms = ai_started.elapsed().as_millis();
@@ -836,7 +909,14 @@ async fn guide(
         Ok(r) => (true, r.steps.len()),
         Err(_) => (false, 0),
     };
-    log_model_timing(&app, &timing_provider, &timing_model, ai_elapsed_ms, timing_ok, timing_steps);
+    log_model_timing(
+        &app,
+        &timing_provider,
+        &timing_model,
+        ai_elapsed_ms,
+        timing_ok,
+        timing_steps,
+    );
 
     // Emit balance update for managed provider before processing the result.
     if let Some(remaining) = router.get_managed_free_remaining() {
@@ -882,7 +962,11 @@ async fn guide(
     if let Some(session) = &mut router.session_manager.current_session {
         session.update_state(state_summary.clone());
         session.add_turn("user", sent_user_prompt, None);
-        let content = steps.iter().map(|s| s.instruction.clone()).collect::<Vec<_>>().join("\n");
+        let content = steps
+            .iter()
+            .map(|s| s.instruction.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
     }
@@ -931,10 +1015,18 @@ async fn guide(
         });
     }
 
-    let log_trace = state.ai_router.lock().await.config.debug_locate_log_file_enabled;
+    let log_trace = state
+        .ai_router
+        .lock()
+        .await
+        .config
+        .debug_locate_log_file_enabled;
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
-        app.path().app_data_dir().ok().map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
+        app.path()
+            .app_data_dir()
+            .ok()
+            .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
         None
     };
@@ -945,7 +1037,10 @@ async fn guide(
     // visual change that trips the threshold on every response. The overlay
     // was cleared before the AI capture, so the screen is pointer-free here
     // too; any drift now reflects a real user change while the AI was thinking.
-    let stale_hash = tokio::task::spawn_blocking(ahash_of_screen).await.ok().flatten();
+    let stale_hash = tokio::task::spawn_blocking(ahash_of_screen)
+        .await
+        .ok()
+        .flatten();
     if let (Some(p), Some(q)) = (pre_hash, stale_hash) {
         let drift = hamming64(p, q);
         if drift >= STALE_RESPONSE_THRESHOLD {
@@ -953,9 +1048,20 @@ async fn guide(
         }
     }
 
-    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd_opt, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, capture_rect_opt)
-        .unwrap_or((None, None));
-    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
+    let (located, locate_trace) = execute_step(
+        &app,
+        &steps[0],
+        new_hwnd_opt,
+        debug_ocr_path,
+        &state.tracker,
+        &state.last_overlay,
+        ai_bbox,
+        capture_rect_opt,
+    )
+    .unwrap_or((None, None));
+    if let Some(ref t) = locate_trace {
+        maybe_log_trace(&app, t, log_trace);
+    }
 
     // Anchor the autopilot baseline AFTER the pointer is drawn so that
     // check_screen_changed (which also sees the pointer) compares like-for-like.
@@ -997,12 +1103,18 @@ async fn next_step(
     };
 
     if step_index >= steps.len() {
-        return Err(format!("step_index {step_index} out of range ({})", steps.len()));
+        return Err(format!(
+            "step_index {step_index} out of range ({})",
+            steps.len()
+        ));
     }
 
     let (log_trace, debug_screenshot_enabled) = {
         let cfg = &state.ai_router.lock().await.config;
-        (cfg.debug_locate_log_file_enabled, cfg.debug_screenshot_enabled)
+        (
+            cfg.debug_locate_log_file_enabled,
+            cfg.debug_screenshot_enabled,
+        )
     };
     let stored_hwnd = {
         let g = state.guidance.lock();
@@ -1010,14 +1122,28 @@ async fn next_step(
     };
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
-        app.path().app_data_dir().ok().map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
+        app.path()
+            .app_data_dir()
+            .ok()
+            .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
-    let (located, locate_trace) = execute_step(&app, &steps[step_index], stored_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, capture_rect)
-        .unwrap_or((None, None));
-    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
+    let (located, locate_trace) = execute_step(
+        &app,
+        &steps[step_index],
+        stored_hwnd,
+        debug_ocr_path,
+        &state.tracker,
+        &state.last_overlay,
+        ai_bbox,
+        capture_rect,
+    )
+    .unwrap_or((None, None));
+    if let Some(ref t) = locate_trace {
+        maybe_log_trace(&app, t, log_trace);
+    }
 
     // Local step advance — no AI call, so no stale check. But anchor the
     // autopilot baseline to the new pointer state so autopilot waits for the
@@ -1081,7 +1207,23 @@ async fn send_correction(
 
     // Fresh capture — no stored HWND, always walks z-order to the focused window.
     #[allow(clippy::type_complexity)]
-    let (screenshot_b64, new_capture_rect, new_hwnd, debug_screenshot_path, chat_thumb_b64, full_jpeg_opt, pre_hash): (String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Option<Vec<u8>>, Option<u64>) = tokio::task::spawn_blocking(move || {
+    let (
+        screenshot_b64,
+        new_capture_rect,
+        new_hwnd,
+        debug_screenshot_path,
+        chat_thumb_b64,
+        full_jpeg_opt,
+        pre_hash,
+    ): (
+        String,
+        Option<capture::Rect>,
+        Option<usize>,
+        Option<String>,
+        Option<String>,
+        Option<Vec<u8>>,
+        Option<u64>,
+    ) = tokio::task::spawn_blocking(move || {
         if let Ok((bytes, rect, hwnd)) = capture::capture_active_window_jpeg(75, &exclude) {
             let final_bytes = bytes;
 
@@ -1113,7 +1255,15 @@ async fn send_correction(
             let thumb_b64 = make_chat_thumbnail(&final_bytes);
             let pre_hash = ahash_of_jpeg(&final_bytes);
             let b64 = capture::to_base64(&final_bytes);
-            (b64, Some(rect), Some(hwnd), debug_path, thumb_b64, Some(final_bytes), pre_hash)
+            (
+                b64,
+                Some(rect),
+                Some(hwnd),
+                debug_path,
+                thumb_b64,
+                Some(final_bytes),
+                pre_hash,
+            )
         } else {
             (String::new(), None, None, None, None, None, None)
         }
@@ -1137,16 +1287,20 @@ async fn send_correction(
     };
 
     let user_text_owned = match note.as_deref().filter(|n| !n.trim().is_empty()) {
-        Some(n) => format!("{} User note: {}", crate::ai::prompts::CORRECTION_CONTEXT, n),
-        None    => crate::ai::prompts::CORRECTION_CONTEXT.to_string(),
+        Some(n) => format!(
+            "{} User note: {}",
+            crate::ai::prompts::CORRECTION_CONTEXT,
+            n
+        ),
+        None => crate::ai::prompts::CORRECTION_CONTEXT.to_string(),
     };
-    
+
     let mut window_context = String::new();
     if let Some(hwnd) = new_hwnd {
         let info = capture::get_window_info(hwnd);
         window_context = format!("\n[Current Window Info]\n{}", info);
     }
-    
+
     let final_user_text = if !window_context.is_empty() {
         format!("{user_text_owned}\n{window_context}")
     } else {
@@ -1165,7 +1319,12 @@ async fn send_correction(
     let mut streamed = String::new();
     let on_chunk = move |chunk: &str| {
         streamed.push_str(chunk);
-        let _ = app_clone.emit("stream_chunk", StreamChunkPayload { delta: chunk.to_string() });
+        let _ = app_clone.emit(
+            "stream_chunk",
+            StreamChunkPayload {
+                delta: chunk.to_string(),
+            },
+        );
         if let Ok(update) =
             overlay::make_update(overlay::OverlayKind::Subtitle, None, Some(streamed.clone()))
         {
@@ -1177,14 +1336,23 @@ async fn send_correction(
     let timing_model = router.active_model();
     let ai_started = std::time::Instant::now();
 
-    let resp = router.send_guidance_request(user_text, Some(&screenshot_b64), Some(&summary), on_chunk).await;
+    let resp = router
+        .send_guidance_request(user_text, Some(&screenshot_b64), Some(&summary), on_chunk)
+        .await;
 
     let ai_elapsed_ms = ai_started.elapsed().as_millis();
     let (timing_ok, timing_steps) = match &resp {
         Ok(r) => (true, r.steps.len()),
         Err(_) => (false, 0),
     };
-    log_model_timing(&app, &timing_provider, &timing_model, ai_elapsed_ms, timing_ok, timing_steps);
+    log_model_timing(
+        &app,
+        &timing_provider,
+        &timing_model,
+        ai_elapsed_ms,
+        timing_ok,
+        timing_steps,
+    );
 
     if let Some(remaining) = router.get_managed_free_remaining() {
         let _ = app.emit("balance_update", remaining);
@@ -1211,7 +1379,11 @@ async fn send_correction(
     if let Some(session) = &mut router.session_manager.current_session {
         session.update_state(state_summary.clone());
         session.add_turn("user", user_text.to_string(), None);
-        let content = steps.iter().map(|s| s.instruction.clone()).collect::<Vec<_>>().join("\n");
+        let content = steps
+            .iter()
+            .map(|s| s.instruction.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
     }
@@ -1258,18 +1430,27 @@ async fn send_correction(
 
     let (log_trace, debug_screenshot_enabled) = {
         let cfg = &state.ai_router.lock().await.config;
-        (cfg.debug_locate_log_file_enabled, cfg.debug_screenshot_enabled)
+        (
+            cfg.debug_locate_log_file_enabled,
+            cfg.debug_screenshot_enabled,
+        )
     };
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
-        app.path().app_data_dir().ok().map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
+        app.path()
+            .app_data_dir()
+            .ok()
+            .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[0], new_capture_rect, &provider);
 
     // Stale detection before the pointer is drawn — see guide() for rationale.
-    let stale_hash = tokio::task::spawn_blocking(ahash_of_screen).await.ok().flatten();
+    let stale_hash = tokio::task::spawn_blocking(ahash_of_screen)
+        .await
+        .ok()
+        .flatten();
     if let (Some(p), Some(q)) = (pre_hash, stale_hash) {
         let drift = hamming64(p, q);
         if drift >= STALE_RESPONSE_THRESHOLD {
@@ -1277,9 +1458,20 @@ async fn send_correction(
         }
     }
 
-    let (located, locate_trace) = execute_step(&app, &steps[0], new_hwnd, debug_ocr_path, &state.tracker, &state.last_overlay, ai_bbox, new_capture_rect)
-        .unwrap_or((None, None));
-    if let Some(ref t) = locate_trace { maybe_log_trace(&app, t, log_trace); }
+    let (located, locate_trace) = execute_step(
+        &app,
+        &steps[0],
+        new_hwnd,
+        debug_ocr_path,
+        &state.tracker,
+        &state.last_overlay,
+        ai_bbox,
+        new_capture_rect,
+    )
+    .unwrap_or((None, None));
+    if let Some(ref t) = locate_trace {
+        maybe_log_trace(&app, t, log_trace);
+    }
 
     // Anchor the autopilot baseline AFTER the pointer is drawn (pointer-inclusive).
     let _ = anchor_autopilot_baseline(&state).await;
@@ -1338,9 +1530,13 @@ fn list_tts_voices(state: State<'_, AppState>) -> Vec<tts::VoiceInfo> {
 #[tauri::command]
 fn list_target_windows() -> Vec<capture::TargetWindowInfo> {
     #[cfg(windows)]
-    { capture::list_target_windows() }
+    {
+        capture::list_target_windows()
+    }
     #[cfg(not(windows))]
-    { vec![] }
+    {
+        vec![]
+    }
 }
 
 /// Item 1 — pin a specific window as the guidance target. Survives new tasks;
@@ -1389,8 +1585,9 @@ fn get_shared_app_info(state: State<'_, AppState>) -> Option<SharedAppInfoPayloa
             g.pinned_hwnd.or(g.target_hwnd)
         };
         let info = match stored {
-            Some(hwnd) => capture::get_window_info_for_hwnd(hwnd)
-                .or_else(capture::get_active_window_info),
+            Some(hwnd) => {
+                capture::get_window_info_for_hwnd(hwnd).or_else(capture::get_active_window_info)
+            }
             None => capture::get_active_window_info(),
         };
         info.map(|i| SharedAppInfoPayload {
@@ -1439,11 +1636,7 @@ async fn capture_screen(quality: Option<u8>) -> Result<CaptureResult, String> {
 }
 
 fn emit_box_overlay(app: &AppHandle, result: &locator::LocateResult) {
-    match overlay::make_update(
-        overlay::OverlayKind::Box,
-        Some(result.bbox),
-        None,
-    ) {
+    match overlay::make_update(overlay::OverlayKind::Box, Some(result.bbox), None) {
         Ok(update) => {
             if let Err(e) = overlay::emit_update(app, update) {
                 log::warn!("overlay emit failed: {e}");
@@ -1471,12 +1664,11 @@ async fn locate_a11y(
             target_hwnd: None,
             debug_ocr_image_path: None,
         };
-        let (result, _trace) = tokio::task::spawn_blocking(move || {
-            locator::a11y::find_element(&text, &opts)
-        })
-        .await
-        .map_err(|e| format!("task join: {e}"))?
-        .map_err(|e| e.to_string())?;
+        let (result, _trace) =
+            tokio::task::spawn_blocking(move || locator::a11y::find_element(&text, &opts))
+                .await
+                .map_err(|e| format!("task join: {e}"))?
+                .map_err(|e| e.to_string())?;
         if let Some(ref r) = result {
             emit_box_overlay(&app, r);
         }
@@ -1508,10 +1700,11 @@ async fn locate_element(
             target_hwnd: None,
             debug_ocr_image_path: None,
         };
-        let (result, _trace) = tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts))
-            .await
-            .map_err(|e| format!("task join: {e}"))?
-            .map_err(|e| e.to_string())?;
+        let (result, _trace) =
+            tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts))
+                .await
+                .map_err(|e| format!("task join: {e}"))?
+                .map_err(|e| e.to_string())?;
         if let Some(ref r) = result {
             emit_box_overlay(&app, r);
         }
@@ -1532,9 +1725,9 @@ async fn capture_active_window(quality: Option<u8>) -> Result<CaptureResult, Str
         let exclude = capture::get_panel_rects();
         capture::capture_active_window_jpeg(q, &exclude)
     })
-        .await
-        .map_err(|e| format!("task join: {e}"))?
-        .map_err(|e| e.to_string())?;
+    .await
+    .map_err(|e| format!("task join: {e}"))?
+    .map_err(|e| e.to_string())?;
     let (w, h) = image::load_from_memory(&bytes)
         .map(|img| (img.width(), img.height()))
         .unwrap_or((0, 0));
@@ -1555,7 +1748,9 @@ async fn open_debug_folder(app: AppHandle) -> Result<(), String> {
     if !developer_mode_enabled() {
         return Err("Developer mode not enabled".into());
     }
-    let dir = app.path().app_data_dir()
+    let dir = app
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("app_data_dir: {e}"))?
         .join("debug");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir: {e}"))?;
@@ -1598,11 +1793,11 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         tts_voice: c.tts_voice.clone(),
         voice_input_enabled: c.voice_input_enabled,
         voice_language: c.voice_language.clone(),
-        hotkey_next:  c.hotkey_next.clone(),
+        hotkey_next: c.hotkey_next.clone(),
         hotkey_wrong: c.hotkey_wrong.clone(),
         hotkey_pause: c.hotkey_pause.clone(),
-        hotkey_icon:  c.hotkey_icon.clone(),
-        hotkey_talk:  c.hotkey_talk.clone(),
+        hotkey_icon: c.hotkey_icon.clone(),
+        hotkey_talk: c.hotkey_talk.clone(),
         debug_screenshot_enabled: c.debug_screenshot_enabled,
         debug_show_response_info: c.debug_show_response_info,
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
@@ -1615,7 +1810,10 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
 /// Returns true when the process was launched with NAVISUAL_DEV=true or =1.
 /// Read live so unsetting + relaunching reverts the gate without a save.
 fn developer_mode_enabled() -> bool {
-    matches!(std::env::var("NAVISUAL_DEV").as_deref(), Ok("true") | Ok("1"))
+    matches!(
+        std::env::var("NAVISUAL_DEV").as_deref(),
+        Ok("true") | Ok("1")
+    )
 }
 
 #[tauri::command]
@@ -1628,40 +1826,73 @@ async fn save_settings(
 
     // Always-written settings (non-sensitive)
     let mut updates: Vec<(String, String)> = vec![
-        ("API_PROVIDER".into(),         payload.api_provider.clone()),
-        ("ANTHROPIC_MODEL".into(),      payload.anthropic_model.clone()),
-        ("ANTHROPIC_FAST_MODEL".into(), payload.anthropic_fast_model.clone()),
-        ("GEMINI_MODEL".into(),         payload.gemini_model.clone()),
-        ("GEMINI_FAST_MODEL".into(),    payload.gemini_fast_model.clone()),
-        ("OLLAMA_BASE_URL".into(),      payload.ollama_base_url.clone()),
-        ("OLLAMA_MODEL".into(),         payload.ollama_model.clone()),
-        ("OPENAI_MODEL".into(),         payload.openai_model.clone()),
-        ("DEEPSEEK_MODEL".into(),       payload.deepseek_model.clone()),
-        ("QWEN_MODEL".into(),           payload.qwen_model.clone()),
-        ("QWEN_BASE_URL".into(),        payload.qwen_base_url.clone()),
-        ("OVERLAY_COLOR".into(),        payload.overlay_color.clone()),
-        ("OVERLAY_THICKNESS".into(),    payload.overlay_thickness.to_string()),
-        ("SUBTITLE_ENABLED".into(),     payload.subtitle_enabled.to_string()),
-        ("AUTO_ADVANCE".into(),         payload.auto_advance.to_string()),
-        ("TTS_ENABLED".into(),          payload.tts_enabled.to_string()),
-        ("TTS_VOICE".into(),            payload.tts_voice.clone()),
-        ("VOICE_INPUT_ENABLED".into(),  payload.voice_input_enabled.to_string()),
-        ("VOICE_LANGUAGE".into(),       payload.voice_language.clone()),
-        ("HOTKEY_NEXT".into(),          payload.hotkey_next.clone()),
-        ("HOTKEY_WRONG".into(),         payload.hotkey_wrong.clone()),
-        ("HOTKEY_PAUSE".into(),         payload.hotkey_pause.clone()),
-        ("HOTKEY_ICON".into(),          payload.hotkey_icon.clone()),
-        ("HOTKEY_TALK".into(),          payload.hotkey_talk.clone()),
-        ("DEBUG_SCREENSHOT_ENABLED".into(),       payload.debug_screenshot_enabled.to_string()),
-        ("DEBUG_SHOW_RESPONSE_INFO".into(),       payload.debug_show_response_info.to_string()),
-        ("DEBUG_LOCATE_TRACE_ENABLED".into(),     payload.debug_locate_trace_enabled.to_string()),
-        ("DEBUG_LOCATE_LOG_FILE_ENABLED".into(),  payload.debug_locate_log_file_enabled.to_string()),
-        ("DEBUG_SHOW_AI_BBOX".into(),             payload.debug_show_ai_bbox.to_string()),
+        ("API_PROVIDER".into(), payload.api_provider.clone()),
+        ("ANTHROPIC_MODEL".into(), payload.anthropic_model.clone()),
+        (
+            "ANTHROPIC_FAST_MODEL".into(),
+            payload.anthropic_fast_model.clone(),
+        ),
+        ("GEMINI_MODEL".into(), payload.gemini_model.clone()),
+        (
+            "GEMINI_FAST_MODEL".into(),
+            payload.gemini_fast_model.clone(),
+        ),
+        ("OLLAMA_BASE_URL".into(), payload.ollama_base_url.clone()),
+        ("OLLAMA_MODEL".into(), payload.ollama_model.clone()),
+        ("OPENAI_MODEL".into(), payload.openai_model.clone()),
+        ("DEEPSEEK_MODEL".into(), payload.deepseek_model.clone()),
+        ("QWEN_MODEL".into(), payload.qwen_model.clone()),
+        ("QWEN_BASE_URL".into(), payload.qwen_base_url.clone()),
+        ("OVERLAY_COLOR".into(), payload.overlay_color.clone()),
+        (
+            "OVERLAY_THICKNESS".into(),
+            payload.overlay_thickness.to_string(),
+        ),
+        (
+            "SUBTITLE_ENABLED".into(),
+            payload.subtitle_enabled.to_string(),
+        ),
+        ("AUTO_ADVANCE".into(), payload.auto_advance.to_string()),
+        ("TTS_ENABLED".into(), payload.tts_enabled.to_string()),
+        ("TTS_VOICE".into(), payload.tts_voice.clone()),
+        (
+            "VOICE_INPUT_ENABLED".into(),
+            payload.voice_input_enabled.to_string(),
+        ),
+        ("VOICE_LANGUAGE".into(), payload.voice_language.clone()),
+        ("HOTKEY_NEXT".into(), payload.hotkey_next.clone()),
+        ("HOTKEY_WRONG".into(), payload.hotkey_wrong.clone()),
+        ("HOTKEY_PAUSE".into(), payload.hotkey_pause.clone()),
+        ("HOTKEY_ICON".into(), payload.hotkey_icon.clone()),
+        ("HOTKEY_TALK".into(), payload.hotkey_talk.clone()),
+        (
+            "DEBUG_SCREENSHOT_ENABLED".into(),
+            payload.debug_screenshot_enabled.to_string(),
+        ),
+        (
+            "DEBUG_SHOW_RESPONSE_INFO".into(),
+            payload.debug_show_response_info.to_string(),
+        ),
+        (
+            "DEBUG_LOCATE_TRACE_ENABLED".into(),
+            payload.debug_locate_trace_enabled.to_string(),
+        ),
+        (
+            "DEBUG_LOCATE_LOG_FILE_ENABLED".into(),
+            payload.debug_locate_log_file_enabled.to_string(),
+        ),
+        (
+            "DEBUG_SHOW_AI_BBOX".into(),
+            payload.debug_show_ai_bbox.to_string(),
+        ),
     ];
 
     // API keys: only overwrite if the user actually typed something
     if !payload.anthropic_api_key.trim().is_empty() {
-        updates.push(("ANTHROPIC_API_KEY".into(), payload.anthropic_api_key.clone()));
+        updates.push((
+            "ANTHROPIC_API_KEY".into(),
+            payload.anthropic_api_key.clone(),
+        ));
     }
     if !payload.gemini_api_key.trim().is_empty() {
         updates.push(("GEMINI_API_KEY".into(), payload.gemini_api_key.clone()));
@@ -1677,7 +1908,10 @@ async fn save_settings(
     }
 
     // Atomic write to .env
-    let refs: Vec<(&str, &str)> = updates.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let refs: Vec<(&str, &str)> = updates
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     update_env_file(&env_path, &refs)?;
 
     // Propagate to current process so Config::load() picks them up
@@ -1696,11 +1930,14 @@ async fn save_settings(
     state.tts.set_voice(payload.tts_voice.clone());
 
     // Notify the overlay canvas of the new theme (broadcasts to all webview windows).
-    let _ = app.emit("overlay:theme", OverlayThemePayload {
-        color: payload.overlay_color,
-        thickness: payload.overlay_thickness,
-        subtitle_enabled: payload.subtitle_enabled,
-    });
+    let _ = app.emit(
+        "overlay:theme",
+        OverlayThemePayload {
+            color: payload.overlay_color,
+            thickness: payload.overlay_thickness,
+            subtitle_enabled: payload.subtitle_enabled,
+        },
+    );
 
     Ok(())
 }
@@ -1731,8 +1968,16 @@ async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, Strin
 
     let (supabase_url, anon_key) = {
         let router = state.ai_router.lock().await;
-        let url = router.config.supabase_url.clone().ok_or("SUPABASE_URL not configured")?;
-        let key = router.config.supabase_anon_key.clone().ok_or("SUPABASE_ANON_KEY not configured")?;
+        let url = router
+            .config
+            .supabase_url
+            .clone()
+            .ok_or("SUPABASE_URL not configured")?;
+        let key = router
+            .config
+            .supabase_anon_key
+            .clone()
+            .ok_or("SUPABASE_ANON_KEY not configured")?;
         (url, key)
     };
 
@@ -1747,7 +1992,10 @@ async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, Strin
         router.set_managed_session(new_session);
     }
 
-    Ok(SessionStatus { signed_in: true, free_remaining: None })
+    Ok(SessionStatus {
+        signed_in: true,
+        free_remaining: None,
+    })
 }
 
 /// Fetch the managed-provider balance (tier, free_remaining, coin_balance_microdollars).
@@ -1755,7 +2003,11 @@ async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, Strin
 async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceResponse, String> {
     let (supabase_url, access_token) = {
         let router = state.ai_router.lock().await;
-        let url = router.config.supabase_url.clone().ok_or("SUPABASE_URL not configured")?;
+        let url = router
+            .config
+            .supabase_url
+            .clone()
+            .ok_or("SUPABASE_URL not configured")?;
         // Try to get the access token from the managed client's session.
         let token = match &router.client_access_token() {
             Some(t) => t.clone(),
@@ -1786,7 +2038,58 @@ async fn get_session_status(state: State<'_, AppState>) -> Result<SessionStatus,
     let router = state.ai_router.lock().await;
     let free_remaining = router.get_managed_free_remaining();
     let signed_in = router.has_managed_session();
-    Ok(SessionStatus { signed_in, free_remaining })
+    Ok(SessionStatus {
+        signed_in,
+        free_remaining,
+    })
+}
+
+/// One test-user feedback row: a "worked" success ping (sent on → Next) or a
+/// categorized "wrong" report. Mirrors the Supabase `feedback` table columns.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FeedbackPayload {
+    kind: String,
+    note: Option<String>,
+    app_version: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    task_prompt: Option<String>,
+    instruction: Option<String>,
+    target_text: Option<String>,
+    located: Option<bool>,
+    locate_role: Option<String>,
+    locate_conf: Option<f32>,
+    app_window: Option<String>,
+    session_id: Option<String>,
+}
+
+/// Insert a feedback row into Supabase. Best-effort: the frontend ignores
+/// failures (offline / not configured / not signed in). Uses the managed JWT
+/// when present so `user_id` is attributed, else the anon role.
+#[tauri::command]
+async fn submit_feedback(
+    state: State<'_, AppState>,
+    payload: FeedbackPayload,
+) -> Result<(), String> {
+    let (supabase_url, anon_key, token) = {
+        let router = state.ai_router.lock().await;
+        let url = router
+            .config
+            .supabase_url
+            .clone()
+            .ok_or("SUPABASE_URL not configured")?;
+        let key = router
+            .config
+            .supabase_anon_key
+            .clone()
+            .ok_or("SUPABASE_ANON_KEY not configured")?;
+        let token = router.client_access_token();
+        (url, key, token)
+    };
+    let row = serde_json::to_value(&payload).map_err(|e| e.to_string())?;
+    server::submit_feedback(&supabase_url, &anon_key, token.as_deref(), &row)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1844,7 +2147,9 @@ pub fn run() {
 
             // Resolve the app data directory (user-writable on all platforms).
             // Falls back to CWD so dev builds with no installation still work.
-            let app_data_dir = app.path().app_data_dir()
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
             std::fs::create_dir_all(&app_data_dir).ok();
             cleanup_old_debug_artifacts(&app_data_dir);
@@ -1865,7 +2170,12 @@ pub fn run() {
             let session_manager = SessionManager::new(app_data_dir.join("sessions"));
             let supabase_session_path = app_data_dir.join("supabase_session.json");
 
-            let router = AiRouter::new(config, cost_tracker, session_manager, Some(supabase_session_path.clone()));
+            let router = AiRouter::new(
+                config,
+                cost_tracker,
+                session_manager,
+                Some(supabase_session_path.clone()),
+            );
             log::info!("AiRouter ready (provider: {})", router.config.api_provider);
             handle.manage(AppState {
                 ai_router: tokio::sync::Mutex::new(router),
@@ -1916,6 +2226,7 @@ pub fn run() {
             sign_in_anon,
             get_balance,
             get_session_status,
+            submit_feedback,
             exit_for_update,
             list_target_windows,
             pin_target_window,

@@ -1,4 +1,4 @@
-use anyhow::{Result, bail, anyhow};
+use anyhow::{anyhow, bail, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -38,7 +38,11 @@ pub async fn sign_in_anonymously(supabase_url: &str, anon_key: &str) -> Result<S
         .send()
         .await?;
     if !resp.status().is_success() {
-        bail!("Supabase sign-in failed ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
+        bail!(
+            "Supabase sign-in failed ({}): {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
     }
     let body: serde_json::Value = resp.json().await?;
     parse_session(&body)
@@ -59,7 +63,11 @@ pub async fn refresh_session(
         .send()
         .await?;
     if !resp.status().is_success() {
-        bail!("Session refresh failed ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
+        bail!(
+            "Session refresh failed ({}): {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
     }
     let body: serde_json::Value = resp.json().await?;
     parse_session(&body)
@@ -95,9 +103,44 @@ pub async fn get_balance(supabase_url: &str, access_token: &str) -> Result<Balan
         .send()
         .await?;
     if !resp.status().is_success() {
-        bail!("get_balance failed ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
+        bail!(
+            "get_balance failed ({}): {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
     }
     Ok(resp.json().await?)
+}
+
+/// Insert one feedback row into the Supabase `feedback` table via PostgREST.
+/// Uses the user's JWT when signed in (so `auth.uid()` fills `user_id`), and
+/// falls back to the anon key (anon role) for BYOK / offline users.
+pub async fn submit_feedback(
+    supabase_url: &str,
+    anon_key: &str,
+    access_token: Option<&str>,
+    row: &serde_json::Value,
+) -> Result<()> {
+    let client = Client::new();
+    let url = format!("{}/rest/v1/feedback", supabase_url);
+    let bearer = access_token.unwrap_or(anon_key);
+    let resp = client
+        .post(&url)
+        .header("apikey", anon_key)
+        .header("Authorization", format!("Bearer {}", bearer))
+        .header("Content-Type", "application/json")
+        .header("Prefer", "return=minimal")
+        .json(row)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        bail!(
+            "submit_feedback failed ({}): {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+    }
+    Ok(())
 }
 
 pub fn load_session(path: &Path) -> Option<SupabaseSession> {

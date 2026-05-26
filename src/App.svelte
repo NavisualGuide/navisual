@@ -149,6 +149,29 @@ See the LICENSE file in the root of this repository for complete details.
   let locateResult = $state<LocateResult | null>(null);
   let locateTrace = $state<LocateTrace | null>(null);
   let debugDrawerOpen = $state(false);
+  // Test-user feedback (see logFeedback / submitWrong / correction).
+  let currentGoal = $state("");
+  let wrongPickerOpen = $state(false);
+  const CATEGORY_LABEL: Record<string, string> = {
+    wrong_instruction: "Wrong instruction",
+    wrong_spot: "Wrong spot",
+    not_found: "Can't find it",
+    already_done: "Already did that",
+    wrong_other: "Other",
+  };
+  // Steering hint folded into the AI re-analysis note for each reason (the user's
+  // own typed text is appended after, and is what gets logged). wrong_other has
+  // no canned hint — the free text is the signal.
+  const CATEGORY_HINT: Record<string, string> = {
+    wrong_instruction:
+      "That instruction was the wrong action for my goal. Reconsider the task and propose a different next step.",
+    wrong_spot:
+      "The pointer landed on the WRONG element. The target may be ambiguous (it appears more than once on screen) or you identified the wrong one. Re-examine the screenshot and return a more specific target_text, a precise target_bbox, and a target_nearby_text anchor to disambiguate.",
+    not_found:
+      "The pointer could not be placed — the element you described isn't visible or wasn't found. It may be off-screen (needs scrolling), hidden behind a menu, or named differently. Re-examine and either guide a scroll/expand step first or give a more findable target.",
+    already_done:
+      "I have ALREADY done this step. Do not repeat it — advance to the next action.",
+  };
   let sessionId = $state("");
   let provider = $state("");
   // Set when the screen drifted during the 5–90s AI thinking window.
@@ -569,11 +592,6 @@ See the LICENSE file in the root of this repository for complete details.
     showQuickMenu = false;
   }
 
-  async function wrongAndClose() {
-    showQuickMenu = false;
-    await correction();
-  }
-
   function cancelRequest() {
     requestToken++;
     stopTimer();
@@ -659,7 +677,7 @@ See the LICENSE file in the root of this repository for complete details.
     }
     const pairs: Array<[string, () => void]> = [
       [hk.hotkey_next,  debounced(() => { if (!actionDisabled) nextStep(); })],
-      [hk.hotkey_wrong, debounced(() => { if (!actionDisabled) correction(); })],
+      [hk.hotkey_wrong, debounced(() => { if (!actionDisabled) openWrongPicker(); })],
       [hk.hotkey_pause, debounced(() => cancelRequest())],
       [hk.hotkey_icon,  debounced(() => { if (iconMode) expandToPanel(); else collapseToIcon(); })],
       [hk.hotkey_talk,  debounced(() => { if (settingsForm.voice_input_enabled) toggleVoiceInput(); })],
@@ -789,6 +807,8 @@ See the LICENSE file in the root of this repository for complete details.
     task = "";
     // Keep session context when in the middle of a task; start fresh from idle/error.
     const isReply = phase === "guiding" || phase === "needs_input" || phase === "consent_prompt";
+    // Remember the original goal for feedback reports (the textarea gets cleared).
+    if (!isReply && !fullScreen) currentGoal = taskText;
     const prevPhase = phase;
     const userEntryId = await addToHistory("user", taskText);
     currentInstruction = "";
@@ -821,6 +841,8 @@ See the LICENSE file in the root of this repository for complete details.
     // Don't allow next while an AI call is in flight — the hotkey can fire
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
+    // Pressing Next means the current step worked → implicit success signal.
+    if (phase === "guiding") logFeedback("worked", "");
     const nextIdx = stepIndex + 1;
     const prevPhase = phase;
     if (nextIdx >= steps.length) {
@@ -874,11 +896,16 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  async function correction() {
-    const note = task.trim();
-    if (note) task = "";
+  async function correction(category?: string) {
+    const rawNote = task.trim();
+    if (rawNote) task = "";
+    // Fold a steering hint for the reason into the note the AI sees, then the
+    // user's own text. (The logged note is the user's raw text only.)
+    const hint = category ? (CATEGORY_HINT[category] ?? "") : "";
+    const note = [hint, rawNote].filter(Boolean).join(" ").trim();
+    const label = (category && CATEGORY_LABEL[category]) || "Wrong";
     const prevPhase = phase;
-    const corrEntryId = await addToHistory("correction", note ? `Wrong — ${note}` : "Marked wrong — re-analysing…");
+    const corrEntryId = await addToHistory("correction", rawNote ? `${label} — ${rawNote}` : `${label} — re-analysing…`);
     currentInstruction = "";
     staleResponse = false;
     phase = "thinking";
@@ -892,7 +919,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (!res.ok) {
         phase = prevPhase;
         addToHistory("system", "⚠️ " + (res.error ?? "correction failed"));
-        if (note !== "") task = note;
+        if (rawNote !== "") task = rawNote;
         return;
       }
       applyResponse(res, 0, token);
@@ -901,14 +928,78 @@ See the LICENSE file in the root of this repository for complete details.
       if (token !== requestToken) return;
       phase = prevPhase;
       addToHistory("system", "⚠️ " + String(e));
-      if (note !== "") task = note;
+      if (rawNote !== "") task = rawNote;
     }
+  }
+
+  // Best-effort test-user feedback → Supabase (see submit_feedback in lib.rs).
+  // "worked" on Next; a reason category on Wrong. Failures are ignored.
+  async function logFeedback(kind: string, note: string) {
+    try {
+      await invoke("submit_feedback", {
+        payload: {
+          kind,
+          note: note || null,
+          app_version: appVersion,
+          provider: settingsForm.api_provider,
+          model: activeModel,
+          task_prompt: currentGoal || null,
+          instruction: currentInstruction || null,
+          target_text: steps[stepIndex]?.target_text ?? null,
+          located: !!locateResult,
+          locate_role: locateResult?.role ?? null,
+          locate_conf: locateResult?.confidence ?? null,
+          app_window: sharedApp ? (friendlyName(sharedApp.exe_name) || sharedApp.app_name) : null,
+          session_id: sessionId || null,
+        },
+      });
+    } catch (_) {
+      /* offline / not signed in / not configured — feedback is best-effort */
+    }
+  }
+
+  // Wrong button → log the reason, then re-analyse with that reason as a hint.
+  async function submitWrong(category: string) {
+    wrongPickerOpen = false;
+    const note = task.trim();
+    logFeedback(category, note);
+    await correction(category);
+  }
+
+  function openWrongPicker() {
+    if (phase === "guiding") wrongPickerOpen = true;
+    else correction();
+  }
+
+  // About → Send feedback: open the user's mail client with version + provider
+  // prefilled so long-form reports arrive with context.
+  function openFeedbackEmail() {
+    const subject = `Navisual feedback (v${appVersion})`;
+    const body = [
+      "What went wrong / what would you like to see?",
+      "",
+      "",
+      "—",
+      `App version: v${appVersion}`,
+      `Provider: ${settingsForm.api_provider}`,
+      `Model: ${activeModel}`,
+    ].join("\n");
+    openUrl(
+      `mailto:feedback@navisualguide.com?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
+    );
+  }
+
+  // Textarea submit: while the Wrong picker is open, a typed message is itself a
+  // "wrong" report (logged as wrong_other) rather than a normal follow-up.
+  function submitTask() {
+    if (wrongPickerOpen && task.trim()) submitWrong("wrong_other");
+    else guide();
   }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey && !isThinking && task.trim()) {
       e.preventDefault();
-      guide();
+      submitTask();
     }
   }
 
@@ -1134,6 +1225,28 @@ See the LICENSE file in the root of this repository for complete details.
           <p class="miss-note">⊘ Pointer unavailable — follow the instruction above</p>
         {/if}
 
+        <!-- Feedback: mark this step wrong (promoted from the ··· quick-menu) -->
+        {#if phase === "guiding"}
+          <div class="wrong-footer">
+            {#if !wrongPickerOpen}
+              <button class="wrong-btn" onclick={() => (wrongPickerOpen = true)} title="This guidance is wrong (Ctrl+E)">✗ This is wrong</button>
+            {:else}
+              <div class="reason-row">
+                <span class="reason-prompt">What went wrong?</span>
+                <button class="reason-cancel" onclick={() => (wrongPickerOpen = false)} title="Cancel" aria-label="Cancel">✕</button>
+              </div>
+              <div class="reason-chips">
+                <button class="reason-chip" onclick={() => submitWrong("wrong_instruction")}>Wrong instruction</button>
+                <button class="reason-chip" onclick={() => submitWrong("wrong_spot")}>Wrong spot</button>
+                <button class="reason-chip" onclick={() => submitWrong("not_found")}>Can't find it</button>
+                <button class="reason-chip" onclick={() => submitWrong("already_done")}>Already did that</button>
+              </div>
+              <p class="feedback-hint">Not one of these? Type what's wrong below, then ↩ Follow up.</p>
+              <p class="feedback-note">Shared with the Navisual team to improve guidance.</p>
+            {/if}
+          </div>
+        {/if}
+
         <!-- Phase 0.1: locate-trace debug drawer -->
         {#if settingsForm.debug_locate_trace_enabled && locateTrace}
           <div class="debug-drawer">
@@ -1306,7 +1419,7 @@ See the LICENSE file in the root of this repository for complete details.
         {#if isThinking}
           <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
         {:else}
-          <button class="btn-primary btn-full" onclick={() => guide()} disabled={!task.trim()}>
+          <button class="btn-primary btn-full" onclick={submitTask} disabled={!task.trim()}>
             {phase === "needs_input" ? "↩ Send answer" : phase === "guiding" ? "↩ Follow up" : "Guide me"}
           </button>
         {/if}
@@ -1316,9 +1429,6 @@ See the LICENSE file in the root of this repository for complete details.
     <!-- Quick-action menu (opened by ··· button) -->
     {#if showQuickMenu}
       <div class="quick-menu">
-        <button class="qm-btn qm-wrong" onclick={wrongAndClose} disabled={actionDisabled} title="Ctrl+E">
-          ✗ Wrong
-        </button>
         <button class="qm-btn" class:qm-active={isMuted} onclick={toggleMute}>
           {isMuted ? "🔇 Unmute" : "🔊 Mute"}
         </button>
@@ -1956,7 +2066,7 @@ See the LICENSE file in the root of this repository for complete details.
           <div class="about-links">
             <button class="about-link" onclick={() => openUrl("https://navisualguide.com")}>navisualguide.com</button>
             <button class="about-link" onclick={() => openUrl("https://github.com/NavisualGuide/navisual")}>GitHub</button>
-            <button class="about-link" onclick={() => openUrl("mailto:feedback@navisualguide.com")}>Send feedback</button>
+            <button class="about-link" onclick={openFeedbackEmail}>Send feedback</button>
           </div>
 
           <!-- Update section -->
@@ -2266,6 +2376,80 @@ See the LICENSE file in the root of this repository for complete details.
     font-size: 11px;
     color: var(--text-muted, #6b7280);
     margin: 4px 0 0;
+  }
+
+  /* ── Feedback: mark-wrong footer + reason chips ───── */
+
+  .wrong-footer {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+  .wrong-btn {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger);
+    border: 1px solid rgba(239, 68, 68, 0.22);
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .wrong-btn:hover { background: rgba(239, 68, 68, 0.22); }
+
+  .reason-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .reason-prompt {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .reason-cancel {
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0 2px;
+    line-height: 1;
+  }
+  .reason-cancel:hover { color: var(--text-primary); }
+
+  .reason-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .reason-chip {
+    background: var(--surface-3, #2d2d33);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 12px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .reason-chip:hover {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+  .feedback-hint {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin: 8px 0 0;
+  }
+  .feedback-note {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    margin: 6px 0 0;
   }
 
   /* Stale-response banner: screen drifted during AI thinking. */
@@ -2654,13 +2838,6 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .qm-btn:hover:not(:disabled) { background: #2d2d33; color: var(--text-primary); }
   .qm-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
-  .qm-wrong {
-    background: rgba(239, 68, 68, 0.12);
-    color: var(--danger);
-    border-color: rgba(239, 68, 68, 0.22);
-  }
-  .qm-wrong:not(:disabled):hover { background: rgba(239, 68, 68, 0.25); }
 
   .qm-active {
     background: rgba(255, 107, 53, 0.15) !important;
