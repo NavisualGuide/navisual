@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
 use chrono::Local;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenUsage {
@@ -38,7 +38,12 @@ pub struct CostTracker {
 }
 
 impl CostTracker {
-    pub fn new(daily_cap: u64, monthly_cap: u64, safety_margin: f64, storage_path: Option<PathBuf>) -> Self {
+    pub fn new(
+        daily_cap: u64,
+        monthly_cap: u64,
+        safety_margin: f64,
+        storage_path: Option<PathBuf>,
+    ) -> Self {
         let mut tracker = Self {
             daily_cap,
             monthly_cap,

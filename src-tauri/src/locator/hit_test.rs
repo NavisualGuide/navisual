@@ -28,10 +28,10 @@ pub enum HitTestOutcome {
 
 /// Win32 classes that are never a user-clickable control.
 const DENYLIST: &[&str] = &[
-    "Static",               // Win32 label / static-text control
-    "SysHeader32",          // ListView / TreeView column header
-    "ScrollBar",            // scrollbar track
-    "msctls_statusbar32",   // status bar at the bottom of windows
+    "Static",             // Win32 label / static-text control
+    "SysHeader32",        // ListView / TreeView column header
+    "ScrollBar",          // scrollbar track
+    "msctls_statusbar32", // status bar at the bottom of windows
 ];
 
 /// Classes that host a web-content rendering surface.
@@ -62,7 +62,10 @@ pub fn verify_hit(cx: i32, cy: i32) -> HitTestOutcome {
     }
 
     // Web renderer — skip denylist entirely.
-    if WEB_RENDERERS.iter().any(|&wc| class.eq_ignore_ascii_case(wc)) {
+    if WEB_RENDERERS
+        .iter()
+        .any(|&wc| class.eq_ignore_ascii_case(wc))
+    {
         return HitTestOutcome::WebRenderer;
     }
 

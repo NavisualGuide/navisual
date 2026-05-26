@@ -76,10 +76,8 @@ mod imp {
     // - Speech\Voices       — classic SAPI5 voices (David Desktop, Zira Desktop)
     // - Speech_OneCore\Voices — modern OneCore voices (Mark, Cortana, etc.)
     // We enumerate both and merge, deduplicating by ID.
-    const ONECORE_VOICES: &str =
-        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices";
-    const CLASSIC_VOICES: &str =
-        "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices";
+    const ONECORE_VOICES: &str = "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices";
+    const CLASSIC_VOICES: &str = "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices";
 
     // Enumerate one token category into `out`, skipping IDs already in `seen`.
     unsafe fn collect_from_category(
@@ -92,36 +90,53 @@ mod imp {
         };
         use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
 
-        let Ok(cat) = CoCreateInstance::<_, ISpObjectTokenCategory>(
-            &SpObjectTokenCategory, None, CLSCTX_ALL,
-        ) else { return };
+        let Ok(cat) =
+            CoCreateInstance::<_, ISpObjectTokenCategory>(&SpObjectTokenCategory, None, CLSCTX_ALL)
+        else {
+            return;
+        };
 
         let wide: Vec<u16> = cat_path.encode_utf16().chain(std::iter::once(0)).collect();
         let pcwstr = windows::core::PCWSTR(wide.as_ptr());
-        if cat.SetId(pcwstr, false).is_err() { return }
+        if cat.SetId(pcwstr, false).is_err() {
+            return;
+        }
 
-        let Ok(tokens) = cat.EnumTokens(
-            windows::core::PCWSTR::null(), windows::core::PCWSTR::null()
-        ) else { return };
+        let Ok(tokens) =
+            cat.EnumTokens(windows::core::PCWSTR::null(), windows::core::PCWSTR::null())
+        else {
+            return;
+        };
 
         loop {
             let mut token: Option<ISpObjectToken> = None;
             let mut fetched: u32 = 0;
             let hr = tokens.Next(1, &mut token, Some(&mut fetched));
-            if fetched == 0 || hr.is_err() { break }
+            if fetched == 0 || hr.is_err() {
+                break;
+            }
             let Some(t) = token else { break };
 
-            let id_raw = match t.GetId() { Ok(p) => p, Err(_) => continue };
+            let id_raw = match t.GetId() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
             let id = pwstr_to_string(id_raw.0 as *const u16);
             CoTaskMemFree(Some(id_raw.0 as *const _));
-            if id.is_empty() || seen.contains(&id) { continue }
+            if id.is_empty() || seen.contains(&id) {
+                continue;
+            }
             seen.push(id.clone());
 
             let name = match t.GetStringValue(windows::core::PCWSTR::null()) {
                 Ok(p) => {
                     let s = pwstr_to_string(p.0 as *const u16);
                     CoTaskMemFree(Some(p.0 as *const _));
-                    if s.is_empty() { id.split('\\').next_back().unwrap_or("Unknown").to_string() } else { s }
+                    if s.is_empty() {
+                        id.split('\\').next_back().unwrap_or("Unknown").to_string()
+                    } else {
+                        s
+                    }
                 }
                 Err(_) => id.split('\\').next_back().unwrap_or("Unknown").to_string(),
             };
@@ -143,10 +158,7 @@ mod imp {
     }
 
     // Find the token with `target_id` across both categories and call SetVoice.
-    unsafe fn sapi_set_voice(
-        voice: &windows::Win32::Media::Speech::ISpVoice,
-        target_id: &str,
-    ) {
+    unsafe fn sapi_set_voice(voice: &windows::Win32::Media::Speech::ISpVoice, target_id: &str) {
         use windows::Win32::Media::Speech::{
             ISpObjectToken, ISpObjectTokenCategory, SpObjectTokenCategory,
         };
@@ -154,25 +166,38 @@ mod imp {
 
         for cat_path in [ONECORE_VOICES, CLASSIC_VOICES] {
             let Ok(cat) = CoCreateInstance::<_, ISpObjectTokenCategory>(
-                &SpObjectTokenCategory, None, CLSCTX_ALL,
-            ) else { continue };
+                &SpObjectTokenCategory,
+                None,
+                CLSCTX_ALL,
+            ) else {
+                continue;
+            };
 
             let wide: Vec<u16> = cat_path.encode_utf16().chain(std::iter::once(0)).collect();
             let pcwstr = windows::core::PCWSTR(wide.as_ptr());
-            if cat.SetId(pcwstr, false).is_err() { continue }
+            if cat.SetId(pcwstr, false).is_err() {
+                continue;
+            }
 
-            let Ok(tokens) = cat.EnumTokens(
-                windows::core::PCWSTR::null(), windows::core::PCWSTR::null()
-            ) else { continue };
+            let Ok(tokens) =
+                cat.EnumTokens(windows::core::PCWSTR::null(), windows::core::PCWSTR::null())
+            else {
+                continue;
+            };
 
             loop {
                 let mut token: Option<ISpObjectToken> = None;
                 let mut fetched: u32 = 0;
                 let hr = tokens.Next(1, &mut token, Some(&mut fetched));
-                if fetched == 0 || hr.is_err() { break }
+                if fetched == 0 || hr.is_err() {
+                    break;
+                }
                 let Some(t) = token else { break };
 
-                let id_raw = match t.GetId() { Ok(p) => p, Err(_) => continue };
+                let id_raw = match t.GetId() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
                 let id = pwstr_to_string(id_raw.0 as *const u16);
                 CoTaskMemFree(Some(id_raw.0 as *const _));
 
@@ -212,11 +237,9 @@ mod imp {
                     Msg::Speak(text) => {
                         let wide: Vec<u16> =
                             text.encode_utf16().chain(std::iter::once(0)).collect();
-                        if let Err(e) = voice.Speak(
-                            windows::core::PCWSTR(wide.as_ptr()),
-                            FLAGS,
-                            None,
-                        ) {
+                        if let Err(e) =
+                            voice.Speak(windows::core::PCWSTR(wide.as_ptr()), FLAGS, None)
+                        {
                             log::warn!("TTS speak failed: {e}");
                         }
                     }
@@ -242,10 +265,14 @@ mod imp {
     }
     pub struct TtsEngine;
     impl TtsEngine {
-        pub fn new() -> Self { Self }
+        pub fn new() -> Self {
+            Self
+        }
         pub fn speak(&self, _text: String) {}
         pub fn set_voice(&self, _voice_id: String) {}
-        pub fn list_voices(&self) -> Vec<VoiceInfo> { vec![] }
+        pub fn list_voices(&self) -> Vec<VoiceInfo> {
+            vec![]
+        }
     }
 }
 

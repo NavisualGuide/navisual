@@ -37,7 +37,10 @@ pub struct LocateOptions {
     pub debug_ocr_image_path: Option<std::path::PathBuf>,
 }
 
-pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateResult>, LocateTrace)> {
+pub fn locate(
+    target_text: &str,
+    opts: &LocateOptions,
+) -> Result<(Option<LocateResult>, LocateTrace)> {
     let started = Instant::now();
     let mut trace = LocateTrace::new(target_text);
     trace.target_role = opts.role.clone();
@@ -52,7 +55,9 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
     let (a11y_hit, a11y_trace) = match a11y::find_element(target_text, &a11y_opts) {
         Ok(v) => v,
         Err(e) => {
-            trace.final_decision = FinalDecision::Error { message: e.to_string() };
+            trace.final_decision = FinalDecision::Error {
+                message: e.to_string(),
+            };
             trace.elapsed_ms = started.elapsed().as_millis() as u32;
             return Ok((None, trace));
         }
@@ -85,7 +90,9 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
             match capture::encode_png_for_ocr(&raw_img) {
                 Ok(bytes) => (bytes, rect, iw, ih),
                 Err(e) => {
-                    trace.final_decision = FinalDecision::Error { message: e.to_string() };
+                    trace.final_decision = FinalDecision::Error {
+                        message: e.to_string(),
+                    };
                     trace.elapsed_ms = started.elapsed().as_millis() as u32;
                     return Ok((None, trace));
                 }
@@ -97,7 +104,9 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
                 match capture::encode_png_for_ocr(&raw_img) {
                     Ok(bytes) => (bytes, rect, iw, ih),
                     Err(e) => {
-                        trace.final_decision = FinalDecision::Error { message: e.to_string() };
+                        trace.final_decision = FinalDecision::Error {
+                            message: e.to_string(),
+                        };
                         trace.elapsed_ms = started.elapsed().as_millis() as u32;
                         return Ok((None, trace));
                     }
@@ -108,7 +117,9 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
                 let jpeg = match capture::capture_primary_monitor_jpeg(80) {
                     Ok(b) => b,
                     Err(e) => {
-                        trace.final_decision = FinalDecision::Error { message: e.to_string() };
+                        trace.final_decision = FinalDecision::Error {
+                            message: e.to_string(),
+                        };
                         trace.elapsed_ms = started.elapsed().as_millis() as u32;
                         return Ok((None, trace));
                     }
@@ -116,7 +127,17 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
                 let (iw, ih) = image::load_from_memory(&jpeg)
                     .map(|img| (img.width(), img.height()))
                     .unwrap_or((0, 0));
-                (jpeg, Rect { x: 0, y: 0, width: 0, height: 0 }, iw, ih)
+                (
+                    jpeg,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 0,
+                        height: 0,
+                    },
+                    iw,
+                    ih,
+                )
             }
         },
     };
@@ -136,7 +157,9 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
     let results = match ocr::run_ocr(&ocr_bytes) {
         Ok(r) => r,
         Err(e) => {
-            trace.final_decision = FinalDecision::Error { message: e.to_string() };
+            trace.final_decision = FinalDecision::Error {
+                message: e.to_string(),
+            };
             trace.elapsed_ms = started.elapsed().as_millis() as u32;
             return Ok((None, trace));
         }
@@ -193,16 +216,16 @@ pub fn locate(target_text: &str, opts: &LocateOptions) -> Result<(Option<LocateR
     // crop origin is added to get virtual-desktop absolute coordinates.
     let (sx, sy) = if img_w > 0 && img_h > 0 && crop_rect.width > 0 && crop_rect.height > 0 {
         (
-            crop_rect.width  as f32 / img_w as f32,
+            crop_rect.width as f32 / img_w as f32,
             crop_rect.height as f32 / img_h as f32,
         )
     } else {
         (1.0, 1.0)
     };
     let bbox = Rect {
-        x:      (hit.bbox.0 as f32 * sx).round() as i32 + crop_rect.x,
-        y:      (hit.bbox.1 as f32 * sy).round() as i32 + crop_rect.y,
-        width:  (hit.bbox.2 as f32 * sx).round() as u32,
+        x: (hit.bbox.0 as f32 * sx).round() as i32 + crop_rect.x,
+        y: (hit.bbox.1 as f32 * sy).round() as i32 + crop_rect.y,
+        width: (hit.bbox.2 as f32 * sx).round() as u32,
         height: (hit.bbox.3 as f32 * sy).round() as u32,
     };
 

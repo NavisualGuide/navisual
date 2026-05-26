@@ -56,7 +56,7 @@ pub struct Config {
 
     // Audio output (TTS)
     pub tts_enabled: bool,
-    pub tts_voice: String,  // SAPI token ID; empty = system default
+    pub tts_voice: String, // SAPI token ID; empty = system default
 
     // Audio input (voice)
     pub voice_input_enabled: bool,
@@ -143,65 +143,183 @@ impl Config {
     pub fn load(env_file: Option<&std::path::Path>) -> Self {
         match env_file {
             Some(path) => load_env_file_simple(path),
-            None       => { let _ = dotenvy::dotenv(); }
+            None => {
+                let _ = dotenvy::dotenv();
+            }
         }
 
         let mut config = Config::default();
 
-        if let Ok(v) = env::var("API_PROVIDER") { config.api_provider = v; }
-        if let Ok(v) = env::var("ANTHROPIC_API_KEY") { if !v.is_empty() { config.anthropic_api_key = Some(v); } }
-        if let Ok(v) = env::var("ANTHROPIC_MODEL") { config.anthropic_model = v; }
-        if let Ok(v) = env::var("ANTHROPIC_FAST_MODEL") { config.anthropic_fast_model = v; }
-        
-        if let Ok(v) = env::var("GEMINI_API_KEY") { if !v.is_empty() { config.gemini_api_key = Some(v); } }
-        if let Ok(v) = env::var("GEMINI_MODEL") { config.gemini_model = v; }
-        if let Ok(v) = env::var("GEMINI_FAST_MODEL") { config.gemini_fast_model = v; }
+        if let Ok(v) = env::var("API_PROVIDER") {
+            config.api_provider = v;
+        }
+        if let Ok(v) = env::var("ANTHROPIC_API_KEY") {
+            if !v.is_empty() {
+                config.anthropic_api_key = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("ANTHROPIC_MODEL") {
+            config.anthropic_model = v;
+        }
+        if let Ok(v) = env::var("ANTHROPIC_FAST_MODEL") {
+            config.anthropic_fast_model = v;
+        }
 
-        if let Ok(v) = env::var("OLLAMA_BASE_URL") { config.ollama_base_url = v; }
-        if let Ok(v) = env::var("OLLAMA_MODEL") { config.ollama_model = v; }
-        
-        if let Ok(v) = env::var("OPENAI_API_KEY") { if !v.is_empty() { config.openai_api_key = Some(v); } }
-        if let Ok(v) = env::var("OPENAI_MODEL") { config.openai_model = v; }
+        if let Ok(v) = env::var("GEMINI_API_KEY") {
+            if !v.is_empty() {
+                config.gemini_api_key = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("GEMINI_MODEL") {
+            config.gemini_model = v;
+        }
+        if let Ok(v) = env::var("GEMINI_FAST_MODEL") {
+            config.gemini_fast_model = v;
+        }
 
-        if let Ok(v) = env::var("DEEPSEEK_API_KEY") { if !v.is_empty() { config.deepseek_api_key = Some(v); } }
-        if let Ok(v) = env::var("DEEPSEEK_MODEL") { if !v.is_empty() { config.deepseek_model = v; } }
+        if let Ok(v) = env::var("OLLAMA_BASE_URL") {
+            config.ollama_base_url = v;
+        }
+        if let Ok(v) = env::var("OLLAMA_MODEL") {
+            config.ollama_model = v;
+        }
 
-        if let Ok(v) = env::var("QWEN_API_KEY") { if !v.is_empty() { config.qwen_api_key = Some(v); } }
-        if let Ok(v) = env::var("QWEN_MODEL") { if !v.is_empty() { config.qwen_model = v; } }
-        if let Ok(v) = env::var("QWEN_BASE_URL") { if !v.is_empty() { config.qwen_base_url = v; } }
+        if let Ok(v) = env::var("OPENAI_API_KEY") {
+            if !v.is_empty() {
+                config.openai_api_key = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("OPENAI_MODEL") {
+            config.openai_model = v;
+        }
 
-        if let Ok(v) = env::var("SUPABASE_URL") { if !v.is_empty() { config.supabase_url = Some(v); } }
-        if let Ok(v) = env::var("SUPABASE_ANON_KEY") { if !v.is_empty() { config.supabase_anon_key = Some(v); } }
-        if let Ok(v) = env::var("MANAGED_MODEL") { if !v.is_empty() { config.managed_model = v; } }
+        if let Ok(v) = env::var("DEEPSEEK_API_KEY") {
+            if !v.is_empty() {
+                config.deepseek_api_key = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("DEEPSEEK_MODEL") {
+            if !v.is_empty() {
+                config.deepseek_model = v;
+            }
+        }
 
-        if let Ok(v) = env::var("OVERLAY_COLOR") { config.overlay_color = v; }
+        if let Ok(v) = env::var("QWEN_API_KEY") {
+            if !v.is_empty() {
+                config.qwen_api_key = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("QWEN_MODEL") {
+            if !v.is_empty() {
+                config.qwen_model = v;
+            }
+        }
+        if let Ok(v) = env::var("QWEN_BASE_URL") {
+            if !v.is_empty() {
+                config.qwen_base_url = v;
+            }
+        }
+
+        if let Ok(v) = env::var("SUPABASE_URL") {
+            if !v.is_empty() {
+                config.supabase_url = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("SUPABASE_ANON_KEY") {
+            if !v.is_empty() {
+                config.supabase_anon_key = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("MANAGED_MODEL") {
+            if !v.is_empty() {
+                config.managed_model = v;
+            }
+        }
+
+        if let Ok(v) = env::var("OVERLAY_COLOR") {
+            config.overlay_color = v;
+        }
         if let Ok(v) = env::var("OVERLAY_THICKNESS") {
-            if let Ok(n) = v.parse::<u32>() { config.overlay_thickness = n; }
+            if let Ok(n) = v.parse::<u32>() {
+                config.overlay_thickness = n;
+            }
         }
-        if let Ok(v) = env::var("SUBTITLE_ENABLED") { config.subtitle_enabled = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("AUTO_ADVANCE") { config.auto_advance = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("TTS_ENABLED") { config.tts_enabled = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("TTS_VOICE") { if !v.is_empty() { config.tts_voice = v; } }
-        if let Ok(v) = env::var("VOICE_INPUT_ENABLED") { config.voice_input_enabled = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("VOICE_LANGUAGE") { if !v.is_empty() { config.voice_language = v; } }
-        if let Ok(v) = env::var("HOTKEY_NEXT")  { if !v.is_empty() { config.hotkey_next  = v; } }
-        if let Ok(v) = env::var("HOTKEY_WRONG") { if !v.is_empty() { config.hotkey_wrong = v; } }
-        if let Ok(v) = env::var("HOTKEY_PAUSE") { if !v.is_empty() { config.hotkey_pause = v; } }
-        if let Ok(v) = env::var("HOTKEY_ICON")  { if !v.is_empty() { config.hotkey_icon  = v; } }
-        if let Ok(v) = env::var("HOTKEY_TALK")  { if !v.is_empty() { config.hotkey_talk  = v; } }
-        if let Ok(v) = env::var("DEBUG_SCREENSHOT_ENABLED") { config.debug_screenshot_enabled = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("DEBUG_SHOW_RESPONSE_INFO") { config.debug_show_response_info = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("DEBUG_LOCATE_TRACE_ENABLED") { config.debug_locate_trace_enabled = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") { config.debug_locate_log_file_enabled = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") { config.debug_show_ai_bbox = v == "true" || v == "1"; }
-        if let Ok(v) = env::var("DAILY_TOKEN_CAP") { 
-            if let Ok(n) = v.parse() { config.daily_token_cap = n; }
+        if let Ok(v) = env::var("SUBTITLE_ENABLED") {
+            config.subtitle_enabled = v == "true" || v == "1";
         }
-        if let Ok(v) = env::var("MONTHLY_TOKEN_CAP") { 
-            if let Ok(n) = v.parse() { config.monthly_token_cap = n; }
+        if let Ok(v) = env::var("AUTO_ADVANCE") {
+            config.auto_advance = v == "true" || v == "1";
         }
-        if let Ok(v) = env::var("COST_SAFETY_MARGIN") { 
-            if let Ok(n) = v.parse() { config.cost_safety_margin = n; }
+        if let Ok(v) = env::var("TTS_ENABLED") {
+            config.tts_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("TTS_VOICE") {
+            if !v.is_empty() {
+                config.tts_voice = v;
+            }
+        }
+        if let Ok(v) = env::var("VOICE_INPUT_ENABLED") {
+            config.voice_input_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("VOICE_LANGUAGE") {
+            if !v.is_empty() {
+                config.voice_language = v;
+            }
+        }
+        if let Ok(v) = env::var("HOTKEY_NEXT") {
+            if !v.is_empty() {
+                config.hotkey_next = v;
+            }
+        }
+        if let Ok(v) = env::var("HOTKEY_WRONG") {
+            if !v.is_empty() {
+                config.hotkey_wrong = v;
+            }
+        }
+        if let Ok(v) = env::var("HOTKEY_PAUSE") {
+            if !v.is_empty() {
+                config.hotkey_pause = v;
+            }
+        }
+        if let Ok(v) = env::var("HOTKEY_ICON") {
+            if !v.is_empty() {
+                config.hotkey_icon = v;
+            }
+        }
+        if let Ok(v) = env::var("HOTKEY_TALK") {
+            if !v.is_empty() {
+                config.hotkey_talk = v;
+            }
+        }
+        if let Ok(v) = env::var("DEBUG_SCREENSHOT_ENABLED") {
+            config.debug_screenshot_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DEBUG_SHOW_RESPONSE_INFO") {
+            config.debug_show_response_info = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DEBUG_LOCATE_TRACE_ENABLED") {
+            config.debug_locate_trace_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") {
+            config.debug_locate_log_file_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") {
+            config.debug_show_ai_bbox = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DAILY_TOKEN_CAP") {
+            if let Ok(n) = v.parse() {
+                config.daily_token_cap = n;
+            }
+        }
+        if let Ok(v) = env::var("MONTHLY_TOKEN_CAP") {
+            if let Ok(n) = v.parse() {
+                config.monthly_token_cap = n;
+            }
+        }
+        if let Ok(v) = env::var("COST_SAFETY_MARGIN") {
+            if let Ok(n) = v.parse() {
+                config.cost_safety_margin = n;
+            }
         }
 
         config
@@ -223,7 +341,9 @@ fn load_env_file_simple(path: &std::path::Path) {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let Some(eq) = trimmed.find('=') else { continue };
+        let Some(eq) = trimmed.find('=') else {
+            continue;
+        };
         let key = trimmed[..eq].trim();
         let value = &trimmed[eq + 1..];
         if key.is_empty() {

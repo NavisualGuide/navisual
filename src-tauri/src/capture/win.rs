@@ -11,27 +11,26 @@ use super::Rect;
 use anyhow::{anyhow, Result};
 use image::{ImageBuffer, Rgba};
 use std::mem;
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, POINT, RECT, TRUE};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, DeleteDC, DeleteObject,
-    EnumDisplayMonitors, GetDIBits, GetMonitorInfoW, MonitorFromPoint, SelectObject,
-    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    EnumDisplayMonitors, GetDIBits, GetMonitorInfoW, MonitorFromPoint, SelectObject, BITMAPINFO,
+    BITMAPINFOHEADER, DIB_RGB_COLORS, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
     MONITOR_DEFAULTTONEAREST, SRCCOPY,
 };
-use windows::core::PCWSTR;
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow,
-    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GetWindowTextW,
-    GetWindowLongW, GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-    GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    GA_ROOTOWNER,
-    SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE,
-    GetWindow, GW_OWNER,
+    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindow,
+    GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SetWindowPos, GA_ROOTOWNER, GWL_EXSTYLE, GW_OWNER, HWND_TOPMOST,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -79,9 +78,15 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
         let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
 
         let mut pid: u32 = 0;
-        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            hwnd,
+            Some(&mut pid as *mut u32),
+        );
 
-        format!("Title: '{}'\nClass: '{}'\nRect: [{}, {}, {}, {}]\nPID: {}", title_str, class_str, rect.left, rect.top, rect.right, rect.bottom, pid)
+        format!(
+            "Title: '{}'\nClass: '{}'\nRect: [{}, {}, {}, {}]\nPID: {}",
+            title_str, class_str, rect.left, rect.top, rect.right, rect.bottom, pid
+        )
     }
 }
 
@@ -284,7 +289,11 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
     }
 
     let our_pid = std::process::id();
-    let mut state = State { our_pid, seen_exe_stems: Vec::new(), results: Vec::new() };
+    let mut state = State {
+        our_pid,
+        seen_exe_stems: Vec::new(),
+        results: Vec::new(),
+    };
     unsafe {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
@@ -303,15 +312,18 @@ pub fn window_screen_rect(hwnd: HWND) -> Option<Rect> {
 /// in the crate — we already have a per-monitor pipeline for capture, so
 /// monitor enumeration goes through the same code path.
 pub fn enumerate_monitor_rects() -> Vec<Rect> {
-    collect_all_monitors().iter().map(|info| {
-        let r = info.monitorInfo.rcMonitor;
-        Rect {
-            x: r.left,
-            y: r.top,
-            width: (r.right - r.left).max(0) as u32,
-            height: (r.bottom - r.top).max(0) as u32,
-        }
-    }).collect()
+    collect_all_monitors()
+        .iter()
+        .map(|info| {
+            let r = info.monitorInfo.rcMonitor;
+            Rect {
+                x: r.left,
+                y: r.top,
+                width: (r.right - r.left).max(0) as u32,
+                height: (r.bottom - r.top).max(0) as u32,
+            }
+        })
+        .collect()
 }
 
 /// Returns the rect of the entire multi-monitor virtual desktop.
@@ -365,7 +377,10 @@ pub fn own_panel_rects() -> Vec<Rect> {
         TRUE
     }
 
-    let mut state = State { pid: our_pid, rects: Vec::new() };
+    let mut state = State {
+        pid: our_pid,
+        rects: Vec::new(),
+    };
     unsafe {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
@@ -484,7 +499,11 @@ pub fn blank_outside_rects(
             let y0 = (k.y - capture_rect.y).max(0);
             let x1 = (k.x + k.width as i32 - capture_rect.x).min(iw);
             let y1 = (k.y + k.height as i32 - capture_rect.y).min(ih);
-            if x1 <= x0 || y1 <= y0 { None } else { Some((x0, y0, x1, y1)) }
+            if x1 <= x0 || y1 <= y0 {
+                None
+            } else {
+                Some((x0, y0, x1, y1))
+            }
         })
         .collect();
 
@@ -644,7 +663,9 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
     let target_rect = frame_rect_of(target)?;
 
     let mut pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(target, Some(&mut pid)); }
+    unsafe {
+        GetWindowThreadProcessId(target, Some(&mut pid));
+    }
     if pid == 0 {
         return Some(target_rect);
     }
@@ -699,7 +720,9 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
             return TRUE;
         }
 
-        let Some(r) = frame_rect_of(hwnd) else { return TRUE; };
+        let Some(r) = frame_rect_of(hwnd) else {
+            return TRUE;
+        };
 
         // Reject tiny windows (zombie/glitch hidden popups occasionally have
         // 0–50 px dimensions even when WS_VISIBLE).
@@ -712,13 +735,14 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
         // "Font" dialog dragged to a second screen must still be captured.
         // Unowned top-level windows (e.g. a second document on another monitor)
         // keep the same-monitor filter so the union stays compact.
-        let is_owned = GetWindow(hwnd, GW_OWNER).map(|o| !o.0.is_null()).unwrap_or(false);
+        let is_owned = GetWindow(hwnd, GW_OWNER)
+            .map(|o| !o.0.is_null())
+            .unwrap_or(false);
         if !is_owned {
             let cx = r.x + r.width as i32 / 2;
             let cy = r.y + r.height as i32 / 2;
             let m = &state.monitor;
-            if cx < m.x || cx >= m.x + m.width as i32
-                || cy < m.y || cy >= m.y + m.height as i32 {
+            if cx < m.x || cx >= m.x + m.width as i32 || cy < m.y || cy >= m.y + m.height as i32 {
                 return TRUE;
             }
         }
@@ -763,7 +787,12 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
     if width == 0 || height == 0 {
         return Some(target_rect);
     }
-    Some(Rect { x: left, y: top, width, height })
+    Some(Rect {
+        x: left,
+        y: top,
+        width,
+        height,
+    })
 }
 
 /// Convenience wrapper for callers that hold a raw HWND value (usize).
@@ -783,7 +812,9 @@ pub fn pid_union_rect_raw(hwnd_raw: usize) -> Option<Rect> {
 /// empty (which would otherwise blank the whole capture).
 pub fn pid_member_rects(target: HWND) -> Vec<Rect> {
     let mut pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(target, Some(&mut pid)); }
+    unsafe {
+        GetWindowThreadProcessId(target, Some(&mut pid));
+    }
     if pid == 0 {
         return frame_rect_of(target).into_iter().collect();
     }
@@ -820,7 +851,10 @@ pub fn pid_member_rects(target: HWND) -> Vec<Rect> {
         TRUE
     }
 
-    let mut state = State { target_pid: pid, rects: Vec::new() };
+    let mut state = State {
+        target_pid: pid,
+        rects: Vec::new(),
+    };
     unsafe {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
@@ -860,7 +894,6 @@ fn is_webview2_renderer(pid: u32) -> bool {
     }
 }
 
-
 /// Is `hwnd` a plausible capture target (the actual app the user is interacting with)?
 /// We must vigorously filter out "ghost" windows and invisible overlays because
 /// Z-order walks (`EnumWindows`) frequently trip over them.
@@ -878,7 +911,7 @@ fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
         if pid == 0 || pid == our_pid {
             return false;
         }
-        
+
         // Filter out windows owned by our app (e.g. WebView2 popups or overlay windows)
         let root = GetAncestor(hwnd, GA_ROOTOWNER);
         let mut root_pid: u32 = 0;
@@ -903,14 +936,13 @@ fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
         // Generic Overlay Filter:
         // Automatically skips gaming and system overlays (Steam, Discord, Xbox, NVIDIA, AMD).
         // These overlays run invisibly in the background and sit high in the Z-order.
-        // They use WS_EX_TOOLWINDOW (to hide from Taskbar/Alt-Tab) or WS_EX_TRANSPARENT 
+        // They use WS_EX_TOOLWINDOW (to hide from Taskbar/Alt-Tab) or WS_EX_TRANSPARENT
         // (to allow mouse clicks to pass through them to the game beneath).
         // If a window cannot receive mouse clicks, the user cannot be interacting with it!
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         if (ex_style & WS_EX_TOOLWINDOW.0) != 0 || (ex_style & WS_EX_TRANSPARENT.0) != 0 {
             return false;
         }
-
 
         let mut wr = RECT::default();
         if GetWindowRect(hwnd, &mut wr).is_err() {
@@ -955,7 +987,10 @@ fn first_target_in_z_order(our_pid: u32) -> Option<HWND> {
         }
     }
 
-    let mut state = State { our_pid, result: None };
+    let mut state = State {
+        our_pid,
+        result: None,
+    };
     unsafe {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
@@ -995,10 +1030,7 @@ pub fn get_foreground_target() -> Option<(HWND, Rect)> {
     // includes the dialog naturally (it's drawn on top of the owner on screen).
     let hwnd = first_target_in_z_order(our_pid)?;
     let root = unsafe { GetAncestor(hwnd, GA_ROOTOWNER) };
-    let target = if !root.0.is_null()
-        && root.0 != hwnd.0
-        && is_target_candidate(root, our_pid)
-    {
+    let target = if !root.0.is_null() && root.0 != hwnd.0 && is_target_candidate(root, our_pid) {
         root
     } else {
         hwnd
@@ -1086,15 +1118,20 @@ fn collect_all_monitors() -> Vec<MONITORINFOEXW> {
         );
     }
 
-    state.0.iter().filter_map(|&hmon| unsafe {
-        let mut info: MONITORINFOEXW = mem::zeroed();
-        info.monitorInfo.cbSize = mem::size_of::<MONITORINFOEXW>() as u32;
-        if GetMonitorInfoW(hmon, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO).as_bool() {
-            Some(info)
-        } else {
-            None
-        }
-    }).collect()
+    state
+        .0
+        .iter()
+        .filter_map(|&hmon| unsafe {
+            let mut info: MONITORINFOEXW = mem::zeroed();
+            info.monitorInfo.cbSize = mem::size_of::<MONITORINFOEXW>() as u32;
+            if GetMonitorInfoW(hmon, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO).as_bool()
+            {
+                Some(info)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// `(dst_x, dst_y, image)` — a piece captured from a single monitor and where
@@ -1106,10 +1143,7 @@ type MonitorPiece = (i64, i64, ImageBuffer<Rgba<u8>, Vec<u8>>);
 /// monitor-relative (always non-negative), which is why this works for
 /// left-secondary monitors at negative virtual-desktop x — unlike `GetDC(NULL)`
 /// (primary-only) or xcap/DXGI (silently fails on negative-x monitors).
-unsafe fn capture_from_monitor(
-    rect: &Rect,
-    info: &MONITORINFOEXW,
-) -> Result<MonitorPiece> {
+unsafe fn capture_from_monitor(rect: &Rect, info: &MONITORINFOEXW) -> Result<MonitorPiece> {
     let mr = info.monitorInfo.rcMonitor;
     let clip_left = rect.x.max(mr.left);
     let clip_top = rect.y.max(mr.top);
@@ -1155,8 +1189,18 @@ unsafe fn capture_from_monitor(
         },
         ..Default::default()
     };
-    GetDIBits(hdc_mem, h_bmp, 0, ch as u32, Some(buf.as_mut_ptr() as *mut _), &mut bmi, DIB_RGB_COLORS);
-    for px in buf.chunks_exact_mut(4) { px.swap(0, 2); } // GDI returns BGRA → swap to RGBA
+    GetDIBits(
+        hdc_mem,
+        h_bmp,
+        0,
+        ch as u32,
+        Some(buf.as_mut_ptr() as *mut _),
+        &mut bmi,
+        DIB_RGB_COLORS,
+    );
+    for px in buf.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    } // GDI returns BGRA → swap to RGBA
 
     SelectObject(hdc_mem, prev);
     let _ = DeleteObject(h_bmp.into());
@@ -1186,10 +1230,13 @@ pub fn capture_desktop_region(rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u
     }
 
     let monitors = collect_all_monitors();
-    let overlapping: Vec<_> = monitors.iter().filter(|info| {
-        let r = info.monitorInfo.rcMonitor;
-        rect.x < r.right && rect.x + w > r.left && rect.y < r.bottom && rect.y + h > r.top
-    }).collect();
+    let overlapping: Vec<_> = monitors
+        .iter()
+        .filter(|info| {
+            let r = info.monitorInfo.rcMonitor;
+            rect.x < r.right && rect.x + w > r.left && rect.y < r.bottom && rect.y + h > r.top
+        })
+        .collect();
 
     if overlapping.is_empty() {
         return Err(anyhow!("rect does not intersect any monitor"));
@@ -1202,9 +1249,8 @@ pub fn capture_desktop_region(rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u
     }
 
     // Multi-monitor path: stitch each monitor's contribution onto a canvas.
-    let mut canvas = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(
-        rect.width, rect.height, Rgba([0, 0, 0, 255]),
-    );
+    let mut canvas =
+        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(rect.width, rect.height, Rgba([0, 0, 0, 255]));
     for info in &overlapping {
         if let Ok((dx, dy, piece)) = unsafe { capture_from_monitor(rect, info) } {
             image::imageops::overlay(&mut canvas, &piece, dx, dy);

@@ -33,9 +33,13 @@ pub struct Rect {
 /// Stable cross-platform signature so callers don't reach for xcap directly.
 pub fn enumerate_monitor_rects() -> Vec<Rect> {
     #[cfg(windows)]
-    { win::enumerate_monitor_rects() }
+    {
+        win::enumerate_monitor_rects()
+    }
     #[cfg(not(windows))]
-    { Vec::new() }
+    {
+        Vec::new()
+    }
 }
 
 /// Capture the primary monitor and encode as JPEG. The primary monitor is, by
@@ -48,15 +52,16 @@ pub fn capture_primary_monitor_jpeg(quality: u8) -> Result<Vec<u8>> {
             .into_iter()
             .find(|r| r.x == 0 && r.y == 0)
             .ok_or_else(|| anyhow!("no primary monitor"))?;
-        let img = win::capture_desktop_region(&primary)
-            .context("capture primary monitor")?;
+        let img = win::capture_desktop_region(&primary).context("capture primary monitor")?;
         encode_jpeg(&cap_size(img), quality)
     }
 
     #[cfg(not(windows))]
     {
         let _ = quality;
-        Err(anyhow!("primary monitor capture only implemented for Windows"))
+        Err(anyhow!(
+            "primary monitor capture only implemented for Windows"
+        ))
     }
 }
 
@@ -78,8 +83,8 @@ pub fn capture_primary_monitor_jpeg(quality: u8) -> Result<Vec<u8>> {
 pub fn capture_active_window_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Vec<u8>, Rect, usize)> {
     #[cfg(windows)]
     {
-        let (hwnd, frame_rect) = win::get_foreground_target()
-            .ok_or_else(|| anyhow!("no foreground window found"))?;
+        let (hwnd, frame_rect) =
+            win::get_foreground_target().ok_or_else(|| anyhow!("no foreground window found"))?;
         let rect = win::pid_union_rect(hwnd).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
         // Grey gaps between the target's windows (other apps / desktop showing
@@ -93,7 +98,9 @@ pub fn capture_active_window_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Vec<
     #[cfg(not(windows))]
     {
         let _ = (quality, exclude);
-        Err(anyhow!("active-window capture only implemented for Windows"))
+        Err(anyhow!(
+            "active-window capture only implemented for Windows"
+        ))
     }
 }
 
@@ -112,7 +119,9 @@ pub fn capture_virtual_desktop_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Ve
     #[cfg(not(windows))]
     {
         let _ = (quality, exclude);
-        Err(anyhow!("virtual desktop capture only implemented for Windows"))
+        Err(anyhow!(
+            "virtual desktop capture only implemented for Windows"
+        ))
     }
 }
 
@@ -121,11 +130,13 @@ pub fn capture_virtual_desktop_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Ve
 ///
 /// Returns (raw_image, window rect in physical pixels, raw HWND as usize).
 #[allow(clippy::type_complexity)]
-pub fn capture_active_window_raw(exclude: &[Rect]) -> Result<(ImageBuffer<Rgba<u8>, Vec<u8>>, Rect, usize)> {
+pub fn capture_active_window_raw(
+    exclude: &[Rect],
+) -> Result<(ImageBuffer<Rgba<u8>, Vec<u8>>, Rect, usize)> {
     #[cfg(windows)]
     {
-        let (hwnd, frame_rect) = win::get_foreground_target()
-            .ok_or_else(|| anyhow!("no foreground window found"))?;
+        let (hwnd, frame_rect) =
+            win::get_foreground_target().ok_or_else(|| anyhow!("no foreground window found"))?;
         let rect = win::pid_union_rect(hwnd).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
         win::blank_outside_rects(&mut img, &rect, &win::pid_member_rects(hwnd));
@@ -194,7 +205,11 @@ pub fn recapture_window_raw(
 /// `capture_active_window_jpeg` to rediscover.
 ///
 /// `exclude` — same semantics as `capture_active_window_jpeg`.
-pub fn recapture_window_jpeg(hwnd_raw: usize, quality: u8, exclude: &[Rect]) -> Result<(Vec<u8>, Rect)> {
+pub fn recapture_window_jpeg(
+    hwnd_raw: usize,
+    quality: u8,
+    exclude: &[Rect],
+) -> Result<(Vec<u8>, Rect)> {
     #[cfg(windows)]
     {
         let frame_rect = win::validate_hwnd_raw(hwnd_raw)
@@ -261,7 +276,6 @@ pub fn list_target_windows() -> Vec<win::TargetWindowInfo> {
     win::list_target_windows()
 }
 
-
 /// Predict the dimensions of the AI-image after `cap_size()` would be applied
 /// to a source of (`src_w`, `src_h`). Mirrors `cap_size` exactly so the AI-bbox
 /// converter knows the pixel space the model actually sees.
@@ -299,7 +313,8 @@ fn encode_jpeg(img: &ImageBuffer<Rgba<u8>, Vec<u8>>, quality: u8) -> Result<Vec<
     }
     let mut out = Vec::with_capacity(rgb.len() / 4);
     let mut encoder = JpegEncoder::new_with_quality(&mut out, quality);
-    encoder.encode(&rgb, w, h, ColorType::Rgb8.into())
+    encoder
+        .encode(&rgb, w, h, ColorType::Rgb8.into())
         .context("jpeg encode")?;
     Ok(out)
 }

@@ -1,10 +1,10 @@
+use anyhow::{anyhow, bail, Result};
+use reqwest::{header, Client};
 use serde_json::{json, Value};
-use reqwest::{Client, header};
-use anyhow::{Result, bail, anyhow};
 use std::time::Duration;
 
-use crate::ai::types::{NavigateStepResponse, Message, Role};
 use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::types::{Message, NavigateStepResponse, Role};
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -17,7 +17,10 @@ pub struct GeminiClient {
 impl GeminiClient {
     pub fn new(api_key: String, model: String, timeout_sec: u64) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
 
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_sec))
@@ -43,7 +46,7 @@ impl GeminiClient {
         on_chunk: &mut impl FnMut(&str),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
-        
+
         let tool_schema = json!({
             "name": "navigate_step",
             "description": "Provide navigation instructions for the user. Return one or more steps. Steps with checkpoint=true will wait for the user to complete the action before proceeding.",
@@ -106,12 +109,12 @@ impl GeminiClient {
         });
 
         // Use streamGenerateContent with SSE (alt=sse)
-        let url = format!("{}/{}:streamGenerateContent?alt=sse&key={}", GEMINI_API_BASE, effective_model, self.api_key);
-        
-        let response = self.client.post(&url)
-            .json(&payload)
-            .send()
-            .await?;
+        let url = format!(
+            "{}/{}:streamGenerateContent?alt=sse&key={}",
+            GEMINI_API_BASE, effective_model, self.api_key
+        );
+
+        let response = self.client.post(&url).json(&payload).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -123,7 +126,7 @@ impl GeminiClient {
         use futures_util::StreamExt;
 
         let mut stream = response.bytes_stream().eventsource();
-        
+
         let mut accumulated_json = String::new();
         let mut input_tokens = 0;
         let mut output_tokens = 0;
@@ -133,46 +136,68 @@ impl GeminiClient {
 
         while let Some(event_result) = stream.next().await {
             let event = event_result?;
-            
+
             // Gemini sends data events
             let data_str = event.data;
-            if data_str.is_empty() { continue; }
-            
+            if data_str.is_empty() {
+                continue;
+            }
+
             let data: Value = serde_json::from_str(&data_str).unwrap_or_default();
-            
+
             // Extract usage if present
             if let Some(usage) = data.get("usageMetadata") {
-                input_tokens = usage.get("promptTokenCount").and_then(|t| t.as_u64()).unwrap_or(input_tokens);
-                output_tokens = usage.get("candidatesTokenCount").and_then(|t| t.as_u64()).unwrap_or(output_tokens);
+                input_tokens = usage
+                    .get("promptTokenCount")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(input_tokens);
+                output_tokens = usage
+                    .get("candidatesTokenCount")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(output_tokens);
             }
-            
+
             if let Some(candidates) = data.get("candidates").and_then(|c| c.as_array()) {
                 if let Some(first_candidate) = candidates.first() {
-                    if let Some(parts) = first_candidate.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+                    if let Some(parts) = first_candidate
+                        .get("content")
+                        .and_then(|c| c.get("parts"))
+                        .and_then(|p| p.as_array())
+                    {
                         for part in parts {
                             if let Some(fn_call) = part.get("functionCall") {
-                                if fn_call.get("name").and_then(|n| n.as_str()) == Some("navigate_step") {
+                                if fn_call.get("name").and_then(|n| n.as_str())
+                                    == Some("navigate_step")
+                                {
                                     if let Some(args) = fn_call.get("args") {
                                         // Gemini might stream partial args as JSON object or a string fragment?
                                         // Wait, Gemini function calling streaming behaviour: it returns partial args!
                                         // But the args might be partially constructed JSON object.
-                                        // Wait, actually Gemini streamGenerateContent with tools returns the full args object 
+                                        // Wait, actually Gemini streamGenerateContent with tools returns the full args object
                                         // progressively in chunks. Let's just convert it to string to extract the instruction.
-                                        let partial = serde_json::to_string(args).unwrap_or_default();
-                                        
+                                        let partial =
+                                            serde_json::to_string(args).unwrap_or_default();
+
                                         // We just replace accumulated_json with the latest `args` state
                                         // because Gemini sends the cumulative args so far, not diffs!
                                         accumulated_json = partial;
-                                        
+
                                         let instruction_prefix = r#""instruction":""#;
                                         let instruction_prefix_spaced = r#""instruction": ""#;
-                                        
-                                        if !in_instruction && (accumulated_json.contains(instruction_prefix) || accumulated_json.contains(instruction_prefix_spaced)) {
+
+                                        if !in_instruction
+                                            && (accumulated_json.contains(instruction_prefix)
+                                                || accumulated_json
+                                                    .contains(instruction_prefix_spaced))
+                                        {
                                             in_instruction = true;
                                         }
-                                        
+
                                         if in_instruction {
-                                            let visible = crate::ai::streaming::extract_visible_instruction(&accumulated_json);
+                                            let visible =
+                                                crate::ai::streaming::extract_visible_instruction(
+                                                    &accumulated_json,
+                                                );
                                             if visible.len() > emitted_instruction_len {
                                                 let new_text = &visible[emitted_instruction_len..];
                                                 on_chunk(new_text);
@@ -194,7 +219,7 @@ impl GeminiClient {
         if accumulated_json.trim().is_empty() {
             if !raw_text.is_empty() {
                 let mut clean_instruction = raw_text.trim().to_string();
-                
+
                 // Extract clean instruction if Gemini outputted pseudo-JSON
                 if let Some(start_idx) = clean_instruction.find(r#"instruction: ""#) {
                     let after = &clean_instruction[start_idx + 14..];
@@ -209,18 +234,29 @@ impl GeminiClient {
                 }
 
                 let mut checkpoint = true;
-                if raw_text.contains("checkpoint: false") || raw_text.contains("\"checkpoint\": false") {
+                if raw_text.contains("checkpoint: false")
+                    || raw_text.contains("\"checkpoint\": false")
+                {
                     checkpoint = false;
                 }
 
                 let mut needs_input = false;
-                if raw_text.contains("needs_input: true") || raw_text.contains("\"needs_input\": true") {
+                if raw_text.contains("needs_input: true")
+                    || raw_text.contains("\"needs_input\": true")
+                {
                     needs_input = true;
                 }
 
                 let mut target_role = None;
-                if let Some(idx) = raw_text.find(r#"target_role: ""#).or_else(|| raw_text.find(r#""target_role": ""#)) {
-                    let offset = if raw_text[idx..].starts_with("\"target_role") { 16 } else { 14 };
+                if let Some(idx) = raw_text
+                    .find(r#"target_role: ""#)
+                    .or_else(|| raw_text.find(r#""target_role": ""#))
+                {
+                    let offset = if raw_text[idx..].starts_with("\"target_role") {
+                        16
+                    } else {
+                        14
+                    };
                     let after = &raw_text[idx + offset..];
                     if let Some(end) = after.find('"') {
                         let role_str = &after[..end];
@@ -229,8 +265,15 @@ impl GeminiClient {
                 }
 
                 let mut state_summary = "Continuing task...".to_string();
-                if let Some(idx) = raw_text.find(r#"state_summary: ""#).or_else(|| raw_text.find(r#""state_summary": ""#)) {
-                    let offset = if raw_text[idx..].starts_with("\"state_summary") { 18 } else { 16 };
+                if let Some(idx) = raw_text
+                    .find(r#"state_summary: ""#)
+                    .or_else(|| raw_text.find(r#""state_summary": ""#))
+                {
+                    let offset = if raw_text[idx..].starts_with("\"state_summary") {
+                        18
+                    } else {
+                        16
+                    };
                     let after = &raw_text[idx + offset..];
                     if let Some(end) = after.find('"') {
                         state_summary = after[..end].to_string();
@@ -253,10 +296,10 @@ impl GeminiClient {
                     needs_input,
                     request_full_screen: false,
                 };
-                
+
                 // Emit the cleaned instruction to the UI instantly
                 on_chunk(&fallback.steps[0].instruction);
-                
+
                 return Ok((fallback, input_tokens, output_tokens));
             } else {
                 bail!("Gemini returned an empty response (possible safety filter or API error).");
@@ -265,7 +308,7 @@ impl GeminiClient {
 
         let step_response: NavigateStepResponse = serde_json::from_str(&accumulated_json)
             .map_err(|e| anyhow!("Failed to parse Gemini tool JSON: {e}\n{accumulated_json}"))?;
-            
+
         Ok((step_response, input_tokens, output_tokens))
     }
 }

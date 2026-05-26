@@ -1,15 +1,17 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::path::PathBuf;
 
+use crate::ai::anthropic::{build_messages as build_anthropic, AnthropicClient};
 use crate::ai::config::Config;
 use crate::ai::cost_tracker::CostTracker;
+use crate::ai::deepseek::{
+    build_messages as build_deepseek, build_openai_messages as build_openai, DeepSeekClient,
+};
+use crate::ai::gemini::{build_messages as build_gemini, GeminiClient};
+use crate::ai::managed::{build_messages as build_managed, ManagedClient};
+use crate::ai::ollama::{build_messages as build_ollama, OllamaClient};
 use crate::ai::session::SessionManager;
 use crate::ai::types::NavigateStepResponse;
-use crate::ai::anthropic::{AnthropicClient, build_messages as build_anthropic};
-use crate::ai::gemini::{GeminiClient, build_messages as build_gemini};
-use crate::ai::ollama::{OllamaClient, build_messages as build_ollama};
-use crate::ai::deepseek::{DeepSeekClient, build_messages as build_deepseek, build_openai_messages as build_openai};
-use crate::ai::managed::{ManagedClient, build_messages as build_managed};
 
 pub enum ApiClient {
     Anthropic(AnthropicClient),
@@ -202,11 +204,17 @@ impl AiRouter {
             "managed" => {
                 let url = match &self.config.supabase_url {
                     Some(u) => u.clone(),
-                    None => { log::error!("SUPABASE_URL not configured"); return; }
+                    None => {
+                        log::error!("SUPABASE_URL not configured");
+                        return;
+                    }
                 };
                 let key = match &self.config.supabase_anon_key {
                     Some(k) => k.clone(),
-                    None => { log::error!("SUPABASE_ANON_KEY not configured"); return; }
+                    None => {
+                        log::error!("SUPABASE_ANON_KEY not configured");
+                        return;
+                    }
                 };
                 match ManagedClient::new(
                     url,
@@ -277,7 +285,10 @@ impl AiRouter {
                 c.send_message(msgs, &mut on_chunk).await?
             }
             None => {
-                bail!("No API client configured for provider '{}'", self.config.api_provider);
+                bail!(
+                    "No API client configured for provider '{}'",
+                    self.config.api_provider
+                );
             }
         };
 
@@ -291,5 +302,4 @@ impl AiRouter {
 
         Ok(response)
     }
-
 }

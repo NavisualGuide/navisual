@@ -9,10 +9,15 @@ pub fn extract_visible_instruction(partial_json: &str) -> String {
             while let Some(ch) = chars.next() {
                 if ch == '\\' {
                     if let Some(next_ch) = chars.next() {
-                        if next_ch == '"' { result.push('"'); }
-                        else if next_ch == 'n' { result.push('\n'); }
-                        else if next_ch == 't' { result.push('\t'); }
-                        else { result.push(next_ch); }
+                        if next_ch == '"' {
+                            result.push('"');
+                        } else if next_ch == 'n' {
+                            result.push('\n');
+                        } else if next_ch == 't' {
+                            result.push('\t');
+                        } else {
+                            result.push(next_ch);
+                        }
                     }
                 } else if ch == '"' {
                     break;

@@ -57,13 +57,7 @@ impl WindowTracker {
 
     /// Begin tracking the window that contains `abs_bbox`.
     /// `kind` and `text` are replayed when the window moves or is restored.
-    pub fn start(
-        &self,
-        abs_bbox: &Rect,
-        kind: OverlayKind,
-        text: Option<String>,
-        app: AppHandle,
-    ) {
+    pub fn start(&self, abs_bbox: &Rect, kind: OverlayKind, text: Option<String>, app: AppHandle) {
         #[cfg(windows)]
         {
             let result = unsafe {
@@ -82,7 +76,13 @@ impl WindowTracker {
                 if GetWindowRect(hwnd, &mut wr).is_err() {
                     return;
                 }
-                (hwnd.0 as isize, wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top)
+                (
+                    hwnd.0 as isize,
+                    wr.left,
+                    wr.top,
+                    wr.right - wr.left,
+                    wr.bottom - wr.top,
+                )
             };
 
             let (hwnd, win_left, win_top, win_width, win_height) = result;

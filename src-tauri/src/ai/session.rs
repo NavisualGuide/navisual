@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+use crate::ai::types::{GuidanceStep, Message, Role};
 use chrono::Local;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use crate::ai::types::{GuidanceStep, Role, Message};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSummary {

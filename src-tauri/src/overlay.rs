@@ -67,16 +67,19 @@ pub struct OverlayUpdate {
 /// subtitle visibly shifts between monitors mid-session.
 fn active_screen_for_bbox(bbox: Option<&Rect>) -> Option<Rect> {
     let monitors = crate::capture::enumerate_monitor_rects();
-    if monitors.is_empty() { return None; }
+    if monitors.is_empty() {
+        return None;
+    }
 
     if let Some(b) = bbox {
         let cx = b.x + (b.width as i32) / 2;
         let cy = b.y + (b.height as i32) / 2;
         for m in &monitors {
-            if cx >= m.x && cx < m.x + m.width as i32
-                && cy >= m.y && cy < m.y + m.height as i32
-            {
-                *LAST_ACTIVE_SCREEN.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(*m);
+            if cx >= m.x && cx < m.x + m.width as i32 && cy >= m.y && cy < m.y + m.height as i32 {
+                *LAST_ACTIVE_SCREEN
+                    .get_or_init(|| Mutex::new(None))
+                    .lock()
+                    .unwrap() = Some(*m);
                 return Some(*m);
             }
         }
@@ -84,12 +87,17 @@ fn active_screen_for_bbox(bbox: Option<&Rect>) -> Option<Rect> {
 
     // No bbox (or bbox off-screen) — reuse the last-known active screen so the
     // subtitle stays on the monitor the user is working on.
-    if let Some(cached) = *LAST_ACTIVE_SCREEN.get_or_init(|| Mutex::new(None)).lock().unwrap() {
+    if let Some(cached) = *LAST_ACTIVE_SCREEN
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+    {
         return Some(cached);
     }
 
     // First-ever call with no bbox: fall back to the monitor closest to (0, 0).
-    monitors.iter()
+    monitors
+        .iter()
         .min_by_key(|m| m.x.abs() + m.y.abs())
         .copied()
 }
@@ -138,7 +146,10 @@ pub fn virtual_desktop_rect() -> Result<Rect> {
         width: (max_x - min_x).max(0) as u32,
         height: (max_y - min_y).max(0) as u32,
     };
-    *guard = Some(CachedVd { rect, at: Instant::now() });
+    *guard = Some(CachedVd {
+        rect,
+        at: Instant::now(),
+    });
     Ok(rect)
 }
 
@@ -212,4 +223,3 @@ pub fn make_update_with_ai_bbox(
         ai_bbox,
     })
 }
-
