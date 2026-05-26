@@ -94,6 +94,11 @@ Rules:
     (a) Advance to the next logical step assuming the previous action succeeded, OR
     (b) Ask the user a yes/no question ("Did you click at the end of that line?") to confirm before
         proceeding. NEVER issue the identical instruction twice in a row.
+19. LANGUAGE: Detect the language of the user's request and respond ENTIRELY in that language —
+    every instruction and the state_summary. If the user writes or speaks Chinese, write all
+    instructions in Chinese; if English, in English. Keep using the user's language for the whole
+    task, including follow-ups and corrections, even when the on-screen UI text is in another
+    language. Never switch languages mid-task or mix two languages in one response.
 
 Use the navigate_step tool for all responses."#;
 
