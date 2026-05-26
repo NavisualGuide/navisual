@@ -1,10 +1,10 @@
+use anyhow::{anyhow, bail, Result};
+use reqwest::{header, Client};
 use serde_json::{json, Value};
-use reqwest::{Client, header};
-use anyhow::{Result, bail, anyhow};
 use std::time::Duration;
 
-use crate::ai::types::{NavigateStepResponse, Message, Role};
 use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::types::{Message, NavigateStepResponse, Role};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -20,9 +20,18 @@ impl AnthropicClient {
     pub fn new(api_key: String, model: String, timeout_sec: u64) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert("x-api-key", header::HeaderValue::from_str(&api_key)?);
-        headers.insert("anthropic-version", header::HeaderValue::from_str(ANTHROPIC_VERSION)?);
-        headers.insert("anthropic-beta", header::HeaderValue::from_static("prompt-caching-2024-07-31"));
-        headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
+        headers.insert(
+            "anthropic-version",
+            header::HeaderValue::from_str(ANTHROPIC_VERSION)?,
+        );
+        headers.insert(
+            "anthropic-beta",
+            header::HeaderValue::from_static("prompt-caching-2024-07-31"),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
 
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_sec))
@@ -48,7 +57,7 @@ impl AnthropicClient {
         on_chunk: &mut impl FnMut(&str),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
-        
+
         let tool_schema = json!({
             "name": "navigate_step",
             "description": "Provide navigation instructions for the user. Return one or more steps. Steps with checkpoint=true will wait for the user to complete the action before proceeding.",
@@ -85,7 +94,7 @@ impl AnthropicClient {
                                     "items": {"type": "number"},
                                     "minItems": 4,
                                     "maxItems": 4,
-                                    "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax]. Use absolute pixel coordinates of the screenshot you see (NOT normalized). The box should tightly wrap the target element. Omit when no target_text."
+                                    "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax] in NORMALIZED 0-1000 coordinates: 0 = top/left edge of the image, 1000 = bottom/right edge, regardless of pixel size. Tightly wrap the element. Omit when no target_text."
                                 }
                             }
                         }
@@ -113,7 +122,9 @@ impl AnthropicClient {
             "messages": messages,
         });
 
-        let response = self.client.post(ANTHROPIC_API_URL)
+        let response = self
+            .client
+            .post(ANTHROPIC_API_URL)
             .json(&payload)
             .send()
             .await?;
@@ -128,7 +139,7 @@ impl AnthropicClient {
         use futures_util::StreamExt;
 
         let mut stream = response.bytes_stream().eventsource();
-        
+
         let mut accumulated_json = String::new();
         let mut input_tokens = 0;
         let mut output_tokens = 0;
@@ -143,16 +154,21 @@ impl AnthropicClient {
                     if delta.get("type").and_then(|t| t.as_str()) == Some("input_json_delta") {
                         if let Some(partial) = delta.get("partial_json").and_then(|p| p.as_str()) {
                             accumulated_json.push_str(partial);
-                            
+
                             let instruction_prefix = r#""instruction":""#;
                             let instruction_prefix_spaced = r#""instruction": ""#;
-                            
-                            if !in_instruction && (accumulated_json.contains(instruction_prefix) || accumulated_json.contains(instruction_prefix_spaced)) {
+
+                            if !in_instruction
+                                && (accumulated_json.contains(instruction_prefix)
+                                    || accumulated_json.contains(instruction_prefix_spaced))
+                            {
                                 in_instruction = true;
                             }
-                            
+
                             if in_instruction {
-                                let visible = crate::ai::streaming::extract_visible_instruction(&accumulated_json);
+                                let visible = crate::ai::streaming::extract_visible_instruction(
+                                    &accumulated_json,
+                                );
                                 if visible.len() > emitted_instruction_len {
                                     let new_text = &visible[emitted_instruction_len..];
                                     on_chunk(new_text);
@@ -166,23 +182,28 @@ impl AnthropicClient {
                 let data: Value = serde_json::from_str(&event.data).unwrap_or_default();
                 if let Some(msg) = data.get("message") {
                     if let Some(usage) = msg.get("usage") {
-                        input_tokens = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                        input_tokens = usage
+                            .get("input_tokens")
+                            .and_then(|t| t.as_u64())
+                            .unwrap_or(0);
                     }
                 }
             } else if event.event == "message_delta" {
                 let data: Value = serde_json::from_str(&event.data).unwrap_or_default();
                 if let Some(usage) = data.get("usage") {
-                    output_tokens = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(output_tokens);
+                    output_tokens = usage
+                        .get("output_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(output_tokens);
                 }
             }
         }
 
         let step_response: NavigateStepResponse = serde_json::from_str(&accumulated_json)
             .map_err(|e| anyhow!("Failed to parse tool JSON: {e}\n{accumulated_json}"))?;
-            
+
         Ok((step_response, input_tokens, output_tokens))
     }
-
 }
 
 pub fn build_messages(

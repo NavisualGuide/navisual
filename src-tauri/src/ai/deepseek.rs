@@ -1,11 +1,11 @@
-use serde_json::{json, Value};
-use reqwest::{Client, header};
-use anyhow::{Result, bail};
-use std::time::Duration;
+use anyhow::{bail, Result};
 use futures_util::StreamExt;
+use reqwest::{header, Client};
+use serde_json::{json, Value};
+use std::time::Duration;
 
-use crate::ai::types::{NavigateStepResponse, GuidanceStep, OverlayType, Message, Role};
 use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType, Role};
 
 /// Same schema instruction as Ollama — DeepSeek doesn't support function-calling
 /// for vision models, so we use prompt engineering + response_format:json_object.
@@ -36,7 +36,7 @@ Step fields (inside "steps" array only):
 - overlay_type: "arrow" for clickable targets, "subtitle" for keyboard/scroll steps with no target (default arrow)
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
 - clipboard: text to copy to clipboard (optional)
-- target_bbox: [ymin, xmin, ymax, xmax] absolute pixel coordinates of the target element in the screenshot (optional, omit when no target_text)
+- target_bbox: [ymin, xmin, ymax, xmax] as NORMALIZED 0-1000 coordinates (0 = top/left edge, 1000 = bottom/right edge of the image, regardless of pixel size; NOT pixels) (optional, omit when no target_text)
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
@@ -52,7 +52,13 @@ pub struct DeepSeekClient {
 }
 
 impl DeepSeekClient {
-    pub fn new(api_key: String, model: String, timeout_sec: u64, base_url: Option<String>, name: Option<String>) -> Result<Self> {
+    pub fn new(
+        api_key: String,
+        model: String,
+        timeout_sec: u64,
+        base_url: Option<String>,
+        name: Option<String>,
+    ) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
@@ -62,9 +68,16 @@ impl DeepSeekClient {
             .timeout(Duration::from_secs(timeout_sec))
             .default_headers(headers)
             .build()?;
-        let base_url = base_url.unwrap_or_else(|| "https://api.deepseek.com/v1/chat/completions".to_string());
+        let base_url =
+            base_url.unwrap_or_else(|| "https://api.deepseek.com/v1/chat/completions".to_string());
         let name = name.unwrap_or_else(|| "DeepSeek".to_string());
-        Ok(Self { client, api_key, model, base_url, name })
+        Ok(Self {
+            client,
+            api_key,
+            model,
+            base_url,
+            name,
+        })
     }
 
     pub async fn send_message(
@@ -106,7 +119,8 @@ impl DeepSeekClient {
         payload: &Value,
         on_chunk: &mut impl FnMut(&str),
     ) -> Result<Option<(NavigateStepResponse, u64, u64)>> {
-        let response = self.client
+        let response = self
+            .client
             .post(&self.base_url)
             .bearer_auth(&self.api_key)
             .json(payload)
@@ -137,7 +151,9 @@ impl DeepSeekClient {
             while let Some(nl) = line_buf.find('\n') {
                 let line = line_buf[..nl].trim().to_string();
                 line_buf = line_buf[nl + 1..].to_string();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
 
                 let data_str = if let Some(s) = line.strip_prefix("data: ") {
                     s.trim()
@@ -145,7 +161,9 @@ impl DeepSeekClient {
                     continue;
                 };
 
-                if data_str == "[DONE]" { break; }
+                if data_str == "[DONE]" {
+                    break;
+                }
 
                 let data: Value = match serde_json::from_str(data_str) {
                     Ok(v) => v,
@@ -256,7 +274,10 @@ impl DeepSeekClient {
         // on continuation prompts that reference a screen it can't see.
         log::warn!(
             "{}: empty answer — finish_reason={:?}, content_chars={}, reasoning_chars={}",
-            self.name, finish_reason, accumulated_text.len(), reasoning_text.len()
+            self.name,
+            finish_reason,
+            accumulated_text.len(),
+            reasoning_text.len()
         );
 
         Ok(None)
@@ -272,8 +293,8 @@ fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    let mut stream = serde_json::Deserializer::from_str(stripped)
-        .into_iter::<NavigateStepResponse>();
+    let mut stream =
+        serde_json::Deserializer::from_str(stripped).into_iter::<NavigateStepResponse>();
     if let Some(Ok(resp)) = stream.next() {
         if !resp.steps.is_empty() {
             return Some(resp);

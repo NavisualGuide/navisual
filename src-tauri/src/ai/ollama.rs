@@ -1,11 +1,11 @@
-use serde_json::{json, Value};
-use reqwest::{Client, header};
-use anyhow::{Result, bail};
-use std::time::Duration;
+use anyhow::{bail, Result};
 use futures_util::StreamExt;
+use reqwest::{header, Client};
+use serde_json::{json, Value};
+use std::time::Duration;
 
-use crate::ai::types::{NavigateStepResponse, GuidanceStep, OverlayType, Message, Role};
 use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType, Role};
 
 /// Appended to the system prompt so the model knows to return JSON.
 /// Vision models in Ollama don't support the tools/function-calling API,
@@ -37,7 +37,7 @@ Step fields (inside "steps" array only):
 - overlay_type: "arrow" for clickable targets, "subtitle" for keyboard/scroll steps with no target (default arrow)
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
 - clipboard: text to copy to clipboard (optional)
-- target_bbox: [ymin, xmin, ymax, xmax] absolute pixel coordinates of the target element in the screenshot (optional, omit when no target_text)
+- target_bbox: [ymin, xmin, ymax, xmax] as NORMALIZED 0-1000 coordinates (0 = top/left edge, 1000 = bottom/right edge of the image, regardless of pixel size; NOT pixels) (optional, omit when no target_text)
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
@@ -61,7 +61,11 @@ impl OllamaClient {
             .timeout(Duration::from_secs(timeout_sec))
             .default_headers(headers)
             .build()?;
-        Ok(Self { client, model, base_url })
+        Ok(Self {
+            client,
+            model,
+            base_url,
+        })
     }
 
     pub async fn send_message(
@@ -107,7 +111,9 @@ impl OllamaClient {
             while let Some(nl) = line_buf.find('\n') {
                 let line = line_buf[..nl].trim().to_string();
                 line_buf = line_buf[nl + 1..].to_string();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
 
                 let data: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,

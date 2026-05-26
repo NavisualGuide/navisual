@@ -27,14 +27,14 @@ Rules:
    target_nearby_text to an adjacent toolbar label so the locator picks the icon,
    not the section header).
 4. TARGET BOUNDING BOX: For every step that has a target_text, also return
-   target_bbox as [ymin, xmin, ymax, xmax] — the tight bounding box of the
-   target UI element in the screenshot you see. Use whatever spatial
-   coordinate convention you natively use for object detection (e.g.,
-   normalized 0–1000 for Gemini, absolute image pixels for other models).
-   The application handles the conversion to screen coordinates. The bbox
-   should wrap the element tightly — top edge, left edge, bottom edge,
-   right edge. Omit target_bbox for steps with no target_text (scroll-only
-   steps, subtitle-only steps).
+   target_bbox as [ymin, xmin, ymax, xmax] using NORMALIZED 0–1000 coordinates:
+   0 is the top (or left) edge of the image and 1000 is the bottom (or right)
+   edge, regardless of the image's pixel size. Do NOT use raw pixels. Example:
+   an element near the top and centered horizontally → roughly [80, 450, 110, 550].
+   The application converts these to screen coordinates. The bbox should wrap the
+   element tightly — top edge, left edge, bottom edge, right edge. Omit
+   target_bbox for steps with no target_text (scroll-only steps, subtitle-only
+   steps).
 5. If the screen shows the user completed the step, acknowledge and advance. If
    the screen shows something unexpected, describe what you see and suggest how
    to recover.
@@ -97,7 +97,8 @@ Rules:
 
 Use the navigate_step tool for all responses."#;
 
-pub const CORRECTION_CONTEXT: &str = "The user pressed the 'wrong' button, indicating the previous instruction was \
+pub const CORRECTION_CONTEXT: &str =
+    "The user pressed the 'wrong' button, indicating the previous instruction was \
 incorrect or they cannot find the element. Analyze the current screen carefully \
 and provide a corrected instruction. Describe the target element differently — \
 use different identifying features (color, position, size, nearby elements) \
@@ -119,4 +120,3 @@ pub fn initial_context_template(task_description: &str) -> String {
         task_description
     )
 }
-

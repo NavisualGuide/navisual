@@ -1,13 +1,15 @@
-use anyhow::{Result, bail, anyhow};
+use anyhow::{anyhow, bail, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use crate::ai::types::{NavigateStepResponse, Message, Role};
 use crate::ai::prompts::SYSTEM_PROMPT;
-use crate::server::{SupabaseSession, sign_in_anonymously, refresh_session, load_session, save_session};
+use crate::ai::types::{Message, NavigateStepResponse, Role};
+use crate::server::{
+    load_session, refresh_session, save_session, sign_in_anonymously, SupabaseSession,
+};
 
 pub struct ManagedClient {
     client: Client,
@@ -46,7 +48,11 @@ impl ManagedClient {
 
     pub fn free_remaining(&self) -> Option<u32> {
         let v = self.free_remaining.load(Ordering::Relaxed);
-        if v < 0 { None } else { Some(v as u32) }
+        if v < 0 {
+            None
+        } else {
+            Some(v as u32)
+        }
     }
 
     pub async fn ensure_token(&mut self) -> Result<()> {
@@ -82,7 +88,8 @@ impl ManagedClient {
         messages: Vec<Value>,
         on_chunk: &mut impl FnMut(&str),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
-        let access_token = self.session
+        let access_token = self
+            .session
             .as_ref()
             .map(|s| s.access_token.clone())
             .ok_or_else(|| anyhow!("no active Supabase session"))?;
@@ -97,7 +104,8 @@ impl ManagedClient {
         });
 
         let relay_url = format!("{}/functions/v1/relay", self.supabase_url);
-        let resp = self.client
+        let resp = self
+            .client
             .post(&relay_url)
             .header("Authorization", format!("Bearer {}", access_token))
             .json(&payload)
@@ -231,7 +239,7 @@ fn navigate_step_tool() -> Value {
                                     "items": {"type": "number"},
                                     "minItems": 4,
                                     "maxItems": 4,
-                                    "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax]. Absolute pixel coordinates of the screenshot. Omit when no target_text."
+                                    "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax] in NORMALIZED 0-1000 coordinates (0 = top/left edge, 1000 = bottom/right edge of the image, regardless of pixel size). Omit when no target_text."
                                 }
                             }
                         }

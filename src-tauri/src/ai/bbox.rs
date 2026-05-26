@@ -1,8 +1,11 @@
 //! AI-returned bounding-box coordinate-system conversion.
 //!
-//! Different vision models use different conventions for spatial coordinates:
-//! - Gemini: normalized 0–1000 in [ymin, xmin, ymax, xmax] (native object-detection format)
-//! - Most others: absolute pixel coordinates of the image they were shown
+//! All providers are instructed to return spatial coordinates as normalized
+//! 0–1000 in [ymin, xmin, ymax, xmax] (Gemini's native object-detection format).
+//! Normalized coordinates are resolution-independent, so the AI-image downscale
+//! factor cannot corrupt them — absolute pixels proved unreliable for
+//! non-grounding models (GPT/Claude/Qwen reported coordinates in inconsistent
+//! scales, often exceeding the downscaled image size).
 //!
 //! `ai_bbox_to_screen_rect` takes whatever the AI returned and the active
 //! provider name, plus the actual AI-image dimensions and the screen rect the
@@ -15,19 +18,20 @@ use crate::capture::Rect;
 pub enum BboxFormat {
     /// Coordinates are normalized to 0–1000 (Gemini's native object-detection scale).
     Normalized1000,
-    /// Coordinates are absolute pixels of the AI-image (post `cap_size` downscale).
+    /// Absolute pixels of the AI-image (post `cap_size` downscale). Reserved: no
+    /// provider uses this now (all normalized — see `bbox_format_for_provider`);
+    /// kept so a single provider can be reverted to the pixel contract.
+    #[allow(dead_code)]
     Pixel,
 }
 
-/// Hardcoded per-provider format. Conservative defaults; can be overridden via
-/// auto-detection if the values look out of range (see `decode_bbox`).
-pub fn bbox_format_for_provider(provider: &str) -> BboxFormat {
-    match provider {
-        "gemini" => BboxFormat::Normalized1000,
-        // Anthropic, OpenAI, DeepSeek, Qwen, Ollama, managed — instructed to
-        // use absolute pixels in the system prompt.
-        _ => BboxFormat::Pixel,
-    }
+/// All providers are instructed to return normalized 0–1000 coordinates
+/// (Gemini's convention) — resolution-independent, so the downscale factor
+/// cannot corrupt them. Absolute pixels proved unreliable for non-grounding
+/// models. To revert one provider to the pixel contract, match it here and
+/// return `BboxFormat::Pixel` (and change its prompt text back to pixels).
+pub fn bbox_format_for_provider(_provider: &str) -> BboxFormat {
+    BboxFormat::Normalized1000
 }
 
 /// Convert an AI-returned `[ymin, xmin, ymax, xmax]` to a screen Rect.
