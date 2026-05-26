@@ -8,8 +8,8 @@ See the LICENSE file in the root of this repository for complete details.
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
   import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { LogicalSize, LogicalPosition } from "@tauri-apps/api/dpi";
+  import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
+  import { LogicalSize, LogicalPosition, PhysicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
   import { listen, emitTo } from "@tauri-apps/api/event";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
@@ -370,20 +370,23 @@ See the LICENSE file in the root of this repository for complete details.
     try {
       const outer = await win.outerSize();      // physical pixels
       const pos   = await win.outerPosition();
-      const scale = window.devicePixelRatio || 1;
       _lightboxPrevSize = { w: outer.width, h: outer.height };
       _lightboxPrevPos  = { x: pos.x, y: pos.y };
 
-      // Target: fit the screenshot plus a small margin, capped at 90% of screen.
-      const sw = window.screen.availWidth;
-      const sh = window.screen.availHeight;
-      const targetW = Math.round(Math.min(sw * 0.9, 1560));  // 1536 + margin
-      const targetH = Math.round(Math.min(sh * 0.9, 800));
-      // Center on screen.
-      const newX = Math.round((sw - targetW) / 2);
-      const newY = Math.round((sh - targetH) / 2);
-      await win.setSize(new LogicalSize(targetW, targetH));
-      await win.setPosition(new LogicalPosition(newX, newY));
+      // Size + center on the monitor the panel is CURRENTLY on (not the primary),
+      // so the lightbox doesn't jump to the main screen. All physical pixels.
+      const mon = await currentMonitor();
+      const mScale = mon?.scaleFactor ?? (window.devicePixelRatio || 1);
+      const mx = mon ? mon.position.x : 0;
+      const my = mon ? mon.position.y : 0;
+      const mw = mon ? mon.size.width  : Math.round(window.screen.availWidth  * mScale);
+      const mh = mon ? mon.size.height : Math.round(window.screen.availHeight * mScale);
+      const targetW = Math.round(Math.min(mw * 0.9, 1560 * mScale));  // 1536 + margin
+      const targetH = Math.round(Math.min(mh * 0.9, 800 * mScale));
+      const newX = Math.round(mx + (mw - targetW) / 2);
+      const newY = Math.round(my + (mh - targetH) / 2);
+      await win.setSize(new PhysicalSize(targetW, targetH));
+      await win.setPosition(new PhysicalPosition(newX, newY));
     } catch (_) {}
 
     lightboxOpen = true;
@@ -394,15 +397,12 @@ See the LICENSE file in the root of this repository for complete details.
     lightboxSrc = null;
     const win = getCurrentWindow();
     try {
+      // Restore the exact pre-lightbox physical size + position (same monitor).
       if (_lightboxPrevSize) {
-        const scale = window.devicePixelRatio || 1;
-        await win.setSize(new LogicalSize(
-          _lightboxPrevSize.w / scale,
-          _lightboxPrevSize.h / scale,
-        ));
+        await win.setSize(new PhysicalSize(_lightboxPrevSize.w, _lightboxPrevSize.h));
       }
       if (_lightboxPrevPos) {
-        await win.setPosition(new LogicalPosition(_lightboxPrevPos.x, _lightboxPrevPos.y));
+        await win.setPosition(new PhysicalPosition(_lightboxPrevPos.x, _lightboxPrevPos.y));
       }
     } catch (_) {}
     _lightboxPrevSize = null;
