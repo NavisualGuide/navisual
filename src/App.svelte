@@ -1198,8 +1198,12 @@ See the LICENSE file in the root of this repository for complete details.
       {/if}
       <div class="header-actions">
         <button class="hdr-btn" onclick={() => (showAbout = true)} title="About Navisual">ⓘ</button>
-        <button class="hdr-btn" onclick={openSettings} title="Settings">⚙</button>
-        <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to icon (Ctrl+Q)">⊟</button>
+        <button class="hdr-btn" onclick={openSettings} title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to floating icon" aria-label="Collapse to floating icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
+        </button>
         <button class="hdr-btn hdr-btn-close" onclick={closeWindow} title="Quit">✕</button>
       </div>
     </div>
@@ -2341,6 +2345,7 @@ See the LICENSE file in the root of this repository for complete details.
     font-family: inherit;
     transition: background 120ms ease-out, color 120ms ease-out;
   }
+  .hdr-btn svg { width: 17px; height: 17px; display: block; }
   .hdr-btn:hover { background: var(--surface-3); color: var(--text-primary); }
   .hdr-btn-close:hover { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
 
