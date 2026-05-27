@@ -350,15 +350,33 @@ mod imp {
                         } else {
                             lang_code_of_locale(&lang)
                         };
-                        // Preferred voice if it speaks the target language; else any
-                        // installed voice for that language; else caption-only.
-                        let chosen = preferred_id
+                        // Pick the voice for this utterance:
+                        //  * A user-selected preferred voice is authoritative — use it
+                        //    UNLESS we know it speaks a different language than the reply
+                        //    AND a voice that can exists (then auto-switch so the reply is
+                        //    not garbled).
+                        //  * Otherwise pick any installed voice for the target language.
+                        //  * Never drop speech just because language metadata was missing:
+                        //    fall back to the first voice when no voice exposes a language.
+                        let preferred = preferred_id
                             .as_ref()
-                            .filter(|pid| voices.iter().any(|v| &v.id == *pid && v.lang == target))
-                            .cloned()
-                            .or_else(|| {
-                                voices.iter().find(|v| v.lang == target).map(|v| v.id.clone())
-                            });
+                            .and_then(|pid| voices.iter().find(|v| &v.id == pid));
+                        let target_voice =
+                            voices.iter().find(|v| !v.lang.is_empty() && v.lang == target);
+                        let chosen: Option<String> = match (preferred, target_voice) {
+                            (Some(p), Some(tv)) if !p.lang.is_empty() && p.lang != target => {
+                                Some(tv.id.clone())
+                            }
+                            (Some(p), _) => Some(p.id.clone()),
+                            (None, Some(tv)) => Some(tv.id.clone()),
+                            (None, None) => {
+                                if voices.iter().all(|v| v.lang.is_empty()) {
+                                    voices.first().map(|v| v.id.clone())
+                                } else {
+                                    None
+                                }
+                            }
+                        };
                         match chosen {
                             Some(id) => {
                                 if current_id.as_deref() != Some(id.as_str()) {
