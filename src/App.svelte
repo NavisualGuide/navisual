@@ -299,7 +299,7 @@ See the LICENSE file in the root of this repository for complete details.
   let settingsError = $state<string | null>(null);
   let settingsSaved = $state(false);
   const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-4-6","claude-opus-4-7"];
-  const MODEL_PRESETS_GEMINI    = ["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-3.1-flash-lite-preview","gemini-3.1-pro-preview"];
+  const MODEL_PRESETS_GEMINI    = ["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-3.5-flash","gemini-3.1-pro-preview"];
   const MODEL_PRESETS_OPENAI    = ["gpt-5.5","gpt-5.4-mini"];
   const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro"];
   const MODEL_PRESETS_QWEN      = ["qwen3.6-plus","qwen3.5-omni-plus"];
@@ -1732,7 +1732,7 @@ See the LICENSE file in the root of this repository for complete details.
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.gemini_model = v; else settingsForm.gemini_model = ""; }}>
                   <option value="gemini-2.5-flash">gemini-2.5-flash (recommended)</option>
                   <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (fast)</option>
-                  <option value="gemini-3.1-flash-lite-preview">gemini-3.1-flash-lite-preview</option>
+                  <option value="gemini-3.5-flash">gemini-3.5-flash</option>
                   <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
