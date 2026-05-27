@@ -284,7 +284,7 @@ See the LICENSE file in the root of this repository for complete details.
     qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     overlay_color: "#FF6B35", overlay_thickness: 4,
     subtitle_enabled: true, auto_advance: false,
-    tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "en-US",
+    tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
     hotkey_pause: "", hotkey_icon: "", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
@@ -542,7 +542,10 @@ See the LICENSE file in the root of this repository for complete details.
     speechRecognition = new SR();
     speechRecognition.continuous = false;
     speechRecognition.interimResults = false;
-    speechRecognition.lang = settingsForm.voice_language || "en-US";
+    speechRecognition.lang =
+      settingsForm.voice_language && settingsForm.voice_language !== "auto"
+        ? settingsForm.voice_language
+        : navigator.language || "en-US";
     isRecording = true;
 
     speechRecognition.onresult = (event: any) => {
@@ -781,7 +784,7 @@ See the LICENSE file in the root of this repository for complete details.
         meta = `not located · "${steps[idx].target_text}"`;
       }
       addToHistory("ai", cleanInstruction, meta);
-      if (!isMuted) invoke("speak", { text: cleanInstruction }).catch(() => {});
+      if (!isMuted) invoke("speak", { text: cleanInstruction, lang: settingsForm.voice_language }).catch(() => {});
     }
     if (res.debug_screenshot_path) {
       addToHistory("system", `📷 ${res.debug_screenshot_path}`);
@@ -1555,6 +1558,7 @@ See the LICENSE file in the root of this repository for complete details.
             <li>Screenshots are held in memory only — never written to disk by Navisual.</li>
             <li>Only the active window is captured by default; full-screen needs your permission each time.</li>
             <li>Your selected provider may log requests per their own terms.</li>
+            <li>Voice input (optional) sends audio to Microsoft's online speech service via the WebView2 Web Speech API.</li>
             <li>For zero data sharing, use the Ollama provider — it runs locally.</li>
           </ul>
           <p style="margin: 0 0 14px 0; font-size: 0.85em; color: var(--text-tertiary);">
@@ -1971,11 +1975,11 @@ See the LICENSE file in the root of this repository for complete details.
               </label>
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="tts-voice">Voice</label>
+              <label class="setting-label" for="tts-voice">Preferred voice (optional)</label>
               <select id="tts-voice" class="setting-select"
                 bind:value={settingsForm.tts_voice}
                 disabled={!settingsForm.tts_enabled}>
-                <option value="">System default</option>
+                <option value="">Auto — match the language</option>
                 {#if availableVoices.length === 0}
                   <option disabled value="">Loading voices…</option>
                 {/if}
@@ -1983,20 +1987,22 @@ See the LICENSE file in the root of this repository for complete details.
                   <option value={v.id}>{v.name}</option>
                 {/each}
               </select>
+              <p class="stub-hint" style="margin-top:4px">Auto speaks each reply in its own language (using an installed voice for it). Pick a specific voice to force it — applied only when it matches the spoken language.</p>
             </div>
             <div class="setting-group">
               <p class="setting-label">Voice input</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.voice_input_enabled} />
-                <span>Enable 🎤 push-to-talk (Ctrl+A)</span>
+                <span>Enable 🎤 push-to-talk</span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Uses the browser's built-in speech recognition — requires internet and microphone permission.</p>
+              <p class="stub-hint" style="margin-top:4px">Uses the WebView2 Web Speech API — audio is sent to Microsoft's online speech service; requires internet and microphone permission.</p>
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="voice-lang">Recognition language</label>
+              <label class="setting-label" for="voice-lang">Language</label>
               <select id="voice-lang" class="setting-input setting-select"
                 bind:value={settingsForm.voice_language}
-                disabled={!settingsForm.voice_input_enabled}>
+                disabled={!settingsForm.tts_enabled && !settingsForm.voice_input_enabled}>
+                <option value="auto">Auto-detect</option>
                 <option value="en-US">English (US)</option>
                 <option value="en-GB">English (UK)</option>
                 <option value="fr-FR">French</option>
@@ -2007,6 +2013,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <option value="ko-KR">Korean</option>
                 <option value="pt-BR">Portuguese (Brazil)</option>
               </select>
+              <p class="stub-hint" style="margin-top:4px">Sets both the TTS voice language and the voice-input language. Auto-detect speaks each reply in its own language and uses your OS language for voice input.</p>
             </div>
           {/if}
         </div>

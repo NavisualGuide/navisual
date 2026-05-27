@@ -91,6 +91,7 @@ Additional notes:
 - Full-screen / multi-monitor capture requires explicit one-time permission each time
 - Assign a Pause hotkey in **Settings → Hotkeys** to stop all capture instantly
 - Settings and auth token live in `%APPDATA%\com.navisual.app\`
+- Voice input (optional) uses the WebView2 Web Speech API, which sends your spoken audio to Microsoft's online speech service
 - Debug captures are off by default; when enabled, files older than 7 days are auto-deleted
 
 ---

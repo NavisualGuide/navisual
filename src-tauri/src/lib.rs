@@ -1495,8 +1495,8 @@ async fn send_correction(
 }
 
 #[tauri::command]
-fn speak(text: String, state: State<'_, AppState>) {
-    state.tts.speak(text);
+fn speak(text: String, lang: Option<String>, state: State<'_, AppState>) {
+    state.tts.speak(text, lang.unwrap_or_default());
 }
 
 #[tauri::command]

@@ -114,7 +114,7 @@ impl Default for Config {
             tts_enabled: true,
             tts_voice: String::new(),
             voice_input_enabled: true,
-            voice_language: "en-US".to_string(),
+            voice_language: "auto".to_string(),
             hotkey_next:  "Ctrl+Backquote".to_string(),
             hotkey_wrong: "Ctrl+KeyE".to_string(),
             hotkey_pause: String::new(),
