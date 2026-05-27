@@ -150,7 +150,6 @@ See the LICENSE file in the root of this repository for complete details.
   let locateTrace = $state<LocateTrace | null>(null);
   let debugDrawerOpen = $state(false);
   // Test-user feedback (see logFeedback / submitWrong / correction).
-  let currentGoal = $state("");
   let wrongPickerOpen = $state(false);
   const CATEGORY_LABEL: Record<string, string> = {
     wrong_instruction: "Wrong instruction",
@@ -810,8 +809,6 @@ See the LICENSE file in the root of this repository for complete details.
     task = "";
     // Keep session context when in the middle of a task; start fresh from idle/error.
     const isReply = phase === "guiding" || phase === "needs_input" || phase === "consent_prompt";
-    // Remember the original goal for feedback reports (the textarea gets cleared).
-    if (!isReply && !fullScreen) currentGoal = taskText;
     const prevPhase = phase;
     const userEntryId = await addToHistory("user", taskText);
     currentInstruction = "";
@@ -946,7 +943,6 @@ See the LICENSE file in the root of this repository for complete details.
           app_version: appVersion,
           provider: settingsForm.api_provider,
           model: activeModel,
-          task_prompt: currentGoal || null,
           instruction: currentInstruction || null,
           target_text: steps[stepIndex]?.target_text ?? null,
           located: !!locateResult,
@@ -1253,7 +1249,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <button class="reason-chip" onclick={() => submitWrong("already_done")}>Already did that</button>
               </div>
               <p class="feedback-hint">Not one of these? Type what's wrong below, then ↩ Follow up.</p>
-              <p class="feedback-note">Shared with the Navisual team to improve guidance.</p>
+              <p class="feedback-note">Shared with the Navisual team to improve guidance — never your screen or request text.</p>
             {/if}
           </div>
         {/if}
