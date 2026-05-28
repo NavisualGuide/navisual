@@ -62,7 +62,12 @@ windows = { version = "0.62", features = [
   "Media_Ocr",
   "Graphics_Imaging",
   "Storage_Streams",
-  # Phase D.3 — TTS via Windows SAPI
+  # WinRT TTS — OneCore (modern) voices via SpeechSynthesizer + MediaPlayer + MediaSource
+  "Foundation",
+  "Media_SpeechSynthesis",
+  "Media_Playback",
+  "Media_Core",
+  # Phase D.3 — legacy SAPI ISpVoice (superseded by the WinRT engine above)
   "Win32_Media_Speech",
   # PrintWindow — capture window directly, works on any monitor (incl. left secondary)
   "Win32_Storage_Xps",

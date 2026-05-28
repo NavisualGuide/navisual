@@ -1,22 +1,33 @@
-//! Text-to-speech via Windows SAPI (ISpVoice COM interface).
+//! Text-to-speech via the WinRT SpeechSynthesizer (Windows.Media.SpeechSynthesis).
 //!
-//! Runs on a dedicated STA thread so the async runtime is never blocked.
-//! Calling `speak(text)` purges any in-flight speech and starts the new text
-//! immediately. Calling `speak("")` stops speech without starting a new one.
-//! Calling `set_voice(token_id)` switches voices without restarting the thread.
-//! Calling `list_voices()` blocks until the STA thread returns all installed voices.
+//! Uses the modern OneCore voice engine so the natural Windows 10/11 voices —
+//! the ones in Settings → Speech (e.g. Kangkang, Xiaoxiao) — actually play. The
+//! legacy SAPI `ISpVoice` engine can *enumerate* those tokens but silently
+//! substitutes an old SAPI5 voice of the same language, so a picked voice never
+//! took effect.
+//!
+//! Runs on a dedicated MTA thread. The synthesizer renders text to an audio
+//! stream that a MediaPlayer plays; starting a new utterance replaces the
+//! previous one. `speak("")` stops playback. `set_voice(id)` sets the preferred
+//! voice (a WinRT VoiceInformation Id); empty = auto-by-language.
 
 #[cfg(windows)]
 mod imp {
+    use std::future::IntoFuture;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    use windows::core::HSTRING;
+    use windows::Media::Core::MediaSource;
+    use windows::Media::Playback::MediaPlayer;
+    use windows::Media::SpeechSynthesis::SpeechSynthesizer;
 
     #[derive(serde::Serialize, Clone)]
     pub struct VoiceInfo {
         pub id: String,
         pub name: String,
-        /// Primary language code from the SAPI token (e.g. "en", "zh"); "" if unknown.
+        /// Primary language code (e.g. "en", "zh"); "" if unknown.
         pub lang: String,
     }
 
@@ -36,7 +47,7 @@ mod imp {
         pub fn new() -> Self {
             let (tx, rx) = mpsc::channel();
             thread::Builder::new()
-                .name("tts-sapi".into())
+                .name("tts-winrt".into())
                 .spawn(move || tts_thread(rx))
                 .expect("tts thread spawn");
             Self { tx }
@@ -46,13 +57,13 @@ mod imp {
             let _ = self.tx.send(Msg::Speak(text, lang));
         }
 
-        /// Set the *preferred* voice (a SAPI token id). Empty = no preference
-        /// (pure auto-by-language). Applied on the next speak, per utterance.
+        /// Set the *preferred* voice (a WinRT VoiceInformation Id). Empty = no
+        /// preference (auto-by-language). Applied on the next speak.
         pub fn set_voice(&self, voice_id: String) {
             let _ = self.tx.send(Msg::SetVoice(voice_id));
         }
 
-        /// Block until the STA thread returns all installed TTS voices (up to 3 s).
+        /// Block until the worker returns all installed voices (up to 3 s).
         pub fn list_voices(&self) -> Vec<VoiceInfo> {
             let (tx, rx) = mpsc::sync_channel(1);
             let _ = self.tx.send(Msg::ListVoices(tx));
@@ -64,46 +75,6 @@ mod imp {
         fn drop(&mut self) {
             let _ = self.tx.send(Msg::Quit);
         }
-    }
-
-    unsafe fn pwstr_to_string(ptr: *const u16) -> String {
-        if ptr.is_null() {
-            return String::new();
-        }
-        let len = (0usize..).take_while(|&i| *ptr.add(i) != 0).count();
-        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
-    }
-
-    /// Map a SAPI `Attributes\Language` value (LCID in hex, sometimes a
-    /// ';'-separated list) to a primary 2-letter language code. "" if unknown.
-    fn lcid_to_lang(lcid_str: &str) -> String {
-        let first = lcid_str
-            .split([';', ',', ' '])
-            .find(|s| !s.is_empty())
-            .unwrap_or("");
-        let Ok(lcid) = u32::from_str_radix(first.trim(), 16) else {
-            return String::new();
-        };
-        let code = match lcid & 0x3ff {
-            0x04 => "zh",
-            0x09 => "en",
-            0x11 => "ja",
-            0x12 => "ko",
-            0x0a => "es",
-            0x0c => "fr",
-            0x07 => "de",
-            0x16 => "pt",
-            0x10 => "it",
-            0x19 => "ru",
-            0x01 => "ar",
-            0x15 => "pl",
-            0x13 => "nl",
-            0x1f => "tr",
-            0x2a => "vi",
-            0x21 => "id",
-            _ => "",
-        };
-        code.to_string()
     }
 
     /// Best-effort primary-language detection from script, for "auto" TTS.
@@ -140,6 +111,32 @@ mod imp {
         code.to_string()
     }
 
+    /// Minimal single-thread blocking executor — drives a WinRT async operation
+    /// to completion on this (MTA) thread. The op completes on a thread-pool
+    /// thread and wakes us, so there is no self-deadlock.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Wake, Waker};
+        struct ThreadWaker(std::thread::Thread);
+        impl Wake for ThreadWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let mut fut = Box::pin(fut);
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+
     /// Primary language subtag of a BCP-47 locale ("zh-CN" -> "zh").
     fn lang_code_of_locale(locale: &str) -> String {
         locale
@@ -149,258 +146,144 @@ mod imp {
             .to_ascii_lowercase()
     }
 
-    /// Read a voice token's `Attributes\Language` and map it to a language code.
-    unsafe fn token_language(t: &windows::Win32::Media::Speech::ISpObjectToken) -> String {
-        use windows::Win32::System::Com::CoTaskMemFree;
-        let attrs_w: Vec<u16> = "Attributes"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let Ok(attrs) = t.OpenKey(windows::core::PCWSTR(attrs_w.as_ptr())) else {
-            return String::new();
+    /// Enumerate every installed voice (OneCore + classic) via the WinRT engine.
+    fn enum_voices() -> Vec<VoiceInfo> {
+        let mut out = Vec::new();
+        let Ok(all) = SpeechSynthesizer::AllVoices() else {
+            return out;
         };
-        let lang_w: Vec<u16> = "Language".encode_utf16().chain(std::iter::once(0)).collect();
-        let Ok(p) = attrs.GetStringValue(windows::core::PCWSTR(lang_w.as_ptr())) else {
-            return String::new();
-        };
-        let s = pwstr_to_string(p.0 as *const u16);
-        CoTaskMemFree(Some(p.0 as *const _));
-        lcid_to_lang(&s)
+        let count = all.Size().unwrap_or(0);
+        for i in 0..count {
+            let Ok(vi) = all.GetAt(i) else { continue };
+            let id = vi.Id().map(|h| h.to_string()).unwrap_or_default();
+            if id.is_empty() {
+                continue;
+            }
+            let name = vi.DisplayName().map(|h| h.to_string()).unwrap_or_default();
+            let langtag = vi.Language().map(|h| h.to_string()).unwrap_or_default();
+            out.push(VoiceInfo {
+                id,
+                name,
+                lang: lang_code_of_locale(&langtag),
+            });
+        }
+        out
     }
 
-    // Windows stores SAPI voices in two separate registry locations:
-    // - Speech\Voices       — classic SAPI5 voices (David Desktop, Zira Desktop)
-    // - Speech_OneCore\Voices — modern OneCore voices (Mark, Cortana, etc.)
-    // We enumerate both and merge, deduplicating by ID.
-    const ONECORE_VOICES: &str = "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices";
-    const CLASSIC_VOICES: &str = "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices";
-
-    // Enumerate one token category into `out`, skipping IDs already in `seen`.
-    unsafe fn collect_from_category(
-        cat_path: &str,
-        seen: &mut Vec<String>,
-        out: &mut Vec<VoiceInfo>,
-    ) {
-        use windows::Win32::Media::Speech::{
-            ISpObjectToken, ISpObjectTokenCategory, SpObjectTokenCategory,
+    /// Point the synthesizer at the voice whose Id matches `id`. Returns whether it was found+set.
+    fn set_voice_by_id(synth: &SpeechSynthesizer, id: &str) -> bool {
+        let Ok(all) = SpeechSynthesizer::AllVoices() else {
+            return false;
         };
-        use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
-
-        let Ok(cat) =
-            CoCreateInstance::<_, ISpObjectTokenCategory>(&SpObjectTokenCategory, None, CLSCTX_ALL)
-        else {
-            return;
-        };
-
-        let wide: Vec<u16> = cat_path.encode_utf16().chain(std::iter::once(0)).collect();
-        let pcwstr = windows::core::PCWSTR(wide.as_ptr());
-        if cat.SetId(pcwstr, false).is_err() {
-            return;
-        }
-
-        let Ok(tokens) =
-            cat.EnumTokens(windows::core::PCWSTR::null(), windows::core::PCWSTR::null())
-        else {
-            return;
-        };
-
-        loop {
-            let mut token: Option<ISpObjectToken> = None;
-            let mut fetched: u32 = 0;
-            let hr = tokens.Next(1, &mut token, Some(&mut fetched));
-            if fetched == 0 || hr.is_err() {
-                break;
-            }
-            let Some(t) = token else { break };
-
-            let id_raw = match t.GetId() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let id = pwstr_to_string(id_raw.0 as *const u16);
-            CoTaskMemFree(Some(id_raw.0 as *const _));
-            if id.is_empty() || seen.contains(&id) {
-                continue;
-            }
-            seen.push(id.clone());
-
-            let name = match t.GetStringValue(windows::core::PCWSTR::null()) {
-                Ok(p) => {
-                    let s = pwstr_to_string(p.0 as *const u16);
-                    CoTaskMemFree(Some(p.0 as *const _));
-                    if s.is_empty() {
-                        id.split('\\').next_back().unwrap_or("Unknown").to_string()
-                    } else {
-                        s
-                    }
-                }
-                Err(_) => id.split('\\').next_back().unwrap_or("Unknown").to_string(),
-            };
-            let lang = token_language(&t);
-            out.push(VoiceInfo { id, name, lang });
-        }
-    }
-
-    // Enumerate installed SAPI voices. Uses OneCore (Windows 10+) which is a
-    // superset of the classic engine — no duplicates. Falls back to classic only
-    // if OneCore yields nothing (very old Windows 10 builds).
-    unsafe fn sapi_enum_voices() -> Vec<VoiceInfo> {
-        let mut seen = Vec::new();
-        let mut voices = Vec::new();
-        collect_from_category(ONECORE_VOICES, &mut seen, &mut voices);
-        if voices.is_empty() {
-            collect_from_category(CLASSIC_VOICES, &mut seen, &mut voices);
-        }
-        voices
-    }
-
-    // Find the token with `target_id` across both categories and call SetVoice.
-    unsafe fn sapi_set_voice(voice: &windows::Win32::Media::Speech::ISpVoice, target_id: &str) {
-        use windows::Win32::Media::Speech::{
-            ISpObjectToken, ISpObjectTokenCategory, SpObjectTokenCategory,
-        };
-        use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
-
-        for cat_path in [ONECORE_VOICES, CLASSIC_VOICES] {
-            let Ok(cat) = CoCreateInstance::<_, ISpObjectTokenCategory>(
-                &SpObjectTokenCategory,
-                None,
-                CLSCTX_ALL,
-            ) else {
-                continue;
-            };
-
-            let wide: Vec<u16> = cat_path.encode_utf16().chain(std::iter::once(0)).collect();
-            let pcwstr = windows::core::PCWSTR(wide.as_ptr());
-            if cat.SetId(pcwstr, false).is_err() {
-                continue;
-            }
-
-            let Ok(tokens) =
-                cat.EnumTokens(windows::core::PCWSTR::null(), windows::core::PCWSTR::null())
-            else {
-                continue;
-            };
-
-            loop {
-                let mut token: Option<ISpObjectToken> = None;
-                let mut fetched: u32 = 0;
-                let hr = tokens.Next(1, &mut token, Some(&mut fetched));
-                if fetched == 0 || hr.is_err() {
-                    break;
-                }
-                let Some(t) = token else { break };
-
-                let id_raw = match t.GetId() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                let id = pwstr_to_string(id_raw.0 as *const u16);
-                CoTaskMemFree(Some(id_raw.0 as *const _));
-
-                if id == target_id {
-                    if let Err(e) = voice.SetVoice(&t) {
-                        log::warn!("TTS SetVoice failed: {e}");
-                    }
-                    return;
-                }
+        let count = all.Size().unwrap_or(0);
+        for i in 0..count {
+            let Ok(vi) = all.GetAt(i) else { continue };
+            if vi.Id().map(|h| h.to_string()).unwrap_or_default() == id {
+                return synth.SetVoice(&vi).is_ok();
             }
         }
-        log::warn!("TTS: voice id not found in any category: {target_id}");
+        false
     }
 
     fn tts_thread(rx: mpsc::Receiver<Msg>) {
-        use windows::Win32::Media::Speech::{ISpVoice, SpVoice};
-        use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+        // MTA so block_on() on the synthesize async never deadlocks — the op
+        // completes on a thread-pool thread and wakes us.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+
+        let synth = match SpeechSynthesizer::new() {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("TTS: SpeechSynthesizer::new failed: {e}");
+                return;
+            }
+        };
+        let player = match MediaPlayer::new() {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("TTS: MediaPlayer::new failed: {e}");
+                return;
+            }
         };
 
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let voices = enum_voices();
+        let mut preferred_id: Option<String> = None;
+        let mut current_id: Option<String> = None;
 
-            let voice: ISpVoice = match CoCreateInstance(&SpVoice, None, CLSCTX_ALL) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::error!("TTS: SpVoice CoCreateInstance failed: {e}");
-                    return;
-                }
-            };
-
-            // SPF_ASYNC (1) | SPF_PURGEBEFORESPEAK (2)
-            const FLAGS: u32 = 1 | 2;
-
-            // Voices (with language) enumerated once. `preferred_id` is the user's
-            // optional voice override; `current_id` is whatever SAPI is set to now,
-            // so we only call SetVoice when the target language needs a switch.
-            let voices = sapi_enum_voices();
-            let mut preferred_id: Option<String> = None;
-            let mut current_id: Option<String> = None;
-
-            for msg in rx {
-                match msg {
-                    Msg::Speak(text, lang) => {
-                        if text.is_empty() {
-                            // Empty text = stop/purge any in-flight speech.
-                            let stop = [0u16];
-                            let _ = voice.Speak(windows::core::PCWSTR(stop.as_ptr()), FLAGS, None);
-                            continue;
+        for msg in rx {
+            match msg {
+                Msg::Speak(text, lang) => {
+                    if text.is_empty() {
+                        // Empty text = stop any in-flight speech.
+                        let _ = player.Pause();
+                        continue;
+                    }
+                    let target = if lang.is_empty() || lang.eq_ignore_ascii_case("auto") {
+                        detect_lang(&text)
+                    } else {
+                        lang_code_of_locale(&lang)
+                    };
+                    // A user-selected preferred voice is used as-is — picking a voice
+                    // must be predictable. Auto (no preferred) picks an installed voice
+                    // for the reply language, falling back to the first voice rather than
+                    // going silent when language metadata is unavailable.
+                    let chosen: Option<String> = if let Some(pid) = preferred_id.clone() {
+                        Some(pid)
+                    } else {
+                        voices
+                            .iter()
+                            .find(|v| !v.lang.is_empty() && v.lang == target)
+                            .map(|v| v.id.clone())
+                            .or_else(|| {
+                                if voices.iter().all(|v| v.lang.is_empty()) {
+                                    voices.first().map(|v| v.id.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                    };
+                    log::info!(
+                        "[tts] lang={lang} target={target} preferred={preferred_id:?} chosen={chosen:?}"
+                    );
+                    let Some(id) = chosen else {
+                        log::warn!("TTS: no installed voice for language '{target}' — caption only");
+                        continue;
+                    };
+                    if current_id.as_deref() != Some(id.as_str()) {
+                        if set_voice_by_id(&synth, &id) {
+                            current_id = Some(id);
+                        } else {
+                            log::warn!("TTS: voice id not found: {id}");
                         }
-                        let target = if lang.is_empty() || lang.eq_ignore_ascii_case("auto") {
-                            detect_lang(&text)
-                        } else {
-                            lang_code_of_locale(&lang)
-                        };
-                        // A user-selected preferred voice is used as-is — picking a voice
-                        // must be predictable. Auto (no preferred) picks an installed voice
-                        // for the reply language, falling back to the first voice rather
-                        // than going silent when language metadata is unavailable.
-                        let chosen: Option<String> = if let Some(pid) = preferred_id.clone() {
-                            Some(pid)
-                        } else {
-                            voices
-                                .iter()
-                                .find(|v| !v.lang.is_empty() && v.lang == target)
-                                .map(|v| v.id.clone())
-                                .or_else(|| {
-                                    if voices.iter().all(|v| v.lang.is_empty()) {
-                                        voices.first().map(|v| v.id.clone())
-                                    } else {
-                                        None
+                    }
+                    // Render to an audio stream and play it (replaces any current utterance).
+                    match synth.SynthesizeTextToStreamAsync(&HSTRING::from(text.as_str())) {
+                        Ok(op) => match block_on(op.into_future()) {
+                            Ok(stream) => {
+                                let ct = stream.ContentType().unwrap_or_default();
+                                match MediaSource::CreateFromStream(&stream, &ct) {
+                                    Ok(source) => {
+                                        let _ = player.SetSource(&source);
+                                        let _ = player.Play();
                                     }
-                                })
-                        };
-                        log::info!(
-                            "[tts] lang={lang} target={target} preferred={preferred_id:?} chosen={chosen:?}"
-                        );
-                        match chosen {
-                            Some(id) => {
-                                if current_id.as_deref() != Some(id.as_str()) {
-                                    sapi_set_voice(&voice, &id);
-                                    current_id = Some(id);
-                                }
-                                let wide: Vec<u16> =
-                                    text.encode_utf16().chain(std::iter::once(0)).collect();
-                                if let Err(e) =
-                                    voice.Speak(windows::core::PCWSTR(wide.as_ptr()), FLAGS, None)
-                                {
-                                    log::warn!("TTS speak failed: {e}");
+                                    Err(e) => log::warn!("TTS: CreateFromStream failed: {e}"),
                                 }
                             }
-                            None => {
-                                log::warn!(
-                                    "TTS: no installed voice for language '{target}' — caption only"
-                                );
-                            }
-                        }
+                            Err(e) => log::warn!("TTS: synthesize failed: {e}"),
+                        },
+                        Err(e) => log::warn!("TTS: synthesize failed: {e}"),
                     }
-                    Msg::SetVoice(id) => {
-                        preferred_id = if id.is_empty() { None } else { Some(id) };
-                    }
-                    Msg::ListVoices(reply) => {
-                        let _ = reply.send(sapi_enum_voices());
-                    }
-                    Msg::Quit => break,
                 }
+                Msg::SetVoice(id) => {
+                    preferred_id = if id.is_empty() { None } else { Some(id) };
+                }
+                Msg::ListVoices(reply) => {
+                    let _ = reply.send(enum_voices());
+                }
+                Msg::Quit => break,
             }
         }
     }
