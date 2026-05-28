@@ -78,7 +78,7 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 
 | Provider | Where the screenshot goes |
 |---|---|
-| **Managed (default)** | Supabase Edge Function → OpenRouter → NVIDIA Nemotron |
+| **Managed (default)** | Supabase Edge Function → OpenRouter → Google Gemma |
 | Anthropic | `api.anthropic.com` |
 | Gemini | `generativelanguage.googleapis.com` |
 | OpenAI | `api.openai.com` |

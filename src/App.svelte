@@ -1665,7 +1665,7 @@ See the LICENSE file in the root of this repository for complete details.
             <!-- Per-provider contextual hint -->
             <p class="setting-hint provider-hint">
               {#if settingsForm.api_provider === "managed"}
-                Free · 50 requests included. Powered by NVIDIA Nemotron via the Navisual relay. May be slower than BYOK providers — ideal for getting started.
+                Free · 50 requests included. Powered by Google Gemma via the Navisual relay. May be slower than BYOK providers — ideal for getting started.
               {:else if settingsForm.api_provider === "gemini"}
                 Recommended for most users outside mainland China. Free API key available at aistudio.google.com.
               {:else if settingsForm.api_provider === "anthropic"}
