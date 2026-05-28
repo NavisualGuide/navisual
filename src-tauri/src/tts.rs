@@ -350,33 +350,28 @@ mod imp {
                         } else {
                             lang_code_of_locale(&lang)
                         };
-                        // Pick the voice for this utterance:
-                        //  * A user-selected preferred voice is authoritative — use it
-                        //    UNLESS we know it speaks a different language than the reply
-                        //    AND a voice that can exists (then auto-switch so the reply is
-                        //    not garbled).
-                        //  * Otherwise pick any installed voice for the target language.
-                        //  * Never drop speech just because language metadata was missing:
-                        //    fall back to the first voice when no voice exposes a language.
-                        let preferred = preferred_id
-                            .as_ref()
-                            .and_then(|pid| voices.iter().find(|v| &v.id == pid));
-                        let target_voice =
-                            voices.iter().find(|v| !v.lang.is_empty() && v.lang == target);
-                        let chosen: Option<String> = match (preferred, target_voice) {
-                            (Some(p), Some(tv)) if !p.lang.is_empty() && p.lang != target => {
-                                Some(tv.id.clone())
-                            }
-                            (Some(p), _) => Some(p.id.clone()),
-                            (None, Some(tv)) => Some(tv.id.clone()),
-                            (None, None) => {
-                                if voices.iter().all(|v| v.lang.is_empty()) {
-                                    voices.first().map(|v| v.id.clone())
-                                } else {
-                                    None
-                                }
-                            }
+                        // A user-selected preferred voice is used as-is — picking a voice
+                        // must be predictable. Auto (no preferred) picks an installed voice
+                        // for the reply language, falling back to the first voice rather
+                        // than going silent when language metadata is unavailable.
+                        let chosen: Option<String> = if let Some(pid) = preferred_id.clone() {
+                            Some(pid)
+                        } else {
+                            voices
+                                .iter()
+                                .find(|v| !v.lang.is_empty() && v.lang == target)
+                                .map(|v| v.id.clone())
+                                .or_else(|| {
+                                    if voices.iter().all(|v| v.lang.is_empty()) {
+                                        voices.first().map(|v| v.id.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
                         };
+                        log::info!(
+                            "[tts] lang={lang} target={target} preferred={preferred_id:?} chosen={chosen:?}"
+                        );
                         match chosen {
                             Some(id) => {
                                 if current_id.as_deref() != Some(id.as_str()) {
