@@ -102,7 +102,7 @@ impl Default for Config {
             qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             supabase_url: Some("https://gwekzberpfuxsoddwwqj.supabase.co".to_string()),
             supabase_anon_key: Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3ZWt6YmVycGZ1eHNvZGR3d3FqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMTUxMjEsImV4cCI6MjA5MzY5MTEyMX0.gCXLsnFq3NMv8_JvZGcR9TB9bAfyjCnEnj4u0RZnRbg".to_string()),
-            managed_model: "google/gemma-4-31b-it:free".to_string(),
+            managed_model: "openrouter/free".to_string(),
             api_timeout_sec: 90,
             daily_token_cap: 100_000,
             monthly_token_cap: 5_000_000,

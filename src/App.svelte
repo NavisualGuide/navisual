@@ -36,6 +36,7 @@ See the LICENSE file in the root of this repository for complete details.
     needs_input: boolean;
     request_full_screen: boolean;
     provider: string;
+    model: string | null;
     error: string | null;
     debug_screenshot_path: string | null;
     chat_thumb_b64: string | null;
@@ -173,6 +174,10 @@ See the LICENSE file in the root of this repository for complete details.
   };
   let sessionId = $state("");
   let provider = $state("");
+  // The model that actually handled the last AI response. For managed this is the
+  // concrete model OpenRouter routed to (the relay sends the `openrouter/free` router);
+  // shown in the debug drawer and logged with feedback. Empty until the first response.
+  let routedModel = $state("");
   // Set when the screen drifted during the 5–90s AI thinking window.
   // Surfaces a soft banner over the instruction so the user knows the
   // guidance may be referring to state that no longer exists.
@@ -769,6 +774,7 @@ See the LICENSE file in the root of this repository for complete details.
     locateTrace = res.locate_trace;
     sessionId = res.session_id;
     if (res.provider) provider = res.provider;
+    if (res.model) routedModel = res.model;
     if (res.request_full_screen) {
       phase = "consent_prompt";
     } else {
@@ -782,6 +788,7 @@ See the LICENSE file in the root of this repository for complete details.
       } else if (steps[idx]?.target_text) {
         meta = `not located · "${steps[idx].target_text}"`;
       }
+      if (res.model) meta = meta ? `${meta} · ${res.model}` : res.model;
       addToHistory("ai", cleanInstruction, meta);
       if (!isMuted) invoke("speak", { text: cleanInstruction, lang: settingsForm.voice_language }).catch(() => {});
     }
@@ -942,7 +949,7 @@ See the LICENSE file in the root of this repository for complete details.
           note: note || null,
           app_version: appVersion,
           provider: settingsForm.api_provider,
-          model: activeModel,
+          model: routedModel || activeModel,
           instruction: currentInstruction || null,
           target_text: steps[stepIndex]?.target_text ?? null,
           located: !!locateResult,
@@ -1665,7 +1672,7 @@ See the LICENSE file in the root of this repository for complete details.
             <!-- Per-provider contextual hint -->
             <p class="setting-hint provider-hint">
               {#if settingsForm.api_provider === "managed"}
-                Free · 50 requests included. Powered by Google Gemma via the Navisual relay. May be slower than BYOK providers — ideal for getting started.
+                Free · 50 requests included. Powered by OpenRouter's free model router via the Navisual relay. May be slower than BYOK providers — ideal for getting started.
               {:else if settingsForm.api_provider === "gemini"}
                 Recommended for most users outside mainland China. Free API key available at aistudio.google.com.
               {:else if settingsForm.api_provider === "anthropic"}

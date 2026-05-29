@@ -472,6 +472,10 @@ struct GuideResponse {
     needs_input: bool,
     request_full_screen: bool,
     provider: String,
+    /// The model that actually handled this request. For managed this is the concrete
+    /// model OpenRouter routed to (the relay sends the `openrouter/free` router); for
+    /// other providers it's the configured model. Surfaced in the debug drawer + logged.
+    model: Option<String>,
     error: Option<String>,
     /// Path to the debug screenshot saved for this request (None when disabled).
     debug_screenshot_path: Option<String>,
@@ -795,6 +799,7 @@ async fn guide(
                 needs_input: false,
                 request_full_screen: false,
                 provider: String::new(),
+                model: None,
                 error: Some(
                     "No application window found. Please click on the program you want \
                      help with to bring it into focus, then try Guide me again."
@@ -857,9 +862,9 @@ async fn guide(
     };
 
     // Measure the pure AI round-trip (excludes capture + locate) for the model
-    // latency log. Provider/model captured before the borrow by send_guidance_request.
+    // latency log. Provider captured before the borrow; the actual model is read
+    // after the request (managed routes to a concrete model server-side).
     let timing_provider = router.config.api_provider.clone();
-    let timing_model = router.active_model();
     let ai_started = std::time::Instant::now();
 
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
@@ -909,10 +914,15 @@ async fn guide(
         Ok(r) => (true, r.steps.len()),
         Err(_) => (false, 0),
     };
+    // The model that actually handled this request: for managed, the concrete model
+    // OpenRouter routed to (relay sends the `openrouter/free` router); else the configured one.
+    let used_model = router
+        .get_managed_routed_model()
+        .unwrap_or_else(|| router.active_model());
     log_model_timing(
         &app,
         &timing_provider,
-        &timing_model,
+        &used_model,
         ai_elapsed_ms,
         timing_ok,
         timing_steps,
@@ -940,6 +950,7 @@ async fn guide(
                 needs_input: false,
                 request_full_screen: false,
                 provider: router.config.api_provider.clone(),
+                model: Some(used_model.clone()),
                 error: Some(if err_str == "free_trial_exhausted" {
                     "Your 50 free requests have been used.".to_string()
                 } else {
@@ -1007,6 +1018,7 @@ async fn guide(
             needs_input,
             request_full_screen,
             provider,
+            model: Some(used_model.clone()),
             error: None,
             debug_screenshot_path,
             chat_thumb_b64,
@@ -1077,6 +1089,7 @@ async fn guide(
         needs_input,
         request_full_screen,
         provider,
+        model: Some(used_model),
         error: None,
         debug_screenshot_path,
         chat_thumb_b64,
@@ -1161,6 +1174,7 @@ async fn next_step(
         needs_input,
         request_full_screen: false, // next_step just steps forward
         provider,
+        model: None, // local advance, no AI call — frontend keeps the prior routed model
         error: None,
         debug_screenshot_path: None,
         chat_thumb_b64: None,
@@ -1333,7 +1347,6 @@ async fn send_correction(
     };
 
     let timing_provider = router.config.api_provider.clone();
-    let timing_model = router.active_model();
     let ai_started = std::time::Instant::now();
 
     let resp = router
@@ -1345,10 +1358,13 @@ async fn send_correction(
         Ok(r) => (true, r.steps.len()),
         Err(_) => (false, 0),
     };
+    let used_model = router
+        .get_managed_routed_model()
+        .unwrap_or_else(|| router.active_model());
     log_model_timing(
         &app,
         &timing_provider,
-        &timing_model,
+        &used_model,
         ai_elapsed_ms,
         timing_ok,
         timing_steps,
@@ -1420,6 +1436,7 @@ async fn send_correction(
             needs_input,
             request_full_screen,
             provider,
+            model: Some(used_model.clone()),
             error: None,
             debug_screenshot_path,
             chat_thumb_b64,
@@ -1486,6 +1503,7 @@ async fn send_correction(
         needs_input,
         request_full_screen,
         provider,
+        model: Some(used_model),
         error: None,
         debug_screenshot_path,
         chat_thumb_b64,

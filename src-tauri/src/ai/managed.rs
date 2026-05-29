@@ -19,6 +19,9 @@ pub struct ManagedClient {
     pub session: Option<SupabaseSession>,
     session_path: Option<PathBuf>,
     free_remaining: AtomicI64, // -1 = unknown
+    // The model OpenRouter actually routed to on the last request (the relay sends
+    // `openrouter/free`, a router; the response `model` names the concrete model used).
+    last_model: parking_lot::Mutex<Option<String>>,
 }
 
 impl ManagedClient {
@@ -43,6 +46,7 @@ impl ManagedClient {
             session,
             session_path,
             free_remaining: AtomicI64::new(-1),
+            last_model: parking_lot::Mutex::new(None),
         })
     }
 
@@ -53,6 +57,11 @@ impl ManagedClient {
         } else {
             Some(v as u32)
         }
+    }
+
+    /// The concrete model OpenRouter routed to on the most recent request.
+    pub fn last_routed_model(&self) -> Option<String> {
+        self.last_model.lock().clone()
     }
 
     pub async fn ensure_token(&mut self) -> Result<()> {
@@ -135,6 +144,13 @@ impl ManagedClient {
         }
 
         let body: Value = resp.json().await?;
+
+        // OpenRouter returns the concrete model it routed to (the relay sends the
+        // `openrouter/free` router). Record it so the UI/feedback can show which
+        // free model actually handled the request.
+        let routed = body["model"].as_str().map(str::to_string);
+        log::info!("[managed] requested={} routed={routed:?}", self.model);
+        *self.last_model.lock() = routed;
 
         let json_str = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
             .as_str()

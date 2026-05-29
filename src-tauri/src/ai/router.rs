@@ -92,6 +92,17 @@ impl AiRouter {
         }
     }
 
+    /// The concrete model OpenRouter routed the last managed request to (the relay
+    /// sends the `openrouter/free` router). None for non-managed providers or before
+    /// the first request.
+    pub fn get_managed_routed_model(&self) -> Option<String> {
+        if let Some(ApiClient::Managed(ref c)) = self.client {
+            c.last_routed_model()
+        } else {
+            None
+        }
+    }
+
     /// Called by lib.rs after sign_in_anon to seed the session into the client.
     pub fn set_managed_session(&mut self, session: crate::server::SupabaseSession) {
         if let Some(ApiClient::Managed(ref mut c)) = self.client {
