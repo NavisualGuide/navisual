@@ -155,14 +155,19 @@ impl ManagedClient {
         let json_str = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
             .ok_or_else(|| {
-                anyhow!(
-                    "no tool_calls in relay response: {}",
+                log::warn!(
+                    "[managed] no tool_calls in relay response: {}",
                     serde_json::to_string(&body).unwrap_or_default()
-                )
+                );
+                anyhow!("The free model returned an unreadable response. Please try again.")
             })?;
 
-        let nav_response: NavigateStepResponse = serde_json::from_str(json_str)
-            .map_err(|e| anyhow!("navigate_step parse error: {e}\njson: {json_str}"))?;
+        // Free models occasionally emit malformed tool args (leaked </think>, whitespace
+        // runaway → truncated JSON). Surface a friendly retry, keep the detail in the log.
+        let nav_response: NavigateStepResponse = serde_json::from_str(json_str).map_err(|e| {
+            log::warn!("[managed] navigate_step parse error: {e}\njson: {json_str}");
+            anyhow!("The free model returned an unreadable response. Please try again.")
+        })?;
 
         // Emit the first instruction as a single chunk (managed tier is non-streaming).
         if let Some(step) = nav_response.steps.first() {
