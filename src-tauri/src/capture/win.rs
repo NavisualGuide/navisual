@@ -28,9 +28,9 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics,
     GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SetWindowPos, GA_ROOTOWNER, GWL_EXSTYLE, HWND_TOPMOST,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    IsWindowVisible, SetWindowPos, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE,
+    HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -644,6 +644,44 @@ fn monitor_rect_containing(x: i32, y: i32) -> Option<Rect> {
     }
 }
 
+/// Returns true if `hwnd` is at least partially visible on screen — i.e. the
+/// top-level window under at least one of five sample points (centre + four
+/// inset corners) of `r` is `hwnd` itself. A same-PID sub-window that's fully
+/// covered by another application would otherwise extend the capture bbox into
+/// that other application's region; gap-blanking then preserves the rect
+/// (same PID), but the actual pixels captured are the covering app's. Filter
+/// such fully-occluded windows out of both the union and the keep-set so the
+/// AI never sees a different program in place of one of the target's hidden
+/// sub-windows.
+unsafe fn is_visible_to_user(hwnd: HWND, r: &Rect) -> bool {
+    let w = r.width as i32;
+    let h = r.height as i32;
+    if w <= 0 || h <= 0 {
+        return false;
+    }
+    let inset_x = (w / 5).max(1);
+    let inset_y = (h / 5).max(1);
+    let points = [
+        (r.x + w / 2, r.y + h / 2),
+        (r.x + inset_x, r.y + inset_y),
+        (r.x + w - inset_x, r.y + inset_y),
+        (r.x + inset_x, r.y + h - inset_y),
+        (r.x + w - inset_x, r.y + h - inset_y),
+    ];
+    for (px, py) in points {
+        let top = WindowFromPoint(POINT { x: px, y: py });
+        if top.0.is_null() {
+            continue;
+        }
+        let root = GetAncestor(top, GA_ROOT);
+        let root_top = if !root.0.is_null() { root } else { top };
+        if root_top.0 == hwnd.0 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Compute the bounding rect of all visible top-level windows belonging to the
 /// same process as `target`, clamped to the monitor containing the target.
 ///
@@ -750,6 +788,15 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
             }
         }
 
+        // Skip same-PID sub-windows that are fully occluded on screen. Without
+        // this, a hidden VS Code window covered by Chrome on another monitor
+        // would extend the capture bbox into Chrome's territory and the AI
+        // would see Chrome instead of an empty VS Code rect. The target itself
+        // is always included — it's the foreground window by construction.
+        if hwnd.0 != state.target.0 && !is_visible_to_user(hwnd, &r) {
+            return TRUE;
+        }
+
         // Extend the running union.
         let u_left = state.union.x.min(r.x);
         let u_top = state.union.y.min(r.y);
@@ -824,6 +871,7 @@ pub fn pid_member_rects(target: HWND) -> Vec<Rect> {
     }
 
     struct State {
+        target: HWND,
         target_pid: u32,
         rects: Vec<Rect>,
     }
@@ -850,12 +898,20 @@ pub fn pid_member_rects(target: HWND) -> Vec<Rect> {
             return TRUE;
         }
         if let Some(r) = frame_rect_of(hwnd) {
+            // Skip same-PID sub-windows that are fully occluded by another app
+            // — gap-blanking would otherwise preserve their rect and the AI
+            // would see the covering app's pixels. The target itself is kept
+            // unconditionally (it's the visible foreground window).
+            if hwnd.0 != state.target.0 && !is_visible_to_user(hwnd, &r) {
+                return TRUE;
+            }
             state.rects.push(r);
         }
         TRUE
     }
 
     let mut state = State {
+        target,
         target_pid: pid,
         rects: Vec::new(),
     };
