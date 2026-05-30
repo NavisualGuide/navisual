@@ -829,7 +829,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (token !== requestToken) return;
       if (res.chat_thumb_b64) attachThumb(userEntryId, res.chat_thumb_b64);
       if (!res.ok) {
-        phase = prevPhase;
+        phase = errorFallbackPhase(prevPhase, fullScreen);
         addToHistory("system", "⚠️ " + (res.error ?? "guide failed"));
         if (!fullScreen && taskText !== "") task = taskText;
         return;
@@ -838,10 +838,22 @@ See the LICENSE file in the root of this repository for complete details.
     } catch (e) {
       stopTimer();
       if (token !== requestToken) return;
-      phase = prevPhase;
+      phase = errorFallbackPhase(prevPhase, fullScreen);
       addToHistory("system", "⚠️ " + String(e));
       if (!fullScreen && taskText !== "") task = taskText;
     }
+  }
+
+  // After a failed guide call, pick the phase to revert to. Normally that's
+  // prevPhase — but when the user just clicked "Allow Once" (fullScreen=true)
+  // and the request errored (e.g. upstream 429), reverting to consent_prompt
+  // would re-ask for permission and trap them in a click → 429 → click loop.
+  // Surface the error and drop back to a non-consent phase instead.
+  function errorFallbackPhase(prev: AppPhase, fullScreen: boolean): AppPhase {
+    if (fullScreen && prev === "consent_prompt") {
+      return steps.length > 0 ? "guiding" : "idle";
+    }
+    return prev;
   }
 
   async function nextStep() {

@@ -26,9 +26,9 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindow,
+    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics,
     GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SetWindowPos, GA_ROOTOWNER, GWL_EXSTYLE, GW_OWNER, HWND_TOPMOST,
+    IsWindowVisible, SetWindowPos, GA_ROOTOWNER, GWL_EXSTYLE, HWND_TOPMOST,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
@@ -675,6 +675,7 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
     let monitor = monitor_union_for(&target_rect);
 
     struct State {
+        target: HWND,
         target_pid: u32,
         our_pid: u32,
         monitor: Rect,
@@ -730,15 +731,17 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
             return TRUE;
         }
 
-        // Owned windows (modal dialogs, popups) are part of the interaction and
-        // are kept regardless of which monitor they sit on — a Word "Find" or
-        // "Font" dialog dragged to a second screen must still be captured.
-        // Unowned top-level windows (e.g. a second document on another monitor)
-        // keep the same-monitor filter so the union stays compact.
-        let is_owned = GetWindow(hwnd, GW_OWNER)
-            .map(|o| !o.0.is_null())
-            .unwrap_or(false);
-        if !is_owned {
+        // Cross-monitor inclusion only when the window's owner chain roots at
+        // the focused target — that's how the OS marks a dialog/popup as
+        // belonging to a specific window (Word "Find"/"Font", a modal dialog
+        // dragged to a second screen). Other same-PID top-level windows (a VS
+        // Code extension panel torn off as its own window, a second editor
+        // window, an unrelated tool window) have a different owner root and
+        // must stay subject to the same-monitor filter — otherwise the bbox
+        // balloons across monitors and stitches "different apps" together
+        // even though they share a PID.
+        let owned_by_target = GetAncestor(hwnd, GA_ROOTOWNER).0 == state.target.0;
+        if !owned_by_target {
             let cx = r.x + r.width as i32 / 2;
             let cy = r.y + r.height as i32 / 2;
             let m = &state.monitor;
@@ -763,6 +766,7 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
 
     let our_pid = std::process::id();
     let mut state = State {
+        target,
         target_pid: pid,
         our_pid,
         monitor,
