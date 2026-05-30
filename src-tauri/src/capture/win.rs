@@ -851,29 +851,127 @@ pub fn pid_union_rect_raw(hwnd_raw: usize) -> Option<Rect> {
     pid_union_rect(HWND(hwnd_raw as *mut _))
 }
 
-/// Collect the frame rects of every visible, non-cloaked top-level window
-/// belonging to the SAME PROCESS as `target`. Fed to `blank_outside_rects` to
-/// grey the gaps in the union-bbox capture so the AI only sees the target app.
-///
-/// Deliberately MORE inclusive than `pid_union_rect`'s internal filter: it
-/// keeps tool windows (floating palettes, tooltips, dropdown popups) so a
-/// same-app popup sitting in a gap is preserved rather than blanked. Our own
-/// windows are a different PID and are naturally excluded. Falls back to the
-/// target's own frame if enumeration yields nothing, so the keep-set is never
-/// empty (which would otherwise blank the whole capture).
-pub fn pid_member_rects(target: HWND) -> Vec<Rect> {
-    let mut pid: u32 = 0;
-    unsafe {
-        GetWindowThreadProcessId(target, Some(&mut pid));
+/// Geometric intersection of two rects. Returns a zero-sized rect when disjoint.
+fn rect_intersect(a: &Rect, b: &Rect) -> Rect {
+    let x1 = a.x.max(b.x);
+    let y1 = a.y.max(b.y);
+    let x2 = (a.x + a.width as i32).min(b.x + b.width as i32);
+    let y2 = (a.y + a.height as i32).min(b.y + b.height as i32);
+    if x2 <= x1 || y2 <= y1 {
+        return Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
     }
-    if pid == 0 {
+    Rect {
+        x: x1,
+        y: y1,
+        width: (x2 - x1) as u32,
+        height: (y2 - y1) as u32,
+    }
+}
+
+/// Return the parts of `a` not covered by `b` (0, 1, 2, 3, or 4 axis-aligned sub-rects).
+fn rect_subtract(a: Rect, b: Rect) -> Vec<Rect> {
+    let ix = rect_intersect(&a, &b);
+    if ix.width == 0 || ix.height == 0 {
+        return vec![a];
+    }
+    let a_right = a.x + a.width as i32;
+    let a_bottom = a.y + a.height as i32;
+    let i_right = ix.x + ix.width as i32;
+    let i_bottom = ix.y + ix.height as i32;
+    let mut out = Vec::with_capacity(4);
+    // Top strip (full width of a, above the intersection).
+    if ix.y > a.y {
+        out.push(Rect {
+            x: a.x,
+            y: a.y,
+            width: a.width,
+            height: (ix.y - a.y) as u32,
+        });
+    }
+    // Bottom strip (full width of a, below the intersection).
+    if i_bottom < a_bottom {
+        out.push(Rect {
+            x: a.x,
+            y: i_bottom,
+            width: a.width,
+            height: (a_bottom - i_bottom) as u32,
+        });
+    }
+    // Left strip (middle band, left of the intersection).
+    if ix.x > a.x {
+        out.push(Rect {
+            x: a.x,
+            y: ix.y,
+            width: (ix.x - a.x) as u32,
+            height: ix.height,
+        });
+    }
+    // Right strip (middle band, right of the intersection).
+    if i_right < a_right {
+        out.push(Rect {
+            x: i_right,
+            y: ix.y,
+            width: (a_right - i_right) as u32,
+            height: ix.height,
+        });
+    }
+    out
+}
+
+/// Subtract a list of covering rects from `a`. Returns the parts of `a` that
+/// remain visible. Each subtraction can fragment surviving pieces into smaller
+/// rects; this is O(N²) in the worst case but N (windows above) is small.
+fn rect_subtract_many(a: Rect, covered: &[Rect]) -> Vec<Rect> {
+    let mut current = vec![a];
+    for c in covered {
+        if current.is_empty() {
+            break;
+        }
+        let mut next = Vec::with_capacity(current.len());
+        for r in &current {
+            next.extend(rect_subtract(*r, *c));
+        }
+        current = next;
+    }
+    current
+}
+
+/// Compute the per-pixel-accurate keep-set for gap-blanking: the **visible
+/// portions** of every same-PID top-level window, clipped to `bbox`.
+///
+/// Walks top-level windows in z-order top-to-bottom (EnumWindows order). For
+/// each window we compute its visible portion = `rect ∩ bbox − union(higher-z
+/// rects)`. Same-PID visible portions go into the keep-set; non-same-PID rects
+/// still contribute to `covered` so they correctly hide same-PID stuff below
+/// them (e.g. Word covering a hidden VS Code sub-window). Our own pid is
+/// skipped entirely — the panel is blanked separately by the caller.
+///
+/// Result: same-PID pixels actually visible on screen are preserved; covered
+/// portions (the other-app slivers that previously leaked into the capture)
+/// fall outside the keep-set and `blank_outside_rects` greys them. Returns the
+/// target's frame as a single-element fallback when enumeration finds nothing,
+/// so the keep-set is never empty.
+pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
+    let mut target_pid: u32 = 0;
+    unsafe {
+        GetWindowThreadProcessId(target, Some(&mut target_pid));
+    }
+    if target_pid == 0 {
         return frame_rect_of(target).into_iter().collect();
     }
+    let our_pid = std::process::id();
 
     struct State {
-        target: HWND,
+        bbox: Rect,
+        our_pid: u32,
         target_pid: u32,
-        rects: Vec<Rect>,
+        covered: Vec<Rect>,
+        keep: Vec<Rect>,
     }
 
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
@@ -883,10 +981,10 @@ pub fn pid_member_rects(target: HWND) -> Vec<Rect> {
         }
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid != state.target_pid {
+        if pid == 0 || pid == state.our_pid {
+            // Our own panel/overlay is handled by the separate `exclude` pass.
             return TRUE;
         }
-        // Skip cloaked (UWP hidden / virtual-desktop) windows.
         let mut cloaked: u32 = 0;
         let _ = DwmGetWindowAttribute(
             hwnd,
@@ -897,36 +995,50 @@ pub fn pid_member_rects(target: HWND) -> Vec<Rect> {
         if cloaked != 0 {
             return TRUE;
         }
-        if let Some(r) = frame_rect_of(hwnd) {
-            // Skip same-PID sub-windows that are fully occluded by another app
-            // — gap-blanking would otherwise preserve their rect and the AI
-            // would see the covering app's pixels. The target itself is kept
-            // unconditionally (it's the visible foreground window).
-            if hwnd.0 != state.target.0 && !is_visible_to_user(hwnd, &r) {
-                return TRUE;
-            }
-            state.rects.push(r);
+        let Some(r_full) = frame_rect_of(hwnd) else {
+            return TRUE;
+        };
+        let r = rect_intersect(&r_full, &state.bbox);
+        if r.width == 0 || r.height == 0 {
+            return TRUE;
         }
+
+        // Visible-now = this window's bbox-clipped rect minus everything above it.
+        if pid == state.target_pid {
+            let visible = rect_subtract_many(r, &state.covered);
+            state.keep.extend(visible);
+        }
+        state.covered.push(r);
         TRUE
     }
 
     let mut state = State {
-        target,
-        target_pid: pid,
-        rects: Vec::new(),
+        bbox: *bbox,
+        our_pid,
+        target_pid,
+        covered: Vec::new(),
+        keep: Vec::new(),
     };
     unsafe {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
-    if state.rects.is_empty() {
-        return frame_rect_of(target).into_iter().collect();
+
+    if state.keep.is_empty() {
+        // Defensive: don't return an empty keep-set, otherwise blank_outside_rects
+        // greys the whole capture. Fall back to the target's clipped frame.
+        if let Some(r) = frame_rect_of(target) {
+            let clipped = rect_intersect(&r, bbox);
+            if clipped.width > 0 && clipped.height > 0 {
+                return vec![clipped];
+            }
+        }
     }
-    state.rects
+    state.keep
 }
 
 /// Convenience wrapper for callers that hold a raw HWND value (usize).
-pub fn pid_member_rects_raw(hwnd_raw: usize) -> Vec<Rect> {
-    pid_member_rects(HWND(hwnd_raw as *mut _))
+pub fn pid_visible_keep_rects_raw(hwnd_raw: usize, bbox: &Rect) -> Vec<Rect> {
+    pid_visible_keep_rects(HWND(hwnd_raw as *mut _), bbox)
 }
 
 /// Returns true when `pid` belongs to Tauri's embedded WebView2 renderer
