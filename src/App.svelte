@@ -141,6 +141,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Core state
   let task = $state("");
+  let lastUserTask = $state("");  // most recent real user task; restated in consent grant/deny messages so weak models keep context
   let lastCompletedInstruction = $state("");  // passed to AI on Next re-query
   let phase = $state<AppPhase>("idle");
 
@@ -748,6 +749,11 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
+  async function applySettingsAndClose() {
+    await applySettings();
+    if (!settingsError) showSettings = false;
+  }
+
   async function newSession() {
     cancelRequest();
     // Reset Rust-side session state including target_hwnd so the next Guide me
@@ -802,7 +808,9 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   function denyFullScreen() {
-    task = "Permission to capture full screen was denied. Please ask me to manually bring the required application into focus.";
+    task = lastUserTask
+      ? `Permission to capture full screen was denied. Original task: "${lastUserTask}". Ask the user to manually bring the correct application window into focus so you can continue.`
+      : "Permission to capture full screen was denied. Ask the user to manually bring the correct application window into focus so you can continue.";
     correction();
   }
 
@@ -812,7 +820,15 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function guide_impl(fullScreen: boolean) {
     if (!task.trim() && !fullScreen) return;
-    const taskText = fullScreen ? "[User granted permission to capture full desktop for the next step]" : task.trim();
+    let taskText: string;
+    if (fullScreen) {
+      taskText = lastUserTask
+        ? `[User granted permission to capture full desktop for the next step. Original task: "${lastUserTask}"]`
+        : "[User granted permission to capture full desktop for the next step]";
+    } else {
+      taskText = task.trim();
+      lastUserTask = taskText;
+    }
     task = "";
     // Keep session context when in the middle of a task; start fresh from idle/error.
     const isReply = phase === "guiding" || phase === "needs_input" || phase === "consent_prompt";
@@ -2054,9 +2070,10 @@ See the LICENSE file in the root of this repository for complete details.
           <div class="footer-actions">
             <button class="btn-ghost btn-reset" onclick={resetSettings} title="Restore all settings to defaults (API keys are preserved)">Reset to defaults</button>
             <button class="btn-ghost" onclick={() => (showSettings = false)}>Cancel</button>
-            <button class="btn-primary" onclick={applySettings} disabled={settingsSaving}>
+            <button class="btn-ghost" onclick={applySettings} disabled={settingsSaving}>
               {settingsSaving ? "Saving…" : "Apply"}
             </button>
+            <button class="btn-primary" onclick={applySettingsAndClose} disabled={settingsSaving}>OK</button>
           </div>
         </div>
       </div>
