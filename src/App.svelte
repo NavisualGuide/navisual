@@ -651,10 +651,29 @@ See the LICENSE file in the root of this repository for complete details.
     catch (e) { console.error("expandToPanel:", e); }
   }
 
+  // Ollama: live list of models installed on the server (GET /api/tags via the
+  // backend, so the LAN/http server isn't blocked by WebView fetch rules).
+  let ollamaModels = $state<string[]>([]);
+  let ollamaModelsMsg = $state<string>("");
+
+  async function refreshOllamaModels() {
+    ollamaModelsMsg = "Loading…";
+    try {
+      const baseUrl = settingsForm.ollama_base_url?.trim() || "http://localhost:11434";
+      const models = await invoke<string[]>("list_ollama_models", { baseUrl });
+      ollamaModels = models;
+      ollamaModelsMsg = models.length ? "" : "No models found — pull one with `ollama pull`.";
+    } catch {
+      ollamaModels = [];
+      ollamaModelsMsg = "Couldn't reach the Ollama server — type the model name below.";
+    }
+  }
+
   async function openSettings() {
     settingsError = null;
     settingsSaved = false;
     showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false;
+    ollamaModels = []; ollamaModelsMsg = "";
     showSettings = true;
     // Load voices and settings in parallel, but wait for both before assigning
     // settingsForm. If we assign settingsForm while availableVoices is still empty,
@@ -671,6 +690,7 @@ See the LICENSE file in the root of this repository for complete details.
       // changed it since the last disk save, and the button is the source of truth.
       settingsForm = { ...data, auto_advance: autoAdvanceEnabled };
       debugShowInfo = data.debug_show_response_info;
+      if (data.api_provider === "ollama") refreshOllamaModels();
     } catch (e) {
       settingsError = String(e);
     }
@@ -1690,7 +1710,8 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="provider-radios">
                 {#each (["managed","anthropic","gemini","ollama","openai","deepseek","qwen"] as const) as p}
                   <label class="radio-opt" class:radio-active={settingsForm.api_provider === p}>
-                    <input type="radio" name="provider" value={p} bind:group={settingsForm.api_provider} />
+                    <input type="radio" name="provider" value={p} bind:group={settingsForm.api_provider}
+                      onchange={() => { if (settingsForm.api_provider === "ollama" && ollamaModels.length === 0) refreshOllamaModels(); }} />
                     {p === "managed" ? "Managed (free)" : p === "qwen" ? "Qwen / OpenAI-compat" : p.charAt(0).toUpperCase() + p.slice(1)}
                   </label>
                 {/each}
@@ -1794,13 +1815,24 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <div class="setting-group">
                 <label class="setting-label" for="ollama-model">Model</label>
-                <input id="ollama-model" class="setting-input" type="text" list="ollama-models"
-                  bind:value={settingsForm.ollama_model} placeholder="llama3.2-vision" />
-                <datalist id="ollama-models">
-                  <option value="llama3.2-vision"></option>
-                  <option value="llava"></option>
-                  <option value="moondream"></option>
-                </datalist>
+                <select id="ollama-model" class="setting-select"
+                  value={ollamaModels.includes(settingsForm.ollama_model) ? settingsForm.ollama_model : "__custom__"}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.ollama_model = v; else settingsForm.ollama_model = ""; }}>
+                  {#each ollamaModels as m}
+                    <option value={m}>{m}</option>
+                  {/each}
+                  <option value="__custom__">Custom / not listed…</option>
+                </select>
+                {#if !ollamaModels.includes(settingsForm.ollama_model)}
+                  <input class="setting-input" type="text" bind:value={settingsForm.ollama_model}
+                    placeholder="e.g. gemma4:e4b" spellcheck="false" style="margin-top:6px" />
+                {/if}
+                <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+                  <button class="key-toggle" type="button" onclick={refreshOllamaModels}>↻ Refresh</button>
+                  <span class="setting-hint" style="margin:0">
+                    {ollamaModelsMsg || `${ollamaModels.length} model${ollamaModels.length === 1 ? "" : "s"} on the server · must be vision-capable`}
+                  </span>
+                </div>
               </div>
 
             {:else if settingsForm.api_provider === "openai"}

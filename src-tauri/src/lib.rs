@@ -193,7 +193,13 @@ fn execute_step(
     ),
     String,
 > {
-    let (located, trace) = if let Some(ref text) = step.target_text {
+    // Treat an empty/whitespace target_text as "no target". The Ollama schema now
+    // *requires* target_text (so small local models can't silently omit it and leave
+    // the locator with nothing), and genuine no-target steps (scroll, press a key)
+    // emit an empty string — those must not trigger a bogus locate.
+    let (located, trace) = if let Some(text) =
+        step.target_text.as_ref().filter(|t| !t.trim().is_empty())
+    {
         #[cfg(windows)]
         {
             let opts = locator::orchestrator::LocateOptions {
@@ -240,7 +246,12 @@ fn execute_step(
     // user gets a "search this region" cue instead of nothing. The
     // "pointer unavailable" caption in the panel still tells them it's
     // approximate.
-    if located.is_none() && step.target_text.is_some() {
+    if located.is_none()
+        && step
+            .target_text
+            .as_ref()
+            .is_some_and(|t| !t.trim().is_empty())
+    {
         if let Some(ai) = ai_bbox {
             if let Some(hint) = inflate_hint_bbox(ai, capture_rect) {
                 kind = overlay::OverlayKind::Hint;
@@ -1782,6 +1793,36 @@ async fn open_debug_folder(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// List the models installed on an Ollama server (`GET /api/tags`) so the
+/// Settings → Ollama model dropdown can offer the user's actual pulled models
+/// instead of a hardcoded guess. Returns sorted model names (e.g. "gemma4:e4b").
+/// Best-effort: returns an error string the UI shows inline when the server is
+/// unreachable, so the user falls back to typing the name.
+#[tauri::command]
+async fn list_ollama_models(base_url: String) -> Result<Vec<String>, String> {
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Ollama server returned {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut models: Vec<String> = body
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort();
+    Ok(models)
+}
+
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, String> {
     let router = state.ai_router.lock().await;
@@ -2240,6 +2281,7 @@ pub fn run() {
             speak,
             get_settings,
             save_settings,
+            list_ollama_models,
             open_debug_folder,
             sign_in_anon,
             get_balance,

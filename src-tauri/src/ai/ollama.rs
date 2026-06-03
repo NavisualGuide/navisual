@@ -32,7 +32,7 @@ Example (copy this structure exactly):
 
 Step fields (inside "steps" array only):
 - instruction: what the user should do (required)
-- target_text: 1-5 words visible on screen (optional)
+- target_text: the EXACT visible label of the element to point at, 1-5 words (REQUIRED — this is what locates the on-screen element). For a step with no on-screen target (scrolling, pressing a key), use an empty string "".
 - target_role: button|tab|link|textbox|menuitem|checkbox|radio|combobox|slider|image|heading|other (optional)
 - overlay_type: "arrow" for clickable targets, "subtitle" for keyboard/scroll steps with no target (default arrow)
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
@@ -76,18 +76,51 @@ impl OllamaClient {
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
-        // Vision models in Ollama do not support the tools API — use the built-in
-        // "format":"json" field to force JSON output at the sampler level, then
-        // rely on the system prompt JSON schema instruction to get the right shape.
-        let payload = json!({
-            "model": effective_model,
-            "messages": messages,
-            "stream": true,
-            "format": "json"
-        });
-
+        // Constrain output to the navigate_step JSON *schema* (Ollama structured
+        // outputs), not just "any JSON". `format:"json"` only forces *valid* JSON,
+        // so weak vision models emit valid-but-wrong shapes — re-encoding the
+        // window-context block, adding an extra wrapper key, or `target_bbox` as a
+        // string — which fail to parse and fall through to the raw-text fallback.
+        // A schema grammar-constrains sampling to the exact shape the parser expects.
+        // Falls back to "json" if the Ollama build is too old to accept a schema.
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let build_payload = |fmt: Value| {
+            json!({
+                "model": effective_model,
+                "messages": messages.clone(),
+                "stream": true,
+                "format": fmt,
+                // Bound generation with a hard token cap. Weak vision models can run
+                // away inside a string field — repeating a phrase and never closing
+                // the quote — which otherwise hangs until the request times out
+                // (surfacing as "error decoding response body"). A navigate_step
+                // response is well under 768 tokens, so this never truncates valid
+                // output; it only stops a runaway. (No repeat_penalty — under a
+                // grammar constraint it skewed some models toward an empty reply.)
+                "options": {
+                    "num_predict": 768
+                }
+            })
+        };
+
+        let mut response = self
+            .client
+            .post(&url)
+            .json(&build_payload(navigate_step_schema()))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            log::warn!(
+                "Ollama rejected the JSON-schema format (status {}); retrying with format=json. Update Ollama for structured-output support.",
+                response.status()
+            );
+            response = self
+                .client
+                .post(&url)
+                .json(&build_payload(json!("json")))
+                .send()
+                .await?;
+        }
 
         let status = response.status();
         if !status.is_success() {
@@ -119,6 +152,14 @@ impl OllamaClient {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+
+                // Surface server/grammar errors Ollama streams as {"error": ...}
+                // (an unsupported `format` schema, a bad option, OOM, a model still
+                // loading). Without this the stream just ends with no content and the
+                // user only sees the generic "empty response" message.
+                if let Some(err) = data.get("error").and_then(|e| e.as_str()) {
+                    bail!("Ollama error: {}", err);
+                }
 
                 // Token counts appear on the final done=true line.
                 if let Some(n) = data.get("prompt_eval_count").and_then(|v| v.as_u64()) {
@@ -161,7 +202,11 @@ impl OllamaClient {
 
         let text = accumulated_text.trim().to_string();
         if text.is_empty() {
-            bail!("Ollama returned an empty response (is ollama serve running?)");
+            bail!(
+                "Ollama returned no output (the server replied but the model generated nothing). \
+                 This usually means the model stalled under the JSON-schema constraint or is \
+                 still loading — retry, or try a different vision model."
+            );
         }
 
         // Strip optional markdown code fences the model may add despite instructions.
@@ -208,6 +253,54 @@ impl OllamaClient {
         }
         Ok((fallback, input_tokens, output_tokens))
     }
+}
+
+/// JSON Schema for the navigate_step response, passed to Ollama as `format` so
+/// the model's output is grammar-constrained to exactly the shape the parser
+/// (`NavigateStepResponse`) expects — a non-empty `steps` array plus the three
+/// top-level flags. This stops weak vision models from emitting valid-but-wrong
+/// JSON (extra wrapper keys, `target_bbox` as a string, the window-context block
+/// re-encoded). Optional step fields are omitted from `required` so scroll-only
+/// steps can leave them out; `target_bbox` is constrained to a numeric array so
+/// it can never come back as a string.
+fn navigate_step_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        // maxLength + enum stop weak models from running away inside a
+                        // string field (e.g. target_role looping "-like-textbox-like-…"
+                        // until the token cap, which leaves the JSON unparseable). The
+                        // grammar forces the closing quote at the limit, so output stays
+                        // valid. Limits are generous — they never truncate legit content.
+                        "instruction": { "type": "string", "maxLength": 400 },
+                        "target_text": { "type": "string", "maxLength": 80 },
+                        "target_role": {
+                            "type": "string",
+                            "enum": [
+                                "button", "tab", "link", "textbox", "menuitem", "checkbox",
+                                "radio", "combobox", "slider", "image", "heading", "other"
+                            ]
+                        },
+                        "overlay_type": { "type": "string", "maxLength": 16 },
+                        "clipboard": { "type": "string", "maxLength": 2000 },
+                        "target_bbox": { "type": "array", "items": { "type": "number" } },
+                        "checkpoint": { "type": "boolean" }
+                    },
+                    "required": ["instruction", "target_text", "checkpoint"]
+                }
+            },
+            "state_summary": { "type": "string", "maxLength": 300 },
+            "needs_input": { "type": "boolean" },
+            "request_full_screen": { "type": "boolean" }
+        },
+        "required": ["steps", "state_summary", "needs_input", "request_full_screen"]
+    })
 }
 
 pub fn build_messages(
