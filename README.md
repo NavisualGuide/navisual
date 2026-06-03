@@ -20,11 +20,13 @@ Navisual watches your screen and walks you through any task step by step — poi
 | Gemini | Free key at [aistudio.google.com](https://aistudio.google.com/apikey) | Free tier available |
 | Anthropic (Claude) | Key at [console.anthropic.com](https://console.anthropic.com) | Pay per use |
 | OpenAI | Key at [platform.openai.com](https://platform.openai.com) | Pay per use |
-| DeepSeek | Key at [platform.deepseek.com](https://platform.deepseek.com) | Pay per use |
-| Qwen | Key at [dashscope.aliyuncs.com](https://dashscope.aliyuncs.com) | Pay per use |
+| DeepSeek | Key at [platform.deepseek.com](https://platform.deepseek.com) | Pay per use (text-only — can't see the screen) |
+| Qwen / OpenAI-compatible | DashScope key, **or any OpenAI-compatible endpoint** (LM Studio, llama.cpp, llamafile, vLLM) via a custom Base URL | Pay per use — or free when self-hosted |
 | Ollama (local) | [ollama.com](https://ollama.com) + `ollama pull llama3.2-vision` | Free, nothing leaves your machine |
 
 Configure your provider in-app via **Settings → Provider** — no file editing required.
+
+**Run locally — two ways:** the **Ollama** provider (native API), or the **Qwen / OpenAI-compatible** provider pointed at any OpenAI-compatible server (LM Studio `…:1234/v1`, llama.cpp / llamafile `…:8080/v1`). Load a *vision* model, enter any dummy API key, and nothing leaves your machine.
 
 ---
 
@@ -46,7 +48,7 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 - **Audio narration** — TTS via Windows SAPI, no install required
 - **Voice input** — push-to-talk via Web Speech API
 - **Free managed tier** — 50 requests out of the box, no account needed
-- **Multi-provider AI** — 6 BYOK providers including DeepSeek and Qwen for Chinese users
+- **Multi-provider AI** — 6 BYOK providers (incl. DeepSeek & Qwen for China) plus any OpenAI-compatible local server (LM Studio, llama.cpp, llamafile)
 - **Windows UI Automation** — primary element locator, < 5ms for browsers
 - **Windows built-in OCR** — zero model downloads, works offline
 - **Active-window crop** — only the relevant window is sent to the AI
@@ -83,7 +85,7 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 | Gemini | `generativelanguage.googleapis.com` |
 | OpenAI | `api.openai.com` |
 | DeepSeek | `api.deepseek.com` (text-only — screenshot not sent) |
-| Qwen | `dashscope.aliyuncs.com` (or your configured workspace URL) |
+| Qwen / OpenAI-compatible | `dashscope.aliyuncs.com`, or your configured endpoint — including a local server (nothing leaves your machine) |
 | Ollama | `http://localhost:11434` — nothing leaves your machine |
 
 Additional notes:

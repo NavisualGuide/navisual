@@ -1691,7 +1691,7 @@ See the LICENSE file in the root of this repository for complete details.
                 {#each (["managed","anthropic","gemini","ollama","openai","deepseek","qwen"] as const) as p}
                   <label class="radio-opt" class:radio-active={settingsForm.api_provider === p}>
                     <input type="radio" name="provider" value={p} bind:group={settingsForm.api_provider} />
-                    {p === "managed" ? "Managed (free)" : p.charAt(0).toUpperCase() + p.slice(1)}
+                    {p === "managed" ? "Managed (free)" : p === "qwen" ? "Qwen / OpenAI-compat" : p.charAt(0).toUpperCase() + p.slice(1)}
                   </label>
                 {/each}
               </div>
@@ -1710,7 +1710,7 @@ See the LICENSE file in the root of this repository for complete details.
               {:else if settingsForm.api_provider === "deepseek"}
                 ⚠ Text-only — DeepSeek cannot see your screen (its API rejects images). Guidance is inferred from your description, so it may be wrong on unfamiliar or custom apps. For mainland China <em>with</em> screen analysis, use Qwen instead.
               {:else if settingsForm.api_provider === "qwen"}
-                Recommended for mainland China users — US AI services (Gemini, Anthropic, OpenAI) are geoblocked there. Qwen supports image analysis.
+                Qwen (DashScope) <em>and</em> any OpenAI-compatible endpoint — point the Base URL at a local server (LM Studio, llama.cpp, llamafile, vLLM) to run fully offline, no key needed. Supports image analysis. Also the recommended cloud option for mainland China, where US AI services are geoblocked.
               {:else if settingsForm.api_provider === "ollama"}
                 Free · runs locally · no data leaves your machine. Requires Ollama installed with a vision model (e.g. llama3.2-vision).
               {/if}
@@ -1902,11 +1902,14 @@ See the LICENSE file in the root of this repository for complete details.
                 {/if}
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="qwen-url">Base URL</label>
+                <label class="setting-label" for="qwen-url">Base URL (OpenAI-compatible)</label>
                 <input id="qwen-url" class="setting-input" type="text"
                   bind:value={settingsForm.qwen_base_url}
                   placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
-                <p class="setting-hint">Leave blank to use the default DashScope endpoint (mainland China). Only change if using a custom workspace URL.</p>
+                <p class="setting-hint">
+                  The <code>/v1</code> endpoint — Navisual appends <code>/chat/completions</code>. Blank = DashScope (Qwen).<br />
+                  Local servers: LM Studio <code>http://localhost:1234/v1</code> · llama.cpp / llamafile <code>http://localhost:8080/v1</code> (use the host's LAN IP if it's another machine). For local servers, set Model to a <em>vision</em> model and enter any dummy API key above.
+                </p>
               </div>
             {/if}
 
