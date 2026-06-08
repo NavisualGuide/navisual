@@ -274,6 +274,10 @@ fn execute_step(
             {
                 let _ = overlay::emit_update(app, update);
             }
+            // Tell the UI the pointer was hidden because the target is occluded, so it
+            // can offer a re-analyse — distinct from the generic "pointer unavailable"
+            // miss note (which means the locator genuinely couldn't find the element).
+            let _ = app.emit("pointer_occluded", ());
             return Ok((None, None));
         }
     }

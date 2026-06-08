@@ -151,6 +151,8 @@ See the LICENSE file in the root of this repository for complete details.
   let stepIndex = $state(0);
   let currentInstruction = $state("");
   let locateResult = $state<LocateResult | null>(null);
+  // Backend hid the pointer because the target window is occluded (not a locate miss).
+  let pointerOccluded = $state(false);
   let locateTrace = $state<LocateTrace | null>(null);
   let debugDrawerOpen = $state(false);
   // Test-user feedback (see logFeedback / submitWrong / correction).
@@ -913,6 +915,7 @@ See the LICENSE file in the root of this repository for complete details.
     const userEntryId = await addToHistory("user", taskText);
     currentInstruction = "";
     staleResponse = false;
+    pointerOccluded = false;
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -1020,6 +1023,7 @@ See the LICENSE file in the root of this repository for complete details.
     const corrEntryId = await addToHistory("correction", rawNote ? `${label} — ${rawNote}` : `${label} — re-analysing…`);
     currentInstruction = "";
     staleResponse = false;
+    pointerOccluded = false;
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -1256,6 +1260,12 @@ See the LICENSE file in the root of this repository for complete details.
       staleResponse = true;
     });
 
+    // Backend located the target but hid the pointer because the target window is
+    // covered by another app. Offer a re-analyse (after the user brings it forward).
+    listen("pointer_occluded", () => {
+      pointerOccluded = true;
+    });
+
     lastAppliedModel = activeModel;
     await addToHistory("system", `Navisual ready — using ${activeModel}`);
   });
@@ -1339,8 +1349,18 @@ See the LICENSE file in the root of this repository for complete details.
         {/if}
         <p class="latest-text">{currentInstruction}</p>
 
-        <!-- D6: subtle miss note — only when a target was expected but not found -->
-        {#if !locateResult && steps[stepIndex]?.target_text && phase === "guiding"}
+        <!-- Pointer hidden because the target window is covered by another app -->
+        {#if pointerOccluded && phase === "guiding"}
+          <div class="stale-banner" role="status">
+            <span class="stale-icon">⊘</span>
+            <span class="stale-text">Target window isn't visible — bring it to the front to see the pointer.</span>
+            <button class="stale-action" onclick={() => { pointerOccluded = false; correction(); }} title="Re-analyse the current screen">↻ Re-analyse</button>
+            <button class="stale-dismiss" onclick={() => (pointerOccluded = false)} title="Dismiss">✕</button>
+          </div>
+        {/if}
+
+        <!-- D6: subtle miss note — only when a target was expected but genuinely not found -->
+        {#if !locateResult && !pointerOccluded && steps[stepIndex]?.target_text && phase === "guiding"}
           <p class="miss-note">⊘ Pointer unavailable — follow the instruction above</p>
         {/if}
 
