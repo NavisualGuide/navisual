@@ -285,8 +285,14 @@ impl DeepSeekClient {
 }
 
 /// Parse the first complete `NavigateStepResponse` from `text`, tolerating code
-/// fences and trailing duplicate JSON / explanatory prose. Returns `None` if
-/// nothing with non-empty steps parses.
+/// fences and trailing duplicate JSON / explanatory prose.
+///
+/// Accepts a non-empty plan, OR a valid no-step response that asks the user
+/// something (`needs_input` / `request_full_screen`) — the latter is legitimate
+/// (e.g. answering "can you see my screen?") and must NOT fall through to the
+/// raw-JSON wrap. When such a response carries no instruction text, a neutral
+/// prompt is synthesized so the user never sees raw JSON. Returns `None` only
+/// when nothing usable parses.
 fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
     let stripped = text
         .trim_start_matches("```json")
@@ -295,8 +301,24 @@ fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
         .trim();
     let mut stream =
         serde_json::Deserializer::from_str(stripped).into_iter::<NavigateStepResponse>();
-    if let Some(Ok(resp)) = stream.next() {
+    if let Some(Ok(mut resp)) = stream.next() {
         if !resp.steps.is_empty() {
+            return Some(resp);
+        }
+        if resp.needs_input || resp.request_full_screen {
+            resp.steps.push(GuidanceStep {
+                instruction:
+                    "Tell me what you'd like to do and which app or window you're in, and I'll guide you."
+                        .to_string(),
+                target_text: None,
+                target_role: None,
+                target_region: None,
+                target_nearby_text: None,
+                overlay_type: OverlayType::None,
+                clipboard: None,
+                checkpoint: true,
+                target_bbox: None,
+            });
             return Some(resp);
         }
     }
@@ -330,7 +352,7 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
 /// screenshot, so the model genuinely can see it.
 const TEXT_ONLY_NOTICE: &str = r#"
 
-IMPORTANT — YOU CANNOT SEE THE SCREEN. No screenshot is provided to you (this provider is text-only). Never say or imply that you can see the user's screen. Base your guidance on the [Current Window Info] (the focused app's title and class), the user's words, and your general knowledge of how that application's UI is normally laid out. If you are unsure what is currently on screen, ask a short clarifying question (set needs_input=true) rather than guessing — do NOT invent specific on-screen elements you cannot confirm."#;
+IMPORTANT — YOU CANNOT SEE THE SCREEN. No screenshot is provided to you (this provider is text-only). Never say or imply that you can see the user's screen. Base your guidance on the [Current Window Info] (the focused app's title and class), the user's words, and your general knowledge of how that application's UI is normally laid out. If you are unsure what is currently on screen, ask a short clarifying question (set needs_input=true) rather than guessing — do NOT invent specific on-screen elements you cannot confirm. ALWAYS return at least one step whose "instruction" is your reply to the user; when you are answering a question or asking for clarification, put that reply/question in the instruction (e.g. "I can't see your screen — tell me which app you're in and what you want to do"). Never return an empty "steps" list."#;
 
 /// Text-only message builder (no screenshot) for the literal DeepSeek API.
 /// CONFIRMED 2026-05-24: api.deepseek.com rejects `image_url` content parts with
