@@ -260,29 +260,19 @@ fn execute_step(
         }
     }
 
-    // Visibility guard: only draw the pointer if the target area actually shows
-    // through. If the located spot is entirely hidden behind another app (the user
-    // switched apps / a window popped in front while the AI was thinking), the
-    // pointer would sit on the wrong window and the tracker would follow it — so
-    // suppress it. A partially-visible target (incl. a pinned window side-by-side)
-    // still draws. The AI instruction still shows in the panel.
-    if let (Some(th), Some(b)) = (target_hwnd, bbox) {
-        if !capture::target_visible_in_rect(b.x, b.y, b.width as i32, b.height as i32, th) {
-            tracker.clear();
-            if let Ok(update) =
-                overlay::make_update_with_ai_bbox(overlay::OverlayKind::None, None, None, None)
-            {
-                let _ = overlay::emit_update(app, update);
-            }
-            // Tell the UI the pointer was hidden because the target is occluded, so it
-            // can offer a re-analyse — distinct from the generic "pointer unavailable"
-            // miss note (which means the locator genuinely couldn't find the element).
-            let _ = app.emit("pointer_occluded", ());
-            return Ok((None, None));
-        }
-    }
-
     let text_for_overlay = Some(step.instruction.clone());
+
+    // Is the target area visible right now? Drives the initial draw; the window tracker
+    // (started below) then keeps it in sync — auto-hiding the pointer if the target gets
+    // covered by another app and auto-redrawing it when the target is visible again.
+    // When hidden we don't draw the pointer onto the wrong window, and we tell the UI so
+    // it can offer a re-analyse.
+    let visible = match (target_hwnd, bbox) {
+        (Some(th), Some(b)) => {
+            capture::target_visible_in_rect(b.x, b.y, b.width as i32, b.height as i32, th)
+        }
+        _ => true,
+    };
 
     // Persist for restore_overlay — the AI bbox alone is a valid state too.
     if !matches!(kind, overlay::OverlayKind::None) || ai_bbox.is_some() {
@@ -293,13 +283,24 @@ fn execute_step(
             ai_bbox,
         });
     }
-    match overlay::make_update_with_ai_bbox(kind, bbox, text_for_overlay.clone(), ai_bbox) {
-        Ok(update) => {
-            if let Err(e) = overlay::emit_update(app, update) {
-                log::warn!("overlay emit failed: {e}");
+    if visible {
+        match overlay::make_update_with_ai_bbox(kind, bbox, text_for_overlay.clone(), ai_bbox) {
+            Ok(update) => {
+                if let Err(e) = overlay::emit_update(app, update) {
+                    log::warn!("overlay emit failed: {e}");
+                }
             }
+            Err(e) => log::warn!("overlay make_update failed: {e}"),
         }
-        Err(e) => log::warn!("overlay make_update failed: {e}"),
+    } else {
+        // Target covered by another app — hide the pointer and tell the UI so it can
+        // offer a re-analyse. The tracker auto-redraws it the moment the target shows.
+        if let Ok(update) =
+            overlay::make_update_with_ai_bbox(overlay::OverlayKind::None, None, None, None)
+        {
+            let _ = overlay::emit_update(app, update);
+        }
+        let _ = app.emit("pointer_occluded", ());
     }
 
     // E.4 — Clipboard: if the AI supplied text to copy, write it now so
@@ -317,11 +318,11 @@ fn execute_step(
         }
     }
 
-    // Start tracking the window so the overlay follows if it moves — anchored to
-    // the target app (target_hwnd) so the pointer only ever moves with the right
-    // window, never another app overlapping the located point.
+    // Start tracking the window so the overlay follows it and auto-hides/redraws with
+    // the target's visibility — anchored to the target app (target_hwnd) so the pointer
+    // only ever moves with the right window, never another app overlapping the spot.
     if let Some(ref b) = bbox {
-        tracker.start(b, kind, text_for_overlay, app.clone(), target_hwnd);
+        tracker.start(b, kind, text_for_overlay, app.clone(), target_hwnd, visible);
     } else {
         tracker.clear();
     }

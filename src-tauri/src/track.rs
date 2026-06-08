@@ -2,8 +2,9 @@
 //!
 //! After an element is located, this tracker watches the containing window for
 //! moves/resizes and keeps the overlay bbox aligned without re-running the full
-//! locate pipeline.  On minimize it clears the overlay; on restore it re-shows
-//! at the new position.
+//! locate pipeline. It also auto-hides the pointer when the target gets covered by
+//! another app (or minimized) and auto-redraws it when the target is visible again,
+//! emitting `pointer_occluded` / `pointer_restored` so the panel can sync its banner.
 //!
 //! A 200 ms polling thread is used instead of SetWinEventHook to avoid the
 //! message-loop requirement; at 200 ms latency the overlay "snaps" to the
@@ -12,7 +13,7 @@
 use crate::capture::Rect;
 use crate::overlay::{self, OverlayKind};
 use std::sync::{Arc, Mutex};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, POINT};
@@ -32,7 +33,9 @@ struct TrackState {
     kind: OverlayKind,
     text: Option<String>,
     app: AppHandle,
-    was_minimized: bool,
+    /// Whether the pointer is currently drawn. Toggled by the poll as the target
+    /// window is covered/uncovered by another app, or minimized/restored.
+    shown: bool,
 }
 
 pub struct WindowTracker {
@@ -66,6 +69,7 @@ impl WindowTracker {
         text: Option<String>,
         app: AppHandle,
         target_hwnd: Option<usize>,
+        initially_shown: bool,
     ) {
         #[cfg(windows)]
         {
@@ -140,12 +144,12 @@ impl WindowTracker {
                 kind,
                 text,
                 app,
-                was_minimized: false,
+                shown: initially_shown,
             });
         }
         #[cfg(not(windows))]
         {
-            let _ = (abs_bbox, kind, text, app, target_hwnd);
+            let _ = (abs_bbox, kind, text, app, target_hwnd, initially_shown);
         }
     }
 
@@ -170,55 +174,67 @@ fn poll_once(state: &Mutex<Option<TrackState>>) {
         let hwnd = HWND(s.hwnd as *mut core::ffi::c_void);
 
         unsafe {
-            let minimized = IsIconic(hwnd).as_bool();
-
-            if minimized && !s.was_minimized {
-                s.was_minimized = true;
-                if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
-                    let _ = overlay::emit_update(&s.app, u);
+            let mut wr = windows::Win32::Foundation::RECT::default();
+            if GetWindowRect(hwnd, &mut wr).is_err() {
+                // Window gone — hide the pointer if it was showing.
+                if s.shown {
+                    if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
+                        let _ = overlay::emit_update(&s.app, u);
+                    }
+                    s.shown = false;
+                    let _ = s.app.emit("pointer_occluded", ());
                 }
                 return;
             }
-            if minimized {
-                return;
-            }
-
-            // A pointer is active and its window is visible — keep the overlay
-            // above any transient popup (ribbon dropdown, combo list, tooltip)
-            // the user just opened, which Windows would otherwise stack on top.
-            crate::capture::raise_overlay_topmost();
-
-            let mut wr = windows::Win32::Foundation::RECT::default();
-            if GetWindowRect(hwnd, &mut wr).is_err() {
-                return;
-            }
-
-            let restored = s.was_minimized;
-            s.was_minimized = false;
 
             let new_w = wr.right - wr.left;
             let new_h = wr.bottom - wr.top;
             let moved = wr.left != s.win_left || wr.top != s.win_top;
             let resized = new_w != s.win_width || new_h != s.win_height;
+            s.win_left = wr.left;
+            s.win_top = wr.top;
+            s.win_width = new_w;
+            s.win_height = new_h;
 
-            if moved || resized || restored {
-                s.win_left = wr.left;
-                s.win_top = wr.top;
-                s.win_width = new_w;
-                s.win_height = new_h;
+            let abs_bbox = Rect {
+                x: wr.left + s.rel_bbox.x,
+                y: wr.top + s.rel_bbox.y,
+                width: s.rel_bbox.width,
+                height: s.rel_bbox.height,
+            };
 
-                let new_bbox = Rect {
-                    x: wr.left + s.rel_bbox.x,
-                    y: wr.top + s.rel_bbox.y,
-                    width: s.rel_bbox.width,
-                    height: s.rel_bbox.height,
-                };
+            // The pointer should show only when the target window is neither minimized
+            // nor covered by another app at the located spot. (s.hwnd is a window of
+            // the target app — anchored in start() — so this is the right occlusion ref.)
+            let should_show = !IsIconic(hwnd).as_bool()
+                && crate::capture::target_visible_in_rect(
+                    abs_bbox.x,
+                    abs_bbox.y,
+                    abs_bbox.width as i32,
+                    abs_bbox.height as i32,
+                    s.hwnd as usize,
+                );
 
-                let kind = s.kind;
-                let text = s.text.clone();
-                if let Ok(u) = overlay::make_update(kind, Some(new_bbox), text) {
+            if should_show {
+                // Keep the overlay above any transient popup (ribbon dropdown, combo
+                // list, tooltip) the user just opened, which Windows would otherwise
+                // stack on top.
+                crate::capture::raise_overlay_topmost();
+                if !s.shown || moved || resized {
+                    if let Ok(u) = overlay::make_update(s.kind, Some(abs_bbox), s.text.clone()) {
+                        let _ = overlay::emit_update(&s.app, u);
+                    }
+                    if !s.shown {
+                        s.shown = true;
+                        let _ = s.app.emit("pointer_restored", ());
+                    }
+                }
+            } else if s.shown {
+                if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
                     let _ = overlay::emit_update(&s.app, u);
                 }
+                s.shown = false;
+                let _ = s.app.emit("pointer_occluded", ());
             }
         }
     }

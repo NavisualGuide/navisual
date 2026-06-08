@@ -1265,6 +1265,10 @@ See the LICENSE file in the root of this repository for complete details.
     listen("pointer_occluded", () => {
       pointerOccluded = true;
     });
+    // The tracker auto-redrew the pointer once the target became visible again.
+    listen("pointer_restored", () => {
+      pointerOccluded = false;
+    });
 
     lastAppliedModel = activeModel;
     await addToHistory("system", `Navisual ready — using ${activeModel}`);
