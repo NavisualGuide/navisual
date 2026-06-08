@@ -487,6 +487,10 @@ struct GuideResponse {
     /// model OpenRouter routed to (the relay sends the `openrouter/free` router); for
     /// other providers it's the configured model. Surfaced in the debug drawer + logged.
     model: Option<String>,
+    /// Input / output token counts for this AI call (None on local-advance / on errors
+    /// with no AI call). Shown in the debug Response-info drawer.
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
     error: Option<String>,
     /// Path to the debug screenshot saved for this request (None when disabled).
     debug_screenshot_path: Option<String>,
@@ -811,6 +815,8 @@ async fn guide(
                 request_full_screen: false,
                 provider: String::new(),
                 model: None,
+                input_tokens: None,
+                output_tokens: None,
                 error: Some(
                     "No application window found. Please click on the program you want \
                      help with to bring it into focus, then try Guide me again."
@@ -930,6 +936,7 @@ async fn guide(
     let used_model = router
         .get_managed_routed_model()
         .unwrap_or_else(|| router.active_model());
+    let (in_tok, out_tok) = router.get_last_usage();
     log_model_timing(
         &app,
         &timing_provider,
@@ -962,6 +969,8 @@ async fn guide(
                 request_full_screen: false,
                 provider: router.config.api_provider.clone(),
                 model: Some(used_model.clone()),
+                input_tokens: Some(in_tok),
+                output_tokens: Some(out_tok),
                 error: Some(if err_str == "free_trial_exhausted" {
                     "Your 50 free requests have been used.".to_string()
                 } else {
@@ -1030,6 +1039,8 @@ async fn guide(
             request_full_screen,
             provider,
             model: Some(used_model.clone()),
+            input_tokens: Some(in_tok),
+            output_tokens: Some(out_tok),
             error: None,
             debug_screenshot_path,
             chat_thumb_b64,
@@ -1101,6 +1112,8 @@ async fn guide(
         request_full_screen,
         provider,
         model: Some(used_model),
+        input_tokens: Some(in_tok),
+        output_tokens: Some(out_tok),
         error: None,
         debug_screenshot_path,
         chat_thumb_b64,
@@ -1186,6 +1199,8 @@ async fn next_step(
         request_full_screen: false, // next_step just steps forward
         provider,
         model: None, // local advance, no AI call — frontend keeps the prior routed model
+        input_tokens: None,
+        output_tokens: None,
         error: None,
         debug_screenshot_path: None,
         chat_thumb_b64: None,
@@ -1372,6 +1387,7 @@ async fn send_correction(
     let used_model = router
         .get_managed_routed_model()
         .unwrap_or_else(|| router.active_model());
+    let (in_tok, out_tok) = router.get_last_usage();
     log_model_timing(
         &app,
         &timing_provider,
@@ -1448,6 +1464,8 @@ async fn send_correction(
             request_full_screen,
             provider,
             model: Some(used_model.clone()),
+            input_tokens: Some(in_tok),
+            output_tokens: Some(out_tok),
             error: None,
             debug_screenshot_path,
             chat_thumb_b64,
@@ -1515,6 +1533,8 @@ async fn send_correction(
         request_full_screen,
         provider,
         model: Some(used_model),
+        input_tokens: Some(in_tok),
+        output_tokens: Some(out_tok),
         error: None,
         debug_screenshot_path,
         chat_thumb_b64,
@@ -1821,6 +1841,69 @@ async fn list_ollama_models(base_url: String) -> Result<Vec<String>, String> {
         .unwrap_or_default();
     models.sort();
     Ok(models)
+}
+
+/// One row of the Settings → Usage panel: token totals + estimated cost for a model.
+#[derive(serde::Serialize)]
+struct UsageRow {
+    provider: String,
+    model: String,
+    daily_in: u64,
+    daily_out: u64,
+    monthly_in: u64,
+    monthly_out: u64,
+    /// Estimated USD: Some(0.0)=free (local), Some(n)=priced BYOK, None=managed or unknown model.
+    daily_cost: Option<f64>,
+    monthly_cost: Option<f64>,
+    free: bool,
+}
+
+#[derive(serde::Serialize)]
+struct UsagePayload {
+    rows: Vec<UsageRow>,
+    /// Managed free-tier requests remaining (the metric that matters there, not tokens).
+    managed_free_remaining: Option<u32>,
+}
+
+/// Per-(provider, model) token usage + estimated cost for the Settings → Usage panel.
+/// Costs are estimates from list pricing (see `ai/pricing.rs`); the UI discloses this.
+#[tauri::command]
+async fn get_usage(state: State<'_, AppState>) -> Result<UsagePayload, String> {
+    let mut router = state.ai_router.lock().await;
+    let breakdown = router.cost_tracker.breakdown();
+    let managed_free_remaining = router.get_managed_free_remaining();
+    let rows = breakdown
+        .into_iter()
+        .map(|(key, u)| {
+            let (provider, model) = key.split_once('|').unwrap_or(("", key.as_str()));
+            UsageRow {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                daily_in: u.daily_in,
+                daily_out: u.daily_out,
+                monthly_in: u.monthly_in,
+                monthly_out: u.monthly_out,
+                daily_cost: crate::ai::pricing::estimate_cost(
+                    provider, model, u.daily_in, u.daily_out,
+                ),
+                monthly_cost: crate::ai::pricing::estimate_cost(
+                    provider, model, u.monthly_in, u.monthly_out,
+                ),
+                free: provider == "ollama",
+            }
+        })
+        .collect();
+    Ok(UsagePayload {
+        rows,
+        managed_free_remaining,
+    })
+}
+
+/// Clear all recorded token usage (Settings → Usage → Reset).
+#[tauri::command]
+async fn reset_usage(state: State<'_, AppState>) -> Result<(), String> {
+    state.ai_router.lock().await.cost_tracker.reset();
+    Ok(())
 }
 
 #[tauri::command]
@@ -2220,12 +2303,7 @@ pub fn run() {
             if !config.tts_voice.is_empty() {
                 tts.set_voice(config.tts_voice.clone());
             }
-            let cost_tracker = CostTracker::new(
-                config.daily_token_cap,
-                config.monthly_token_cap,
-                config.cost_safety_margin,
-                Some(app_data_dir.join("usage.json")),
-            );
+            let cost_tracker = CostTracker::new(Some(app_data_dir.join("usage.json")));
             let session_manager = SessionManager::new(app_data_dir.join("sessions"));
             let supabase_session_path = app_data_dir.join("supabase_session.json");
 
@@ -2282,6 +2360,8 @@ pub fn run() {
             get_settings,
             save_settings,
             list_ollama_models,
+            get_usage,
+            reset_usage,
             open_debug_folder,
             sign_in_anon,
             get_balance,

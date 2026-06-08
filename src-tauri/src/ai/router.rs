@@ -29,6 +29,9 @@ pub struct AiRouter {
     pub session_manager: SessionManager,
     client: Option<ApiClient>,
     managed_session_path: Option<PathBuf>,
+    /// (input, output) token counts from the most recent guidance/correction call,
+    /// surfaced to the debug Response-info drawer. (0, 0) before the first call.
+    last_usage: (u64, u64),
 }
 
 impl AiRouter {
@@ -44,6 +47,7 @@ impl AiRouter {
             session_manager,
             client: None,
             managed_session_path,
+            last_usage: (0, 0),
         };
         router.init_client();
         router
@@ -101,6 +105,11 @@ impl AiRouter {
         } else {
             None
         }
+    }
+
+    /// (input, output) token counts from the most recent guidance/correction call.
+    pub fn get_last_usage(&self) -> (u64, u64) {
+        self.last_usage
     }
 
     /// Called by lib.rs after sign_in_anon to seed the session into the client.
@@ -249,12 +258,6 @@ impl AiRouter {
         state_summary: Option<&str>,
         mut on_chunk: impl FnMut(&str),
     ) -> Result<NavigateStepResponse> {
-        // Pre-check budget
-        let estimated_total = 3000; // rough estimate
-        if !self.cost_tracker.can_spend(estimated_total) {
-            bail!("Token budget would be exceeded.");
-        }
-
         let conversation = if let Some(session) = &self.session_manager.current_session {
             session.get_conversation_for_api(10)
         } else {
@@ -305,8 +308,15 @@ impl AiRouter {
 
         let (response, in_tokens, out_tokens) = result;
 
-        // Record usage
-        self.cost_tracker.record_usage(in_tokens, out_tokens);
+        // Record usage, attributed to the model that actually handled it (for managed,
+        // the concrete model OpenRouter routed to; else the configured one).
+        let provider = self.config.api_provider.clone();
+        let model = self
+            .get_managed_routed_model()
+            .unwrap_or_else(|| self.active_model());
+        self.last_usage = (in_tokens, out_tokens);
+        self.cost_tracker
+            .record_usage(&provider, &model, in_tokens, out_tokens);
         if let Some(session) = &mut self.session_manager.current_session {
             session.record_tokens(in_tokens, out_tokens);
         }

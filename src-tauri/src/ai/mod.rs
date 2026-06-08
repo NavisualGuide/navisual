@@ -6,6 +6,7 @@ pub mod deepseek;
 pub mod gemini;
 pub mod managed;
 pub mod ollama;
+pub mod pricing;
 pub mod prompts;
 pub mod router;
 pub mod session;

@@ -1,16 +1,27 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+/// Token totals for one (provider, model). Daily + monthly, each input/output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub daily_in: u64,
+    pub daily_out: u64,
+    pub monthly_in: u64,
+    pub monthly_out: u64,
+}
+
+/// Persisted usage, bucketed per `"provider|model"`. The old single-aggregate
+/// schema (daily_input/…) is silently discarded on load — serde ignores the
+/// unknown fields and `models` defaults to empty, so we just start fresh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenUsage {
-    pub date: String,
-    pub daily_input: u64,
-    pub daily_output: u64,
-    pub monthly_input: u64,
-    pub monthly_output: u64,
-    pub month: String,
+    pub date: String,  // YYYY-MM-DD — daily reset boundary
+    pub month: String, // YYYY-MM    — monthly reset boundary
+    #[serde(default)]
+    pub models: BTreeMap<String, ModelUsage>, // key: "provider|model"
     pub last_updated: String,
 }
 
@@ -19,35 +30,21 @@ impl Default for TokenUsage {
         let now = Local::now();
         Self {
             date: now.format("%Y-%m-%d").to_string(),
-            daily_input: 0,
-            daily_output: 0,
-            monthly_input: 0,
-            monthly_output: 0,
             month: now.format("%Y-%m").to_string(),
+            models: BTreeMap::new(),
             last_updated: now.to_rfc3339(),
         }
     }
 }
 
 pub struct CostTracker {
-    pub daily_cap: u64,
-    pub monthly_cap: u64,
-    pub safety_margin: f64,
     storage_path: Option<PathBuf>,
     usage: TokenUsage,
 }
 
 impl CostTracker {
-    pub fn new(
-        daily_cap: u64,
-        monthly_cap: u64,
-        safety_margin: f64,
-        storage_path: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(storage_path: Option<PathBuf>) -> Self {
         let mut tracker = Self {
-            daily_cap,
-            monthly_cap,
-            safety_margin,
             storage_path,
             usage: TokenUsage::default(),
         };
@@ -61,22 +58,33 @@ impl CostTracker {
                 if let Ok(content) = fs::read_to_string(path) {
                     if let Ok(data) = serde_json::from_str::<TokenUsage>(&content) {
                         self.usage = data;
-                        let now = Local::now();
-                        let today = now.format("%Y-%m-%d").to_string();
-                        if self.usage.date != today {
-                            self.usage.daily_input = 0;
-                            self.usage.daily_output = 0;
-                            self.usage.date = today;
-                        }
-                        let current_month = now.format("%Y-%m").to_string();
-                        if self.usage.month != current_month {
-                            self.usage.monthly_input = 0;
-                            self.usage.monthly_output = 0;
-                            self.usage.month = current_month;
-                        }
                     }
                 }
             }
+        }
+        self.roll_over_if_needed();
+    }
+
+    /// Zero the daily (and monthly) buckets when the calendar day/month has rolled
+    /// over since the last write — so a long-running session resets correctly, not
+    /// only at startup.
+    fn roll_over_if_needed(&mut self) {
+        let now = Local::now();
+        let today = now.format("%Y-%m-%d").to_string();
+        let this_month = now.format("%Y-%m").to_string();
+        if self.usage.date != today {
+            for m in self.usage.models.values_mut() {
+                m.daily_in = 0;
+                m.daily_out = 0;
+            }
+            self.usage.date = today;
+        }
+        if self.usage.month != this_month {
+            for m in self.usage.models.values_mut() {
+                m.monthly_in = 0;
+                m.monthly_out = 0;
+            }
+            self.usage.month = this_month;
         }
     }
 
@@ -91,27 +99,32 @@ impl CostTracker {
         }
     }
 
-    pub fn daily_total(&self) -> u64 {
-        self.usage.daily_input + self.usage.daily_output
-    }
-
-    pub fn monthly_total(&self) -> u64 {
-        self.usage.monthly_input + self.usage.monthly_output
-    }
-
-    pub fn can_spend(&self, estimated_tokens: u64) -> bool {
-        let adjusted = (estimated_tokens as f64 * self.safety_margin) as u64;
-        let within_daily = self.daily_total() + adjusted <= self.daily_cap;
-        let within_monthly = self.monthly_total() + adjusted <= self.monthly_cap;
-        within_daily && within_monthly
-    }
-
-    pub fn record_usage(&mut self, input_tokens: u64, output_tokens: u64) {
-        self.usage.daily_input += input_tokens;
-        self.usage.daily_output += output_tokens;
-        self.usage.monthly_input += input_tokens;
-        self.usage.monthly_output += output_tokens;
+    pub fn record_usage(&mut self, provider: &str, model: &str, input_tokens: u64, output_tokens: u64) {
+        self.roll_over_if_needed();
+        let entry = self.usage.models.entry(format!("{provider}|{model}")).or_default();
+        entry.daily_in += input_tokens;
+        entry.daily_out += output_tokens;
+        entry.monthly_in += input_tokens;
+        entry.monthly_out += output_tokens;
         self.usage.last_updated = Local::now().to_rfc3339();
+        self.save();
+    }
+
+    /// Per-(provider, model) usage snapshot for the Settings → Usage panel.
+    /// Rolls daily/monthly buckets over first so the displayed totals are current.
+    /// Each tuple is (`"provider|model"`, totals).
+    pub fn breakdown(&mut self) -> Vec<(String, ModelUsage)> {
+        self.roll_over_if_needed();
+        self.usage
+            .models
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Clear all recorded usage (Settings → Usage → Reset).
+    pub fn reset(&mut self) {
+        self.usage = TokenUsage::default();
         self.save();
     }
 }

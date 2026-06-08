@@ -41,11 +41,6 @@ pub struct Config {
     // Shared
     pub api_timeout_sec: u64,
 
-    // Token Budget
-    pub daily_token_cap: u64,
-    pub monthly_token_cap: u64,
-    pub cost_safety_margin: f64,
-
     // Overlay appearance
     pub overlay_color: String,
     pub overlay_thickness: u32,
@@ -104,9 +99,6 @@ impl Default for Config {
             supabase_anon_key: Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3ZWt6YmVycGZ1eHNvZGR3d3FqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMTUxMjEsImV4cCI6MjA5MzY5MTEyMX0.gCXLsnFq3NMv8_JvZGcR9TB9bAfyjCnEnj4u0RZnRbg".to_string()),
             managed_model: "openrouter/free".to_string(),
             api_timeout_sec: 90,
-            daily_token_cap: 100_000,
-            monthly_token_cap: 5_000_000,
-            cost_safety_margin: 2.5,
             overlay_color: "#FF6B35".to_string(),
             overlay_thickness: 4,
             subtitle_enabled: true,
@@ -305,21 +297,6 @@ impl Config {
         }
         if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") {
             config.debug_show_ai_bbox = v == "true" || v == "1";
-        }
-        if let Ok(v) = env::var("DAILY_TOKEN_CAP") {
-            if let Ok(n) = v.parse() {
-                config.daily_token_cap = n;
-            }
-        }
-        if let Ok(v) = env::var("MONTHLY_TOKEN_CAP") {
-            if let Ok(n) = v.parse() {
-                config.monthly_token_cap = n;
-            }
-        }
-        if let Ok(v) = env::var("COST_SAFETY_MARGIN") {
-            if let Ok(n) = v.parse() {
-                config.cost_safety_margin = n;
-            }
         }
 
         config

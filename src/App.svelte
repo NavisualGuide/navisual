@@ -37,6 +37,8 @@ See the LICENSE file in the root of this repository for complete details.
     request_full_screen: boolean;
     provider: string;
     model: string | null;
+    input_tokens: number | null;
+    output_tokens: number | null;
     error: string | null;
     debug_screenshot_path: string | null;
     chat_thumb_b64: string | null;
@@ -46,7 +48,7 @@ See the LICENSE file in the root of this repository for complete details.
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "consent_prompt" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
-  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer";
+  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "usage" | "developer";
   type SettingsPayload = {
     api_provider: string;
     anthropic_api_key: string;
@@ -274,6 +276,28 @@ See the LICENSE file in the root of this repository for complete details.
   let updateStatus = $state<"idle" | "checking" | "downloading" | "done">("idle");
   let updateProgress = $state(0);
   let settingsTab = $state<SettingsTab>("provider");
+
+  // Settings → Usage tab
+  type UsageRow = {
+    provider: string; model: string;
+    daily_in: number; daily_out: number; monthly_in: number; monthly_out: number;
+    daily_cost: number | null; monthly_cost: number | null; free: boolean;
+  };
+  let usageRows = $state<UsageRow[]>([]);
+  let usageManagedRemaining = $state<number | null>(null);
+  let usagePeriod = $state<"today" | "month">("today");
+  let usageLoaded = $state(false);
+  let usageView = $derived(
+    usageRows.map((r) => ({
+      model: r.model,
+      tokens: usagePeriod === "today" ? r.daily_in + r.daily_out : r.monthly_in + r.monthly_out,
+      cost: usagePeriod === "today" ? r.daily_cost : r.monthly_cost,
+      free: r.free,
+    })),
+  );
+  let usageTotalCost = $derived(usageView.reduce((s, r) => s + (r.cost ?? 0), 0));
+  let usageHasEstimate = $derived(usageView.some((r) => r.cost != null && !r.free));
+
   let history = $state<HistoryEntry[]>([]);
   let historyEl: HTMLElement | null = $state(null);
 
@@ -669,6 +693,34 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
+  function fmtTok(n: number): string {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+    return String(n);
+  }
+  function fmtCost(c: number | null, free: boolean): string {
+    if (free) return "free";
+    if (c == null) return "—";
+    return "~$" + c.toFixed(c < 1 ? 3 : 2);
+  }
+  async function loadUsage() {
+    try {
+      const res = await invoke<{ rows: UsageRow[]; managed_free_remaining: number | null }>(
+        "get_usage",
+      );
+      usageRows = res.rows;
+      usageManagedRemaining = res.managed_free_remaining;
+    } catch {
+      usageRows = [];
+      usageManagedRemaining = null;
+    }
+    usageLoaded = true;
+  }
+  async function resetUsage() {
+    await invoke("reset_usage").catch(() => {});
+    loadUsage();
+  }
+
   async function openSettings() {
     settingsError = null;
     settingsSaved = false;
@@ -815,6 +867,11 @@ See the LICENSE file in the root of this repository for complete details.
         meta = `not located · "${steps[idx].target_text}"`;
       }
       if (res.model) meta = meta ? `${meta} · ${res.model}` : res.model;
+      if (res.input_tokens != null && res.output_tokens != null) {
+        const k = (n: number) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n));
+        const tok = `${k(res.input_tokens)} in · ${k(res.output_tokens)} out`;
+        meta = meta ? `${meta} · ${tok}` : tok;
+      }
       addToHistory("ai", cleanInstruction, meta);
       if (!isMuted) invoke("speak", { text: cleanInstruction, lang: settingsForm.voice_language }).catch(() => {});
     }
@@ -1697,6 +1754,7 @@ See the LICENSE file in the root of this repository for complete details.
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
+          <button class="tab-btn {settingsTab === 'usage' ? 'tab-active' : ''}" onclick={() => { settingsTab = "usage"; loadUsage(); }}>Usage</button>
           {#if settingsForm.developer_mode}
             <button class="tab-btn {settingsTab === 'developer' ? 'tab-active' : ''}" onclick={() => (settingsTab = "developer")}>Developer</button>
           {/if}
@@ -2037,6 +2095,51 @@ See the LICENSE file in the root of this repository for complete details.
                 <span>Draw the AI-returned target_bbox on the overlay (cyan dashed)</span>
               </label>
               <p class="stub-hint" style="margin-top:4px">Drawn alongside the production pointer for visual comparison. Coordinate-system per provider — Gemini normalized 0–1000, others absolute pixels.</p>
+            </div>
+
+          {:else if settingsTab === "usage"}
+            <!-- Usage tab -->
+            <div class="setting-group">
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px">
+                <p class="setting-label" style="margin:0">Token usage</p>
+                <div style="display:flex; gap:6px">
+                  <button class="tab-btn {usagePeriod === 'today' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "today")}>Today</button>
+                  <button class="tab-btn {usagePeriod === 'month' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "month")}>This month</button>
+                </div>
+              </div>
+
+              {#if !usageLoaded}
+                <p class="setting-hint">Loading…</p>
+              {:else if usageView.length === 0}
+                <p class="setting-hint">No usage recorded yet — run a guidance task and it'll appear here.</p>
+              {:else}
+                <div style="display:flex; flex-direction:column; gap:5px">
+                  {#each usageView as r}
+                    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; font-size:13px">
+                      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model}</span>
+                      <span style="white-space:nowrap; color:var(--text-secondary)">{fmtTok(r.tokens)} tok</span>
+                      <span style="white-space:nowrap; min-width:62px; text-align:right; color:{r.free ? 'var(--text-secondary)' : 'var(--text-primary)'}">{fmtCost(r.cost, r.free)}</span>
+                    </div>
+                  {/each}
+                  {#if usageHasEstimate}
+                    <div style="display:flex; justify-content:space-between; gap:10px; font-size:13px; font-weight:600; border-top:1px solid var(--border); margin-top:4px; padding-top:7px">
+                      <span>Estimated total</span>
+                      <span style="min-width:62px; text-align:right">~${usageTotalCost.toFixed(2)}</span>
+                    </div>
+                  {/if}
+                </div>
+                {#if usageHasEstimate}
+                  <p class="setting-hint" style="margin-top:8px">Estimates only — based on each provider's published list pricing, which is set by the provider and subject to change. Check your provider's dashboard for actual charges.</p>
+                {/if}
+              {/if}
+
+              {#if usageManagedRemaining != null}
+                <p class="setting-hint" style="margin-top:8px">Managed (free): {usageManagedRemaining} / 50 requests left</p>
+              {/if}
+
+              <div style="margin-top:14px">
+                <button class="btn-ghost" type="button" onclick={resetUsage}>↻ Reset usage</button>
+              </div>
             </div>
 
           {:else}
