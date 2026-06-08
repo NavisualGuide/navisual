@@ -229,18 +229,19 @@ pub fn recapture_window_jpeg(
     }
 }
 
-/// True when the located rect is fully occluded by another app's window(s) — so the
-/// guidance pointer should be suppressed rather than drawn onto the wrong window. A
-/// partially-visible target is not occluded. Always false off-Windows.
-pub fn rect_occluded_by_other_app(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize) -> bool {
+/// True when the target window is visible anywhere within the located rect — i.e. the
+/// pointer's target area shows through at least partly, so it's safe to draw. Only
+/// when the whole target spot is hidden behind another app is this false (suppress the
+/// pointer). Always true off-Windows (don't suppress).
+pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize) -> bool {
     #[cfg(windows)]
     {
-        win::rect_occluded_by_other_app(x, y, w, h, target_hwnd)
+        win::target_visible_in_rect(x, y, w, h, target_hwnd)
     }
     #[cfg(not(windows))]
     {
         let _ = (x, y, w, h, target_hwnd);
-        false
+        true
     }
 }
 

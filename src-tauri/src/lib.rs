@@ -260,13 +260,14 @@ fn execute_step(
         }
     }
 
-    // Occlusion guard: if the point we're about to mark is now covered by a window
-    // from a DIFFERENT app (the user switched apps / another window popped in front
-    // while the AI was thinking), don't draw — the pointer would sit on the wrong
-    // window and the tracker would follow it. A *visible* pinned target is not
-    // occluded, so pinning still works. The AI instruction still shows in the panel.
+    // Visibility guard: only draw the pointer if the target area actually shows
+    // through. If the located spot is entirely hidden behind another app (the user
+    // switched apps / a window popped in front while the AI was thinking), the
+    // pointer would sit on the wrong window and the tracker would follow it — so
+    // suppress it. A partially-visible target (incl. a pinned window side-by-side)
+    // still draws. The AI instruction still shows in the panel.
     if let (Some(th), Some(b)) = (target_hwnd, bbox) {
-        if capture::rect_occluded_by_other_app(b.x, b.y, b.width as i32, b.height as i32, th) {
+        if !capture::target_visible_in_rect(b.x, b.y, b.width as i32, b.height as i32, th) {
             tracker.clear();
             if let Ok(update) =
                 overlay::make_update_with_ai_bbox(overlay::OverlayKind::None, None, None, None)

@@ -90,48 +90,107 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
     }
 }
 
-/// True when the located rect `(x, y, w, h)` (physical pixels) is **fully** occluded
-/// by windows from a DIFFERENT application than `target_hwnd` — i.e. the spot we want
-/// to mark is hidden behind another app (the user switched apps / a window popped in
-/// front while the AI was thinking). Used to suppress the guidance pointer so it
-/// never lands on the wrong window.
+/// True when the target window (`target_hwnd`) is **visible anywhere** within the
+/// located rect `(x, y, w, h)` (physical pixels) — i.e. the pointer's target area
+/// overlaps the part of the target window that isn't hidden behind another app.
 ///
-/// Samples the centre + four inner quadrant points and suppresses only when **every**
-/// sample is covered by another app, so a *partially*-covered but still-visible target
-/// (a small overlapping window, or a pinned window shown side-by-side) keeps its
-/// pointer. Our own overlay/panel at a point does NOT count as occlusion (the overlay
-/// is click-through, so `WindowFromPoint` returns the window beneath it anyway).
-pub fn rect_occluded_by_other_app(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize) -> bool {
+/// Pure geometry, no sampling: take the located rect ∩ the target window's frame, then
+/// subtract every higher-z window that belongs to a DIFFERENT app; if any area is left,
+/// the target shows through → draw. If nothing is left, the spot is fully covered by
+/// another app → suppress. Our own panel/overlay and the target app's own windows are
+/// never occluders. Returns true (don't suppress) for degenerate inputs.
+pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize) -> bool {
     if target_hwnd == 0 || w <= 0 || h <= 0 {
-        return false;
+        return true;
     }
-    let own = std::process::id();
+    let target = HWND(target_hwnd as *mut core::ffi::c_void);
     let mut target_pid: u32 = 0;
     unsafe {
-        GetWindowThreadProcessId(HWND(target_hwnd as *mut _), Some(&mut target_pid));
+        GetWindowThreadProcessId(target, Some(&mut target_pid));
     }
     if target_pid == 0 {
-        return false;
+        return true;
     }
-    let pts = [
-        (x + w / 2, y + h / 2),
-        (x + w / 4, y + h / 4),
-        (x + w - w / 4, y + h / 4),
-        (x + w / 4, y + h - h / 4),
-        (x + w - w / 4, y + h - h / 4),
-    ];
-    pts.iter().all(|&(px, py)| unsafe {
-        let hit = WindowFromPoint(POINT { x: px, y: py });
-        if hit.0.is_null() {
-            false // nothing / desktop here → not covered
-        } else {
-            let root = GetAncestor(hit, GA_ROOT);
-            let mut pid: u32 = 0;
-            GetWindowThreadProcessId(root, Some(&mut pid));
-            // Covered by another app (not the target, not our own panel).
-            pid != 0 && pid != own && pid != target_pid
+    let bbox = Rect {
+        x,
+        y,
+        width: w as u32,
+        height: h as u32,
+    };
+    // The part of the located rect that actually lies on the target window.
+    let Some(tframe) = frame_rect_of(target) else {
+        return true;
+    };
+    let target_area = rect_intersect(&tframe, &bbox);
+    if target_area.width == 0 || target_area.height == 0 {
+        return true; // located rect isn't on the target window — nothing to check
+    }
+
+    // Collect the rects of windows ABOVE the target in z-order that belong to a
+    // DIFFERENT app. EnumWindows enumerates top→bottom, so we stop counting once we
+    // reach the target; our own windows and the target app's own windows don't occlude.
+    struct State {
+        target: HWND,
+        our_pid: u32,
+        target_pid: u32,
+        area: Rect,
+        reached_target: bool,
+        occluders: Vec<Rect>,
+    }
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let st = &mut *(lparam.0 as *mut State);
+        if st.reached_target {
+            return TRUE;
         }
-    })
+        if hwnd.0 == st.target.0 {
+            st.reached_target = true;
+            return TRUE;
+        }
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return TRUE;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 || pid == st.our_pid || pid == st.target_pid {
+            return TRUE; // our own window, or the target app itself — not an occluder
+        }
+        let mut cloaked: u32 = 0;
+        let _ = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        );
+        if cloaked != 0 {
+            return TRUE;
+        }
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex & WS_EX_TOOLWINDOW.0) != 0 || (ex & WS_EX_TRANSPARENT.0) != 0 {
+            return TRUE; // tool windows / click-through layers don't occlude
+        }
+        if let Some(r) = frame_rect_of(hwnd) {
+            let clipped = rect_intersect(&r, &st.area);
+            if clipped.width > 0 && clipped.height > 0 {
+                st.occluders.push(clipped);
+            }
+        }
+        TRUE
+    }
+
+    let mut st = State {
+        target,
+        our_pid: std::process::id(),
+        target_pid,
+        area: target_area,
+        reached_target: false,
+        occluders: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(&mut st as *mut State as isize));
+    }
+    // Anything left of the target's area after subtracting other apps above it means
+    // the target shows through somewhere in the located rect.
+    !rect_subtract_many(target_area, &st.occluders).is_empty()
 }
 
 /// Phase 0.2: lightweight info about the window currently being captured.
