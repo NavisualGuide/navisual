@@ -324,6 +324,14 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
     }
 }
 
+/// Appended to the system prompt on the **text-only** path so a screen-blind model
+/// (DeepSeek) doesn't falsely claim to see the screen and hallucinate UI elements.
+/// Deliberately NOT used by `build_openai_messages` (OpenAI/Qwen) — those send the
+/// screenshot, so the model genuinely can see it.
+const TEXT_ONLY_NOTICE: &str = r#"
+
+IMPORTANT — YOU CANNOT SEE THE SCREEN. No screenshot is provided to you (this provider is text-only). Never say or imply that you can see the user's screen. Base your guidance on the [Current Window Info] (the focused app's title and class), the user's words, and your general knowledge of how that application's UI is normally laid out. If you are unsure what is currently on screen, ask a short clarifying question (set needs_input=true) rather than guessing — do NOT invent specific on-screen elements you cannot confirm."#;
+
 /// Text-only message builder (no screenshot) for the literal DeepSeek API.
 /// CONFIRMED 2026-05-24: api.deepseek.com rejects `image_url` content parts with
 /// HTTP 400 ("unknown variant `image_url`, expected `text`") on deepseek-v4-flash
@@ -337,7 +345,10 @@ pub fn build_messages(
 ) -> Vec<Value> {
     let mut messages = Vec::new();
 
-    let system_with_format = format!("{}{}", SYSTEM_PROMPT, JSON_FORMAT_INSTRUCTION);
+    let system_with_format = format!(
+        "{}{}{}",
+        SYSTEM_PROMPT, JSON_FORMAT_INSTRUCTION, TEXT_ONLY_NOTICE
+    );
     messages.push(json!({ "role": "system", "content": system_with_format }));
 
     for turn in conversation_history {
