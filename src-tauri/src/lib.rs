@@ -312,9 +312,11 @@ fn execute_step(
         }
     }
 
-    // Start tracking the window so the overlay follows if it moves.
+    // Start tracking the window so the overlay follows if it moves — anchored to
+    // the target app (target_hwnd) so the pointer only ever moves with the right
+    // window, never another app overlapping the located point.
     if let Some(ref b) = bbox {
-        tracker.start(b, kind, text_for_overlay, app.clone());
+        tracker.start(b, kind, text_for_overlay, app.clone(), target_hwnd);
     } else {
         tracker.clear();
     }

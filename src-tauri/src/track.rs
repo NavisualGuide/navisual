@@ -18,7 +18,7 @@ use tauri::AppHandle;
 use windows::Win32::Foundation::{HWND, POINT};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetWindowRect, IsIconic, WindowFromPoint, GA_ROOT,
+    GetAncestor, GetWindowRect, GetWindowThreadProcessId, IsIconic, WindowFromPoint, GA_ROOT,
 };
 
 struct TrackState {
@@ -55,9 +55,18 @@ impl WindowTracker {
         Self { state }
     }
 
-    /// Begin tracking the window that contains `abs_bbox`.
-    /// `kind` and `text` are replayed when the window moves or is restored.
-    pub fn start(&self, abs_bbox: &Rect, kind: OverlayKind, text: Option<String>, app: AppHandle) {
+    /// Begin tracking the window that contains `abs_bbox`. `target_hwnd` is the window
+    /// the AI/locator was working in; the overlay is anchored to **that app** so the
+    /// pointer only ever follows the right window — never another app that happens to
+    /// overlap the located point. `kind` and `text` are replayed on move/restore.
+    pub fn start(
+        &self,
+        abs_bbox: &Rect,
+        kind: OverlayKind,
+        text: Option<String>,
+        app: AppHandle,
+        target_hwnd: Option<usize>,
+    ) {
         #[cfg(windows)]
         {
             let result = unsafe {
@@ -65,12 +74,40 @@ impl WindowTracker {
                     x: abs_bbox.x + abs_bbox.width as i32 / 2,
                     y: abs_bbox.y + abs_bbox.height as i32 / 2,
                 };
+                // Window under the located point — handles child controls and the
+                // target app's own owned dialogs.
                 let child = WindowFromPoint(center);
-                if child.0.is_null() {
+                let mut hwnd = if child.0.is_null() {
+                    child
+                } else {
+                    let root = GetAncestor(child, GA_ROOT);
+                    if root.0.is_null() {
+                        child
+                    } else {
+                        root
+                    }
+                };
+
+                // Anchor to the TARGET app: if WindowFromPoint landed on a window from
+                // a DIFFERENT app (the located point is overlapped by another app at the
+                // centre), follow the known target window instead — so the overlay never
+                // tracks whatever happens to be on top at that pixel.
+                if let Some(th) = target_hwnd {
+                    let th_hwnd = HWND(th as *mut core::ffi::c_void);
+                    let mut th_pid = 0u32;
+                    GetWindowThreadProcessId(th_hwnd, Some(&mut th_pid));
+                    let mut hit_pid = 0u32;
+                    if !hwnd.0.is_null() {
+                        GetWindowThreadProcessId(hwnd, Some(&mut hit_pid));
+                    }
+                    if hwnd.0.is_null() || (th_pid != 0 && hit_pid != th_pid) {
+                        hwnd = th_hwnd;
+                    }
+                }
+
+                if hwnd.0.is_null() {
                     return;
                 }
-                let root = GetAncestor(child, GA_ROOT);
-                let hwnd = if root.0.is_null() { child } else { root };
 
                 let mut wr = windows::Win32::Foundation::RECT::default();
                 if GetWindowRect(hwnd, &mut wr).is_err() {
@@ -108,7 +145,7 @@ impl WindowTracker {
         }
         #[cfg(not(windows))]
         {
-            let _ = (abs_bbox, kind, text, app);
+            let _ = (abs_bbox, kind, text, app, target_hwnd);
         }
     }
 
