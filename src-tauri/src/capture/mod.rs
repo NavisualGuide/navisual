@@ -229,6 +229,21 @@ pub fn recapture_window_jpeg(
     }
 }
 
+/// True when the located rect is fully occluded by another app's window(s) — so the
+/// guidance pointer should be suppressed rather than drawn onto the wrong window. A
+/// partially-visible target is not occluded. Always false off-Windows.
+pub fn rect_occluded_by_other_app(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize) -> bool {
+    #[cfg(windows)]
+    {
+        win::rect_occluded_by_other_app(x, y, w, h, target_hwnd)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (x, y, w, h, target_hwnd);
+        false
+    }
+}
+
 /// Get debug information about a specific window by its raw HWND.
 pub fn get_window_info(hwnd_raw: usize) -> String {
     #[cfg(windows)]

@@ -90,6 +90,50 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
     }
 }
 
+/// True when the located rect `(x, y, w, h)` (physical pixels) is **fully** occluded
+/// by windows from a DIFFERENT application than `target_hwnd` — i.e. the spot we want
+/// to mark is hidden behind another app (the user switched apps / a window popped in
+/// front while the AI was thinking). Used to suppress the guidance pointer so it
+/// never lands on the wrong window.
+///
+/// Samples the centre + four inner quadrant points and suppresses only when **every**
+/// sample is covered by another app, so a *partially*-covered but still-visible target
+/// (a small overlapping window, or a pinned window shown side-by-side) keeps its
+/// pointer. Our own overlay/panel at a point does NOT count as occlusion (the overlay
+/// is click-through, so `WindowFromPoint` returns the window beneath it anyway).
+pub fn rect_occluded_by_other_app(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize) -> bool {
+    if target_hwnd == 0 || w <= 0 || h <= 0 {
+        return false;
+    }
+    let own = std::process::id();
+    let mut target_pid: u32 = 0;
+    unsafe {
+        GetWindowThreadProcessId(HWND(target_hwnd as *mut _), Some(&mut target_pid));
+    }
+    if target_pid == 0 {
+        return false;
+    }
+    let pts = [
+        (x + w / 2, y + h / 2),
+        (x + w / 4, y + h / 4),
+        (x + w - w / 4, y + h / 4),
+        (x + w / 4, y + h - h / 4),
+        (x + w - w / 4, y + h - h / 4),
+    ];
+    pts.iter().all(|&(px, py)| unsafe {
+        let hit = WindowFromPoint(POINT { x: px, y: py });
+        if hit.0.is_null() {
+            false // nothing / desktop here → not covered
+        } else {
+            let root = GetAncestor(hit, GA_ROOT);
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(root, Some(&mut pid));
+            // Covered by another app (not the target, not our own panel).
+            pid != 0 && pid != own && pid != target_pid
+        }
+    })
+}
+
 /// Phase 0.2: lightweight info about the window currently being captured.
 /// Used for the "Shared: <App>" header chip and the animated boundary overlay.
 #[derive(Debug, Clone, serde::Serialize)]

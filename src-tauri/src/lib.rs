@@ -260,6 +260,23 @@ fn execute_step(
         }
     }
 
+    // Occlusion guard: if the point we're about to mark is now covered by a window
+    // from a DIFFERENT app (the user switched apps / another window popped in front
+    // while the AI was thinking), don't draw — the pointer would sit on the wrong
+    // window and the tracker would follow it. A *visible* pinned target is not
+    // occluded, so pinning still works. The AI instruction still shows in the panel.
+    if let (Some(th), Some(b)) = (target_hwnd, bbox) {
+        if capture::rect_occluded_by_other_app(b.x, b.y, b.width as i32, b.height as i32, th) {
+            tracker.clear();
+            if let Ok(update) =
+                overlay::make_update_with_ai_bbox(overlay::OverlayKind::None, None, None, None)
+            {
+                let _ = overlay::emit_update(app, update);
+            }
+            return Ok((None, None));
+        }
+    }
+
     let text_for_overlay = Some(step.instruction.clone());
 
     // Persist for restore_overlay — the AI bbox alone is a valid state too.
