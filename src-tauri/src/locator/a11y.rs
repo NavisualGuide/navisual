@@ -30,6 +30,28 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_HWNDNEXT, GW_OWNER,
 };
 
+/// Chromium/Electron windows build their UIA tree lazily; on a 0-candidate first pass
+/// we wait this long before walking again (the first query wakes the build).
+const CHROMIUM_RETRY_DELAY_MS: u64 = 250;
+
+/// True when `hwnd_raw`'s window is a Chromium/Electron host (`Chrome_WidgetWin_1`) —
+/// these build their UIA tree lazily, so a 0-candidate first pass is worth retrying.
+fn window_class_is_chromium(hwnd_raw: usize) -> bool {
+    if hwnd_raw == 0 {
+        return false;
+    }
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let mut buf = [0u16; 64];
+        let n = GetClassNameW(hwnd, &mut buf);
+        if n <= 0 {
+            return false;
+        }
+        String::from_utf16_lossy(&buf[..n as usize]).starts_with("Chrome_WidgetWin")
+    }
+}
+
 /// Map our schema roles → UIA ControlType. `None` means "any role".
 fn role_to_control_type(role: &str) -> Option<ControlType> {
     match role.to_ascii_lowercase().as_str() {
@@ -323,50 +345,69 @@ pub fn find_element(
         return Ok((None, trace));
     }
 
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let per_root_ms = ((timeout_ms / search_roots.len() as u64).max(250)).min(timeout_ms);
+    let is_chromium = opts
+        .target_hwnd
+        .map(window_class_is_chromium)
+        .unwrap_or(false);
 
-    let mut candidates = Vec::new();
-
-    for root in &search_roots {
-        if Instant::now() > deadline {
-            trace.timed_out = true;
-            break;
+    let mut candidates: Vec<LocateResult> = Vec::new();
+    // Up to two attempts: Chromium/Electron apps build their UIA tree lazily, so the
+    // first walk can return 0 while the tree is still materialising — the query itself
+    // wakes it. On a Chromium miss, wait briefly and walk once more.
+    for attempt in 0..2u8 {
+        if attempt == 1 {
+            if !is_chromium || !candidates.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(CHROMIUM_RETRY_DELAY_MS));
+            trace.retried = true;
         }
-        // Pass 1
-        candidates.extend(match_in_subtree_all(
-            &automation,
-            root,
-            &name_re,
-            desired_ct,
-            per_root_ms,
-        )?);
-        if Instant::now() > deadline {
-            trace.timed_out = true;
-            break;
-        }
-        // Pass 2
-        if desired_ct.is_some() {
+        candidates.clear();
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        for root in &search_roots {
+            if Instant::now() > deadline {
+                trace.timed_out = true;
+                break;
+            }
+            // Pass 1
             candidates.extend(match_in_subtree_all(
                 &automation,
                 root,
                 &name_re,
-                None,
+                desired_ct,
                 per_root_ms,
             )?);
+            if Instant::now() > deadline {
+                trace.timed_out = true;
+                break;
+            }
+            // Pass 2
+            if desired_ct.is_some() {
+                candidates.extend(match_in_subtree_all(
+                    &automation,
+                    root,
+                    &name_re,
+                    None,
+                    per_root_ms,
+                )?);
+            }
+            if Instant::now() > deadline {
+                trace.timed_out = true;
+                break;
+            }
+            // Pass 3
+            candidates.extend(manual_walk_all(
+                root,
+                &norm_dashes(&target_text.to_ascii_lowercase()),
+                target_norm_len,
+                desired_ct,
+                deadline,
+            ));
         }
-        if Instant::now() > deadline {
-            trace.timed_out = true;
+        if !candidates.is_empty() {
             break;
         }
-        // Pass 3
-        candidates.extend(manual_walk_all(
-            root,
-            &norm_dashes(&target_text.to_ascii_lowercase()),
-            target_norm_len,
-            desired_ct,
-            deadline,
-        ));
     }
 
     if candidates.is_empty() {
@@ -412,6 +453,50 @@ pub fn find_element(
 
     trace.elapsed_ms = started.elapsed().as_millis() as u32;
     Ok((candidates.into_iter().next(), trace))
+}
+
+/// Warm a window's UIA tree so Chromium/Electron starts building its **lazy** accessibility
+/// tree before the locate runs. Fire-and-forget (errors ignored). Meant to be called on a
+/// background thread when the AI begins streaming, so by locate time (seconds later) the tree
+/// is materialised and `find_element` hits. No-op for non-Chromium windows (they build eagerly).
+pub fn prime(hwnd_raw: usize) {
+    if !window_class_is_chromium(hwnd_raw) {
+        return;
+    }
+    let Ok(automation) = UIAutomation::new() else {
+        return;
+    };
+    let Ok(walker) = automation.get_control_view_walker() else {
+        return;
+    };
+    let hwnd = HWND(hwnd_raw as *mut _);
+    let Ok(root) = automation.element_from_handle(hwnd.into()) else {
+        return;
+    };
+    // A shallow descent is enough to make Chromium materialise the tree.
+    prime_touch(&walker, &root, 3);
+}
+
+fn prime_touch(walker: &uiautomation::UITreeWalker, el: &UIElement, depth: u8) {
+    let _ = el.get_name();
+    if depth == 0 {
+        return;
+    }
+    let Ok(first) = walker.get_first_child(el) else {
+        return;
+    };
+    let _ = first.get_name();
+    prime_touch(walker, &first, depth - 1); // descend the first-child chain
+    let mut sib = first; // touch a bounded set of siblings (flat) to span the subtree
+    for _ in 0..24 {
+        match walker.get_next_sibling(&sib) {
+            Ok(next) => {
+                let _ = next.get_name();
+                sib = next;
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 fn match_in_subtree_all(

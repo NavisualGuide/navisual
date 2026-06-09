@@ -892,7 +892,21 @@ async fn guide(
     // caption with the real pointer + final instruction.
     let app_clone = app.clone();
     let mut streamed = String::new();
+    // Warm the target window's UIA tree as soon as the AI starts streaming, so Chromium/
+    // Electron materialises its lazy a11y tree during generation and find_element hits by
+    // locate time (seconds later). Fired once, on a background thread; no-op off-Chromium.
+    let prime_hwnd = new_hwnd_opt;
+    let mut primed = false;
     let on_chunk = move |chunk: &str| {
+        if !primed {
+            primed = true;
+            #[cfg(windows)]
+            if let Some(h) = prime_hwnd {
+                std::thread::spawn(move || crate::locator::a11y::prime(h));
+            }
+            #[cfg(not(windows))]
+            let _ = prime_hwnd;
+        }
         streamed.push_str(chunk);
         let _ = app_clone.emit(
             "stream_chunk",
@@ -1386,7 +1400,19 @@ async fn send_correction(
     // caption with the real pointer + final instruction.
     let app_clone = app.clone();
     let mut streamed = String::new();
+    // Warm the target window's UIA tree on first stream chunk (see guide()).
+    let prime_hwnd = new_hwnd;
+    let mut primed = false;
     let on_chunk = move |chunk: &str| {
+        if !primed {
+            primed = true;
+            #[cfg(windows)]
+            if let Some(h) = prime_hwnd {
+                std::thread::spawn(move || crate::locator::a11y::prime(h));
+            }
+            #[cfg(not(windows))]
+            let _ = prime_hwnd;
+        }
         streamed.push_str(chunk);
         let _ = app_clone.emit(
             "stream_chunk",

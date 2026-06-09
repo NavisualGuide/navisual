@@ -31,6 +31,9 @@ pub struct A11yTrace {
     pub search_roots_count: usize,
     pub candidates: Vec<A11yCandidate>,
     pub timed_out: bool,
+    /// A second walk was run after a short wait because the first returned 0 on a
+    /// Chromium/Electron window (lazy a11y tree — the first query wakes the build).
+    pub retried: bool,
     pub elapsed_ms: u32,
 }
 
