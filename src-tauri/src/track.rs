@@ -13,6 +13,7 @@
 
 use crate::capture::Rect;
 use crate::overlay::{self, OverlayKind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
@@ -23,9 +24,9 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetAncestor, GetMessageW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
-    TranslateMessage, WindowFromPoint, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
-    EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, MSG, WINEVENT_OUTOFCONTEXT,
+    KillTimer, SetTimer, TranslateMessage, WindowFromPoint, EVENT_OBJECT_HIDE,
+    EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, MSG, WINEVENT_OUTOFCONTEXT,
 };
 
 struct TrackState {
@@ -47,6 +48,9 @@ struct TrackState {
 /// Shared state, also reachable from the C `SetWinEventHook` callback (which can't
 /// capture environment). Set once when the tracker is created.
 static STATE: OnceLock<Arc<Mutex<Option<TrackState>>>> = OnceLock::new();
+
+/// Active one-shot "settle" timer id (0 = none). See `schedule_settle`.
+static SETTLE_TIMER: AtomicUsize = AtomicUsize::new(0);
 
 pub struct WindowTracker {
     state: Arc<Mutex<Option<TrackState>>>,
@@ -234,7 +238,7 @@ unsafe fn run_event_thread() {
 #[cfg(windows)]
 unsafe extern "system" fn win_event_proc(
     _hook: HWINEVENTHOOK,
-    _event: u32,
+    event: u32,
     _hwnd: HWND,
     id_object: i32,
     id_child: i32,
@@ -245,6 +249,35 @@ unsafe extern "system" fn win_event_proc(
     if id_object != 0 || id_child != 0 {
         return;
     }
+    recompute();
+    // Z-order / foreground / show-hide / minimize changes aren't always settled at the
+    // instant the event fires (alt-tab to an un-minimizing window, restore animations),
+    // and the system can drop OUTOFCONTEXT events during a burst — so re-check shortly
+    // after. Moves (LOCATIONCHANGE) are continuous and already settle via the live
+    // recompute, so they don't need it.
+    if event != EVENT_OBJECT_LOCATIONCHANGE {
+        schedule_settle();
+    }
+}
+
+/// (Re)arm a coalesced one-shot timer that runs `recompute` ~120 ms after the last
+/// z-order/foreground event — catching state that hadn't settled when the event fired,
+/// and correcting for any events the system dropped during an alt-tab burst. Resetting
+/// it on each event means it fires once, just after the dust settles.
+#[cfg(windows)]
+unsafe fn schedule_settle() {
+    let prev = SETTLE_TIMER.swap(0, Ordering::SeqCst);
+    if prev != 0 {
+        let _ = KillTimer(None, prev);
+    }
+    let id = SetTimer(None, 0, 120, Some(settle_timer_proc));
+    SETTLE_TIMER.store(id, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn settle_timer_proc(_hwnd: HWND, _msg: u32, id: usize, _time: u32) {
+    let _ = KillTimer(None, id);
+    let _ = SETTLE_TIMER.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
     recompute();
 }
 
