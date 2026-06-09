@@ -26,6 +26,58 @@ pub struct OcrResult {
     pub confidence: f32,
 }
 
+fn point_in_bbox(x: i32, y: i32, b: &(i32, i32, u32, u32)) -> bool {
+    x >= b.0 && x < b.0 + b.2 as i32 && y >= b.1 && y < b.1 + b.3 as i32
+}
+
+/// Fraction of the winner's containing OCR line that `target` occupies, plus that line's
+/// character length. A real control label fills its line (~1.0); content text embeds the
+/// word in a long line (low ratio). Used by the locator's corroboration gate. Coords are
+/// image-pixel space (same as `results`).
+pub fn isolation_for(
+    winner_bbox: &(i32, i32, u32, u32),
+    target: &str,
+    results: &[OcrResult],
+) -> (f32, usize) {
+    let wcx = winner_bbox.0 + winner_bbox.2 as i32 / 2;
+    let wcy = winner_bbox.1 + winner_bbox.3 as i32 / 2;
+    let line_text = results
+        .iter()
+        .filter(|r| r.confidence >= 1.0) // line-level results
+        .find(|r| point_in_bbox(wcx, wcy, &r.bbox))
+        .map(|r| r.text.as_str())
+        .unwrap_or(target); // no containing line → treat as fully isolated
+    let line_len = line_text.chars().count().max(1);
+    let ratio = (target.chars().count() as f32 / line_len as f32).min(1.0);
+    (ratio, line_len)
+}
+
+/// True when `anchor` text appears in the OCR results within ~1/4 image-diagonal of the
+/// winner — a soft corroborator (the AI's `nearby_text` label sits next to the real target).
+pub fn anchor_near(
+    winner_bbox: &(i32, i32, u32, u32),
+    anchor: &str,
+    results: &[OcrResult],
+    img_w: u32,
+    img_h: u32,
+) -> bool {
+    let anchor_l = anchor.trim().to_ascii_lowercase();
+    if anchor_l.chars().count() < 2 {
+        return false;
+    }
+    let wcx = winner_bbox.0 as f32 + winner_bbox.2 as f32 / 2.0;
+    let wcy = winner_bbox.1 as f32 + winner_bbox.3 as f32 / 2.0;
+    let thresh = ((img_w as f32).powi(2) + (img_h as f32).powi(2)).sqrt() * 0.25;
+    results.iter().any(|r| {
+        if !r.text.to_ascii_lowercase().contains(&anchor_l) {
+            return false;
+        }
+        let acx = r.bbox.0 as f32 + r.bbox.2 as f32 / 2.0;
+        let acy = r.bbox.1 as f32 + r.bbox.3 as f32 / 2.0;
+        ((acx - wcx).powi(2) + (acy - wcy).powi(2)).sqrt() <= thresh
+    })
+}
+
 /// Run Windows.Media.Ocr on the given image bytes (JPEG or PNG). Returns
 /// line-level results plus word-level results (so single-word targets can
 /// still get a tight bbox instead of the whole line's span).

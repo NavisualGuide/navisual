@@ -12,6 +12,9 @@
 //! Only applied to OCR hits.  A11y results carry UIA control-type information
 //! that already filters non-interactive roles.
 
+use uiautomation::controls::ControlType;
+use uiautomation::types::Point;
+use uiautomation::UIAutomation;
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, WindowFromPoint};
 
@@ -75,6 +78,71 @@ pub fn verify_hit(cx: i32, cy: i32) -> HitTestOutcome {
     }
 
     HitTestOutcome::Pass
+}
+
+/// UIA role hit-test: classify the control under a screen pixel. The **primary**
+/// corroborator for an OCR match — works on native apps *and* primed Chromium/Electron
+/// (where `WindowFromPoint` is blind because all web content is one HWND). The prime
+/// (`a11y::prime`) makes `ElementFromPoint` return the real web element with its role.
+pub enum RoleHit {
+    /// An interactive control (button/link/menuitem/tab/…) — corroborates the match.
+    Interactive(String),
+    /// Content (Document/Text/Edit/terminal) — does NOT corroborate.
+    Content(String),
+    /// UIA couldn't resolve a usable element/type (tree cold, or non-UIA surface).
+    Unknown,
+}
+
+/// Resolve the control type under `(cx, cy)` (virtual-desktop pixels). `ElementFromPoint`
+/// returns the *deepest* element — a button's deepest node is often a Text run — so we walk
+/// up a few ancestors looking for an interactive control before concluding "content".
+pub fn verify_role(cx: i32, cy: i32) -> RoleHit {
+    let Ok(automation) = UIAutomation::new() else {
+        return RoleHit::Unknown;
+    };
+    let mut el = match automation.element_from_point(Point::new(cx, cy)) {
+        Ok(e) => e,
+        Err(_) => return RoleHit::Unknown,
+    };
+    let walker = automation.get_control_view_walker().ok();
+    for _ in 0..3 {
+        match el.get_control_type() {
+            Ok(ct) if is_interactive(ct) => return RoleHit::Interactive(format!("{ct:?}")),
+            Ok(ct) if is_content(ct) => return RoleHit::Content(format!("{ct:?}")),
+            Ok(_) => {
+                // Neutral container (Group/Pane/Custom/Text-run) — try the parent.
+                match walker.as_ref().and_then(|w| w.get_parent(&el).ok()) {
+                    Some(parent) => el = parent,
+                    None => return RoleHit::Unknown,
+                }
+            }
+            Err(_) => return RoleHit::Unknown,
+        }
+    }
+    RoleHit::Unknown
+}
+
+fn is_interactive(ct: ControlType) -> bool {
+    matches!(
+        ct,
+        ControlType::Button
+            | ControlType::Hyperlink
+            | ControlType::MenuItem
+            | ControlType::TabItem
+            | ControlType::ListItem
+            | ControlType::CheckBox
+            | ControlType::RadioButton
+            | ControlType::ComboBox
+            | ControlType::SplitButton
+            | ControlType::TreeItem
+    )
+}
+
+fn is_content(ct: ControlType) -> bool {
+    matches!(
+        ct,
+        ControlType::Document | ControlType::Text | ControlType::Edit
+    )
 }
 
 fn get_class_name(hwnd: HWND) -> String {

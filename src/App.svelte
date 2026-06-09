@@ -101,7 +101,18 @@ See the LICENSE file in the root of this repository for complete details.
     search_roots_count: number;
     candidates: A11yCandidate[];
     timed_out: boolean;
+    retried: boolean;
     elapsed_ms: number;
+  };
+  type Corroboration = {
+    uia_control_type: string | null;
+    uia_interactive: boolean;
+    isolation: number;
+    isolation_line_len: number;
+    isolation_ok: boolean;
+    near_anchor: boolean;
+    near_ai_bbox: boolean;
+    accepted: boolean;
   };
   type OcrCandidate = {
     text: string;
@@ -120,6 +131,7 @@ See the LICENSE file in the root of this repository for complete details.
     strategy_used: string | null;
     tier_reached: number;
     candidates: OcrCandidate[];
+    corroboration: Corroboration | null;
     elapsed_ms: number;
   };
   type FinalDecision =
@@ -127,6 +139,7 @@ See the LICENSE file in the root of this repository for complete details.
     | { kind: "hit_a11y" }
     | { kind: "hit_ocr" }
     | { kind: "rejected_by_hit_test"; leaf_class: string }
+    | { kind: "rejected_uncorroborated"; detail: string }
     | { kind: "error"; message: string };
   type LocateTrace = {
     timestamp_ms: number;
@@ -1438,6 +1451,7 @@ See the LICENSE file in the root of this repository for complete details.
                   <div class="debug-section-head">
                     A11y · {locateTrace.a11y.candidates.length} candidate{locateTrace.a11y.candidates.length === 1 ? "" : "s"}
                     {#if locateTrace.a11y.timed_out} · timed out{/if}
+                    {#if locateTrace.a11y.retried} · retried (chromium){/if}
                     · {locateTrace.a11y.elapsed_ms} ms
                   </div>
                   {#if locateTrace.a11y.regex_used}
@@ -1469,6 +1483,14 @@ See the LICENSE file in the root of this repository for complete details.
                         {#if c.reject_reason}<span class="cand-reason">— {c.reject_reason}</span>{/if}
                       </div>
                     {/each}
+                    {#if locateTrace.ocr.corroboration}
+                      {@const co = locateTrace.ocr.corroboration}
+                      <div class="debug-cand {co.accepted ? 'cand-selected' : 'cand-rejected'}">
+                        <span class="cand-mark">{co.accepted ? "✔" : "⊘"}</span>
+                        <span class="cand-text">corroboration {co.accepted ? "accepted" : "rejected"}</span>
+                        <span class="cand-meta">uia={co.uia_control_type ?? "—"}{co.uia_interactive ? "✓" : ""} · iso={co.isolation.toFixed(2)}/{co.isolation_line_len}{co.isolation_ok ? "✓" : ""} · anchor={co.near_anchor ? "✓" : "✗"} · bbox={co.near_ai_bbox ? "✓" : "✗"}</span>
+                      </div>
+                    {/if}
                     {#if locateTrace.ocr.sample_texts.length > 0}
                       <details class="debug-samples">
                         <summary>OCR sample ({locateTrace.ocr.sample_texts.length} of first 30)</summary>
@@ -1479,6 +1501,17 @@ See the LICENSE file in the root of this repository for complete details.
                         </ul>
                       </details>
                     {/if}
+                  </div>
+                {/if}
+
+                <!-- Corroboration rejection detail -->
+                {#if locateTrace.final_decision.kind === "rejected_uncorroborated"}
+                  <div class="debug-section">
+                    <div class="debug-section-head" style="color: #f59e0b">⊘ Uncorroborated — no pointer (content text?)</div>
+                    <div class="debug-row">
+                      <span class="debug-key">detail</span>
+                      <span class="debug-val">{locateTrace.final_decision.detail}</span>
+                    </div>
                   </div>
                 {/if}
 

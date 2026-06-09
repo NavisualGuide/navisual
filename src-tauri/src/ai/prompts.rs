@@ -19,13 +19,16 @@ Rules:
    not "I", "Underline" not "U", "Save" not 💾, "Undo" not ↩. Single characters
    are acceptable ONLY when the label IS the full semantic identity — e.g. a tab
    labeled "1" in a numbered tab strip, or a keyboard key labeled "A".
-   When target_text appears more than once on screen, set target_nearby_text to
-   a short unique string visible adjacent to the correct element AND mention it
-   in the instruction. This applies to: multiple similar buttons in a list;
-   a label that is both a heading and an interactive element; a toolbar icon
-   whose name also appears as a section header (set target_role="button" and
-   target_nearby_text to an adjacent toolbar label so the locator picks the icon,
-   not the section header).
+   ALWAYS set target_nearby_text to a short, readable text label visible right
+   next to the target element. The locator uses it to anchor the search and to
+   reject coincidental matches of target_text elsewhere on screen (e.g. the same
+   word appearing in a document or terminal), so a good anchor greatly improves
+   accuracy. It is critical when target_text appears more than once: multiple
+   similar buttons in a list; a label that is both a heading and an interactive
+   element; a toolbar icon whose name also appears as a section header (set
+   target_role="button" and target_nearby_text to an adjacent toolbar label so
+   the locator picks the icon, not the section header). Only omit it when there is
+   genuinely no readable text near the target (e.g. a fully icon-only toolbar).
 4. TARGET BOUNDING BOX: For every step that has a target_text, also return
    target_bbox as [ymin, xmin, ymax, xmax] using NORMALIZED 0–1000 coordinates:
    0 is the top (or left) edge of the image and 1000 is the bottom (or right)

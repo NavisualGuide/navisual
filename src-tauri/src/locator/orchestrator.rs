@@ -10,12 +10,18 @@
 //! eventual overlay renderer can consume it directly without further
 //! translation.
 
-use super::hit_test::{self, HitTestOutcome};
-use super::trace::{FinalDecision, LocateTrace, OcrTrace};
+use super::hit_test::{self, HitTestOutcome, RoleHit};
+use super::trace::{Corroboration, FinalDecision, LocateTrace, OcrTrace};
 use super::{a11y, ocr, LocateResult};
 use crate::capture::{self, Rect};
 use anyhow::Result;
 use std::time::Instant;
+
+/// Corroboration-gate isolation thresholds: a match is treated as *content* only when it
+/// occupies < `ISOLATION_MIN` of a line longer than `ISOLATION_LINE_FLOOR` chars — so
+/// packed menu/tab strips (short lines) are never falsely rejected.
+const ISOLATION_LINE_FLOOR: usize = 40;
+const ISOLATION_MIN: f32 = 0.4;
 
 #[derive(Debug, Clone, Default)]
 pub struct LocateOptions {
@@ -229,18 +235,75 @@ pub fn locate(
         height: (hit.bbox.3 as f32 * sy).round() as u32,
     };
 
-    // C5 — WindowFromPoint hit-test: reject if the leaf HWND under the bbox
-    // centre belongs to a non-interactive Win32 class (label, header, etc.).
+    // Corroboration gate. A11y already missed (this is the OCR fallback), so an OCR text
+    // match by name is only trusted when corroborated — otherwise it's likely the same word
+    // appearing as content (terminal/document), not the control ("no pointer beats wrong
+    // pointer"). Accept if ANY corroborator holds, else hard-reject.
     let cx = bbox.x + (bbox.width as i32 / 2);
     let cy = bbox.y + (bbox.height as i32 / 2);
-    match hit_test::verify_hit(cx, cy) {
-        HitTestOutcome::Rejected { leaf_class } => {
-            trace.ocr = ocr_trace;
-            trace.final_decision = FinalDecision::RejectedByHitTest { leaf_class };
-            trace.elapsed_ms = started.elapsed().as_millis() as u32;
-            return Ok((None, trace));
-        }
-        HitTestOutcome::Pass | HitTestOutcome::WebRenderer => {}
+
+    // Cheap native pre-filter: reject obviously inert Win32 leaf classes (scrollbar, static…).
+    if let HitTestOutcome::Rejected { leaf_class } = hit_test::verify_hit(cx, cy) {
+        trace.ocr = ocr_trace;
+        trace.final_decision = FinalDecision::RejectedByHitTest { leaf_class };
+        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+        return Ok((None, trace));
+    }
+
+    // (1) UIA role hit-test — primary; works native AND primed-Electron.
+    let role = hit_test::verify_role(cx, cy);
+    let (uia_control_type, uia_interactive) = match &role {
+        RoleHit::Interactive(ct) => (Some(ct.clone()), true),
+        RoleHit::Content(ct) => (Some(ct.clone()), false),
+        RoleHit::Unknown => (None, false),
+    };
+    // (2) Label isolation (image-pixel space, same as `results`).
+    let (isolation, line_len) = ocr::isolation_for(&hit.bbox, target_text, &results);
+    let isolation_ok = !(line_len > ISOLATION_LINE_FLOOR && isolation < ISOLATION_MIN);
+    // (3) nearby_text anchor proximity (soft).
+    let near_anchor = opts
+        .nearby_text
+        .as_deref()
+        .map(|a| ocr::anchor_near(&hit.bbox, a, &results, img_w, img_h))
+        .unwrap_or(false);
+    // (4) AI bbox region proximity (soft).
+    let near_ai_bbox = ai_bbox_img
+        .map(|ab| {
+            let wcx = hit.bbox.0 as f32 + hit.bbox.2 as f32 / 2.0;
+            let wcy = hit.bbox.1 as f32 + hit.bbox.3 as f32 / 2.0;
+            let acx = ab.0 as f32 + ab.2 as f32 / 2.0;
+            let acy = ab.1 as f32 + ab.3 as f32 / 2.0;
+            let thresh = ((img_w as f32).powi(2) + (img_h as f32).powi(2)).sqrt() * 0.20;
+            ((acx - wcx).powi(2) + (acy - wcy).powi(2)).sqrt() <= thresh
+        })
+        .unwrap_or(false);
+
+    let accept = uia_interactive || isolation_ok || near_anchor || near_ai_bbox;
+    ocr_trace.corroboration = Some(Corroboration {
+        uia_control_type,
+        uia_interactive,
+        isolation,
+        isolation_line_len: line_len,
+        isolation_ok,
+        near_anchor,
+        near_ai_bbox,
+        accepted: accept,
+    });
+
+    if !accept {
+        let role_label = match &role {
+            RoleHit::Interactive(_) => "interactive",
+            RoleHit::Content(_) => "content",
+            RoleHit::Unknown => "unknown",
+        };
+        trace.ocr = ocr_trace;
+        trace.final_decision = FinalDecision::RejectedUncorroborated {
+            detail: format!(
+                "uia={role_label} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox}"
+            ),
+        };
+        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+        return Ok((None, trace));
     }
 
     let result = LocateResult {

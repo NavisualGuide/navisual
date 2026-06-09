@@ -59,7 +59,28 @@ pub struct OcrTrace {
     pub tier_reached: u8,
     /// Notable candidates considered at the matching strategies, with reject reasons.
     pub candidates: Vec<OcrCandidate>,
+    /// Corroboration outcome for the winner (only when A11y was empty and OCR matched).
+    pub corroboration: Option<Corroboration>,
     pub elapsed_ms: u32,
+}
+
+/// Why the OCR winner was accepted or hard-rejected. When A11y is empty, an OCR text
+/// match must be corroborated by ≥1 signal, else it's a content false-match ("no pointer
+/// beats wrong pointer"). Surfaced in the debug drawer.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Corroboration {
+    /// UIA ControlType under the winner (`ElementFromPoint`), if resolvable.
+    pub uia_control_type: Option<String>,
+    /// The UIA element is an interactive control (corroborates).
+    pub uia_interactive: bool,
+    /// len(target) / len(containing OCR line).
+    pub isolation: f32,
+    pub isolation_line_len: usize,
+    pub isolation_ok: bool,
+    pub near_anchor: bool,
+    pub near_ai_bbox: bool,
+    /// Final verdict (`uia_interactive || isolation_ok || near_anchor || near_ai_bbox`).
+    pub accepted: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -83,6 +104,10 @@ pub enum FinalDecision {
     /// Phase 1 C5: WindowFromPoint hit-test rejected the locate.
     RejectedByHitTest {
         leaf_class: String,
+    },
+    /// OCR matched but no corroborator held (likely content text, not the control).
+    RejectedUncorroborated {
+        detail: String,
     },
     Error {
         message: String,
