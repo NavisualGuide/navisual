@@ -54,6 +54,8 @@ font8x8 = "0.3"
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
+  # SetWinEventHook (event-driven window tracking) lives here
+  "Win32_UI_Accessibility",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_System_Com",

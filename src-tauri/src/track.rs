@@ -1,25 +1,31 @@
-//! Window position tracker — Phase D.3.
+//! Window position tracker — event-driven (SetWinEventHook).
 //!
-//! After an element is located, this tracker watches the containing window for
-//! moves/resizes and keeps the overlay bbox aligned without re-running the full
-//! locate pipeline. It also auto-hides the pointer when the target gets covered by
-//! another app (or minimized) and auto-redraws it when the target is visible again,
-//! emitting `pointer_occluded` / `pointer_restored` so the panel can sync its banner.
+//! After an element is located, this tracker keeps the overlay aligned with the
+//! containing window and in sync with the target's visibility: it auto-hides the
+//! pointer when the target gets covered by another app (or minimized) and
+//! auto-redraws it when the target is visible again, emitting `pointer_occluded` /
+//! `pointer_restored` so the panel can sync its banner.
 //!
-//! A 200 ms polling thread is used instead of SetWinEventHook to avoid the
-//! message-loop requirement; at 200 ms latency the overlay "snaps" to the
-//! window fast enough that users don't notice.
+//! Unlike the previous 200 ms polling loop, this reacts to OS window events
+//! (`SetWinEventHook`): foreground/z-order changes, window moves/resizes, popups
+//! showing/hiding, and minimize/restore. When nothing on screen moves, no work runs
+//! at all. The hook callback runs on a dedicated message-loop thread.
 
 use crate::capture::Rect;
 use crate::overlay::{self, OverlayKind};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
+#[cfg(windows)]
+use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetWindowRect, GetWindowThreadProcessId, IsIconic, WindowFromPoint, GA_ROOT,
+    DispatchMessageW, GetAncestor, GetMessageW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    TranslateMessage, WindowFromPoint, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
+    EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+    EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, MSG, WINEVENT_OUTOFCONTEXT,
 };
 
 struct TrackState {
@@ -33,10 +39,14 @@ struct TrackState {
     kind: OverlayKind,
     text: Option<String>,
     app: AppHandle,
-    /// Whether the pointer is currently drawn. Toggled by the poll as the target
-    /// window is covered/uncovered by another app, or minimized/restored.
+    /// Whether the pointer is currently drawn. Toggled as the target window is
+    /// covered/uncovered by another app, or minimized/restored.
     shown: bool,
 }
+
+/// Shared state, also reachable from the C `SetWinEventHook` callback (which can't
+/// capture environment). Set once when the tracker is created.
+static STATE: OnceLock<Arc<Mutex<Option<TrackState>>>> = OnceLock::new();
 
 pub struct WindowTracker {
     state: Arc<Mutex<Option<TrackState>>>,
@@ -45,14 +55,12 @@ pub struct WindowTracker {
 impl WindowTracker {
     pub fn new() -> Self {
         let state: Arc<Mutex<Option<TrackState>>> = Arc::new(Mutex::new(None));
-        let state_clone = state.clone();
+        let _ = STATE.set(state.clone());
 
+        #[cfg(windows)]
         std::thread::Builder::new()
             .name("win-tracker".into())
-            .spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                poll_once(&state_clone);
-            })
+            .spawn(|| unsafe { run_event_thread() })
             .expect("window tracker thread");
 
         Self { state }
@@ -61,7 +69,8 @@ impl WindowTracker {
     /// Begin tracking the window that contains `abs_bbox`. `target_hwnd` is the window
     /// the AI/locator was working in; the overlay is anchored to **that app** so the
     /// pointer only ever follows the right window — never another app that happens to
-    /// overlap the located point. `kind` and `text` are replayed on move/restore.
+    /// overlap the located point. `initially_shown` is the visibility the caller has
+    /// already drawn for the first frame; the tracker maintains it from there.
     pub fn start(
         &self,
         abs_bbox: &Rect,
@@ -113,7 +122,7 @@ impl WindowTracker {
                     return;
                 }
 
-                let mut wr = windows::Win32::Foundation::RECT::default();
+                let mut wr = RECT::default();
                 if GetWindowRect(hwnd, &mut wr).is_err() {
                     return;
                 }
@@ -159,87 +168,162 @@ impl WindowTracker {
     }
 }
 
-fn poll_once(state: &Mutex<Option<TrackState>>) {
-    #[cfg(windows)]
-    {
-        let mut guard = match state.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        let s = match guard.as_mut() {
-            Some(s) => s,
-            None => return,
-        };
+/// Dedicated thread: register the window-event hooks, then pump messages so the OS
+/// delivers `WINEVENT_OUTOFCONTEXT` callbacks to `win_event_proc`.
+#[cfg(windows)]
+unsafe fn run_event_thread() {
+    // Keep the hook handles alive for the life of the thread (process lifetime).
+    let _hooks: [HWINEVENTHOOK; 5] = [
+        SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        ),
+        SetWinEventHook(
+            EVENT_SYSTEM_MINIMIZESTART,
+            EVENT_SYSTEM_MINIMIZEEND,
+            None,
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        ),
+        SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_HIDE,
+            None,
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        ),
+        SetWinEventHook(
+            EVENT_OBJECT_REORDER,
+            EVENT_OBJECT_REORDER,
+            None,
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        ),
+        SetWinEventHook(
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            None,
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        ),
+    ];
 
-        let hwnd = HWND(s.hwnd as *mut core::ffi::c_void);
+    let mut msg = MSG::default();
+    while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+        let _ = TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
 
-        unsafe {
-            let mut wr = windows::Win32::Foundation::RECT::default();
-            if GetWindowRect(hwnd, &mut wr).is_err() {
-                // Window gone — hide the pointer if it was showing.
-                if s.shown {
-                    if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
-                        let _ = overlay::emit_update(&s.app, u);
-                    }
-                    s.shown = false;
-                    let _ = s.app.emit("pointer_occluded", ());
-                }
-                return;
+/// WinEvent callback (runs on the tracker thread's message loop). Drops the noisy
+/// non-window events (cursor/caret/child object location changes) and recomputes the
+/// overlay on anything that could move the target or change what's on top of it.
+#[cfg(windows)]
+unsafe extern "system" fn win_event_proc(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    // OBJID_WINDOW (0) + CHILDID_SELF (0): window-level events only.
+    if id_object != 0 || id_child != 0 {
+        return;
+    }
+    recompute();
+}
+
+/// Re-align the overlay and toggle its visibility against the target window. Same
+/// logic the old 200 ms poll ran, now invoked only when an OS event fires.
+#[cfg(windows)]
+unsafe fn recompute() {
+    let Some(arc) = STATE.get() else {
+        return;
+    };
+    let mut guard = match arc.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let Some(s) = guard.as_mut() else {
+        return; // no pointer tracked — nothing to do (cheap early-out)
+    };
+
+    let hwnd = HWND(s.hwnd as *mut core::ffi::c_void);
+
+    let mut wr = RECT::default();
+    if GetWindowRect(hwnd, &mut wr).is_err() {
+        // Window gone — hide the pointer if it was showing.
+        if s.shown {
+            if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
+                let _ = overlay::emit_update(&s.app, u);
             }
+            s.shown = false;
+            let _ = s.app.emit("pointer_occluded", ());
+        }
+        return;
+    }
 
-            let new_w = wr.right - wr.left;
-            let new_h = wr.bottom - wr.top;
-            let moved = wr.left != s.win_left || wr.top != s.win_top;
-            let resized = new_w != s.win_width || new_h != s.win_height;
-            s.win_left = wr.left;
-            s.win_top = wr.top;
-            s.win_width = new_w;
-            s.win_height = new_h;
+    let new_w = wr.right - wr.left;
+    let new_h = wr.bottom - wr.top;
+    let moved = wr.left != s.win_left || wr.top != s.win_top;
+    let resized = new_w != s.win_width || new_h != s.win_height;
+    s.win_left = wr.left;
+    s.win_top = wr.top;
+    s.win_width = new_w;
+    s.win_height = new_h;
 
-            let abs_bbox = Rect {
-                x: wr.left + s.rel_bbox.x,
-                y: wr.top + s.rel_bbox.y,
-                width: s.rel_bbox.width,
-                height: s.rel_bbox.height,
-            };
+    let abs_bbox = Rect {
+        x: wr.left + s.rel_bbox.x,
+        y: wr.top + s.rel_bbox.y,
+        width: s.rel_bbox.width,
+        height: s.rel_bbox.height,
+    };
 
-            // The pointer should show only when the target window is neither minimized
-            // nor covered by another app at the located spot. (s.hwnd is a window of
-            // the target app — anchored in start() — so this is the right occlusion ref.)
-            let should_show = !IsIconic(hwnd).as_bool()
-                && crate::capture::target_visible_in_rect(
-                    abs_bbox.x,
-                    abs_bbox.y,
-                    abs_bbox.width as i32,
-                    abs_bbox.height as i32,
-                    s.hwnd as usize,
-                );
+    // Visible only when the target window is neither minimized nor covered by another
+    // app at the located spot. (s.hwnd is a window of the target app — anchored in
+    // start() — so it's the right occlusion reference.)
+    let should_show = !IsIconic(hwnd).as_bool()
+        && crate::capture::target_visible_in_rect(
+            abs_bbox.x,
+            abs_bbox.y,
+            abs_bbox.width as i32,
+            abs_bbox.height as i32,
+            s.hwnd as usize,
+        );
 
-            if should_show {
-                // Keep the overlay above any transient popup (ribbon dropdown, combo
-                // list, tooltip) the user just opened, which Windows would otherwise
-                // stack on top.
-                crate::capture::raise_overlay_topmost();
-                if !s.shown || moved || resized {
-                    if let Ok(u) = overlay::make_update(s.kind, Some(abs_bbox), s.text.clone()) {
-                        let _ = overlay::emit_update(&s.app, u);
-                    }
-                    if !s.shown {
-                        s.shown = true;
-                        let _ = s.app.emit("pointer_restored", ());
-                    }
-                }
-            } else if s.shown {
-                if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
-                    let _ = overlay::emit_update(&s.app, u);
-                }
-                s.shown = false;
-                let _ = s.app.emit("pointer_occluded", ());
+    if should_show {
+        // Keep the overlay above any transient popup (ribbon dropdown, combo list,
+        // tooltip) the user just opened, which Windows would otherwise stack on top.
+        crate::capture::raise_overlay_topmost();
+        if !s.shown || moved || resized {
+            if let Ok(u) = overlay::make_update(s.kind, Some(abs_bbox), s.text.clone()) {
+                let _ = overlay::emit_update(&s.app, u);
+            }
+            if !s.shown {
+                s.shown = true;
+                let _ = s.app.emit("pointer_restored", ());
             }
         }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = state;
+    } else if s.shown {
+        if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
+            let _ = overlay::emit_update(&s.app, u);
+        }
+        s.shown = false;
+        let _ = s.app.emit("pointer_occluded", ());
     }
 }
