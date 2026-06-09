@@ -96,9 +96,10 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
 ///
 /// Pure geometry, no sampling: take the located rect ∩ the target window's frame, then
 /// subtract every higher-z window that belongs to a DIFFERENT app; if any area is left,
-/// the target shows through → draw. If nothing is left, the spot is fully covered by
-/// another app → suppress. Our own panel/overlay and the target app's own windows are
-/// never occluders. Returns true (don't suppress) for degenerate inputs.
+/// the target shows through → draw. If nothing is left, the spot is fully covered →
+/// suppress. The target app's own windows and our click-through overlay (the pointer
+/// itself) aren't occluders, but our **opaque panel** is — covering the target with the
+/// Navisual panel hides the pointer. Returns true (don't suppress) for degenerate inputs.
 pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize) -> bool {
     if target_hwnd == 0 || w <= 0 || h <= 0 {
         return true;
@@ -151,8 +152,8 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
         }
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 || pid == st.our_pid || pid == st.target_pid {
-            return TRUE; // our own window, or the target app itself — not an occluder
+        if pid == 0 || pid == st.target_pid {
+            return TRUE; // nothing, or the target app itself — not an occluder
         }
         let mut cloaked: u32 = 0;
         let _ = DwmGetWindowAttribute(
@@ -165,8 +166,16 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
             return TRUE;
         }
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        if (ex & WS_EX_TOOLWINDOW.0) != 0 || (ex & WS_EX_TRANSPARENT.0) != 0 {
-            return TRUE; // tool windows / click-through layers don't occlude
+        // Our own click-through overlay (WS_EX_TRANSPARENT) IS the pointer — never an
+        // occluder. But our opaque panel DOES occlude: if it covers the target the user
+        // can't see or reach it, so the pointer should hide. Other apps' tool windows
+        // (tooltips, helpers) don't occlude; our own panel can be a tool window, so the
+        // tool-window skip is scoped to other processes.
+        if (ex & WS_EX_TRANSPARENT.0) != 0 {
+            return TRUE;
+        }
+        if pid != st.our_pid && (ex & WS_EX_TOOLWINDOW.0) != 0 {
+            return TRUE;
         }
         if let Some(r) = frame_rect_of(hwnd) {
             let clipped = rect_intersect(&r, &st.area);
