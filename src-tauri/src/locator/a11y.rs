@@ -565,6 +565,26 @@ fn deep_substring_match(
         .depth(40)
         .timeout(remaining.min(1000))
         .filter_fn(Box::new(move |el: &UIElement| {
+            // Interactive controls only. Check the (cheap, integer) control type FIRST and
+            // skip the ~99% of the tree that is Text/Document/Group content WITHOUT fetching
+            // its name — this removes content false-candidates (so the real clickable item
+            // wins the AI-bbox sort) AND avoids the expensive per-element get_name on most of
+            // the tree, cutting the deep-traversal cost.
+            if !matches!(
+                el.get_control_type(),
+                Ok(ControlType::Button
+                    | ControlType::TabItem
+                    | ControlType::ListItem
+                    | ControlType::MenuItem
+                    | ControlType::Hyperlink
+                    | ControlType::CheckBox
+                    | ControlType::RadioButton
+                    | ControlType::ComboBox
+                    | ControlType::SplitButton
+                    | ControlType::TreeItem)
+            ) {
+                return Ok(false);
+            }
             let name = el.get_name().unwrap_or_default();
             if name.is_empty() {
                 return Ok(false);
