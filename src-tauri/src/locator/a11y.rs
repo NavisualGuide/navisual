@@ -345,11 +345,18 @@ pub fn find_element(
         return Ok((None, trace));
     }
 
-    let per_root_ms = ((timeout_ms / search_roots.len() as u64).max(250)).min(timeout_ms);
     let is_chromium = opts
         .target_hwnd
         .map(window_class_is_chromium)
         .unwrap_or(false);
+    // Chromium/Electron trees are deep and the primed build is large, so give the search a
+    // bigger budget to actually REACH deeply-nested items (e.g. VS Code's activity bar).
+    let eff_timeout = if is_chromium {
+        timeout_ms.max(1200)
+    } else {
+        timeout_ms
+    };
+    let per_root_ms = ((eff_timeout / search_roots.len() as u64).max(250)).min(eff_timeout);
 
     let mut candidates: Vec<LocateResult> = Vec::new();
     // Up to two attempts: Chromium/Electron apps build their UIA tree lazily, so the
@@ -364,7 +371,7 @@ pub fn find_element(
             trace.retried = true;
         }
         candidates.clear();
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let deadline = Instant::now() + Duration::from_millis(eff_timeout);
         for root in &search_roots {
             if Instant::now() > deadline {
                 trace.timed_out = true;
@@ -404,6 +411,13 @@ pub fn find_element(
                 desired_ct,
                 deadline,
             ));
+            // Pass 4 (Chromium): reach deeply-nested items (VS Code activity bar etc.) the
+            // shallower passes miss, with a substring match so a name carrying a trailing
+            // shortcut ("Extensions (Ctrl+Shift+X)") still matches. The primed tree makes
+            // this a query against cached a11y, not a rebuild.
+            if is_chromium && candidates.is_empty() {
+                candidates.extend(deep_substring_match(&automation, root, target_text, deadline));
+            }
         }
         if !candidates.is_empty() {
             break;
@@ -525,6 +539,42 @@ fn match_in_subtree_all(
             .collect()),
         Err(_) => Ok(Vec::new()),
     }
+}
+
+/// Deep substring matcher for Chromium/Electron windows: reaches far-down items (e.g. VS
+/// Code's activity bar) that the standard passes don't, and matches names carrying trailing
+/// text. UIA-native traversal against the already-built (primed) tree, bounded by the
+/// remaining A11y deadline.
+fn deep_substring_match(
+    automation: &UIAutomation,
+    root: &UIElement,
+    target: &str,
+    deadline: Instant,
+) -> Vec<LocateResult> {
+    let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
+    if remaining < 80 {
+        return Vec::new();
+    }
+    let needle = norm_dashes(&target.to_ascii_lowercase());
+    if needle.chars().count() < 2 {
+        return Vec::new();
+    }
+    let matcher = automation
+        .create_matcher()
+        .from_ref(root)
+        .depth(40)
+        .timeout(remaining.min(1000))
+        .filter_fn(Box::new(move |el: &UIElement| {
+            let name = el.get_name().unwrap_or_default();
+            if name.is_empty() {
+                return Ok(false);
+            }
+            Ok(norm_dashes(&name.to_ascii_lowercase()).contains(&needle))
+        }));
+    matcher
+        .find_all()
+        .map(|els| els.into_iter().filter_map(|e| element_to_result(&e)).collect())
+        .unwrap_or_default()
 }
 
 fn manual_walk_all(
