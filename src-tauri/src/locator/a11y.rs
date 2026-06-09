@@ -466,37 +466,27 @@ pub fn prime(hwnd_raw: usize) {
     let Ok(automation) = UIAutomation::new() else {
         return;
     };
-    let Ok(walker) = automation.get_control_view_walker() else {
-        return;
-    };
     let hwnd = HWND(hwnd_raw as *mut _);
     let Ok(root) = automation.element_from_handle(hwnd.into()) else {
         return;
     };
-    // A shallow descent is enough to make Chromium materialise the tree.
-    prime_touch(&walker, &root, 3);
-}
-
-fn prime_touch(walker: &uiautomation::UITreeWalker, el: &UIElement, depth: u8) {
-    let _ = el.get_name();
-    if depth == 0 {
-        return;
-    }
-    let Ok(first) = walker.get_first_child(el) else {
-        return;
-    };
-    let _ = first.get_name();
-    prime_touch(walker, &first, depth - 1); // descend the first-child chain
-    let mut sib = first; // touch a bounded set of siblings (flat) to span the subtree
-    for _ in 0..24 {
-        match walker.get_next_sibling(&sib) {
-            Ok(next) => {
-                let _ = next.get_name();
-                sib = next;
-            }
-            Err(_) => break,
-        }
-    }
+    // A deep FindFirst forces UIA to traverse *into* the renderer subtree — that traversal
+    // is what actually triggers Chromium/Electron to build its lazy accessibility tree (a
+    // shallow get_name walk doesn't reach the render widget, so the tree never materialises).
+    // The filter never matches; we only want the traversal it performs. The build it kicks
+    // off is ready by the time find_element runs (seconds later, once the AI finishes).
+    let started = Instant::now();
+    let _ = automation
+        .create_matcher()
+        .from_ref(&root)
+        .depth(40)
+        .timeout(1500)
+        .filter_fn(Box::new(|_el: &UIElement| Ok(false)))
+        .find_first();
+    log::info!(
+        "a11y::prime walked window {hwnd_raw:#x} in {} ms",
+        started.elapsed().as_millis()
+    );
 }
 
 fn match_in_subtree_all(
