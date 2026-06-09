@@ -278,7 +278,16 @@ pub fn locate(
         })
         .unwrap_or(false);
 
-    let accept = uia_interactive || isolation_ok || near_anchor || near_ai_bbox;
+    // UIA role is authoritative when it has an opinion. Interactive → accept. Content
+    // (Document/Text/terminal) is a hard negative: the SOFT corroborators (anchor/bbox)
+    // must NOT override it (a nearby word can coincide with a content match) — only a
+    // genuinely isolated label still rescues it. Unknown (cold tree / non-UIA surface) →
+    // fall to all corroborators.
+    let accept = match &role {
+        RoleHit::Interactive(_) => true,
+        RoleHit::Content(_) => isolation_ok,
+        RoleHit::Unknown => isolation_ok || near_anchor || near_ai_bbox,
+    };
     ocr_trace.corroboration = Some(Corroboration {
         uia_control_type,
         uia_interactive,
