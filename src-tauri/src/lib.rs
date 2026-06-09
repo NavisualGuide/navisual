@@ -82,6 +82,9 @@ struct LastOverlay {
     bbox: Option<capture::Rect>,
     text: Option<String>,
     ai_bbox: Option<capture::Rect>,
+    /// Target app window — so restore_overlay can re-arm the tracker (anchored to the
+    /// right app) and auto-hide/redraw keeps working after Clear → Show.
+    target_hwnd: Option<usize>,
 }
 
 /// Return true when `text` looks like a keyboard shortcut (e.g. "Ctrl+A",
@@ -281,6 +284,7 @@ fn execute_step(
             bbox,
             text: text_for_overlay.clone(),
             ai_bbox,
+            target_hwnd,
         });
     }
     if visible {
@@ -1584,14 +1588,21 @@ async fn clear_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 
 #[tauri::command]
 async fn restore_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(last) = state.last_overlay.lock().clone() {
-        match overlay::make_update_with_ai_bbox(last.kind, last.bbox, last.text, last.ai_bbox) {
-            Ok(update) => overlay::emit_update(&app, update).map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        }
-    } else {
-        Ok(())
+    let last = match state.last_overlay.lock().clone() {
+        Some(l) => l,
+        None => return Ok(()),
+    };
+    let update = overlay::make_update_with_ai_bbox(last.kind, last.bbox, last.text.clone(), last.ai_bbox)
+        .map_err(|e| e.to_string())?;
+    overlay::emit_update(&app, update).map_err(|e| e.to_string())?;
+    // Re-arm the tracker — clear_overlay stopped it, so without this the pointer would
+    // no longer follow the window or auto-hide/redraw with the target's visibility.
+    if let Some(b) = last.bbox {
+        state
+            .tracker
+            .start(&b, last.kind, last.text, app.clone(), last.target_hwnd, true);
     }
+    Ok(())
 }
 
 /// Item 5 — enumerate installed TTS voices for the Settings voice picker.
