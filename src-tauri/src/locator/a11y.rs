@@ -120,6 +120,21 @@ fn norm_dashes(s: &str) -> String {
         .collect()
 }
 
+/// Strip a trailing keyboard accelerator / mnemonic that menus append to the accessible name —
+/// `"Playback Alt+I"` → `"Playback"`, `"Save\tCtrl+S"` → `"Save"`, `"文件(&F)"` → `"文件"`. Many
+/// Win32/Qt menu bars expose the shortcut as part of the UIA Name, which defeats the anchored
+/// `^target$` match (VLC's menu bar, confirmed via Accessibility Insights). Conservative: requires
+/// a real modifier+key or a `(&X)` mnemonic so ordinary labels are never truncated.
+fn strip_accelerator(s: &str) -> String {
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:[\s\u{00a0}]+(?:alt|ctrl|shift|win|cmd|meta)\+\S+|\s*\(&\w\))\s*$")
+            .unwrap()
+    });
+    re.replace(s, "").trim().to_string()
+}
+
 /// Build the anchored regex used for name matching.
 /// `^[\W_]*<escaped_target>[\W_]*$`, case-insensitive.
 fn build_name_regex(target: &str) -> Result<Regex> {
@@ -605,7 +620,9 @@ fn match_in_subtree_all(
             if name.is_empty() {
                 return Ok(false);
             }
-            let normed = norm_dashes(&name);
+            // Strip a trailing accelerator ("Playback Alt+I" → "Playback") so the anchored
+            // regex matches menu items whose UIA name carries the shortcut suffix.
+            let normed = strip_accelerator(&norm_dashes(&name));
             Ok(re.is_match(&normed))
         }));
     if let Some(ct) = control_type {
