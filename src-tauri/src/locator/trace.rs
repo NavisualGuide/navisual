@@ -34,6 +34,10 @@ pub struct A11yTrace {
     /// A second walk was run after a short wait because the first returned 0 on a
     /// Chromium/Electron window (lazy a11y tree — the first query wakes the build).
     pub retried: bool,
+    /// UI framework of the target window ("Chrome" / "Eager" / "Other").
+    pub framework: Option<String>,
+    /// The Chrome path used the cached `find_all_build_cache` (batched property reads).
+    pub cached: bool,
     pub elapsed_ms: u32,
 }
 

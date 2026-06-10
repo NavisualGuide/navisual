@@ -53,6 +53,40 @@ fn window_class_is_chromium(hwnd_raw: usize) -> bool {
     }
 }
 
+/// UI framework of the target window, which decides the locate strategy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Framework {
+    /// Chromium/Electron/Edge — lazy a11y tree → prime + a single cached deep find.
+    Chrome,
+    /// WPF / WinForms / WinUI / Win32 — eager tree → the standard matcher + manual walk.
+    Eager,
+    /// Unknown framework — treated like `Eager` (no prime).
+    Other,
+}
+
+/// Classify the target window's framework via the Chromium window class (fast, catches
+/// Electron/Chrome/Edge) then UIA `FrameworkId` (catches eager frameworks so we can skip
+/// priming). Used to route the locate and gate the prime.
+fn framework_of(automation: &UIAutomation, hwnd_raw: usize) -> Framework {
+    if hwnd_raw == 0 {
+        return Framework::Other;
+    }
+    if window_class_is_chromium(hwnd_raw) {
+        return Framework::Chrome;
+    }
+    let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+    let fid = automation
+        .element_from_handle(hwnd.into())
+        .ok()
+        .and_then(|el| el.get_framework_id().ok())
+        .unwrap_or_default();
+    match fid.as_str() {
+        "Chrome" => Framework::Chrome,
+        "WPF" | "WinForm" | "Win32" | "XAML" | "DirectUI" => Framework::Eager,
+        _ => Framework::Other,
+    }
+}
+
 /// Map our schema roles → UIA ControlType. `None` means "any role".
 fn role_to_control_type(role: &str) -> Option<ControlType> {
     match role.to_ascii_lowercase().as_str() {
@@ -212,6 +246,35 @@ fn element_to_result(el: &UIElement) -> Option<LocateResult> {
     })
 }
 
+/// Like `element_to_result` but reads **cached** properties (Name/ControlType/Rect) populated
+/// by `find_all_build_cache` — zero per-element COM round-trips. The cached rect is moments old
+/// (the find just ran), so it's used directly.
+fn element_to_result_cached(el: &UIElement) -> Option<LocateResult> {
+    let ct = el.get_cached_control_type().ok()?;
+    if is_container_role(ct) {
+        return None;
+    }
+    let rect = el.get_cached_bounding_rectangle().ok()?;
+    let left = rect.get_left();
+    let top = rect.get_top();
+    let width = rect.get_width().max(0) as u32;
+    let height = rect.get_height().max(0) as u32;
+    if width == 0 || height == 0 || !rect_is_onscreen(left, top) {
+        return None;
+    }
+    Some(LocateResult {
+        bbox: Rect {
+            x: left,
+            y: top,
+            width,
+            height,
+        },
+        name: el.get_cached_name().unwrap_or_default(),
+        role: format!("{:?}", ct),
+        confidence: 1.0,
+    })
+}
+
 /// Collect visible, non-minimised top-level windows that are OWNED by another
 /// window and belong to the same process as `target` — i.e. modal dialogs and
 /// popups (Excel's "PivotTable from table or range", Word's Find/Font/Save As,
@@ -346,19 +409,21 @@ pub fn find_element(
         return Ok((None, trace));
     }
 
-    let is_chromium = opts
+    let framework = opts
         .target_hwnd
-        .map(window_class_is_chromium)
-        .unwrap_or(false);
+        .map(|h| framework_of(&automation, h))
+        .unwrap_or(Framework::Other);
+    let is_chrome = framework == Framework::Chrome;
+    trace.framework = Some(format!("{framework:?}"));
     let per_root_ms = ((timeout_ms / search_roots.len() as u64).max(250)).min(timeout_ms);
 
     let mut candidates: Vec<LocateResult> = Vec::new();
     // Up to two attempts: Chromium/Electron apps build their UIA tree lazily, so the
-    // first walk can return 0 while the tree is still materialising — the query itself
-    // wakes it. On a Chromium miss, wait briefly and walk once more.
+    // first find can return 0 while the tree is still materialising — the query itself
+    // wakes it. On a Chrome miss, wait briefly and find once more.
     for attempt in 0..2u8 {
         if attempt == 1 {
-            if !is_chromium || !candidates.is_empty() {
+            if !is_chrome || !candidates.is_empty() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(CHROMIUM_RETRY_DELAY_MS));
@@ -371,50 +436,54 @@ pub fn find_element(
                 trace.timed_out = true;
                 break;
             }
-            // Pass 1
-            candidates.extend(match_in_subtree_all(
-                &automation,
-                root,
-                &name_re,
-                desired_ct,
-                per_root_ms,
-            )?);
-            if Instant::now() > deadline {
-                trace.timed_out = true;
-                break;
-            }
-            // Pass 2
-            if desired_ct.is_some() {
-                candidates.extend(match_in_subtree_all(
-                    &automation,
-                    root,
-                    &name_re,
-                    None,
-                    per_root_ms,
-                )?);
-            }
-            if Instant::now() > deadline {
-                trace.timed_out = true;
-                break;
-            }
-            // Pass 3
-            candidates.extend(manual_walk_all(
-                root,
-                &norm_dashes(&target_text.to_ascii_lowercase()),
-                target_norm_len,
-                desired_ct,
-                deadline,
-            ));
-            // Pass 4 (Chromium): reach deeply-nested items (VS Code activity bar, search
-            // boxes, …) the shallower passes miss. Uses a NATIVE UIA control-type condition
-            // (find_all evaluates it in-process), so it's fast on huge Electron trees and the
-            // role decides which control types to consider (clickable vs text/edit).
-            if is_chromium && candidates.is_empty() {
+            if is_chrome {
+                // Chrome/Electron: one cached native find. The tree is deep and the per-element
+                // COM of the matcher/manual passes is too slow here; a control-type condition +
+                // CacheRequest (batched Name/ControlType/Rect) reaches deep items (activity bar,
+                // search box) fast. `deep_role_match` is now cached.
                 candidates.extend(deep_role_match(
                     &automation,
                     root,
                     target_text,
                     opts.role.as_deref(),
+                ));
+                trace.cached = true;
+            } else {
+                // Eager-tree frameworks (WPF/WinForms/WinUI/Win32): the standard matcher + manual
+                // walk are fast and proven here.
+                // Pass 1
+                candidates.extend(match_in_subtree_all(
+                    &automation,
+                    root,
+                    &name_re,
+                    desired_ct,
+                    per_root_ms,
+                )?);
+                if Instant::now() > deadline {
+                    trace.timed_out = true;
+                    break;
+                }
+                // Pass 2
+                if desired_ct.is_some() {
+                    candidates.extend(match_in_subtree_all(
+                        &automation,
+                        root,
+                        &name_re,
+                        None,
+                        per_root_ms,
+                    )?);
+                }
+                if Instant::now() > deadline {
+                    trace.timed_out = true;
+                    break;
+                }
+                // Pass 3
+                candidates.extend(manual_walk_all(
+                    root,
+                    &norm_dashes(&target_text.to_ascii_lowercase()),
+                    target_norm_len,
+                    desired_ct,
+                    deadline,
                 ));
             }
         }
@@ -577,17 +646,27 @@ fn deep_role_match(
     let Some(cond) = cond else {
         return Vec::new();
     };
-    let els = match root.find_all(TreeScope::Descendants, &cond) {
+    // CacheRequest: batch Name + ControlType + BoundingRectangle so the in-process filter
+    // reads CACHED props with zero per-element COM round-trips — the dominant cost on huge
+    // Electron trees (a per-element get_name walk took seconds; one batched call is ~ms).
+    let cache = match automation.create_cache_request() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let _ = cache.add_property(UIProperty::Name);
+    let _ = cache.add_property(UIProperty::ControlType);
+    let _ = cache.add_property(UIProperty::BoundingRectangle);
+    let els = match root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
     els.into_iter()
         .filter(|el| {
-            el.get_name()
+            el.get_cached_name()
                 .map(|n| norm_dashes(&n.to_ascii_lowercase()).contains(&needle))
                 .unwrap_or(false)
         })
-        .filter_map(|el| element_to_result(&el))
+        .filter_map(|el| element_to_result_cached(&el))
         .collect()
 }
 

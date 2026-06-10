@@ -102,6 +102,8 @@ See the LICENSE file in the root of this repository for complete details.
     candidates: A11yCandidate[];
     timed_out: boolean;
     retried: boolean;
+    framework: string | null;
+    cached: boolean;
     elapsed_ms: number;
   };
   type Corroboration = {
@@ -1450,8 +1452,10 @@ See the LICENSE file in the root of this repository for complete details.
                 <div class="debug-section">
                   <div class="debug-section-head">
                     A11y · {locateTrace.a11y.candidates.length} candidate{locateTrace.a11y.candidates.length === 1 ? "" : "s"}
+                    {#if locateTrace.a11y.framework} · {locateTrace.a11y.framework.toLowerCase()}{/if}
+                    {#if locateTrace.a11y.cached} · cached{/if}
                     {#if locateTrace.a11y.timed_out} · timed out{/if}
-                    {#if locateTrace.a11y.retried} · retried (chromium){/if}
+                    {#if locateTrace.a11y.retried} · retried{/if}
                     · {locateTrace.a11y.elapsed_ms} ms
                   </div>
                   {#if locateTrace.a11y.regex_used}
