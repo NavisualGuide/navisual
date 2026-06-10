@@ -75,7 +75,7 @@ windows = { version = "0.62", features = [
   "Win32_Storage_Xps",
   "Win32_System_Threading",
 ] }
-uiautomation = { version = "0.24.4", features = ["process"] }
+uiautomation = { version = "0.24.4", features = ["process", "event"] }
 
 # Faster dev iteration: line-level debug info only (saves link time + PDB size).
 # Full symbols (debug = true) are rarely needed during rapid iteration.

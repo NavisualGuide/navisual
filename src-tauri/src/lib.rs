@@ -931,6 +931,10 @@ async fn guide(
             #[cfg(windows)]
             if let Some(h) = prime_hwnd {
                 std::thread::spawn(move || crate::locator::a11y::prime(h));
+                // Keep the target's a11y tree built for the whole session — an active UIA
+                // subscription so lazy apps (Qt/VLC, Chromium past its ~30s fade) expose their
+                // tree to our locator. Idempotent; re-targets when the focused app changes.
+                crate::locator::keepwarm::warm(h);
             }
             #[cfg(not(windows))]
             let _ = prime_hwnd;
@@ -1447,6 +1451,10 @@ async fn send_correction(
             #[cfg(windows)]
             if let Some(h) = prime_hwnd {
                 std::thread::spawn(move || crate::locator::a11y::prime(h));
+                // Keep the target's a11y tree built for the whole session — an active UIA
+                // subscription so lazy apps (Qt/VLC, Chromium past its ~30s fade) expose their
+                // tree to our locator. Idempotent; re-targets when the focused app changes.
+                crate::locator::keepwarm::warm(h);
             }
             #[cfg(not(windows))]
             let _ = prime_hwnd;
