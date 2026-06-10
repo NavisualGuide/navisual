@@ -249,7 +249,9 @@ mod imp {
                         "[tts] lang={lang} target={target} preferred={preferred_id:?} chosen={chosen:?}"
                     );
                     let Some(id) = chosen else {
-                        log::warn!("TTS: no installed voice for language '{target}' — caption only");
+                        log::warn!(
+                            "TTS: no installed voice for language '{target}' — caption only"
+                        );
                         continue;
                     };
                     if current_id.as_deref() != Some(id.as_str()) {

@@ -99,9 +99,19 @@ impl CostTracker {
         }
     }
 
-    pub fn record_usage(&mut self, provider: &str, model: &str, input_tokens: u64, output_tokens: u64) {
+    pub fn record_usage(
+        &mut self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
         self.roll_over_if_needed();
-        let entry = self.usage.models.entry(format!("{provider}|{model}")).or_default();
+        let entry = self
+            .usage
+            .models
+            .entry(format!("{provider}|{model}"))
+            .or_default();
         entry.daily_in += input_tokens;
         entry.daily_out += output_tokens;
         entry.monthly_in += input_tokens;

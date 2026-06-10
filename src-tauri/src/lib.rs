@@ -189,6 +189,10 @@ fn execute_step(
     last_overlay: &parking_lot::Mutex<Option<LastOverlay>>,
     ai_bbox: Option<capture::Rect>,
     capture_rect: Option<capture::Rect>,
+    // Native-res OCR image captured at AI-capture time (overlay cleared, before the streamed
+    // subtitle). When present the locator's OCR uses it instead of re-capturing — so it never
+    // reads our own caption and there's no clear/redraw flicker. None → locator re-captures.
+    pre_ocr: Option<(Vec<u8>, capture::Rect)>,
 ) -> Result<
     (
         Option<locator::LocateResult>,
@@ -200,40 +204,40 @@ fn execute_step(
     // *requires* target_text (so small local models can't silently omit it and leave
     // the locator with nothing), and genuine no-target steps (scroll, press a key)
     // emit an empty string — those must not trigger a bogus locate.
-    let (located, trace) = if let Some(text) =
-        step.target_text.as_ref().filter(|t| !t.trim().is_empty())
-    {
-        #[cfg(windows)]
-        {
-            let opts = locator::orchestrator::LocateOptions {
-                role: step
-                    .target_role
-                    .as_ref()
-                    .map(|r| format!("{:?}", r).to_lowercase()),
-                nearby_text: step.target_nearby_text.clone(),
-                ai_bbox,
-                a11y_timeout_ms: 500,
-                min_confidence: 0.5,
-                target_hwnd,
-                debug_ocr_image_path: debug_ocr_path,
-            };
-            let text_owned = text.clone();
-            match locator::orchestrator::locate(&text_owned, &opts) {
-                Ok((result, trace)) => (result, Some(trace)),
-                Err(e) => {
-                    log::warn!("locate failed for {:?}: {e}", text);
-                    (None, None)
+    let (located, trace) =
+        if let Some(text) = step.target_text.as_ref().filter(|t| !t.trim().is_empty()) {
+            #[cfg(windows)]
+            {
+                let opts = locator::orchestrator::LocateOptions {
+                    role: step
+                        .target_role
+                        .as_ref()
+                        .map(|r| format!("{:?}", r).to_lowercase()),
+                    nearby_text: step.target_nearby_text.clone(),
+                    ai_bbox,
+                    a11y_timeout_ms: 500,
+                    min_confidence: 0.5,
+                    target_hwnd,
+                    debug_ocr_image_path: debug_ocr_path,
+                };
+                let text_owned = text.clone();
+                let pre = pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r));
+                match locator::orchestrator::locate(&text_owned, &opts, pre) {
+                    Ok((result, trace)) => (result, Some(trace)),
+                    Err(e) => {
+                        log::warn!("locate failed for {:?}: {e}", text);
+                        (None, None)
+                    }
                 }
             }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = (text, target_hwnd, debug_ocr_path);
+            #[cfg(not(windows))]
+            {
+                let _ = (text, target_hwnd, debug_ocr_path, &pre_ocr);
+                (None, None)
+            }
+        } else {
             (None, None)
-        }
-    } else {
-        (None, None)
-    };
+        };
 
     let mut kind = overlay_kind_for_step(&step.overlay_type);
     let mut bbox = located.as_ref().map(|r| r.bbox);
@@ -757,7 +761,7 @@ async fn guide(
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     #[allow(clippy::type_complexity)]
-    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>, Option<u64>), ()> {
+    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>, Option<u64>, Option<Vec<u8>>, Option<capture::Rect>), ()> {
         let is_fs = full_screen.unwrap_or(false);
         let (bytes, rect_opt, hwnd_opt) = if is_fs {
             match capture::capture_virtual_desktop_jpeg(75, &exclude) {
@@ -812,10 +816,25 @@ async fn guide(
             None
         };
 
+        // Native-res OCR image, captured NOW — the overlay is cleared and the streamed subtitle
+        // hasn't been shown yet, so the locator's OCR never reads our own caption and we avoid the
+        // clear/redraw flicker of capturing it at locate time.
+        let (ocr_png, ocr_rect) = if !is_fs {
+            match hwnd_opt {
+                Some(h) => match capture::recapture_window_raw(h, &exclude) {
+                    Ok((raw, rect)) => (capture::encode_png_for_ocr(&raw).ok(), Some(rect)),
+                    Err(_) => (None, None),
+                },
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
         let thumb_b64 = make_chat_thumbnail(&final_bytes);
         let pre_hash = ahash_of_jpeg(&final_bytes);
         let b64 = capture::to_base64(&final_bytes);
-        Ok((b64, rect_opt, hwnd_opt, debug_path, thumb_b64, final_bytes, pre_hash))
+        Ok((b64, rect_opt, hwnd_opt, debug_path, thumb_b64, final_bytes, pre_hash, ocr_png, ocr_rect))
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
@@ -827,10 +846,19 @@ async fn guide(
         debug_screenshot_path,
         chat_thumb_b64,
         pre_hash,
+        pre_ocr,
     ) = match capture_result {
-        Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes, pre_hash)) => {
+        Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes, pre_hash, ocr_png, ocr_rect)) => {
             *state.chat_full_jpeg.lock() = Some(full_bytes);
-            (b64, rect_opt, hwnd_opt, dbg, thumb, pre_hash)
+            (
+                b64,
+                rect_opt,
+                hwnd_opt,
+                dbg,
+                thumb,
+                pre_hash,
+                ocr_png.zip(ocr_rect),
+            )
         }
         Err(()) => {
             return Ok(GuideResponse {
@@ -1125,14 +1153,6 @@ async fn guide(
         }
     }
 
-    // Clear the streamed subtitle before the locate's OCR capture — otherwise OCR reads our
-    // own caption (it shows the instruction, which contains the target text) and matches it.
-    state.tracker.clear();
-    if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
-        let _ = overlay::emit_update(&app, update);
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(33)).await;
-
     let (located, locate_trace) = execute_step(
         &app,
         &steps[0],
@@ -1142,6 +1162,7 @@ async fn guide(
         &state.last_overlay,
         ai_bbox,
         capture_rect_opt,
+        pre_ocr,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1227,6 +1248,7 @@ async fn next_step(
         &state.last_overlay,
         ai_bbox,
         capture_rect,
+        None, // next_step reuses the prior capture; locator re-captures for OCR
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1306,6 +1328,7 @@ async fn send_correction(
         chat_thumb_b64,
         full_jpeg_opt,
         pre_hash,
+        pre_ocr,
     ): (
         String,
         Option<capture::Rect>,
@@ -1314,9 +1337,15 @@ async fn send_correction(
         Option<String>,
         Option<Vec<u8>>,
         Option<u64>,
+        Option<(Vec<u8>, capture::Rect)>,
     ) = tokio::task::spawn_blocking(move || {
         if let Ok((bytes, rect, hwnd)) = capture::capture_active_window_jpeg(75, &exclude) {
             let final_bytes = bytes;
+            // Native-res OCR image, captured now (overlay cleared, before the streamed subtitle)
+            // so the locator's OCR never reads our own caption — see guide().
+            let pre_ocr = capture::recapture_window_raw(hwnd, &exclude)
+                .ok()
+                .and_then(|(raw, r)| capture::encode_png_for_ocr(&raw).ok().map(|png| (png, r)));
 
             let debug_path = if debug_screenshot_enabled {
                 if let Some(ref dir) = debug_dir {
@@ -1354,9 +1383,10 @@ async fn send_correction(
                 thumb_b64,
                 Some(final_bytes),
                 pre_hash,
+                pre_ocr,
             )
         } else {
-            (String::new(), None, None, None, None, None, None)
+            (String::new(), None, None, None, None, None, None, None)
         }
     })
     .await
@@ -1567,13 +1597,6 @@ async fn send_correction(
         }
     }
 
-    // Clear the streamed subtitle before the locate's OCR capture (see guide()).
-    state.tracker.clear();
-    if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
-        let _ = overlay::emit_update(&app, update);
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(33)).await;
-
     let (located, locate_trace) = execute_step(
         &app,
         &steps[0],
@@ -1583,6 +1606,7 @@ async fn send_correction(
         &state.last_overlay,
         ai_bbox,
         new_capture_rect,
+        pre_ocr,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1633,15 +1657,21 @@ async fn restore_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(
         Some(l) => l,
         None => return Ok(()),
     };
-    let update = overlay::make_update_with_ai_bbox(last.kind, last.bbox, last.text.clone(), last.ai_bbox)
-        .map_err(|e| e.to_string())?;
+    let update =
+        overlay::make_update_with_ai_bbox(last.kind, last.bbox, last.text.clone(), last.ai_bbox)
+            .map_err(|e| e.to_string())?;
     overlay::emit_update(&app, update).map_err(|e| e.to_string())?;
     // Re-arm the tracker — clear_overlay stopped it, so without this the pointer would
     // no longer follow the window or auto-hide/redraw with the target's visibility.
     if let Some(b) = last.bbox {
-        state
-            .tracker
-            .start(&b, last.kind, last.text, app.clone(), last.target_hwnd, true);
+        state.tracker.start(
+            &b,
+            last.kind,
+            last.text,
+            app.clone(),
+            last.target_hwnd,
+            true,
+        );
     }
     Ok(())
 }
@@ -1827,7 +1857,7 @@ async fn locate_element(
             debug_ocr_image_path: None,
         };
         let (result, _trace) =
-            tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts))
+            tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts, None))
                 .await
                 .map_err(|e| format!("task join: {e}"))?
                 .map_err(|e| e.to_string())?;
@@ -1961,10 +1991,16 @@ async fn get_usage(state: State<'_, AppState>) -> Result<UsagePayload, String> {
                 monthly_in: u.monthly_in,
                 monthly_out: u.monthly_out,
                 daily_cost: crate::ai::pricing::estimate_cost(
-                    provider, model, u.daily_in, u.daily_out,
+                    provider,
+                    model,
+                    u.daily_in,
+                    u.daily_out,
                 ),
                 monthly_cost: crate::ai::pricing::estimate_cost(
-                    provider, model, u.monthly_in, u.monthly_out,
+                    provider,
+                    model,
+                    u.monthly_in,
+                    u.monthly_out,
                 ),
                 free: provider == "ollama",
             }

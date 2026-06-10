@@ -187,7 +187,11 @@ pub fn recapture_window_raw(
             .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
         let rect = win::pid_union_rect_raw(hwnd_raw).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
-        win::blank_outside_rects(&mut img, &rect, &win::pid_visible_keep_rects_raw(hwnd_raw, &rect));
+        win::blank_outside_rects(
+            &mut img,
+            &rect,
+            &win::pid_visible_keep_rects_raw(hwnd_raw, &rect),
+        );
         win::blank_rects(&mut img, &rect, exclude);
         Ok((img, rect))
     }
@@ -216,7 +220,11 @@ pub fn recapture_window_jpeg(
             .ok_or_else(|| anyhow!("stored window is no longer valid (closed or minimised)"))?;
         let rect = win::pid_union_rect_raw(hwnd_raw).unwrap_or(frame_rect);
         let mut img = win::capture_desktop_region(&rect)?;
-        win::blank_outside_rects(&mut img, &rect, &win::pid_visible_keep_rects_raw(hwnd_raw, &rect));
+        win::blank_outside_rects(
+            &mut img,
+            &rect,
+            &win::pid_visible_keep_rects_raw(hwnd_raw, &rect),
+        );
         win::blank_rects(&mut img, &rect, exclude);
         let buf = encode_jpeg(&cap_size(img), quality)?;
         Ok((buf, rect))

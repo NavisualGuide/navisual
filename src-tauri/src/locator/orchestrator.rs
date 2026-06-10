@@ -46,6 +46,7 @@ pub struct LocateOptions {
 pub fn locate(
     target_text: &str,
     opts: &LocateOptions,
+    pre_ocr: Option<(&[u8], Rect)>,
 ) -> Result<(Option<LocateResult>, LocateTrace)> {
     let started = Instant::now();
     let mut trace = LocateTrace::new(target_text);
@@ -81,31 +82,24 @@ pub fn locate(
     // A1: Capture at native resolution (no cap_size, no JPEG encode) so OCR
     //     sees clean pixels instead of the downscaled+compressed AI image.
     let ocr_started = Instant::now();
-    let exclude = capture::get_panel_rects();
 
-    // Prefer the pinned HWND (the one the AI saw) so a focus change between
-    // AI capture and locate can't send us to the wrong window. Falls through
-    // to GetForegroundWindow if no HWND is pinned or the window is gone.
-    let pinned_capture = opts
-        .target_hwnd
-        .and_then(|h| capture::recapture_window_raw(h, &exclude).ok());
-
-    let (ocr_bytes, crop_rect, img_w, img_h) = match pinned_capture {
-        Some((raw_img, rect)) => {
-            let (iw, ih) = (raw_img.width(), raw_img.height());
-            match capture::encode_png_for_ocr(&raw_img) {
-                Ok(bytes) => (bytes, rect, iw, ih),
-                Err(e) => {
-                    trace.final_decision = FinalDecision::Error {
-                        message: e.to_string(),
-                    };
-                    trace.elapsed_ms = started.elapsed().as_millis() as u32;
-                    return Ok((None, trace));
-                }
-            }
-        }
-        None => match capture::capture_active_window_raw(&exclude) {
-            Ok((raw_img, rect, _hwnd)) => {
+    // Prefer a pre-captured OCR image (taken at AI-capture time, overlay cleared, BEFORE the
+    // streamed subtitle appeared) so OCR never reads our own caption — and there's no clear/
+    // redraw flicker. Fall back to a fresh re-capture when none was supplied (e.g. next_step).
+    let (ocr_bytes, crop_rect, img_w, img_h) = if let Some((png, rect)) = pre_ocr {
+        let (iw, ih) = image::load_from_memory(png)
+            .map(|i| (i.width(), i.height()))
+            .unwrap_or((0, 0));
+        (png.to_vec(), rect, iw, ih)
+    } else {
+        let exclude = capture::get_panel_rects();
+        // Prefer the pinned HWND (the one the AI saw) so a focus change between AI capture and
+        // locate can't send us to the wrong window. Falls through to GetForegroundWindow.
+        let pinned_capture = opts
+            .target_hwnd
+            .and_then(|h| capture::recapture_window_raw(h, &exclude).ok());
+        match pinned_capture {
+            Some((raw_img, rect)) => {
                 let (iw, ih) = (raw_img.width(), raw_img.height());
                 match capture::encode_png_for_ocr(&raw_img) {
                     Ok(bytes) => (bytes, rect, iw, ih),
@@ -118,34 +112,49 @@ pub fn locate(
                     }
                 }
             }
-            Err(_) => {
-                // Fallback: primary monitor via JPEG (panel is foreground or no app found).
-                let jpeg = match capture::capture_primary_monitor_jpeg(80) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        trace.final_decision = FinalDecision::Error {
-                            message: e.to_string(),
-                        };
-                        trace.elapsed_ms = started.elapsed().as_millis() as u32;
-                        return Ok((None, trace));
+            None => match capture::capture_active_window_raw(&exclude) {
+                Ok((raw_img, rect, _hwnd)) => {
+                    let (iw, ih) = (raw_img.width(), raw_img.height());
+                    match capture::encode_png_for_ocr(&raw_img) {
+                        Ok(bytes) => (bytes, rect, iw, ih),
+                        Err(e) => {
+                            trace.final_decision = FinalDecision::Error {
+                                message: e.to_string(),
+                            };
+                            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                            return Ok((None, trace));
+                        }
                     }
-                };
-                let (iw, ih) = image::load_from_memory(&jpeg)
-                    .map(|img| (img.width(), img.height()))
-                    .unwrap_or((0, 0));
-                (
-                    jpeg,
-                    Rect {
-                        x: 0,
-                        y: 0,
-                        width: 0,
-                        height: 0,
-                    },
-                    iw,
-                    ih,
-                )
-            }
-        },
+                }
+                Err(_) => {
+                    // Fallback: primary monitor via JPEG (panel is foreground or no app found).
+                    let jpeg = match capture::capture_primary_monitor_jpeg(80) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            trace.final_decision = FinalDecision::Error {
+                                message: e.to_string(),
+                            };
+                            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                            return Ok((None, trace));
+                        }
+                    };
+                    let (iw, ih) = image::load_from_memory(&jpeg)
+                        .map(|img| (img.width(), img.height()))
+                        .unwrap_or((0, 0));
+                    (
+                        jpeg,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            width: 0,
+                            height: 0,
+                        },
+                        iw,
+                        ih,
+                    )
+                }
+            },
+        }
     };
 
     // When debug screenshots are enabled, save the exact PNG sent to OCR so it

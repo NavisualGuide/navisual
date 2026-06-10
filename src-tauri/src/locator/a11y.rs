@@ -639,11 +639,9 @@ fn deep_role_match(
     }
     let mut cond = None;
     for &id in role_control_type_ids(role) {
-        let Ok(c) = automation.create_property_condition(
-            UIProperty::ControlType,
-            Variant::from(id),
-            None,
-        ) else {
+        let Ok(c) =
+            automation.create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+        else {
             continue;
         };
         cond = Some(match cond.take() {
