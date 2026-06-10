@@ -485,6 +485,17 @@ pub fn find_element(
                     desired_ct,
                     deadline,
                 ));
+                // Fallback: deeply-nested items the depth-12 walk misses (e.g. VLC's Qt menu
+                // items far down the tree) — the cached native deep find reaches them.
+                if candidates.is_empty() {
+                    candidates.extend(deep_role_match(
+                        &automation,
+                        root,
+                        target_text,
+                        opts.role.as_deref(),
+                    ));
+                    trace.cached = true;
+                }
             }
         }
         if !candidates.is_empty() {

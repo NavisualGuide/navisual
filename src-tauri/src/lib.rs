@@ -1125,6 +1125,14 @@ async fn guide(
         }
     }
 
+    // Clear the streamed subtitle before the locate's OCR capture — otherwise OCR reads our
+    // own caption (it shows the instruction, which contains the target text) and matches it.
+    state.tracker.clear();
+    if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
+        let _ = overlay::emit_update(&app, update);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(33)).await;
+
     let (located, locate_trace) = execute_step(
         &app,
         &steps[0],
@@ -1558,6 +1566,13 @@ async fn send_correction(
             let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
         }
     }
+
+    // Clear the streamed subtitle before the locate's OCR capture (see guide()).
+    state.tracker.clear();
+    if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
+        let _ = overlay::emit_update(&app, update);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     let (located, locate_trace) = execute_step(
         &app,
