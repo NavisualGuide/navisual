@@ -22,7 +22,8 @@ use regex::Regex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uiautomation::controls::ControlType;
-use uiautomation::types::TreeScope;
+use uiautomation::types::{TreeScope, UIProperty};
+use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -349,14 +350,7 @@ pub fn find_element(
         .target_hwnd
         .map(window_class_is_chromium)
         .unwrap_or(false);
-    // Chromium/Electron trees are deep and the primed build is large, so give the search a
-    // bigger budget to actually REACH deeply-nested items (e.g. VS Code's activity bar).
-    let eff_timeout = if is_chromium {
-        timeout_ms.max(1200)
-    } else {
-        timeout_ms
-    };
-    let per_root_ms = ((eff_timeout / search_roots.len() as u64).max(250)).min(eff_timeout);
+    let per_root_ms = ((timeout_ms / search_roots.len() as u64).max(250)).min(timeout_ms);
 
     let mut candidates: Vec<LocateResult> = Vec::new();
     // Up to two attempts: Chromium/Electron apps build their UIA tree lazily, so the
@@ -371,7 +365,7 @@ pub fn find_element(
             trace.retried = true;
         }
         candidates.clear();
-        let deadline = Instant::now() + Duration::from_millis(eff_timeout);
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         for root in &search_roots {
             if Instant::now() > deadline {
                 trace.timed_out = true;
@@ -411,12 +405,17 @@ pub fn find_element(
                 desired_ct,
                 deadline,
             ));
-            // Pass 4 (Chromium): reach deeply-nested items (VS Code activity bar etc.) the
-            // shallower passes miss, with a substring match so a name carrying a trailing
-            // shortcut ("Extensions (Ctrl+Shift+X)") still matches. The primed tree makes
-            // this a query against cached a11y, not a rebuild.
+            // Pass 4 (Chromium): reach deeply-nested items (VS Code activity bar, search
+            // boxes, …) the shallower passes miss. Uses a NATIVE UIA control-type condition
+            // (find_all evaluates it in-process), so it's fast on huge Electron trees and the
+            // role decides which control types to consider (clickable vs text/edit).
             if is_chromium && candidates.is_empty() {
-                candidates.extend(deep_substring_match(&automation, root, target_text, deadline));
+                candidates.extend(deep_role_match(
+                    &automation,
+                    root,
+                    target_text,
+                    opts.role.as_deref(),
+                ));
             }
         }
         if !candidates.is_empty() {
@@ -541,60 +540,76 @@ fn match_in_subtree_all(
     }
 }
 
-/// Deep substring matcher for Chromium/Electron windows: reaches far-down items (e.g. VS
-/// Code's activity bar) that the standard passes don't, and matches names carrying trailing
-/// text. UIA-native traversal against the already-built (primed) tree, bounded by the
-/// remaining A11y deadline.
-fn deep_substring_match(
+/// Deep, role-aware matcher for Chromium/Electron windows: finds far-down items (VS Code's
+/// activity bar, search boxes, …) that the standard passes miss. Uses a **native** UIA
+/// control-type OR-condition so `find_all` filters *in-process* — only the few matching
+/// elements cross the COM boundary, instead of a per-element round-trip over the whole tree
+/// (which made the manual approach take seconds). Restricts to the control types appropriate
+/// for the AI's role (a "button" target ignores bulk Text content; a "textbox" target keeps
+/// Edit/Text), then substring-matches the name (so "Extensions (Ctrl+Shift+X)" matches).
+fn deep_role_match(
     automation: &UIAutomation,
     root: &UIElement,
     target: &str,
-    deadline: Instant,
+    role: Option<&str>,
 ) -> Vec<LocateResult> {
-    let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
-    if remaining < 80 {
-        return Vec::new();
-    }
     let needle = norm_dashes(&target.to_ascii_lowercase());
     if needle.chars().count() < 2 {
         return Vec::new();
     }
-    let matcher = automation
-        .create_matcher()
-        .from_ref(root)
-        .depth(40)
-        .timeout(remaining.min(1000))
-        .filter_fn(Box::new(move |el: &UIElement| {
-            // Interactive controls only. Check the (cheap, integer) control type FIRST and
-            // skip the ~99% of the tree that is Text/Document/Group content WITHOUT fetching
-            // its name — this removes content false-candidates (so the real clickable item
-            // wins the AI-bbox sort) AND avoids the expensive per-element get_name on most of
-            // the tree, cutting the deep-traversal cost.
-            if !matches!(
-                el.get_control_type(),
-                Ok(ControlType::Button
-                    | ControlType::TabItem
-                    | ControlType::ListItem
-                    | ControlType::MenuItem
-                    | ControlType::Hyperlink
-                    | ControlType::CheckBox
-                    | ControlType::RadioButton
-                    | ControlType::ComboBox
-                    | ControlType::SplitButton
-                    | ControlType::TreeItem)
-            ) {
-                return Ok(false);
-            }
-            let name = el.get_name().unwrap_or_default();
-            if name.is_empty() {
-                return Ok(false);
-            }
-            Ok(norm_dashes(&name.to_ascii_lowercase()).contains(&needle))
-        }));
-    matcher
-        .find_all()
-        .map(|els| els.into_iter().filter_map(|e| element_to_result(&e)).collect())
-        .unwrap_or_default()
+    let mut cond = None;
+    for &id in role_control_type_ids(role) {
+        let Ok(c) = automation.create_property_condition(
+            UIProperty::ControlType,
+            Variant::from(id),
+            None,
+        ) else {
+            continue;
+        };
+        cond = Some(match cond.take() {
+            None => c,
+            Some(prev) => match automation.create_or_condition(prev, c) {
+                Ok(o) => o,
+                Err(_) => return Vec::new(),
+            },
+        });
+    }
+    let Some(cond) = cond else {
+        return Vec::new();
+    };
+    let els = match root.find_all(TreeScope::Descendants, &cond) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    els.into_iter()
+        .filter(|el| {
+            el.get_name()
+                .map(|n| norm_dashes(&n.to_ascii_lowercase()).contains(&needle))
+                .unwrap_or(false)
+        })
+        .filter_map(|el| element_to_result(&el))
+        .collect()
+}
+
+/// UIA `UIA_*ControlTypeId` values to consider in the deep Chromium pass, by AI role family.
+/// Clickable roles exclude bulk Text/Edit content; "textbox" keeps it; unknown is broad.
+fn role_control_type_ids(role: Option<&str>) -> &'static [i32] {
+    // Button 50000, CheckBox 50002, ComboBox 50003, Edit 50004, Hyperlink 50005,
+    // ListItem 50007, MenuItem 50011, RadioButton 50013, TabItem 50019, Text 50020,
+    // TreeItem 50024, SplitButton 50031.
+    const CLICKABLE: &[i32] = &[
+        50000, 50019, 50007, 50011, 50005, 50002, 50013, 50003, 50031, 50024,
+    ];
+    const TEXTUAL: &[i32] = &[50004, 50020, 50003];
+    const BROAD: &[i32] = &[
+        50000, 50019, 50007, 50011, 50005, 50002, 50013, 50003, 50031, 50024, 50004, 50020,
+    ];
+    match role.map(|r| r.to_ascii_lowercase()).as_deref() {
+        Some("textbox") | Some("searchbox") | Some("combobox") => TEXTUAL,
+        Some("button") | Some("tab") | Some("menuitem") | Some("checkbox") | Some("radio")
+        | Some("link") | Some("listitem") | Some("treeitem") => CLICKABLE,
+        _ => BROAD,
+    }
 }
 
 fn manual_walk_all(
