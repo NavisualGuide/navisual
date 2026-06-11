@@ -111,3 +111,91 @@ pub fn ai_bbox_to_screen_rect(
         height: screen_h.round().max(1.0) as u32,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capture(x: i32, y: i32, w: u32, h: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn normalized_1000_converts_and_undownscales() {
+        // AI image 1000×500, capture rect 2000×1000 → scale ×2 each axis.
+        let r = ai_bbox_to_screen_rect(
+            [100.0, 200.0, 300.0, 400.0],
+            BboxFormat::Normalized1000,
+            1000,
+            500,
+            capture(0, 0, 2000, 1000),
+        )
+        .unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (400, 100, 400, 200));
+    }
+
+    #[test]
+    fn zero_to_one_normalized_is_autodetected() {
+        // [0.1, 0.2, 0.3, 0.4] must land identically to [100, 200, 300, 400].
+        let a = ai_bbox_to_screen_rect(
+            [0.1, 0.2, 0.3, 0.4],
+            BboxFormat::Normalized1000,
+            1000,
+            500,
+            capture(0, 0, 2000, 1000),
+        )
+        .unwrap();
+        assert_eq!((a.x, a.y, a.width, a.height), (400, 100, 400, 200));
+    }
+
+    #[test]
+    fn capture_origin_offset_is_applied() {
+        let r = ai_bbox_to_screen_rect(
+            [0.0, 0.0, 1000.0, 1000.0],
+            BboxFormat::Normalized1000,
+            1000,
+            500,
+            capture(-1920, 50, 1000, 500), // left-secondary monitor
+        )
+        .unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (-1920, 50, 1000, 500));
+    }
+
+    #[test]
+    fn overshoot_is_clamped_to_image() {
+        let r = ai_bbox_to_screen_rect(
+            [0.0, 0.0, 2000.0, 2000.0],
+            BboxFormat::Normalized1000,
+            1000,
+            500,
+            capture(0, 0, 2000, 1000),
+        )
+        .unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 2000, 1000));
+    }
+
+    #[test]
+    fn bogus_boxes_return_none() {
+        let cap = capture(0, 0, 2000, 1000);
+        // Inverted extent.
+        assert!(
+            ai_bbox_to_screen_rect([300.0, 400.0, 100.0, 200.0], BboxFormat::Normalized1000, 1000, 500, cap)
+                .is_none()
+        );
+        // NaN.
+        assert!(
+            ai_bbox_to_screen_rect([f64::NAN, 0.0, 10.0, 10.0], BboxFormat::Normalized1000, 1000, 500, cap)
+                .is_none()
+        );
+        // Degenerate AI image.
+        assert!(
+            ai_bbox_to_screen_rect([0.0, 0.0, 10.0, 10.0], BboxFormat::Normalized1000, 0, 0, cap)
+                .is_none()
+        );
+    }
+}

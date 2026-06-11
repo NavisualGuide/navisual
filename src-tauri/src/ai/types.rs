@@ -185,3 +185,72 @@ pub struct Message {
     pub role: Role,
     pub content: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(json: &str) -> GuidanceStep {
+        serde_json::from_str(json).expect("GuidanceStep must deserialize")
+    }
+
+    #[test]
+    fn minimal_step_gets_defaults() {
+        let s = step(r#"{"instruction": "Click the button"}"#);
+        assert!(s.checkpoint, "checkpoint defaults to true");
+        assert!(matches!(s.overlay_type, OverlayType::Arrow));
+        assert!(s.target_text.is_none());
+        assert!(s.target_bbox.is_none());
+    }
+
+    #[test]
+    fn invented_overlay_type_falls_back_to_arrow() {
+        // A model inventing "pointer" must not fail the whole response parse.
+        let s = step(r#"{"instruction": "x", "overlay_type": "pointer"}"#);
+        assert!(matches!(s.overlay_type, OverlayType::Arrow));
+    }
+
+    #[test]
+    fn empty_or_invalid_role_becomes_none() {
+        let s = step(r#"{"instruction": "x", "target_role": ""}"#);
+        assert!(s.target_role.is_none());
+        let s = step(r#"{"instruction": "x", "target_role": "button-like-thing"}"#);
+        assert!(s.target_role.is_none());
+        let s = step(r#"{"instruction": "x", "target_role": "button"}"#);
+        assert!(matches!(s.target_role, Some(TargetRole::Button)));
+    }
+
+    #[test]
+    fn bbox_accepts_canonical_and_polygon_forms() {
+        let s = step(r#"{"instruction": "x", "target_bbox": [80, 450, 110, 550]}"#);
+        assert_eq!(s.target_bbox, Some([80.0, 450.0, 110.0, 550.0]));
+
+        // GPT-style 4-corner polygon → normalized to its bounding box.
+        let s = step(
+            r#"{"instruction": "x", "target_bbox": [[80, 450], [80, 550], [110, 450], [110, 550]]}"#,
+        );
+        assert_eq!(s.target_bbox, Some([80.0, 450.0, 110.0, 550.0]));
+    }
+
+    #[test]
+    fn malformed_bbox_becomes_none_not_error() {
+        for bad in [
+            r#"{"instruction": "x", "target_bbox": "top left"}"#,
+            r#"{"instruction": "x", "target_bbox": [1, 2, 3]}"#,
+            r#"{"instruction": "x", "target_bbox": null}"#,
+        ] {
+            let s = step(bad);
+            assert!(s.target_bbox.is_none(), "should be None for: {bad}");
+        }
+    }
+
+    #[test]
+    fn response_optional_fields_default() {
+        let r: NavigateStepResponse =
+            serde_json::from_str(r#"{"steps": [{"instruction": "x"}]}"#).unwrap();
+        assert_eq!(r.steps.len(), 1);
+        assert_eq!(r.state_summary, "");
+        assert!(!r.needs_input);
+        assert!(!r.request_full_screen);
+    }
+}

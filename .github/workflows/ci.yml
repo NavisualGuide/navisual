@@ -55,6 +55,10 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-features -- -D warnings
 
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --lib --all-features
+
   # ── Signed release build on semver tag ───────────────────────────────────────
   release:
     name: Release

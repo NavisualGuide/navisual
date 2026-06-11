@@ -701,3 +701,170 @@ fn sequence_ratio(a: &str, b: &str) -> f32 {
     let lcs = prev[lb] as f32;
     2.0 * lcs / (la + lb) as f32
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn word(text: &str, bbox: (i32, i32, u32, u32)) -> OcrResult {
+        OcrResult {
+            text: text.to_string(),
+            bbox,
+            confidence: 0.9,
+        }
+    }
+
+    fn line(text: &str, bbox: (i32, i32, u32, u32)) -> OcrResult {
+        OcrResult {
+            text: text.to_string(),
+            bbox,
+            confidence: 1.0, // line-level results carry confidence 1.0
+        }
+    }
+
+    fn opts(screen: (u32, u32)) -> FindOptions<'static> {
+        FindOptions {
+            screen_width: screen.0,
+            screen_height: screen.1,
+            ..Default::default()
+        }
+    }
+
+    // --- sequence_ratio -------------------------------------------------
+
+    #[test]
+    fn sequence_ratio_basics() {
+        assert_eq!(sequence_ratio("save", "save"), 1.0);
+        assert_eq!(sequence_ratio("", ""), 1.0);
+        assert_eq!(sequence_ratio("save", ""), 0.0);
+        // The historic "Status" ↔ "Startup" false match must stay below the
+        // 0.85 tier-1 threshold (LCS "statu" = 5 → 10/13 ≈ 0.77).
+        assert!(sequence_ratio("status", "startup") < 0.85);
+    }
+
+    // --- find_text cascade ----------------------------------------------
+
+    #[test]
+    fn exact_match_wins_over_substring() {
+        let results = vec![
+            word("Save", (10, 10, 40, 20)),
+            word("Save As Document", (100, 100, 200, 20)),
+        ];
+        let out = find_text("Save", &results, &opts((1000, 600)));
+        assert_eq!(out.strategy_used.as_deref(), Some("exact"));
+        assert_eq!(out.winner.unwrap().text, "Save");
+    }
+
+    #[test]
+    fn word_boundary_rejects_glued_text() {
+        // "Insert" must not match "InsertedText" (no word boundary), and the
+        // fuzzy score (≈0.67) stays below the 0.70 floor.
+        let results = vec![word("InsertedText", (10, 10, 80, 20))];
+        let out = find_text("Insert", &results, &opts((1000, 600)));
+        assert!(out.winner.is_none());
+    }
+
+    #[test]
+    fn word_boundary_matches_target_inside_line() {
+        let results = vec![word("Message (Ctrl+Enter)", (10, 10, 120, 20))];
+        let out = find_text("Message", &results, &opts((1000, 600)));
+        assert_eq!(out.strategy_used.as_deref(), Some("substring"));
+        assert!(out.winner.is_some());
+    }
+
+    #[test]
+    fn word_count_guard_blocks_partial_token() {
+        // A lone "GPU" token must not match the multi-word target "GPU 0":
+        // substring direction A is blocked by the word-count guard and the
+        // fuzzy length guard zeroes the score.
+        let results = vec![word("GPU", (10, 10, 30, 15))];
+        let out = find_text("GPU 0", &results, &opts((1000, 600)));
+        assert!(out.winner.is_none());
+    }
+
+    #[test]
+    fn fuzzy_tier1_catches_ocr_misread() {
+        // "Perfonmance" misread: LCS 10 of 11 → ratio ≈ 0.91 ≥ 0.85 (tier 1).
+        let results = vec![word("Perfonmance", (10, 10, 90, 18))];
+        let out = find_text("Performance", &results, &opts((1000, 600)));
+        assert_eq!(out.strategy_used.as_deref(), Some("fuzzy-t1"));
+        assert!(out.winner.is_some());
+    }
+
+    #[test]
+    fn truncated_target_matches_full_line() {
+        // Model copied a clipped "…" label; the de-truncated core must
+        // whole-word match the full on-screen text.
+        let results = vec![word("Sum of Output USD per 1M tokens", (5, 5, 300, 20))];
+        let out = find_text("Sum of Output USD per…", &results, &opts((1000, 600)));
+        assert_eq!(out.strategy_used.as_deref(), Some("substring"));
+        assert!(out.winner.is_some());
+    }
+
+    #[test]
+    fn nearby_text_anchor_disambiguates_duplicates() {
+        // Two identical "Reply" labels; the anchor "Inbox" sits next to the
+        // second — the anchored pick must choose it.
+        let results = vec![
+            word("Reply", (10, 10, 50, 20)),
+            word("Reply", (500, 300, 50, 20)),
+            word("Inbox", (470, 300, 40, 20)),
+        ];
+        let o = FindOptions {
+            nearby_text: Some("Inbox"),
+            ..opts((1000, 600))
+        };
+        let out = find_text("Reply", &results, &o);
+        assert_eq!(out.winner.unwrap().bbox.0, 500);
+    }
+
+    #[test]
+    fn ai_bbox_miss_falls_back_to_full_pool() {
+        // The AI bbox filter keeps only "Cancel" (near the predicted spot);
+        // nothing there matches "OK", so the nb- retry on the full pool must
+        // find the real "OK" elsewhere on screen.
+        let results = vec![
+            word("Cancel", (905, 505, 40, 10)),
+            word("OK", (10, 10, 20, 10)),
+        ];
+        let o = FindOptions {
+            ai_bbox: Some((900, 500, 50, 20)),
+            ..opts((1000, 600))
+        };
+        let out = find_text("OK", &results, &o);
+        assert_eq!(out.strategy_used.as_deref(), Some("nb-exact"));
+        assert_eq!(out.winner.unwrap().text, "OK");
+    }
+
+    // --- corroboration helpers -------------------------------------------
+
+    #[test]
+    fn isolation_low_inside_long_content_line() {
+        // "status" embedded in a long terminal line → low isolation ratio.
+        let containing = line("git status shows your working tree", (0, 0, 400, 20));
+        let target_word = word("status", (50, 0, 60, 20));
+        let results = vec![containing, target_word.clone()];
+        let (ratio, line_len) = isolation_for(&target_word.bbox, "status", &results);
+        assert!(ratio < 0.3, "ratio {ratio} should be low for content text");
+        assert!(line_len > 30);
+    }
+
+    #[test]
+    fn isolation_full_when_no_containing_line() {
+        let target_word = word("Save", (50, 0, 40, 20));
+        let results = vec![target_word.clone()];
+        let (ratio, _) = isolation_for(&target_word.bbox, "Save", &results);
+        assert_eq!(ratio, 1.0);
+    }
+
+    #[test]
+    fn anchor_near_respects_distance_threshold() {
+        let winner = (100, 100, 50, 20);
+        let near = vec![word("Run", (130, 100, 30, 20))];
+        let far = vec![word("Run", (900, 560, 30, 20))];
+        assert!(anchor_near(&winner, "Run", &near, 1000, 600));
+        assert!(!anchor_near(&winner, "Run", &far, 1000, 600));
+        // Single-character anchors are ignored entirely.
+        assert!(!anchor_near(&winner, "R", &near, 1000, 600));
+    }
+}

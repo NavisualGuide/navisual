@@ -55,3 +55,44 @@ pub struct LocateResult {
     /// 1.0 for A11y hits, < 1.0 for OCR (later).
     pub confidence: f32,
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::strip_trailing_ellipsis;
+
+    #[test]
+    fn long_core_becomes_prefix() {
+        assert_eq!(
+            strip_trailing_ellipsis("Sum of Output USD per…"),
+            ("Sum of Output USD per".to_string(), true)
+        );
+        assert_eq!(
+            strip_trailing_ellipsis("Looooong..."),
+            ("Looooong".to_string(), true)
+        );
+        // Trailing whitespace before the ellipsis is tolerated.
+        assert_eq!(
+            strip_trailing_ellipsis("Foo bartext… "),
+            ("Foo bartext".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn short_core_strips_but_never_prefixes() {
+        // A short clip like "Re…" must not become a prefix that matches half
+        // the screen — ellipsis is stripped, prefix flag stays false.
+        assert_eq!(strip_trailing_ellipsis("Re…"), ("Re".to_string(), false));
+        assert_eq!(
+            strip_trailing_ellipsis("Save..."),
+            ("Save".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn plain_labels_pass_through() {
+        assert_eq!(
+            strip_trailing_ellipsis("Playback"),
+            ("Playback".to_string(), false)
+        );
+    }
+}

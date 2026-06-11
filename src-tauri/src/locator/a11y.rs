@@ -850,3 +850,50 @@ fn walk_recursive(
 // Silence unused-import warnings on non-windows targets (module is cfg-gated).
 #[allow(dead_code)]
 fn _scope_hint(_: TreeScope) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_name_regex, norm_dashes, strip_accelerator};
+
+    #[test]
+    fn accelerator_suffix_is_stripped() {
+        assert_eq!(strip_accelerator("Playback Alt+I"), "Playback");
+        assert_eq!(strip_accelerator("Media Alt+M"), "Media");
+        assert_eq!(strip_accelerator("Save\tCtrl+S"), "Save");
+        assert_eq!(strip_accelerator("Zoom In Ctrl++"), "Zoom In");
+        assert_eq!(strip_accelerator("文件(&F)"), "文件");
+    }
+
+    #[test]
+    fn ordinary_labels_are_never_truncated() {
+        // "Alt" as a word without "+key" must not trigger the strip.
+        assert_eq!(strip_accelerator("Alt text label"), "Alt text label");
+        assert_eq!(strip_accelerator("Cut"), "Cut");
+        assert_eq!(strip_accelerator("Control Panel"), "Control Panel");
+    }
+
+    #[test]
+    fn anchored_regex_rejects_partial_label() {
+        let re = build_name_regex("insert").unwrap();
+        assert!(re.is_match("Insert"));
+        assert!(re.is_match("← Insert")); // leading non-word chars allowed
+        assert!(!re.is_match("Insert Space")); // extra word → reject
+        assert!(!re.is_match("InsertedText"));
+    }
+
+    #[test]
+    fn truncated_target_becomes_prefix_match() {
+        // Model copied a clipped "…" label; UIA names are never truncated,
+        // so the core must prefix-match the full accessible name.
+        let re = build_name_regex("Sum of Output USD per…").unwrap();
+        assert!(re.is_match("Sum of Output USD per 1M tokens"));
+        assert!(!re.is_match("Total Output"));
+    }
+
+    #[test]
+    fn unicode_dashes_normalise_to_ascii() {
+        assert_eq!(norm_dashes("a\u{2014}b"), "a-b"); // em dash
+        assert_eq!(norm_dashes("a\u{2013}b"), "a-b"); // en dash
+        assert_eq!(norm_dashes("a-b"), "a-b");
+    }
+}

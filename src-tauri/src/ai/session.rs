@@ -146,3 +146,55 @@ impl SessionManager {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversation_for_api_keeps_last_n_turns() {
+        let mut s = Session::new("task".into());
+        for i in 0..12 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            s.add_turn(role, format!("turn {i}"), None);
+        }
+        let msgs = s.get_conversation_for_api(10);
+        assert_eq!(msgs.len(), 10);
+        // Oldest two turns trimmed — window starts at turn 2.
+        assert_eq!(msgs[0].content, "turn 2");
+        assert_eq!(msgs.last().unwrap().content, "turn 11");
+    }
+
+    #[test]
+    fn correction_turns_map_to_user_role() {
+        let mut s = Session::new("task".into());
+        s.add_turn("user", "do the thing".into(), None);
+        s.add_turn("assistant", "click X".into(), None);
+        s.add_turn("correction", "that was wrong".into(), None);
+        let msgs = s.get_conversation_for_api(10);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[1].role, Role::Assistant);
+        // Corrections are presented to the provider as user messages.
+        assert_eq!(msgs[2].role, Role::User);
+    }
+
+    #[test]
+    fn unknown_roles_are_excluded() {
+        let mut s = Session::new("task".into());
+        s.add_turn("user", "hi".into(), None);
+        s.add_turn("system", "internal note".into(), None);
+        assert_eq!(s.get_conversation_for_api(10).len(), 1);
+    }
+
+    #[test]
+    fn history_is_plain_text_only() {
+        // Provider-agnostic invariant: turns store text + an optional hash,
+        // never image data — switching providers mid-session must be safe.
+        let mut s = Session::new("task".into());
+        s.add_turn("assistant", "step 1\nstep 2".into(), Some("...".into()));
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.conversation[0].content, "step 1\nstep 2");
+        assert_eq!(back.conversation[0].screenshot_hash.as_deref(), Some("..."));
+    }
+}
