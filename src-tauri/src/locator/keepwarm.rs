@@ -15,8 +15,9 @@
 #[cfg(windows)]
 mod imp {
     use parking_lot::Mutex;
-    use std::sync::mpsc::{channel, Sender};
+    use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
     use std::sync::OnceLock;
+    use std::time::Duration;
     use uiautomation::events::{
         CustomStructureChangedEventHandlerFn, UIStructureChangeEventHandler,
     };
@@ -29,6 +30,12 @@ mod imp {
     }
 
     static TX: OnceLock<Mutex<Sender<Cmd>>> = OnceLock::new();
+
+    /// Release the subscription after this long with no `warm()` call — i.e. guidance stopped (the
+    /// user switched to another app / went idle). Active guidance refreshes it on every request, so
+    /// this fires only once the user has genuinely moved on; the next guide re-subscribes. This is
+    /// the app-switch cleanup, minus the churn of reacting to every transient focus change.
+    const IDLE_RELEASE: Duration = Duration::from_secs(120);
 
     /// Keep the a11y tree of `hwnd` warm (idempotent; re-targets off the previous window). Cheap —
     /// just sends to the keep-warm thread, which it starts on first use.
@@ -58,9 +65,9 @@ mod imp {
                 };
                 let mut current: Option<(usize, UIElement, UIStructureChangeEventHandler)> = None;
 
-                while let Ok(cmd) = rx.recv() {
-                    match cmd {
-                        Cmd::Warm(hwnd) => {
+                loop {
+                    match rx.recv_timeout(IDLE_RELEASE) {
+                        Ok(Cmd::Warm(hwnd)) => {
                             if current.as_ref().map(|(h, _, _)| *h) == Some(hwnd) {
                                 continue; // already subscribed to this window
                             }
@@ -88,6 +95,14 @@ mod imp {
                                 Err(e) => log::warn!("keepwarm: subscribe {hwnd:#x} failed: {e}"),
                             }
                         }
+                        Err(RecvTimeoutError::Timeout) => {
+                            // Guidance stopped — release so we don't keep an idle app's tree built.
+                            if let Some((hwnd, el, h)) = current.take() {
+                                let _ = automation.remove_structure_changed_event_handler(&el, &h);
+                                log::info!("keepwarm: released {hwnd:#x} (idle)");
+                            }
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
             });
