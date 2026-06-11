@@ -27,8 +27,9 @@ use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowRect,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_HWNDNEXT, GW_OWNER,
+    EnumWindows, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowLongW, GetWindowRect,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, GW_HWNDNEXT, GW_OWNER,
+    WS_POPUP,
 };
 
 /// Chromium/Electron windows build their UIA tree lazily; on a 0-candidate first pass
@@ -309,11 +310,15 @@ fn collect_owned_popups(target: HWND) -> Vec<HWND> {
 
     struct State {
         pid: u32,
+        target: isize,
         hwnds: Vec<HWND>,
     }
 
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
         let state = &mut *(lparam.0 as *mut State);
+        if hwnd.0 as isize == state.target {
+            return TRUE; // the main window is added separately
+        }
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             return TRUE;
         }
@@ -322,12 +327,15 @@ fn collect_owned_popups(target: HWND) -> Vec<HWND> {
         if pid != state.pid {
             return TRUE;
         }
-        // Owned windows only (GW_OWNER non-null) — dialogs/popups, not the
-        // main window itself or unrelated top-level documents.
+        // Two kinds of separate top-level windows the main window's subtree walk can't reach:
+        //  - Owned windows (GW_OWNER non-null) — modal dialogs (OK/Cancel, Find, Save As).
+        //  - WS_POPUP windows — open menus / dropdowns / combo lists. VLC's Qt menu popups are
+        //    WS_POPUP WITHOUT an owner, so the owner check alone missed the open submenu (Speed).
         let owned = GetWindow(hwnd, GW_OWNER)
             .map(|o| !o.0.is_null())
             .unwrap_or(false);
-        if owned {
+        let is_popup = (GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_POPUP.0) != 0;
+        if owned || is_popup {
             state.hwnds.push(hwnd);
         }
         TRUE
@@ -335,6 +343,7 @@ fn collect_owned_popups(target: HWND) -> Vec<HWND> {
 
     let mut state = State {
         pid: target_pid,
+        target: target.0 as isize,
         hwnds: Vec::new(),
     };
     unsafe {
