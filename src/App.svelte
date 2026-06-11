@@ -104,6 +104,7 @@ See the LICENSE file in the root of this repository for complete details.
     retried: boolean;
     framework: string | null;
     cached: boolean;
+    element_count: number | null;
     elapsed_ms: number;
   };
   type Corroboration = {
@@ -1454,6 +1455,7 @@ See the LICENSE file in the root of this repository for complete details.
                     A11y · {locateTrace.a11y.candidates.length} candidate{locateTrace.a11y.candidates.length === 1 ? "" : "s"}
                     {#if locateTrace.a11y.framework} · {locateTrace.a11y.framework.toLowerCase()}{/if}
                     {#if locateTrace.a11y.cached} · cached{/if}
+                    {#if locateTrace.a11y.element_count !== null} · {locateTrace.a11y.element_count} elems{/if}
                     {#if locateTrace.a11y.timed_out} · timed out{/if}
                     {#if locateTrace.a11y.retried} · retried{/if}
                     · {locateTrace.a11y.elapsed_ms} ms

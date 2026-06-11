@@ -465,12 +465,15 @@ pub fn find_element(
                 // COM of the matcher/manual passes is too slow here; a control-type condition +
                 // CacheRequest (batched Name/ControlType/Rect) reaches deep items (activity bar,
                 // search box) fast. `deep_role_match` is now cached.
+                let mut n = 0;
                 candidates.extend(deep_role_match(
                     &automation,
                     root,
                     target_text,
                     opts.role.as_deref(),
+                    &mut n,
                 ));
+                trace.element_count = Some(trace.element_count.unwrap_or(0).max(n));
                 trace.cached = true;
             } else {
                 // Eager-tree frameworks (WPF/WinForms/WinUI/Win32): the standard matcher + manual
@@ -512,12 +515,15 @@ pub fn find_element(
                 // Fallback: deeply-nested items the depth-12 walk misses (e.g. VLC's Qt menu
                 // items far down the tree) — the cached native deep find reaches them.
                 if candidates.is_empty() {
+                    let mut n = 0;
                     candidates.extend(deep_role_match(
                         &automation,
                         root,
                         target_text,
                         opts.role.as_deref(),
+                        &mut n,
                     ));
+                    trace.element_count = Some(trace.element_count.unwrap_or(0).max(n));
                     trace.cached = true;
                 }
             }
@@ -658,6 +664,8 @@ fn deep_role_match(
     root: &UIElement,
     target: &str,
     role: Option<&str>,
+    // Out: count of role-matching UIA elements seen before name-filtering (0 = tree not built).
+    count: &mut usize,
 ) -> Vec<LocateResult> {
     let needle = norm_dashes(&target.to_ascii_lowercase());
     if needle.chars().count() < 2 {
@@ -695,6 +703,7 @@ fn deep_role_match(
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
+    *count = els.len();
     els.into_iter()
         .filter(|el| {
             el.get_cached_name()
