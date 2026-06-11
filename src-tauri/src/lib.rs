@@ -152,22 +152,11 @@ fn compute_ai_bbox_for_step(
     capture_rect: Option<capture::Rect>,
     provider: &str,
 ) -> Option<capture::Rect> {
-    // Diagnostic: surface exactly what the model sent for target_bbox (raw) so a
-    // missing cyan box can be attributed to the model omitting it vs a conversion
-    // drop. Shows up on stdout in `tauri dev` and in the app log file.
-    log::info!(
-        "[ai_bbox] provider={} target_text={:?} raw_target_bbox={:?}",
-        provider,
-        step.target_text,
-        step.target_bbox
-    );
     let raw = step.target_bbox?;
     let rect = capture_rect?;
     let (ai_w, ai_h) = capture::ai_image_dims(rect.width, rect.height);
     let format = ai::bbox::bbox_format_for_provider(provider);
-    let out = ai::bbox::ai_bbox_to_screen_rect(raw, format, ai_w, ai_h, rect);
-    log::info!("[ai_bbox] converted={:?}", out);
-    out
+    ai::bbox::ai_bbox_to_screen_rect(raw, format, ai_w, ai_h, rect)
 }
 
 fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
