@@ -25,11 +25,11 @@ use uiautomation::controls::ControlType;
 use uiautomation::types::{TreeScope, UIProperty};
 use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowLongW, GetWindowRect,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, GW_HWNDNEXT, GW_OWNER,
-    WS_POPUP,
+    EnumChildWindows, EnumWindows, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowLongW,
+    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, GW_HWNDNEXT,
+    GW_OWNER, WS_POPUP,
 };
 
 /// Chromium/Electron windows build their UIA tree lazily; on a 0-candidate first pass
@@ -42,16 +42,46 @@ fn window_class_is_chromium(hwnd_raw: usize) -> bool {
     if hwnd_raw == 0 {
         return false;
     }
+    let hwnd = HWND(hwnd_raw as *mut _);
+    if class_is_chromium(hwnd) {
+        return true;
+    }
+    // WebView2 hybrids (new Outlook "olk", Teams 2.0, Tauri apps) host Chromium
+    // in a CHILD window while the top-level class and UIA FrameworkId both read
+    // as native (Win32/XAML) — so a top-level-only check misroutes them to the
+    // Eager path and they never get primed/kept-warm. Verified on new Outlook:
+    // child classes include Chrome_WidgetWin_0/1.
+    has_chromium_child(hwnd)
+}
+
+fn class_is_chromium(hwnd: HWND) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
     unsafe {
-        let hwnd = HWND(hwnd_raw as *mut _);
         let mut buf = [0u16; 64];
         let n = GetClassNameW(hwnd, &mut buf);
-        if n <= 0 {
-            return false;
-        }
-        String::from_utf16_lossy(&buf[..n as usize]).starts_with("Chrome_WidgetWin")
+        n > 0 && String::from_utf16_lossy(&buf[..n as usize]).starts_with("Chrome_WidgetWin")
     }
+}
+
+fn has_chromium_child(hwnd: HWND) -> bool {
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let found = &mut *(lparam.0 as *mut bool);
+        if class_is_chromium(hwnd) {
+            *found = true;
+            return FALSE; // stop enumeration
+        }
+        TRUE
+    }
+    let mut found = false;
+    unsafe {
+        // EnumChildWindows walks ALL descendants, not just direct children.
+        let _ = EnumChildWindows(
+            Some(hwnd),
+            Some(callback),
+            LPARAM(&mut found as *mut bool as isize),
+        );
+    }
+    found
 }
 
 /// UI framework of the target window, which decides the locate strategy.
@@ -1059,6 +1089,22 @@ mod tests {
         // No suffix → unchanged.
         assert_eq!(strip_paren_suffix("Develop_BasicView"), "Develop_BasicView");
         assert_eq!(strip_paren_suffix("Auto"), "Auto");
+    }
+
+    // Live diagnostic: WebView2-hybrid detection (e.g. new Outlook). Pass the
+    // target window handle as decimal in NAVISUAL_TEST_HWND.
+    // Run: $env:NAVISUAL_TEST_HWND=<hwnd>; cargo test --lib chromium_detection_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn chromium_detection_live() {
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+        assert!(
+            super::window_class_is_chromium(hwnd),
+            "expected a Chromium (child) window to be detected"
+        );
     }
 
     // Live diagnostic against a running Lightroom — not part of CI.
