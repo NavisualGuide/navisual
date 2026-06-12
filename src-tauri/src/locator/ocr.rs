@@ -314,6 +314,11 @@ pub fn find_text<'a>(
     let (target_core, _truncated) = super::strip_trailing_ellipsis(target_text);
     let target_text = target_core.as_str();
     let target_lower = target_text.trim().to_ascii_lowercase();
+    // Punct-stripped + digit-only views of the target, for numeric matching:
+    // slider/spinner values arrive as "+0.17" / "−14" and OCR reads them with
+    // separated signs ("+ 0.17") or as bare fragments ("17").
+    let target_stripped = strip_punct(&target_lower);
+    let target_digits: String = target_lower.chars().filter(|c| c.is_ascii_digit()).collect();
 
     let min_conf = if opts.min_confidence <= 0.0 {
         0.5
@@ -495,7 +500,14 @@ pub fn find_text<'a>(
     let exact: Vec<&OcrResult> = candidates
         .iter()
         .copied()
-        .filter(|r| strip_punct(&r.text).to_ascii_lowercase() == target_lower)
+        .filter(|r| {
+            let rc = strip_punct(&r.text).to_ascii_lowercase();
+            // Compare punct-stripped on BOTH sides: strip_punct removes the
+            // leading "+" from the OCR text ("+ 0.17" → "0.17") but the raw
+            // target keeps it ("+0.17"), so symmetric stripping is required
+            // for exact to ever match signed numbers.
+            rc == target_lower || (!target_stripped.is_empty() && rc == target_stripped)
+        })
         .collect();
     if let Some(winner) = pick_best(&exact) {
         for r in &exact {
@@ -535,6 +547,13 @@ pub fn find_text<'a>(
     let target_word_count = target_lower.split_whitespace().count();
     let target_wb_re =
         regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&target_lower))).ok();
+    // Second word-boundary regex from the punct-stripped target: `\b\+0\.17\b`
+    // can never match (no word boundary before "+"), but `\b0\.17\b` finds the
+    // value inside "Exposure + 0.17".
+    let target_wb_re_stripped = (target_stripped != target_lower
+        && target_stripped.chars().count() >= 2)
+        .then(|| regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&target_stripped))).ok())
+        .flatten();
     let substr: Vec<&OcrResult> = candidates
         .iter()
         .copied()
@@ -542,6 +561,17 @@ pub fn find_text<'a>(
             let rc = strip_punct(&r.text).to_ascii_lowercase();
             if rc.is_empty() {
                 return false;
+            }
+            // Numeric guard: a bare number must carry the target's FULL digit
+            // sequence. "." is a word boundary, so without this "17" whole-word
+            // matches inside "+0.17" and the pointer lands on the wrong slider
+            // value (Lightroom: target "+0.17" matched the Vibrance "+ 17").
+            let rc_is_bare_number = !rc.chars().any(|c| c.is_alphabetic());
+            if rc_is_bare_number {
+                let rc_digits: String = rc.chars().filter(|c| c.is_ascii_digit()).collect();
+                if rc_digits.is_empty() || rc_digits != target_digits {
+                    return false;
+                }
             }
             // Direction A: OCR token as whole word inside target.
             let target_contains_rc = rc.chars().count() >= 2 && {
@@ -552,11 +582,16 @@ pub fn find_text<'a>(
                         .map(|re| re.is_match(&target_lower))
                         .unwrap_or(false)
             };
-            // Direction B: target as whole word inside OCR line.
+            // Direction B: target as whole word inside OCR line (raw or
+            // punct-stripped form).
             let rc_contains_target = target_wb_re
                 .as_ref()
                 .map(|re| re.is_match(&rc))
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || target_wb_re_stripped
+                    .as_ref()
+                    .map(|re| re.is_match(&rc))
+                    .unwrap_or(false);
             target_contains_rc || rc_contains_target
         })
         .collect();
@@ -936,6 +971,44 @@ mod tests {
         };
         let out = find_text("Auto", &results, &o);
         assert_eq!(out.winner.unwrap().bbox.0, 800);
+    }
+
+    #[test]
+    fn signed_decimal_matches_exact_after_symmetric_strip() {
+        // Lightroom slider values: OCR separates the sign ("+ 0.17") while the
+        // AI sends "+0.17". Exact must match via punct-stripped comparison on
+        // BOTH sides, and must beat the wrong row's "+ 17".
+        let results = vec![
+            word("+ 17", (300, 455, 40, 14)), // Vibrance — the historic wrong pick
+            word("17", (310, 455, 20, 14)),
+            word("+ 0.17", (300, 222, 46, 14)), // Exposure — the right one
+            word("Exposure", (100, 222, 60, 14)),
+        ];
+        let out = find_text("+0.17", &results, &opts((1000, 600)));
+        assert_eq!(out.strategy_used.as_deref(), Some("exact"));
+        assert_eq!(out.winner.unwrap().bbox.1, 222);
+    }
+
+    #[test]
+    fn bare_number_fragment_cannot_match_decimal_target() {
+        // "." is a word boundary, so "17" used to whole-word match inside
+        // "+0.17" and the pointer landed on the wrong slider value.
+        let results = vec![
+            word("+ 17", (300, 455, 40, 14)),
+            word("17", (310, 455, 20, 14)),
+        ];
+        let out = find_text("+0.17", &results, &opts((1000, 600)));
+        assert!(out.winner.is_none());
+    }
+
+    #[test]
+    fn stripped_target_matches_inside_line() {
+        // Direction B with the punct-stripped form: `\b\+0\.17\b` can never
+        // match (no word boundary before "+"), but `\b0\.17\b` finds the value
+        // inside the row line.
+        let results = vec![word("Exposure + 0.17", (100, 222, 250, 16))];
+        let out = find_text("+0.17", &results, &opts((1000, 600)));
+        assert_eq!(out.strategy_used.as_deref(), Some("substring"));
     }
 
     #[test]

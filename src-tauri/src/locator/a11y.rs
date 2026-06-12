@@ -545,18 +545,22 @@ pub fn find_element(
         }
     }
 
-    // Last resort — Pane fallback for custom-toolkit apps whose entire tree is
-    // typed Pane (Adobe Lightroom family). Only reached when every pass above
-    // returned zero candidates, so normal apps never pay for it.
-    if candidates.is_empty() {
+    // Last resort — Pane fallback (raw-view walk) for custom-toolkit apps whose
+    // controls only exist in the raw view (Adobe Lightroom family). Only reached
+    // when every pass above returned zero candidates, so normal apps never pay
+    // for it; skipped on Chromium (its raw tree is huge and its controls are
+    // properly typed, so the walk would cost seconds and find nothing new).
+    if candidates.is_empty() && !is_chrome {
         for root in &search_roots {
             let mut n = 0;
             candidates.extend(pane_fallback_match(&automation, root, &name_re, &mut n));
             trace.element_count = Some(trace.element_count.unwrap_or(0).max(n));
+            if !candidates.is_empty() {
+                break; // first root with a hit wins — don't pay for the rest
+            }
         }
         if !candidates.is_empty() {
             trace.pane_fallback = true;
-            trace.cached = true;
         }
     }
 
@@ -768,9 +772,40 @@ fn pane_fallback_match(
     automation: &UIAutomation,
     root: &UIElement,
     name_re: &Regex,
-    // Out: number of Pane elements returned before name/size filtering.
+    // Out: raw-view nodes visited.
     count: &mut usize,
 ) -> Vec<LocateResult> {
+    // Why a RAW-VIEW WALK and not FindAll: Lightroom's real controls are
+    // invisible to COM FindAll/FindAllBuildCache — the find returned 273 panes
+    // while the raw-view walker saw 603 nodes including the slider rows
+    // ('Exposure', 'Vibrance' — verified live 2026-06-12; setting the cache
+    // TreeFilter to a true condition changed nothing). Per-node COM is
+    // affordable here: pane-world trees are small (~600 nodes ≈ 1.5 s), the
+    // pass only runs when everything else returned zero, and a hard time
+    // budget caps the worst case.
+    const BUDGET_MS: u64 = 2500;
+    const MAX_DEPTH: usize = 25;
+
+    let Ok(walker) = automation.get_raw_view_walker() else {
+        return Vec::new();
+    };
+    let deadline = Instant::now() + Duration::from_millis(BUDGET_MS);
+    let mut out = Vec::new();
+    pane_walk(&walker, root, 0, MAX_DEPTH, deadline, name_re, count, &mut out);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pane_walk(
+    walker: &uiautomation::UITreeWalker,
+    el: &UIElement,
+    depth: usize,
+    max_depth: usize,
+    deadline: Instant,
+    name_re: &Regex,
+    count: &mut usize,
+    out: &mut Vec<LocateResult>,
+) {
     // Control-sized caps in physical pixels: tall enough for a 200%-DPI button
     // (~4% of a 2160-px screen ≈ 86), wide enough for a long tab label, and a
     // floor that rejects degenerate slivers. Containers (panels: 266×163,
@@ -778,58 +813,57 @@ fn pane_fallback_match(
     const PANE_MIN: u32 = 6;
     const PANE_MAX_W: u32 = 600;
     const PANE_MAX_H: u32 = 96;
-    const PANE_CONTROL_TYPE_ID: i32 = 50033;
 
-    let Ok(cond) = automation.create_property_condition(
-        UIProperty::ControlType,
-        Variant::from(PANE_CONTROL_TYPE_ID),
-        None,
-    ) else {
-        return Vec::new();
-    };
-    let cache = match automation.create_cache_request() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let _ = cache.add_property(UIProperty::Name);
-    let _ = cache.add_property(UIProperty::ControlType);
-    let _ = cache.add_property(UIProperty::BoundingRectangle);
-    let els = match root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    *count = els.len();
-    els.into_iter()
-        .filter_map(|el| {
-            let name = el.get_cached_name().ok()?;
-            let stripped = strip_paren_suffix(&name);
-            if stripped.is_empty() || !name_re.is_match(&norm_dashes(&stripped)) {
-                return None;
+    if depth > max_depth || Instant::now() > deadline {
+        return;
+    }
+    *count += 1;
+    if let Ok(name) = el.get_name() {
+        let stripped = strip_paren_suffix(&name);
+        if !stripped.is_empty() && name_re.is_match(&norm_dashes(&stripped)) {
+            if let Ok(rect) = el.get_bounding_rectangle() {
+                let left = rect.get_left();
+                let top = rect.get_top();
+                let width = rect.get_width().max(0) as u32;
+                let height = rect.get_height().max(0) as u32;
+                if (PANE_MIN..=PANE_MAX_W).contains(&width)
+                    && (PANE_MIN..=PANE_MAX_H).contains(&height)
+                    && rect_is_onscreen(left, top)
+                {
+                    let role = el
+                        .get_control_type()
+                        .map(|ct| format!("{ct:?}"))
+                        .unwrap_or_else(|_| "Pane".to_string());
+                    out.push(LocateResult {
+                        bbox: Rect {
+                            x: left,
+                            y: top,
+                            width,
+                            height,
+                        },
+                        name,
+                        role,
+                        confidence: 1.0,
+                    });
+                }
             }
-            let rect = el.get_cached_bounding_rectangle().ok()?;
-            let left = rect.get_left();
-            let top = rect.get_top();
-            let width = rect.get_width().max(0) as u32;
-            let height = rect.get_height().max(0) as u32;
-            if !(PANE_MIN..=PANE_MAX_W).contains(&width)
-                || !(PANE_MIN..=PANE_MAX_H).contains(&height)
-                || !rect_is_onscreen(left, top)
-            {
-                return None;
+        }
+    }
+    if let Ok(child) = walker.get_first_child(el) {
+        let mut cur = child;
+        loop {
+            pane_walk(
+                walker, &cur, depth + 1, max_depth, deadline, name_re, count, out,
+            );
+            if Instant::now() > deadline {
+                break;
             }
-            Some(LocateResult {
-                bbox: Rect {
-                    x: left,
-                    y: top,
-                    width,
-                    height,
-                },
-                name,
-                role: "Pane".to_string(),
-                confidence: 1.0,
-            })
-        })
-        .collect()
+            match walker.get_next_sibling(&cur) {
+                Ok(next) => cur = next,
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 /// UIA `UIA_*ControlTypeId` values to consider in the deep Chromium pass, by AI role family.
@@ -1025,6 +1059,34 @@ mod tests {
         // No suffix → unchanged.
         assert_eq!(strip_paren_suffix("Develop_BasicView"), "Develop_BasicView");
         assert_eq!(strip_paren_suffix("Auto"), "Auto");
+    }
+
+    // Live diagnostic against a running Lightroom — not part of CI.
+    // Run: cargo test --lib pane_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn pane_live_lightroom() {
+        use uiautomation::UIAutomation;
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+        let hwnd = unsafe { FindWindowW(w!("AgWinMainFrame"), None) }
+            .expect("Lightroom not running?");
+        let automation = UIAutomation::new().unwrap();
+        let lr = automation.element_from_handle(hwnd.into()).unwrap();
+        let re = build_name_regex("Vibrance").unwrap();
+        let mut n = 0;
+        let started = std::time::Instant::now();
+        let hits = super::pane_fallback_match(&automation, &lr, &re, &mut n);
+        eprintln!(
+            "pane_fallback: {} panes scanned in {} ms, {} matched",
+            n,
+            started.elapsed().as_millis(),
+            hits.len()
+        );
+        for h in &hits {
+            eprintln!("  HIT name='{}' bbox={:?}", h.name, h.bbox);
+        }
+        assert!(!hits.is_empty(), "expected Pane 'Vibrance' to match");
     }
 
     #[test]
