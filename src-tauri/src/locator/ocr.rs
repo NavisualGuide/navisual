@@ -54,6 +54,12 @@ pub fn isolation_for(
 
 /// True when `anchor` text appears in the OCR results within ~1/4 image-diagonal of the
 /// winner — a soft corroborator (the AI's `nearby_text` label sits next to the real target).
+///
+/// The winner itself and any line containing it are excluded: a result that contains the
+/// winner's centre also contains the winner's own text, so "anchoring" on it is the locator
+/// agreeing with itself (observed when a model sets nearby_text equal to target_text — the
+/// wrong "Auto" corroborated itself). A genuinely adjacent anchor word survives because OCR
+/// also emits word-level results, which sit beside — not around — the winner.
 pub fn anchor_near(
     winner_bbox: &(i32, i32, u32, u32),
     anchor: &str,
@@ -65,10 +71,15 @@ pub fn anchor_near(
     if anchor_l.chars().count() < 2 {
         return false;
     }
-    let wcx = winner_bbox.0 as f32 + winner_bbox.2 as f32 / 2.0;
-    let wcy = winner_bbox.1 as f32 + winner_bbox.3 as f32 / 2.0;
+    let wcx_i = winner_bbox.0 + winner_bbox.2 as i32 / 2;
+    let wcy_i = winner_bbox.1 + winner_bbox.3 as i32 / 2;
+    let wcx = wcx_i as f32;
+    let wcy = wcy_i as f32;
     let thresh = ((img_w as f32).powi(2) + (img_h as f32).powi(2)).sqrt() * 0.25;
     results.iter().any(|r| {
+        if point_in_bbox(wcx_i, wcy_i, &r.bbox) {
+            return false; // the winner itself / its containing line — not independent evidence
+        }
         if !r.text.to_ascii_lowercase().contains(&anchor_l) {
             return false;
         }
@@ -270,6 +281,11 @@ pub struct FindOptions<'a> {
     /// side are kept. If none survive the filter, the matcher falls back to
     /// the full pool (see `nb-*` retry in `find_text`).
     pub ai_bbox: Option<(i32, i32, u32, u32)>,
+    /// "Wrong spot" memory, in OCR-image-pixel space: the bbox the locator
+    /// pointed at last time, which the user explicitly rejected. Candidates
+    /// whose centre falls inside it are excluded so the retry can surface the
+    /// second-best match instead of deterministically repeating the same pick.
+    pub avoid_bbox: Option<(i32, i32, u32, u32)>,
     pub min_confidence: f32,
 }
 
@@ -311,6 +327,17 @@ pub fn find_text<'a>(
         .filter(|r| r.confidence >= min_conf && r.text.trim().chars().count() <= MAX_LABEL_LEN)
         .collect();
 
+    // "Wrong spot" memory: hard-exclude candidates at the previously-rejected
+    // location so the retry can pick the second-best match (the user already
+    // told us this exact spot is wrong).
+    if let Some(av) = opts.avoid_bbox {
+        candidates.retain(|r| {
+            let cx = r.bbox.0 + r.bbox.2 as i32 / 2;
+            let cy = r.bbox.1 + r.bbox.3 as i32 / 2;
+            !point_in_bbox(cx, cy, &av)
+        });
+    }
+
     // AI-bbox proximity filter — keep candidates whose centre falls inside the
     // AI bbox expanded ±300% on each side (final keep-rect is 7× the AI bbox
     // width and height, centred on the AI bbox). Generous enough to forgive
@@ -342,6 +369,15 @@ pub fn find_text<'a>(
     // Resolve nearby_text anchor (centre of the best-matching OCR result).
     let anchor = opts.nearby_text.and_then(|nt| {
         let nt_lower = nt.trim().to_ascii_lowercase();
+        // A nearby_text identical to the target is a self-anchor: it resolves to
+        // one of the target candidates themselves and then "confirms" whichever
+        // one it landed on — actively steering the pick to the wrong duplicate
+        // (observed: target "Auto", nearby "Auto" picked the wrong Auto while the
+        // AI bbox pointed at the right one). Ignore it and let the AI-bbox
+        // proximity sort drive instead.
+        if nt_lower == target_lower {
+            return None;
+        }
         // 4.a: accept a slightly-misread nearby word as the anchor (was 0.5).
         let mut best_ratio = 0.4f32;
         let mut best_pt: Option<(f32, f32)> = None;
@@ -866,5 +902,53 @@ mod tests {
         assert!(!anchor_near(&winner, "Run", &far, 1000, 600));
         // Single-character anchors are ignored entirely.
         assert!(!anchor_near(&winner, "R", &near, 1000, 600));
+    }
+
+    #[test]
+    fn anchor_near_excludes_winner_and_containing_line() {
+        // The winner's own text and the line containing it must not corroborate
+        // the winner (self-anchoring — the Lightroom wrong-Auto case).
+        let winner_bbox = (100, 100, 50, 20);
+        let results = vec![
+            word("Auto+:", winner_bbox),                  // the winner itself
+            line("WB: Auto+: Tint", (90, 95, 200, 30)),   // its containing line
+        ];
+        assert!(!anchor_near(&winner_bbox, "Auto", &results, 1000, 600));
+        // A genuinely separate nearby word still counts.
+        let mut with_sibling = results.clone();
+        with_sibling.push(word("Auto", (170, 100, 40, 20)));
+        assert!(anchor_near(&winner_bbox, "Auto", &with_sibling, 1000, 600));
+    }
+
+    #[test]
+    fn self_anchor_is_ignored_ai_bbox_drives_pick() {
+        // nearby_text identical to the target used to resolve the anchor to the
+        // FIRST duplicate and steer the pick there. With the self-anchor ignored,
+        // the AI-bbox proximity sort picks the right duplicate.
+        let results = vec![
+            word("Auto", (700, 350, 40, 16)),
+            word("Auto", (800, 400, 40, 16)),
+        ];
+        let o = FindOptions {
+            nearby_text: Some("Auto"),
+            ai_bbox: Some((790, 390, 40, 20)), // centred on the second Auto
+            ..opts((1000, 600))
+        };
+        let out = find_text("Auto", &results, &o);
+        assert_eq!(out.winner.unwrap().bbox.0, 800);
+    }
+
+    #[test]
+    fn avoid_bbox_excludes_rejected_spot() {
+        // "Wrong spot" memory: the previously-pointed bbox is excluded, so the
+        // retry surfaces the other duplicate instead of repeating the pick.
+        let results = vec![word("OK", (10, 10, 20, 10)), word("OK", (300, 200, 20, 10))];
+        let o = FindOptions {
+            avoid_bbox: Some((0, 0, 60, 40)), // where the first OK was pointed
+            ..opts((1000, 600))
+        };
+        let out = find_text("OK", &results, &o);
+        assert_eq!(out.strategy_used.as_deref(), Some("exact"));
+        assert_eq!(out.winner.unwrap().bbox.0, 300);
     }
 }

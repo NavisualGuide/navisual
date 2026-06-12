@@ -136,6 +136,18 @@ fn strip_accelerator(s: &str) -> String {
     re.replace(s, "").trim().to_string()
 }
 
+/// Strip ONE trailing parenthesized suffix from an accessible name —
+/// `"Auto (Bridge View)"` → `"Auto"`. Adobe's custom toolkit (Lightroom,
+/// Photoshop family) suffixes every exposed element name with its view class,
+/// which defeats the anchored `^target$` match. Conservative: only a trailing
+/// `( … )` group is removed, so names with internal parens are untouched.
+fn strip_paren_suffix(s: &str) -> String {
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\s*\([^()]*\)\s*$").unwrap());
+    re.replace(s, "").trim().to_string()
+}
+
 /// Build the anchored regex used for name matching.
 /// `^[\W_]*<escaped_target>[\W_]*$`, case-insensitive.
 fn build_name_regex(target: &str) -> Result<Regex> {
@@ -533,6 +545,34 @@ pub fn find_element(
         }
     }
 
+    // Last resort — Pane fallback for custom-toolkit apps whose entire tree is
+    // typed Pane (Adobe Lightroom family). Only reached when every pass above
+    // returned zero candidates, so normal apps never pay for it.
+    if candidates.is_empty() {
+        for root in &search_roots {
+            let mut n = 0;
+            candidates.extend(pane_fallback_match(&automation, root, &name_re, &mut n));
+            trace.element_count = Some(trace.element_count.unwrap_or(0).max(n));
+        }
+        if !candidates.is_empty() {
+            trace.pane_fallback = true;
+            trace.cached = true;
+        }
+    }
+
+    // "Wrong spot" memory: drop candidates centred inside the bbox the user just
+    // rejected, so the correction retry can surface the second-best match.
+    if let Some(av) = opts.avoid_bbox {
+        candidates.retain(|c| {
+            let cx = c.bbox.x + c.bbox.width as i32 / 2;
+            let cy = c.bbox.y + c.bbox.height as i32 / 2;
+            !(cx >= av.x
+                && cx < av.x + av.width as i32
+                && cy >= av.y
+                && cy < av.y + av.height as i32)
+        });
+    }
+
     if candidates.is_empty() {
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
         return Ok((None, trace));
@@ -711,6 +751,84 @@ fn deep_role_match(
                 .unwrap_or(false)
         })
         .filter_map(|el| element_to_result_cached(&el))
+        .collect()
+}
+
+/// Last-resort Pane fallback for custom-toolkit apps (Adobe Lightroom/Photoshop
+/// family): their UIA tree types EVERY element as `ControlType.Pane` — layout
+/// containers *and* real buttons (Lightroom's Auto button is
+/// `Pane "Auto (Bridge View)" 48×19`). The role-family find returns 0 elements
+/// there and the matcher rejects every node as a container, so the whole app
+/// reads as A11y-opaque. This pass runs only when everything else produced zero
+/// candidates and demands stronger evidence than normal elements need:
+/// the suffix-stripped name must satisfy the anchored regex AND the rect must
+/// be control-sized — a name+size-matched UIA rect is strictly better evidence
+/// than the OCR text match we'd otherwise fall back to.
+fn pane_fallback_match(
+    automation: &UIAutomation,
+    root: &UIElement,
+    name_re: &Regex,
+    // Out: number of Pane elements returned before name/size filtering.
+    count: &mut usize,
+) -> Vec<LocateResult> {
+    // Control-sized caps in physical pixels: tall enough for a 200%-DPI button
+    // (~4% of a 2160-px screen ≈ 86), wide enough for a long tab label, and a
+    // floor that rejects degenerate slivers. Containers (panels: 266×163,
+    // 1920×770…) fail the height cap.
+    const PANE_MIN: u32 = 6;
+    const PANE_MAX_W: u32 = 600;
+    const PANE_MAX_H: u32 = 96;
+    const PANE_CONTROL_TYPE_ID: i32 = 50033;
+
+    let Ok(cond) = automation.create_property_condition(
+        UIProperty::ControlType,
+        Variant::from(PANE_CONTROL_TYPE_ID),
+        None,
+    ) else {
+        return Vec::new();
+    };
+    let cache = match automation.create_cache_request() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let _ = cache.add_property(UIProperty::Name);
+    let _ = cache.add_property(UIProperty::ControlType);
+    let _ = cache.add_property(UIProperty::BoundingRectangle);
+    let els = match root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    *count = els.len();
+    els.into_iter()
+        .filter_map(|el| {
+            let name = el.get_cached_name().ok()?;
+            let stripped = strip_paren_suffix(&name);
+            if stripped.is_empty() || !name_re.is_match(&norm_dashes(&stripped)) {
+                return None;
+            }
+            let rect = el.get_cached_bounding_rectangle().ok()?;
+            let left = rect.get_left();
+            let top = rect.get_top();
+            let width = rect.get_width().max(0) as u32;
+            let height = rect.get_height().max(0) as u32;
+            if !(PANE_MIN..=PANE_MAX_W).contains(&width)
+                || !(PANE_MIN..=PANE_MAX_H).contains(&height)
+                || !rect_is_onscreen(left, top)
+            {
+                return None;
+            }
+            Some(LocateResult {
+                bbox: Rect {
+                    x: left,
+                    y: top,
+                    width,
+                    height,
+                },
+                name,
+                role: "Pane".to_string(),
+                confidence: 1.0,
+            })
+        })
         .collect()
 }
 
@@ -895,5 +1013,28 @@ mod tests {
         assert_eq!(norm_dashes("a\u{2014}b"), "a-b"); // em dash
         assert_eq!(norm_dashes("a\u{2013}b"), "a-b"); // en dash
         assert_eq!(norm_dashes("a-b"), "a-b");
+    }
+
+    #[test]
+    fn paren_suffix_strips_one_trailing_group() {
+        use super::strip_paren_suffix;
+        // Adobe-style view-class suffix (Lightroom's Pane names).
+        assert_eq!(strip_paren_suffix("Auto (Bridge View)"), "Auto");
+        // Only ONE trailing group — internal parens survive.
+        assert_eq!(strip_paren_suffix("Copy (1) (Bridge View)"), "Copy (1)");
+        // No suffix → unchanged.
+        assert_eq!(strip_paren_suffix("Develop_BasicView"), "Develop_BasicView");
+        assert_eq!(strip_paren_suffix("Auto"), "Auto");
+    }
+
+    #[test]
+    fn pane_name_matches_target_after_suffix_strip() {
+        // End-to-end name check the Pane fallback performs: the suffix-stripped
+        // Lightroom name must satisfy the anchored target regex.
+        use super::strip_paren_suffix;
+        let re = build_name_regex("Auto").unwrap();
+        assert!(re.is_match(&norm_dashes(&strip_paren_suffix("Auto (Bridge View)"))));
+        assert!(!re.is_match(&norm_dashes(&strip_paren_suffix("Auto Tone (Bridge View)"))));
+        assert!(!re.is_match(&norm_dashes(&strip_paren_suffix("AgDevelop_navigatorPanel"))));
     }
 }

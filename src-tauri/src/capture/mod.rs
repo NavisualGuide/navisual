@@ -21,7 +21,7 @@ const MAX_CAP_H: u32 = 768;
 #[cfg(windows)]
 mod win;
 
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,

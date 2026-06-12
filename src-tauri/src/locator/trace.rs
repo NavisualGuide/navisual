@@ -38,6 +38,10 @@ pub struct A11yTrace {
     pub framework: Option<String>,
     /// The Chrome path used the cached `find_all_build_cache` (batched property reads).
     pub cached: bool,
+    /// The last-resort Pane fallback produced the candidates: custom-toolkit apps
+    /// (Adobe Lightroom family) expose real buttons as ControlType.Pane with
+    /// suffixed names ("Auto (Bridge View)"), invisible to the role-family passes.
+    pub pane_fallback: bool,
     /// UIA elements the cached find returned BEFORE name-filtering (`None` if the cached find
     /// didn't run). `Some(0)` = the tree wasn't built (lazy app); `Some(n>0)` with no candidates
     /// = the elements were there but none matched the name.

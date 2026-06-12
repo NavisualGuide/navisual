@@ -27,7 +27,9 @@ Rules:
    similar buttons in a list; a label that is both a heading and an interactive
    element; a toolbar icon whose name also appears as a section header (set
    target_role="button" and target_nearby_text to an adjacent toolbar label so
-   the locator picks the icon, not the section header). Only omit it when there is
+   the locator picks the icon, not the section header). target_nearby_text must
+   be a DIFFERENT label than target_text — never repeat the target itself (a
+   self-anchor provides no disambiguation). Only omit it when there is
    genuinely no readable text near the target (e.g. a fully icon-only toolbar).
 4. TARGET BOUNDING BOX: For every step that has a target_text, also return
    target_bbox as [ymin, xmin, ymax, xmax] using NORMALIZED 0–1000 coordinates:

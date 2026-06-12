@@ -1062,6 +1062,10 @@ See the LICENSE file in the root of this repository for complete details.
     // user's own text. (The logged note is the user's raw text only.)
     const hint = category ? (CATEGORY_HINT[category] ?? "") : "";
     const note = [hint, rawNote].filter(Boolean).join(" ").trim();
+    // Wrong spot: tell the locator where NOT to point again — the bbox the
+    // rejected pointer occupied. The retry then surfaces the second-best match
+    // instead of deterministically repeating the same pick.
+    const avoidBbox = category === "wrong_spot" && locateResult ? locateResult.bbox : null;
     const label = (category && CATEGORY_LABEL[category]) || "Wrong";
     const prevPhase = phase;
     const corrEntryId = await addToHistory("correction", rawNote ? `${label} — ${rawNote}` : `${label} — re-analysing…`);
@@ -1072,7 +1076,7 @@ See the LICENSE file in the root of this repository for complete details.
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("send_correction", { note: note || null });
+      const res = await invoke<GuideResponse>("send_correction", { note: note || null, avoidBbox });
       stopTimer();
       if (token !== requestToken) return;
       if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64);

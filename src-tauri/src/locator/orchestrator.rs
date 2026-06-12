@@ -31,6 +31,12 @@ pub struct LocateOptions {
     /// Used by A11y (proximity sort) and OCR (overlap filter with ±300%
     /// expansion). When `None`, both tiers run unfiltered.
     pub ai_bbox: Option<Rect>,
+    /// "Wrong spot" memory in **virtual-desktop physical pixels**: the bbox the
+    /// locator pointed at before the user pressed Wrong → Wrong spot. Candidates
+    /// whose centre falls inside it are excluded in both the A11y and OCR tiers,
+    /// so the correction retry surfaces the second-best match instead of
+    /// deterministically repeating the same wrong pick.
+    pub avoid_bbox: Option<Rect>,
     pub a11y_timeout_ms: u64,
     pub min_confidence: f32,
     /// Raw HWND captured at AI-call time. When set, A11y searches this HWND
@@ -191,7 +197,7 @@ pub fn locate(
     // can filter candidates by overlap. Reverses the post-OCR scale-and-offset
     // step below: img = (vd - crop_origin) * (img / crop). When `crop_rect.width`
     // is 0 (full-screen JPEG fallback) we keep the bbox in image space as-is.
-    let ai_bbox_img: Option<(i32, i32, u32, u32)> = opts.ai_bbox.map(|b| {
+    let to_img_space = |b: Rect| -> (i32, i32, u32, u32) {
         if crop_rect.width == 0 || crop_rect.height == 0 || img_w == 0 || img_h == 0 {
             return (b.x, b.y, b.width, b.height);
         }
@@ -202,7 +208,9 @@ pub fn locate(
         let w = (b.width as f32 * inv_sx).round() as u32;
         let h = (b.height as f32 * inv_sy).round() as u32;
         (x, y, w, h)
-    });
+    };
+    let ai_bbox_img: Option<(i32, i32, u32, u32)> = opts.ai_bbox.map(to_img_space);
+    let avoid_bbox_img: Option<(i32, i32, u32, u32)> = opts.avoid_bbox.map(to_img_space);
 
     let find_opts = ocr::FindOptions {
         role: opts.role.as_deref(),
@@ -210,6 +218,7 @@ pub fn locate(
         screen_width: img_w,
         screen_height: img_h,
         ai_bbox: ai_bbox_img,
+        avoid_bbox: avoid_bbox_img,
         min_confidence: opts.min_confidence,
     };
 
@@ -269,10 +278,12 @@ pub fn locate(
     // (2) Label isolation (image-pixel space, same as `results`).
     let (isolation, line_len) = ocr::isolation_for(&hit.bbox, target_text, &results);
     let isolation_ok = !(line_len > ISOLATION_LINE_FLOOR && isolation < ISOLATION_MIN);
-    // (3) nearby_text anchor proximity (soft).
+    // (3) nearby_text anchor proximity (soft). A nearby_text identical to the
+    // target carries no independent signal (self-anchor) — treat as absent.
     let near_anchor = opts
         .nearby_text
         .as_deref()
+        .filter(|a| !a.trim().eq_ignore_ascii_case(target_text.trim()))
         .map(|a| ocr::anchor_near(&hit.bbox, a, &results, img_w, img_h))
         .unwrap_or(false);
     // (4) AI bbox region proximity (soft).

@@ -177,6 +177,10 @@ fn execute_step(
     tracker: &track::WindowTracker,
     last_overlay: &parking_lot::Mutex<Option<LastOverlay>>,
     ai_bbox: Option<capture::Rect>,
+    // "Wrong spot" memory: the bbox the previous pointer occupied, which the user
+    // explicitly rejected. The locator excludes candidates there (§ fix for the
+    // deterministic same-wrong-pick retry loop). Only the correction path sets it.
+    avoid_bbox: Option<capture::Rect>,
     capture_rect: Option<capture::Rect>,
     // Native-res OCR image captured at AI-capture time (overlay cleared, before the streamed
     // subtitle). When present the locator's OCR uses it instead of re-capturing — so it never
@@ -204,6 +208,7 @@ fn execute_step(
                         .map(|r| format!("{:?}", r).to_lowercase()),
                     nearby_text: step.target_nearby_text.clone(),
                     ai_bbox,
+                    avoid_bbox,
                     a11y_timeout_ms: 500,
                     min_confidence: 0.5,
                     target_hwnd,
@@ -221,7 +226,7 @@ fn execute_step(
             }
             #[cfg(not(windows))]
             {
-                let _ = (text, target_hwnd, debug_ocr_path, &pre_ocr);
+                let _ = (text, target_hwnd, debug_ocr_path, avoid_bbox, &pre_ocr);
                 (None, None)
             }
         } else {
@@ -1154,6 +1159,7 @@ async fn guide(
         &state.tracker,
         &state.last_overlay,
         ai_bbox,
+        None,
         capture_rect_opt,
         pre_ocr,
     )
@@ -1240,6 +1246,7 @@ async fn next_step(
         &state.tracker,
         &state.last_overlay,
         ai_bbox,
+        None,
         capture_rect,
         None, // next_step reuses the prior capture; locator re-captures for OCR
     )
@@ -1280,6 +1287,10 @@ async fn send_correction(
     app: AppHandle,
     state: State<'_, AppState>,
     note: Option<String>,
+    // "Wrong spot" memory: the bbox the rejected pointer occupied (virtual-desktop
+    // physical pixels). The frontend sends it only for the wrong_spot reason; the
+    // locator excludes candidates there so the retry can't repeat the same pick.
+    avoid_bbox: Option<capture::Rect>,
 ) -> Result<GuideResponse, String> {
     let session_id = {
         let g = state.guidance.lock();
@@ -1602,6 +1613,7 @@ async fn send_correction(
         &state.tracker,
         &state.last_overlay,
         ai_bbox,
+        avoid_bbox,
         new_capture_rect,
         pre_ocr,
     )
@@ -1812,6 +1824,7 @@ async fn locate_a11y(
             role,
             nearby_text: None,
             ai_bbox: None,
+            avoid_bbox: None,
             a11y_timeout_ms: timeout_ms.unwrap_or(1500),
             min_confidence: 0.5,
             target_hwnd: None,
@@ -1848,6 +1861,7 @@ async fn locate_element(
             role,
             nearby_text,
             ai_bbox: None,
+            avoid_bbox: None,
             a11y_timeout_ms: timeout_ms.unwrap_or(500),
             min_confidence: 0.5,
             target_hwnd: None,
