@@ -88,10 +88,16 @@ impl DeepSeekClient {
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
+        // include_usage: OpenAI (and DashScope) only put a `usage` field in the
+        // stream when asked — without it the final chunk never carries token
+        // counts and the usage display records 0. DeepSeek sends usage by
+        // default and accepts the option. The extra final chunk it produces has
+        // an empty `choices` array, which the parser below already tolerates.
         let payload = json!({
             "model": effective_model,
             "messages": messages,
             "stream": true,
+            "stream_options": { "include_usage": true },
             "response_format": { "type": "json_object" }
         });
 
