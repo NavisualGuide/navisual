@@ -518,6 +518,23 @@ pub fn find_element(
                 ));
                 trace.element_count = Some(trace.element_count.unwrap_or(0).max(n));
                 trace.cached = true;
+                // Role-family miss → broad retry: the AI's role guess can disagree
+                // with the app's actual control type (new Outlook's "To" is a
+                // Button; the AI says textbox, so the TEXTUAL find never retrieves
+                // it and the anchored name filter never sees it). Deep-find
+                // analogue of the matcher's Pass 2.
+                if candidates.is_empty() && role_restricts_types(opts.role.as_deref()) {
+                    let mut n2 = 0;
+                    candidates.extend(deep_role_match(
+                        &automation,
+                        root,
+                        target_text,
+                        None,
+                        &name_re,
+                        &mut n2,
+                    ));
+                    trace.element_count = Some(trace.element_count.unwrap_or(0).max(n2));
+                }
             } else {
                 // Eager-tree frameworks (WPF/WinForms/WinUI/Win32): the standard matcher + manual
                 // walk are fast and proven here.
@@ -569,6 +586,19 @@ pub fn find_element(
                     ));
                     trace.element_count = Some(trace.element_count.unwrap_or(0).max(n));
                     trace.cached = true;
+                    // Broad retry on a role-family miss (see the Chrome branch).
+                    if candidates.is_empty() && role_restricts_types(opts.role.as_deref()) {
+                        let mut n2 = 0;
+                        candidates.extend(deep_role_match(
+                            &automation,
+                            root,
+                            target_text,
+                            None,
+                            &name_re,
+                            &mut n2,
+                        ));
+                        trace.element_count = Some(trace.element_count.unwrap_or(0).max(n2));
+                    }
                 }
             }
         }
@@ -949,6 +979,28 @@ fn pane_walk(
     }
 }
 
+/// True when the AI's role maps to a RESTRICTED control-type family (so a
+/// broad retry is worthwhile on a miss). Roles that already map to the broad
+/// set would just repeat the identical query.
+fn role_restricts_types(role: Option<&str>) -> bool {
+    matches!(
+        role.map(|r| r.to_ascii_lowercase()).as_deref(),
+        Some(
+            "textbox"
+                | "searchbox"
+                | "combobox"
+                | "button"
+                | "tab"
+                | "menuitem"
+                | "checkbox"
+                | "radio"
+                | "link"
+                | "listitem"
+                | "treeitem"
+        )
+    )
+}
+
 /// UIA `UIA_*ControlTypeId` values to consider in the deep Chromium pass, by AI role family.
 /// Clickable roles exclude bulk Text/Edit content; "textbox" keeps it; unknown is broad.
 fn role_control_type_ids(role: Option<&str>) -> &'static [i32] {
@@ -1205,6 +1257,20 @@ mod tests {
             deep_name_filter("Restrict permission to this item.", &needle, &re),
             None
         );
+    }
+
+    #[test]
+    fn restrictive_roles_warrant_broad_retry() {
+        use super::role_restricts_types;
+        // Restricted families → a broad retry can find what the family missed.
+        assert!(role_restricts_types(Some("textbox")));
+        assert!(role_restricts_types(Some("button")));
+        assert!(role_restricts_types(Some("Tab")));
+        // Already-broad roles → a retry would repeat the identical query.
+        assert!(!role_restricts_types(None));
+        assert!(!role_restricts_types(Some("other")));
+        assert!(!role_restricts_types(Some("heading")));
+        assert!(!role_restricts_types(Some("slider")));
     }
 
     #[test]
