@@ -266,8 +266,25 @@ See the LICENSE file in the root of this repository for complete details.
   let availableVoices = $state<VoiceInfo[]>([]);
 
   async function openTargetPicker() {
+    dismissTargetHint(); // they found the picker — the coach mark is no longer needed
     targetWindows = await invoke<TargetWindowInfo[]>("list_target_windows");
     targetPickerOpen = true;
+  }
+
+  // One-time coach mark on the target-app chip — testers didn't realise the
+  // chip is clickable (it reads as a status badge). Shown once, the first time
+  // a target appears; dismissed forever via localStorage on "Got it" or on
+  // first use of the picker.
+  const TARGET_HINT_KEY = "navisual-target-chip-hint-v1";
+  let showTargetHint = $state(false);
+  function maybeShowTargetHint() {
+    if (showTargetHint) return;
+    if (localStorage.getItem(TARGET_HINT_KEY)) return;
+    showTargetHint = true;
+  }
+  function dismissTargetHint() {
+    showTargetHint = false;
+    localStorage.setItem(TARGET_HINT_KEY, "1");
   }
 
   async function selectTarget(hwnd: number | null) {
@@ -865,7 +882,10 @@ See the LICENSE file in the root of this repository for complete details.
     sessionId = "";
     staleResponse = false;
     history = [];
-    await addToHistory("system", "New session started");
+    await addToHistory(
+      "system",
+      "New session started — guidance follows the app you click into next. To lock one app, click its name in the title bar.",
+    );
   }
 
   function applyResponse(res: GuideResponse, idx: number, token: number) {
@@ -1235,10 +1255,14 @@ See the LICENSE file in the root of this repository for complete details.
     // window the backend is capturing.
     listen<SharedAppInfo>("app_changed", (event) => {
       sharedApp = event.payload;
+      maybeShowTargetHint();
     });
     try {
       const initial = await invokeReady<SharedAppInfo | null>("get_shared_app_info");
-      if (initial) sharedApp = initial;
+      if (initial) {
+        sharedApp = initial;
+        maybeShowTargetHint();
+      }
     } catch (_) {}
 
     // E.3 — Autopilot: on-demand screen-change polling.
@@ -1324,13 +1348,14 @@ See the LICENSE file in the root of this repository for complete details.
         <button
           class="header-shared"
           class:header-shared-pinned={pinnedHwnd !== null}
-          title={pinnedHwnd !== null ? "Target pinned — click to change" : "Click to choose target app"}
+          title={pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
           onmousedown={(e) => e.stopPropagation()}
           onclick={openTargetPicker}
         >
           <span class="header-shared-dot"></span>
           {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
           {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
+          <span class="header-shared-caret">▾</span>
         </button>
       {/if}
       {#if settingsForm.api_provider === "managed" && freeRemaining !== null}
@@ -1618,6 +1643,9 @@ See the LICENSE file in the root of this repository for complete details.
     <!-- Quick-action menu (opened by ··· button) -->
     {#if showQuickMenu}
       <div class="quick-menu">
+        <button class="qm-btn" onclick={() => { showQuickMenu = false; openTargetPicker(); }} title="Choose which app Navisual assists with">
+          🎯 Switch app
+        </button>
         <button class="qm-btn" class:qm-active={isMuted} onclick={toggleMute}>
           {isMuted ? "🔇 Unmute" : "🔊 Mute"}
         </button>
@@ -1703,6 +1731,15 @@ See the LICENSE file in the root of this repository for complete details.
           {/if}
         </button>
       {/each}
+    </div>
+  {/if}
+
+  <!-- One-time coach mark pointing at the target-app chip -->
+  {#if showTargetHint && sharedApp && !showPrivacyDisclosure && !targetPickerOpen}
+    <div class="target-hint" role="note">
+      <span class="target-hint-arrow"></span>
+      <span>Navisual assists with this app. Click its name above to switch to another app, or pin one.</span>
+      <button class="target-hint-btn" onclick={dismissTargetHint}>Got it</button>
     </div>
   {/if}
 
@@ -2518,6 +2555,7 @@ See the LICENSE file in the root of this repository for complete details.
   .header-shared:hover { background: rgba(255, 107, 53, 0.18); }
   .header-shared-pinned { border-style: solid; border-width: 1.5px; }
   .header-shared-pin { font-size: 9px; opacity: 0.8; }
+  .header-shared-caret { font-size: 8px; opacity: 0.75; flex-shrink: 0; }
   .header-shared-dot {
     width: 6px;
     height: 6px;
@@ -2537,6 +2575,49 @@ See the LICENSE file in the root of this repository for complete details.
     inset: 0;
     z-index: 998;
   }
+  /* One-time coach mark anchored under the target-app chip (same spot the
+     picker opens at, so dismissing it via the picker is spatially coherent). */
+  .target-hint {
+    position: fixed;
+    top: 38px;
+    left: 8px;
+    max-width: 250px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    background: var(--surface-2);
+    border: 1px solid rgba(255, 107, 53, 0.45);
+    border-radius: 8px;
+    padding: 9px 11px;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    z-index: 997;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+  .target-hint-arrow {
+    position: absolute;
+    top: -5px;
+    left: 96px;
+    width: 8px;
+    height: 8px;
+    transform: rotate(45deg);
+    background: var(--surface-2);
+    border-left: 1px solid rgba(255, 107, 53, 0.45);
+    border-top: 1px solid rgba(255, 107, 53, 0.45);
+  }
+  .target-hint-btn {
+    align-self: flex-end;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-3);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .target-hint-btn:hover { background: #2d2d33; }
   .target-picker {
     position: fixed;
     top: 34px;
