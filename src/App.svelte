@@ -48,7 +48,7 @@ See the LICENSE file in the root of this repository for complete details.
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "consent_prompt" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
-  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "usage" | "developer";
+  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer";
   type SettingsPayload = {
     api_provider: string;
     anthropic_api_key: string;
@@ -285,6 +285,8 @@ See the LICENSE file in the root of this repository for complete details.
   let iconMode = $state(false);
   let showSettings = $state(false);
   let showAbout = $state(false);
+  // Info (About) dialog tab — "about" (version/links/update) or "usage" (token usage).
+  let aboutTab = $state<"about" | "usage">("about");
   // First-run privacy disclosure (S5). One-shot; persisted in localStorage so
   // it never fires again on the same install.
   let showPrivacyDisclosure = $state(false);
@@ -295,7 +297,7 @@ See the LICENSE file in the root of this repository for complete details.
   let updateProgress = $state(0);
   let settingsTab = $state<SettingsTab>("provider");
 
-  // Settings → Usage tab
+  // Info (About) dialog → Usage tab
   type UsageRow = {
     provider: string; model: string;
     daily_in: number; daily_out: number; monthly_in: number; monthly_out: number;
@@ -737,6 +739,11 @@ See the LICENSE file in the root of this repository for complete details.
   async function resetUsage() {
     await invoke("reset_usage").catch(() => {});
     loadUsage();
+  }
+  function openAbout(tab: "about" | "usage" = "about") {
+    aboutTab = tab;
+    if (tab === "usage") loadUsage();
+    showAbout = true;
   }
 
   async function openSettings() {
@@ -1327,15 +1334,15 @@ See the LICENSE file in the root of this repository for complete details.
         </button>
       {/if}
       {#if settingsForm.api_provider === "managed" && freeRemaining !== null}
-        <span class="header-balance" class:header-balance-low={freeRemaining <= 5}>{freeRemaining} left</span>
+        <button class="header-balance" class:header-balance-low={freeRemaining <= 5} onclick={() => openAbout("usage")} title="View usage">{freeRemaining} left</button>
       {/if}
       {#if pendingUpdate}
-        <button class="header-update" onclick={() => (showAbout = true)} title="Update available">
+        <button class="header-update" onclick={() => openAbout("about")} title="Update available">
           ↑ {pendingUpdate.version}
         </button>
       {/if}
       <div class="header-actions">
-        <button class="hdr-btn" onclick={() => (showAbout = true)} title="About Navisual" aria-label="About Navisual">
+        <button class="hdr-btn" onclick={() => openAbout("about")} title="About Navisual" aria-label="About Navisual">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
         </button>
         <button class="hdr-btn" onclick={openSettings} title="Settings" aria-label="Settings">
@@ -1782,8 +1789,12 @@ See the LICENSE file in the root of this repository for complete details.
         <div class="modal-body" style="padding: 20px; text-align: center; line-height: 1.6;">
           <p style="font-size: 2em; margin-bottom: 12px;">🎯</p>
           <p style="margin-bottom: 8px; font-weight: 600;">Your 50 free requests have been used.</p>
-          <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
+          <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 8px;">
             Coin purchases are coming soon — stay tuned.
+          </p>
+          <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
+            Meanwhile you can keep going free with your own key: Settings → Provider → Gemini
+            (free tier from Google AI Studio) or Ollama (local).
           </p>
           <button class="btn-primary btn-full" onclick={() => (showTrialExhausted = false)}>Close</button>
         </div>
@@ -1817,7 +1828,6 @@ See the LICENSE file in the root of this repository for complete details.
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
-          <button class="tab-btn {settingsTab === 'usage' ? 'tab-active' : ''}" onclick={() => { settingsTab = "usage"; loadUsage(); }}>Usage</button>
           {#if settingsForm.developer_mode}
             <button class="tab-btn {settingsTab === 'developer' ? 'tab-active' : ''}" onclick={() => (settingsTab = "developer")}>Developer</button>
           {/if}
@@ -2160,51 +2170,6 @@ See the LICENSE file in the root of this repository for complete details.
               <p class="stub-hint" style="margin-top:4px">Drawn alongside the production pointer for visual comparison. Coordinate-system per provider — Gemini normalized 0–1000, others absolute pixels.</p>
             </div>
 
-          {:else if settingsTab === "usage"}
-            <!-- Usage tab -->
-            <div class="setting-group">
-              <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px">
-                <p class="setting-label" style="margin:0">Token usage</p>
-                <div style="display:flex; gap:6px">
-                  <button class="tab-btn {usagePeriod === 'today' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "today")}>Today</button>
-                  <button class="tab-btn {usagePeriod === 'month' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "month")}>This month</button>
-                </div>
-              </div>
-
-              {#if !usageLoaded}
-                <p class="setting-hint">Loading…</p>
-              {:else if usageView.length === 0}
-                <p class="setting-hint">No usage recorded yet — run a guidance task and it'll appear here.</p>
-              {:else}
-                <div style="display:flex; flex-direction:column; gap:5px">
-                  {#each usageView as r}
-                    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; font-size:13px">
-                      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model}</span>
-                      <span style="white-space:nowrap; color:var(--text-secondary)">{fmtTok(r.tokens)} tok</span>
-                      <span style="white-space:nowrap; min-width:62px; text-align:right; color:{r.free ? 'var(--text-secondary)' : 'var(--text-primary)'}">{fmtCost(r.cost, r.free)}</span>
-                    </div>
-                  {/each}
-                  {#if usageHasEstimate}
-                    <div style="display:flex; justify-content:space-between; gap:10px; font-size:13px; font-weight:600; border-top:1px solid var(--border); margin-top:4px; padding-top:7px">
-                      <span>Estimated total</span>
-                      <span style="min-width:62px; text-align:right">~${usageTotalCost.toFixed(2)}</span>
-                    </div>
-                  {/if}
-                </div>
-                {#if usageHasEstimate}
-                  <p class="setting-hint" style="margin-top:8px">Estimates only — based on each provider's published list pricing, which is set by the provider and subject to change. Check your provider's dashboard for actual charges.</p>
-                {/if}
-              {/if}
-
-              {#if usageManagedRemaining != null}
-                <p class="setting-hint" style="margin-top:8px">Managed (free): {usageManagedRemaining} / 50 requests left</p>
-              {/if}
-
-              <div style="margin-top:14px">
-                <button class="btn-ghost" type="button" onclick={resetUsage}>↻ Reset usage</button>
-              </div>
-            </div>
-
           {:else}
             <!-- Audio tab -->
             <div class="setting-group">
@@ -2299,9 +2264,14 @@ See the LICENSE file in the root of this repository for complete details.
         onkeydown={(e) => e.stopPropagation()}
       >
         <div class="modal-header">
-          <span class="modal-title">About</span>
+          <span class="modal-title">Navisual</span>
           <button class="hdr-btn hdr-btn-close" onclick={() => (showAbout = false)}>✕</button>
         </div>
+        <div class="modal-tabs">
+          <button class="tab-btn {aboutTab === 'about' ? 'tab-active' : ''}" onclick={() => (aboutTab = "about")}>About</button>
+          <button class="tab-btn {aboutTab === 'usage' ? 'tab-active' : ''}" onclick={() => { aboutTab = "usage"; loadUsage(); }}>Usage</button>
+        </div>
+        {#if aboutTab === "about"}
         <div class="about-body">
           <div class="about-logo">
             <span class="about-dot"></span>
@@ -2335,6 +2305,53 @@ See the LICENSE file in the root of this repository for complete details.
 
           <p class="about-license">Licensed under FSL-1.1-Apache-2.0 — converts to Apache 2.0 two years after each release.</p>
         </div>
+        {:else}
+        <!-- Usage tab — read-only token-usage report (moved here from Settings) -->
+        <div class="modal-body">
+          <div class="setting-group">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px">
+              <p class="setting-label" style="margin:0">Token usage</p>
+              <div style="display:flex; gap:6px">
+                <button class="tab-btn {usagePeriod === 'today' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "today")}>Today</button>
+                <button class="tab-btn {usagePeriod === 'month' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "month")}>This month</button>
+              </div>
+            </div>
+
+            {#if !usageLoaded}
+              <p class="setting-hint">Loading…</p>
+            {:else if usageView.length === 0}
+              <p class="setting-hint">No usage recorded yet — run a guidance task and it'll appear here.</p>
+            {:else}
+              <div style="display:flex; flex-direction:column; gap:5px">
+                {#each usageView as r}
+                  <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; font-size:13px">
+                    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model}</span>
+                    <span style="white-space:nowrap; color:var(--text-secondary)">{fmtTok(r.tokens)} tok</span>
+                    <span style="white-space:nowrap; min-width:62px; text-align:right; color:{r.free ? 'var(--text-secondary)' : 'var(--text-primary)'}">{fmtCost(r.cost, r.free)}</span>
+                  </div>
+                {/each}
+                {#if usageHasEstimate}
+                  <div style="display:flex; justify-content:space-between; gap:10px; font-size:13px; font-weight:600; border-top:1px solid var(--border); margin-top:4px; padding-top:7px">
+                    <span>Estimated total</span>
+                    <span style="min-width:62px; text-align:right">~${usageTotalCost.toFixed(2)}</span>
+                  </div>
+                {/if}
+              </div>
+              {#if usageHasEstimate}
+                <p class="setting-hint" style="margin-top:8px">Estimates only — based on each provider's published list pricing, which is set by the provider and subject to change. Check your provider's dashboard for actual charges.</p>
+              {/if}
+            {/if}
+
+            {#if usageManagedRemaining != null}
+              <p class="setting-hint" style="margin-top:8px">Managed (free): {usageManagedRemaining} / 50 requests left</p>
+            {/if}
+
+            <div style="margin-top:14px">
+              <button class="btn-ghost" type="button" onclick={resetUsage}>↻ Reset usage</button>
+            </div>
+          </div>
+        </div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -2449,12 +2466,19 @@ See the LICENSE file in the root of this repository for complete details.
     color: var(--accent);
     font-family: "JetBrains Mono", ui-monospace, monospace;
     background: rgba(255, 107, 53, 0.12);
+    border: none;
     border-radius: 4px;
     padding: 1px 5px;
+  }
+  .header-balance:hover {
+    background: rgba(255, 107, 53, 0.22);
   }
   .header-balance-low {
     color: #ff4040;
     background: rgba(255, 64, 64, 0.15);
+  }
+  .header-balance-low:hover {
+    background: rgba(255, 64, 64, 0.25);
   }
 
   .header-provider {
@@ -3474,7 +3498,7 @@ See the LICENSE file in the root of this repository for complete details.
   /* ── About modal ──────────────────────────────────── */
 
   .about-modal {
-    max-width: 320px;
+    max-width: 360px;
   }
 
   .about-body {
