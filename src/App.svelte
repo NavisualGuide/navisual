@@ -272,19 +272,20 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // One-time coach mark on the target-app chip — testers didn't realise the
-  // chip is clickable (it reads as a status badge). Shown once, the first time
-  // a target appears; dismissed forever via localStorage on "Got it" or on
-  // first use of the picker.
+  // chip is clickable (it reads as a status badge). Shown once ever (flag is
+  // written the moment it appears), then fades on its own — no acknowledgement
+  // needed. Clicking the bubble opens the picker it's describing.
   const TARGET_HINT_KEY = "navisual-target-chip-hint-v1";
   let showTargetHint = $state(false);
   function maybeShowTargetHint() {
     if (showTargetHint) return;
     if (localStorage.getItem(TARGET_HINT_KEY)) return;
+    localStorage.setItem(TARGET_HINT_KEY, "1");
     showTargetHint = true;
+    setTimeout(() => (showTargetHint = false), 12_000);
   }
   function dismissTargetHint() {
     showTargetHint = false;
-    localStorage.setItem(TARGET_HINT_KEY, "1");
   }
 
   async function selectTarget(hwnd: number | null) {
@@ -1734,13 +1735,13 @@ See the LICENSE file in the root of this repository for complete details.
     </div>
   {/if}
 
-  <!-- One-time coach mark pointing at the target-app chip -->
+  <!-- One-time coach mark pointing at the target-app chip; clicking it opens
+       the picker it describes, and it fades on its own after a few seconds. -->
   {#if showTargetHint && sharedApp && !showPrivacyDisclosure && !targetPickerOpen}
-    <div class="target-hint" role="note">
+    <button class="target-hint" onclick={openTargetPicker}>
       <span class="target-hint-arrow"></span>
-      <span>Navisual assists with this app. Click its name above to switch to another app, or pin one.</span>
-      <button class="target-hint-btn" onclick={dismissTargetHint}>Got it</button>
-    </div>
+      Click here to select the app you want me to assist with.
+    </button>
   {/if}
 
   <!-- Screenshot lightbox — panel window is temporarily expanded to fit -->
@@ -2555,7 +2556,7 @@ See the LICENSE file in the root of this repository for complete details.
   .header-shared:hover { background: rgba(255, 107, 53, 0.18); }
   .header-shared-pinned { border-style: solid; border-width: 1.5px; }
   .header-shared-pin { font-size: 9px; opacity: 0.8; }
-  .header-shared-caret { font-size: 8px; opacity: 0.75; flex-shrink: 0; }
+  .header-shared-caret { font-size: 11px; opacity: 0.9; flex-shrink: 0; }
   .header-shared-dot {
     width: 6px;
     height: 6px;
@@ -2576,24 +2577,28 @@ See the LICENSE file in the root of this repository for complete details.
     z-index: 998;
   }
   /* One-time coach mark anchored under the target-app chip (same spot the
-     picker opens at, so dismissing it via the picker is spatially coherent). */
+     picker opens at). It's a button: clicking it opens the picker. */
   .target-hint {
     position: fixed;
     top: 38px;
     left: 8px;
     max-width: 250px;
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
+    text-align: left;
     background: var(--surface-2);
     border: 1px solid rgba(255, 107, 53, 0.45);
     border-radius: 8px;
     padding: 9px 11px;
     font-size: 11.5px;
+    font-weight: 400;
     line-height: 1.45;
     color: var(--text-secondary);
     z-index: 997;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    cursor: pointer;
+  }
+  .target-hint:hover {
+    color: var(--text-primary);
+    border-color: rgba(255, 107, 53, 0.7);
   }
   .target-hint-arrow {
     position: absolute;
@@ -2606,18 +2611,6 @@ See the LICENSE file in the root of this repository for complete details.
     border-left: 1px solid rgba(255, 107, 53, 0.45);
     border-top: 1px solid rgba(255, 107, 53, 0.45);
   }
-  .target-hint-btn {
-    align-self: flex-end;
-    padding: 3px 12px;
-    font-size: 11px;
-    font-weight: 600;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--surface-3);
-    color: var(--text-primary);
-    cursor: pointer;
-  }
-  .target-hint-btn:hover { background: #2d2d33; }
   .target-picker {
     position: fixed;
     top: 34px;
