@@ -2230,7 +2230,7 @@ See the LICENSE file in the root of this repository for complete details.
                   <option value={v.id}>{v.name}</option>
                 {/each}
               </select>
-              <p class="stub-hint" style="margin-top:4px">Auto speaks each reply in its own language (using an installed voice for it). Pick a specific voice to always use that voice instead.</p>
+              <p class="stub-hint" style="margin-top:4px">Auto speaks each reply in its own language (using an installed voice for it). A picked voice is used for replies in its language; replies in other languages still auto-pick a matching voice.</p>
             </div>
             <div class="setting-group">
               <p class="setting-label">Voice input</p>

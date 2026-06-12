@@ -226,24 +226,31 @@ mod imp {
                     } else {
                         lang_code_of_locale(&lang)
                     };
-                    // A user-selected preferred voice is used as-is — picking a voice
-                    // must be predictable. Auto (no preferred) picks an installed voice
-                    // for the reply language, falling back to the first voice rather than
-                    // going silent when language metadata is unavailable.
-                    let chosen: Option<String> = if let Some(pid) = preferred_id.clone() {
-                        Some(pid)
-                    } else {
-                        voices
+                    // Resolve the preferred voice against the installed list — a stale
+                    // id (e.g. saved before the WinRT migration) is treated as unset
+                    // instead of silently leaving the OS default voice in place.
+                    let preferred = preferred_id
+                        .as_deref()
+                        .and_then(|pid| voices.iter().find(|v| v.id == pid));
+                    // The preferred voice applies to replies in its own language only.
+                    // A reply in a different language auto-picks an installed voice for
+                    // that language — handing e.g. Chinese text to an English preferred
+                    // voice produces silence, which reads as "TTS is broken" (a real
+                    // report: VOICE_LANGUAGE=auto + preferred Zira en-US + zh reply).
+                    let chosen: Option<String> = match preferred {
+                        Some(v) if v.lang.is_empty() || v.lang == target => Some(v.id.clone()),
+                        _ => voices
                             .iter()
                             .find(|v| !v.lang.is_empty() && v.lang == target)
                             .map(|v| v.id.clone())
                             .or_else(|| {
+                                // No language metadata at all → first voice beats silence.
                                 if voices.iter().all(|v| v.lang.is_empty()) {
                                     voices.first().map(|v| v.id.clone())
                                 } else {
                                     None
                                 }
-                            })
+                            }),
                     };
                     log::info!(
                         "[tts] lang={lang} target={target} preferred={preferred_id:?} chosen={chosen:?}"
