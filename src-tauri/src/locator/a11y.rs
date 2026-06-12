@@ -513,6 +513,7 @@ pub fn find_element(
                     root,
                     target_text,
                     opts.role.as_deref(),
+                    &name_re,
                     &mut n,
                 ));
                 trace.element_count = Some(trace.element_count.unwrap_or(0).max(n));
@@ -563,6 +564,7 @@ pub fn find_element(
                         root,
                         target_text,
                         opts.role.as_deref(),
+                        &name_re,
                         &mut n,
                     ));
                     trace.element_count = Some(trace.element_count.unwrap_or(0).max(n));
@@ -612,20 +614,30 @@ pub fn find_element(
         return Ok((None, trace));
     }
 
-    // Sort by AI-bbox proximity if a predicted bbox is provided. Both bboxes
-    // are already in virtual-desktop physical pixels so the comparison is direct.
-    if let Some(ai) = opts.ai_bbox {
-        let target_x = ai.x as f32 + ai.width as f32 / 2.0;
-        let target_y = ai.y as f32 + ai.height as f32 / 2.0;
-
+    // Rank candidates: role agreement first (an Edit named "To" must beat Text
+    // tooltips when the AI asked for a textbox), then AI-bbox proximity. Both
+    // bboxes are already in virtual-desktop physical pixels. The sort is
+    // stable, so without a role or bbox the original pass order is preserved.
+    {
+        let desired_role = desired_ct.map(|ct| format!("{ct:?}"));
+        let ai_center = opts
+            .ai_bbox
+            .map(|ai| (ai.x as f32 + ai.width as f32 / 2.0, ai.y as f32 + ai.height as f32 / 2.0));
         candidates.sort_by(|a, b| {
-            let acx = a.bbox.x as f32 + a.bbox.width as f32 / 2.0;
-            let acy = a.bbox.y as f32 + a.bbox.height as f32 / 2.0;
-            let bcx = b.bbox.x as f32 + b.bbox.width as f32 / 2.0;
-            let bcy = b.bbox.y as f32 + b.bbox.height as f32 / 2.0;
-            let da = (acx - target_x).powi(2) + (acy - target_y).powi(2);
-            let db = (bcx - target_x).powi(2) + (bcy - target_y).powi(2);
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            let a_role_miss = desired_role.as_deref().is_some_and(|r| a.role != r);
+            let b_role_miss = desired_role.as_deref().is_some_and(|r| b.role != r);
+            a_role_miss.cmp(&b_role_miss).then_with(|| {
+                let Some((tx, ty)) = ai_center else {
+                    return std::cmp::Ordering::Equal;
+                };
+                let acx = a.bbox.x as f32 + a.bbox.width as f32 / 2.0;
+                let acy = a.bbox.y as f32 + a.bbox.height as f32 / 2.0;
+                let bcx = b.bbox.x as f32 + b.bbox.width as f32 / 2.0;
+                let bcy = b.bbox.y as f32 + b.bbox.height as f32 / 2.0;
+                let da = (acx - tx).powi(2) + (acy - ty).powi(2);
+                let db = (bcx - tx).powi(2) + (bcy - ty).powi(2);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
     }
 
@@ -640,8 +652,8 @@ pub fn find_element(
             selected: i == 0,
             reject_reason: if i == 0 {
                 None
-            } else if opts.ai_bbox.is_some() {
-                Some("farther from AI bbox".to_string())
+            } else if desired_ct.is_some() || opts.ai_bbox.is_some() {
+                Some("ranked lower (role / AI-bbox distance)".to_string())
             } else {
                 Some("not first match".to_string())
             },
@@ -726,18 +738,44 @@ fn match_in_subtree_all(
     }
 }
 
+/// Name-filter decision for the deep find, tiered by evidence strength:
+/// `Some(true)` = anchored match (the name IS the target, modulo accelerator /
+/// paren-suffix decoration); `Some(false)` = loose containment, allowed only
+/// when the name is **label-sized** relative to the target; `None` = reject.
+/// The label-likeness cap is what keeps short targets safe: "to" must match
+/// the field named "To", never the tooltip "Attach a file to this item." —
+/// prose containing the target word is not a label (live Outlook false hit).
+fn deep_name_filter(name: &str, needle: &str, name_re: &Regex) -> Option<bool> {
+    if name.is_empty() {
+        return None;
+    }
+    let normed = strip_accelerator(&norm_dashes(name));
+    if name_re.is_match(&normed) || name_re.is_match(&strip_paren_suffix(&normed)) {
+        return Some(true);
+    }
+    let needle_len = needle.chars().count();
+    let cap = (needle_len * 3).max(needle_len + 20);
+    if normed.chars().count() <= cap && normed.to_ascii_lowercase().contains(needle) {
+        return Some(false);
+    }
+    None
+}
+
 /// Deep, role-aware matcher for Chromium/Electron windows: finds far-down items (VS Code's
 /// activity bar, search boxes, …) that the standard passes miss. Uses a **native** UIA
 /// control-type OR-condition so `find_all` filters *in-process* — only the few matching
 /// elements cross the COM boundary, instead of a per-element round-trip over the whole tree
 /// (which made the manual approach take seconds). Restricts to the control types appropriate
 /// for the AI's role (a "button" target ignores bulk Text content; a "textbox" target keeps
-/// Edit/Text), then substring-matches the name (so "Extensions (Ctrl+Shift+X)" matches).
+/// Edit/Text), then name-filters via [`deep_name_filter`] — anchored matches win outright;
+/// loose containment ("Search Extensions in Marketplace" for "Search Extensions") only
+/// counts when no anchored match exists.
 fn deep_role_match(
     automation: &UIAutomation,
     root: &UIElement,
     target: &str,
     role: Option<&str>,
+    name_re: &Regex,
     // Out: count of role-matching UIA elements seen before name-filtering (0 = tree not built).
     count: &mut usize,
 ) -> Vec<LocateResult> {
@@ -778,14 +816,29 @@ fn deep_role_match(
         Err(_) => return Vec::new(),
     };
     *count = els.len();
-    els.into_iter()
-        .filter(|el| {
-            el.get_cached_name()
-                .map(|n| norm_dashes(&n.to_ascii_lowercase()).contains(&needle))
-                .unwrap_or(false)
-        })
-        .filter_map(|el| element_to_result_cached(&el))
-        .collect()
+    let mut anchored: Vec<LocateResult> = Vec::new();
+    let mut loose: Vec<LocateResult> = Vec::new();
+    for el in els {
+        let Ok(name) = el.get_cached_name() else {
+            continue;
+        };
+        let Some(is_anchored) = deep_name_filter(&name, &needle, name_re) else {
+            continue;
+        };
+        let Some(r) = element_to_result_cached(&el) else {
+            continue;
+        };
+        if is_anchored {
+            anchored.push(r);
+        } else {
+            loose.push(r);
+        }
+    }
+    if anchored.is_empty() {
+        loose
+    } else {
+        anchored
+    }
 }
 
 /// Last-resort Pane fallback for custom-toolkit apps (Adobe Lightroom/Photoshop
@@ -1133,6 +1186,45 @@ mod tests {
             eprintln!("  HIT name='{}' bbox={:?}", h.name, h.bbox);
         }
         assert!(!hits.is_empty(), "expected Pane 'Vibrance' to match");
+    }
+
+    #[test]
+    fn deep_name_filter_tiers_short_targets_safely() {
+        use super::{deep_name_filter, norm_dashes};
+        let needle = norm_dashes("to");
+        let re = build_name_regex("To").unwrap();
+        // The field actually named "To" → anchored.
+        assert_eq!(deep_name_filter("To", &needle, &re), Some(true));
+        // Prose/tooltips containing the word "to" must be rejected outright —
+        // the live new-Outlook false hit.
+        assert_eq!(
+            deep_name_filter("Attach a file to this item.", &needle, &re),
+            None
+        );
+        assert_eq!(
+            deep_name_filter("Restrict permission to this item.", &needle, &re),
+            None
+        );
+    }
+
+    #[test]
+    fn deep_name_filter_keeps_known_loose_matches() {
+        use super::{deep_name_filter, norm_dashes};
+        // VS Code activity bar: accelerator-suffixed name → anchored via the
+        // paren-suffix strip.
+        let needle = norm_dashes("extensions");
+        let re = build_name_regex("Extensions").unwrap();
+        assert_eq!(
+            deep_name_filter("Extensions (Ctrl+Shift+X)", &needle, &re),
+            Some(true)
+        );
+        // Marketplace search box: longer name, label-sized → loose containment.
+        let needle = norm_dashes("search extensions");
+        let re = build_name_regex("Search Extensions").unwrap();
+        assert_eq!(
+            deep_name_filter("Search Extensions in Marketplace", &needle, &re),
+            Some(false)
+        );
     }
 
     #[test]
