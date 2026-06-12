@@ -65,8 +65,11 @@ pub struct OcrTrace {
     pub word_count: usize,
     /// Up to 30 OCR text samples for at-a-glance debugging.
     pub sample_texts: Vec<String>,
-    /// Strategy that produced the winner ("exact" | "substring" | "fuzzy").
+    /// Strategy that produced the winner ("exact" | "substring" | "fuzzy";
+    /// "up-" prefix = found on the 2× upscale retry).
     pub strategy_used: Option<String>,
+    /// The sparse-OCR 2× upscale retry ran (compact-font UI below the OCR floor).
+    pub upscaled: bool,
     /// Tier reached in the relaxed-threshold cascade (Phase 1 D2). Tier 0 = strict.
     pub tier_reached: u8,
     /// Notable candidates considered at the matching strategies, with reject reasons.

@@ -907,6 +907,81 @@ mod tests {
         assert_eq!(out.winner.unwrap().text, "OK");
     }
 
+    // Live diagnostic: does inverting a dark-theme screenshot improve
+    // Windows.Media.Ocr recognition? Pass an image path in NAVISUAL_TEST_IMG.
+    // Run: $env:NAVISUAL_TEST_IMG=<png>; cargo test --lib ocr_invert_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn ocr_invert_live() {
+        let path = std::env::var("NAVISUAL_TEST_IMG").expect("set NAVISUAL_TEST_IMG");
+        let bytes = std::fs::read(&path).expect("read image");
+        let baseline = run_ocr(&bytes).expect("ocr baseline");
+
+        let mut img = image::load_from_memory(&bytes).expect("decode").to_rgba8();
+        // Mean luminance to confirm the dark-theme hypothesis.
+        let mean_luma: f64 = img
+            .pixels()
+            .map(|p| 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64)
+            .sum::<f64>()
+            / (img.width() as f64 * img.height() as f64);
+        for p in img.pixels_mut() {
+            p[0] = 255 - p[0];
+            p[1] = 255 - p[1];
+            p[2] = 255 - p[2];
+        }
+        let mut inverted = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut inverted),
+                image::ImageFormat::Png,
+            )
+            .expect("encode");
+        let flipped = run_ocr(&inverted).expect("ocr inverted");
+
+        let words = |rs: &[OcrResult]| rs.iter().filter(|r| r.confidence < 1.0).count();
+        let has = |rs: &[OcrResult], t: &str| {
+            rs.iter()
+                .any(|r| r.text.to_ascii_lowercase().contains(&t.to_ascii_lowercase()))
+        };
+        eprintln!(
+            "mean_luma={mean_luma:.0}  baseline: {} words (select-and-mask: {})  inverted: {} words (select-and-mask: {})",
+            words(&baseline),
+            has(&baseline, "Select and Mask"),
+            words(&flipped),
+            has(&flipped, "Select and Mask"),
+        );
+
+        // 2× Lanczos upscale (no inversion).
+        let orig = image::load_from_memory(&bytes).expect("decode").to_rgba8();
+        let up = image::imageops::resize(
+            &orig,
+            orig.width() * 2,
+            orig.height() * 2,
+            image::imageops::FilterType::Lanczos3,
+        );
+        let mut up_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(up)
+            .write_to(
+                &mut std::io::Cursor::new(&mut up_bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode");
+        let upscaled = run_ocr(&up_bytes).expect("ocr upscaled");
+        eprintln!(
+            "2x upscale: {} words (select-and-mask: {})",
+            words(&upscaled),
+            has(&upscaled, "Select and Mask"),
+        );
+        eprintln!(
+            "upscaled sample: {:?}",
+            upscaled
+                .iter()
+                .take(30)
+                .map(|r| r.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
     // --- corroboration helpers -------------------------------------------
 
     #[test]
