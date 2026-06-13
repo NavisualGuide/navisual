@@ -209,7 +209,7 @@ pub fn locate(
         let h = (b.height as f32 * inv_sy).round() as u32;
         (x, y, w, h)
     };
-    let mut ai_bbox_img: Option<(i32, i32, u32, u32)> = opts.ai_bbox.map(to_img_space);
+    let ai_bbox_img: Option<(i32, i32, u32, u32)> = opts.ai_bbox.map(to_img_space);
     let avoid_bbox_img: Option<(i32, i32, u32, u32)> = opts.avoid_bbox.map(to_img_space);
 
     let find_opts = ocr::FindOptions {
@@ -222,80 +222,22 @@ pub fn locate(
         min_confidence: opts.min_confidence,
     };
 
-    let mut results = results;
-    let (mut img_w, mut img_h) = (img_w, img_h);
-    let mut hit: Option<ocr::OcrResult> = {
-        let outcome = ocr::find_text(target_text, &results, &find_opts);
-        ocr_trace.candidates = outcome.candidates;
-        ocr_trace.strategy_used = outcome.strategy_used;
-        outcome.winner.cloned()
-    };
-
-    // Sparse-OCR upscale retry: compact-font UIs (Photoshop's options bar at
-    // ~11 px) sit below Windows.Media.Ocr's reliability floor — the engine read
-    // 30 words on a 2-MP Photoshop window while a 2× Lanczos upscale read 62
-    // INCLUDING the target ("Select and Mask…"; measured 2026-06-12, see the
-    // ignored `ocr_invert_live` test; inversion did NOT help). The retry is
-    // gated to locates that would otherwise MISS on a large-but-sparse image,
-    // so normal locates never pay the ~1–3 s upscale cost.
-    const SPARSE_WORDS: usize = 50;
-    const MIN_UPSCALE_PIXELS: u32 = 1_000_000;
-    if hit.is_none()
-        && ocr_trace.word_count < SPARSE_WORDS
-        && img_w.saturating_mul(img_h) >= MIN_UPSCALE_PIXELS
-    {
-        if let Ok(orig) = image::load_from_memory(&ocr_bytes) {
-            let up = image::imageops::resize(
-                &orig.to_rgba8(),
-                orig.width() * 2,
-                orig.height() * 2,
-                image::imageops::FilterType::Lanczos3,
-            );
-            let mut up_bytes = Vec::new();
-            if image::DynamicImage::ImageRgba8(up)
-                .write_to(
-                    &mut std::io::Cursor::new(&mut up_bytes),
-                    image::ImageFormat::Png,
-                )
-                .is_ok()
-            {
-                if let Ok(up_results) = ocr::run_ocr(&up_bytes) {
-                    results = up_results;
-                    img_w *= 2;
-                    img_h *= 2;
-                    ocr_trace.upscaled = true;
-                    ocr_trace.line_count =
-                        results.iter().filter(|r| r.confidence >= 1.0).count();
-                    ocr_trace.word_count = results.iter().filter(|r| r.confidence < 1.0).count();
-                    ocr_trace.sample_texts =
-                        results.iter().take(30).map(|r| r.text.clone()).collect();
-                    // Re-derive the image-space bboxes for the doubled dims.
-                    // ai_bbox_img is rebound (not just passed) because the
-                    // corroboration gate below compares it against the winner's
-                    // bbox, which is now in 2× space.
-                    ai_bbox_img = ai_bbox_img.map(|(x, y, w, h)| (x * 2, y * 2, w * 2, h * 2));
-                    let up_find_opts = ocr::FindOptions {
-                        role: opts.role.as_deref(),
-                        nearby_text: opts.nearby_text.as_deref(),
-                        screen_width: img_w,
-                        screen_height: img_h,
-                        ai_bbox: ai_bbox_img,
-                        avoid_bbox: avoid_bbox_img
-                            .map(|(x, y, w, h)| (x * 2, y * 2, w * 2, h * 2)),
-                        min_confidence: opts.min_confidence,
-                    };
-                    let outcome = ocr::find_text(target_text, &results, &up_find_opts);
-                    ocr_trace.candidates = outcome.candidates;
-                    ocr_trace.strategy_used =
-                        outcome.strategy_used.map(|s| format!("up-{s}"));
-                    hit = outcome.winner.cloned();
-                }
-            }
-        }
-    }
+    let outcome = ocr::find_text(target_text, &results, &find_opts);
+    ocr_trace.candidates = outcome.candidates;
+    ocr_trace.strategy_used = outcome.strategy_used;
     ocr_trace.elapsed_ms = ocr_started.elapsed().as_millis() as u32;
-
-    let Some(hit) = hit else {
+    // NOTE: a 2× whole-image upscale retry lived here briefly (2026-06-12) and
+    // was reverted the next day. A measured scale sweep (the ignored
+    // `ocr_scale_sweep` test) showed it rescued only 1 of 2 genuinely-present
+    // hard targets (Photoshop "Select and Mask" yes; "Object Selection" no at
+    // any scale), and the live cost was pathological — 12 s on a 2-MP window vs.
+    // <300 ms offline, i.e. GPU/resource contention in the loaded app, not an
+    // inherent OCR cost. Net negative: a guaranteed multi-second stall on every
+    // hard miss for an unreliable rescue. The pixel-size floor is a property of
+    // the input shared by all OCR engines (ocr-improvements-plan.md) — the real
+    // fix is a better engine (ocrs spike) or letting the vision AI read it (v0.7),
+    // not upscaling. The `ocr_scale_sweep` harness is kept for that evaluation.
+    let Some(hit) = outcome.winner.cloned() else {
         trace.ocr = ocr_trace;
         trace.final_decision = FinalDecision::Miss;
         trace.elapsed_ms = started.elapsed().as_millis() as u32;

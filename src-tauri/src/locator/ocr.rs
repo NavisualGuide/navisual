@@ -907,79 +907,88 @@ mod tests {
         assert_eq!(out.winner.unwrap().text, "OK");
     }
 
-    // Live diagnostic: does inverting a dark-theme screenshot improve
-    // Windows.Media.Ocr recognition? Pass an image path in NAVISUAL_TEST_IMG.
-    // Run: $env:NAVISUAL_TEST_IMG=<png>; cargo test --lib ocr_invert_live -- --ignored --nocapture
+    // Live diagnostic: does upscaling actually help Windows.Media.Ocr, and by how
+    // much? Sweeps OCR over 1×/1.5×/2×/3× on the full image and (optionally) a
+    // region crop, reporting word count, target-found, and wall-clock time per
+    // scale. This is the experiment behind the upscale-retry keep/replace/revert
+    // decision — not a single anecdote.
+    //
+    // Run:
+    //   $env:NAVISUAL_TEST_IMG="<png>"; $env:NAVISUAL_TEST_TARGET="Select and Mask"
+    //   # optional region crop in image px: x,y,w,h
+    //   $env:NAVISUAL_TEST_CROP="0,0,1920,70"
+    //   cargo test --lib ocr_scale_sweep -- --ignored --nocapture
     #[test]
     #[ignore]
-    fn ocr_invert_live() {
+    fn ocr_scale_sweep() {
+        use std::time::Instant;
         let path = std::env::var("NAVISUAL_TEST_IMG").expect("set NAVISUAL_TEST_IMG");
+        let target = std::env::var("NAVISUAL_TEST_TARGET").unwrap_or_default();
         let bytes = std::fs::read(&path).expect("read image");
-        let baseline = run_ocr(&bytes).expect("ocr baseline");
+        let full = image::load_from_memory(&bytes).expect("decode").to_rgba8();
 
-        let mut img = image::load_from_memory(&bytes).expect("decode").to_rgba8();
-        // Mean luminance to confirm the dark-theme hypothesis.
-        let mean_luma: f64 = img
-            .pixels()
-            .map(|p| 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64)
-            .sum::<f64>()
-            / (img.width() as f64 * img.height() as f64);
-        for p in img.pixels_mut() {
-            p[0] = 255 - p[0];
-            p[1] = 255 - p[1];
-            p[2] = 255 - p[2];
-        }
-        let mut inverted = Vec::new();
-        image::DynamicImage::ImageRgba8(img)
-            .write_to(
-                &mut std::io::Cursor::new(&mut inverted),
-                image::ImageFormat::Png,
-            )
-            .expect("encode");
-        let flipped = run_ocr(&inverted).expect("ocr inverted");
+        let crop = std::env::var("NAVISUAL_TEST_CROP").ok().map(|s| {
+            let n: Vec<u32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (n[0], n[1], n[2], n[3])
+        });
 
-        let words = |rs: &[OcrResult]| rs.iter().filter(|r| r.confidence < 1.0).count();
-        let has = |rs: &[OcrResult], t: &str| {
-            rs.iter()
-                .any(|r| r.text.to_ascii_lowercase().contains(&t.to_ascii_lowercase()))
+        let region = if let Some((x, y, w, h)) = crop {
+            image::imageops::crop_imm(&full, x, y, w, h).to_image()
+        } else {
+            full.clone()
         };
-        eprintln!(
-            "mean_luma={mean_luma:.0}  baseline: {} words (select-and-mask: {})  inverted: {} words (select-and-mask: {})",
-            words(&baseline),
-            has(&baseline, "Select and Mask"),
-            words(&flipped),
-            has(&flipped, "Select and Mask"),
-        );
 
-        // 2× Lanczos upscale (no inversion).
-        let orig = image::load_from_memory(&bytes).expect("decode").to_rgba8();
-        let up = image::imageops::resize(
-            &orig,
-            orig.width() * 2,
-            orig.height() * 2,
-            image::imageops::FilterType::Lanczos3,
-        );
-        let mut up_bytes = Vec::new();
-        image::DynamicImage::ImageRgba8(up)
-            .write_to(
-                &mut std::io::Cursor::new(&mut up_bytes),
-                image::ImageFormat::Png,
-            )
-            .expect("encode");
-        let upscaled = run_ocr(&up_bytes).expect("ocr upscaled");
-        eprintln!(
-            "2x upscale: {} words (select-and-mask: {})",
-            words(&upscaled),
-            has(&upscaled, "Select and Mask"),
-        );
-        eprintln!(
-            "upscaled sample: {:?}",
-            upscaled
+        let tlow = target.to_ascii_lowercase();
+        let run_at = |scale: f32| -> (usize, bool, String, u128, u32, u32) {
+            let (w, h) = (region.width(), region.height());
+            let (nw, nh) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
+            let scaled = if (scale - 1.0).abs() < 0.01 {
+                region.clone()
+            } else {
+                image::imageops::resize(&region, nw, nh, image::imageops::FilterType::Lanczos3)
+            };
+            let mut buf = Vec::new();
+            image::DynamicImage::ImageRgba8(scaled)
+                .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .expect("encode");
+            let t0 = Instant::now();
+            let rs = run_ocr(&buf).expect("ocr");
+            let ms = t0.elapsed().as_millis();
+            let words = rs.iter().filter(|r| r.confidence < 1.0).count();
+            // Target found = any line-level result contains the target text.
+            let hit_line = rs
                 .iter()
-                .take(30)
-                .map(|r| r.text.as_str())
-                .collect::<Vec<_>>()
+                .filter(|r| r.confidence >= 1.0)
+                .find(|r| !tlow.is_empty() && r.text.to_ascii_lowercase().contains(&tlow))
+                .map(|r| r.text.clone())
+                .unwrap_or_default();
+            (words, !hit_line.is_empty(), hit_line, ms, nw, nh)
+        };
+
+        eprintln!(
+            "\n=== {} ===  target={:?}  region={}x{}{}",
+            std::path::Path::new(&path).file_name().unwrap().to_string_lossy(),
+            target,
+            region.width(),
+            region.height(),
+            crop.map(|_| " (cropped)").unwrap_or(""),
         );
+        eprintln!("scale  dims          MP    ms     words  target?  line");
+        for scale in [1.0f32, 1.5, 2.0, 3.0] {
+            let (words, found, line, ms, nw, nh) = run_at(scale);
+            let mp = (nw as f64 * nh as f64 / 1e6 * 10.0).round() / 10.0;
+            eprintln!(
+                "{:>4.1}x  {:>5}x{:<5}  {:>4}  {:>5}  {:>5}  {:>6}   {}",
+                scale,
+                nw,
+                nh,
+                mp,
+                ms,
+                words,
+                if found { "YES" } else { "no" },
+                if line.len() > 48 { &line[..48] } else { &line },
+            );
+        }
     }
 
     // --- corroboration helpers -------------------------------------------
