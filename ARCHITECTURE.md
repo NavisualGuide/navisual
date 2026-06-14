@@ -120,12 +120,12 @@ The panel and overlay windows are blanked from the captured image via software r
 
 | File | Path | Purpose |
 |---|---|---|
-| `.env` | `%APPDATA%\com.navisual.app\` | User settings (atomic write on Settings → Save) |
-| `sessions/<uuid>.json` | `%APPDATA%\com.navisual.app\` | Conversation history + state summary, resumable across launches |
-| `usage.json` | `%APPDATA%\com.navisual.app\` | Token usage for cost-cap enforcement |
-| `supabase_session.json` | `%APPDATA%\com.navisual.app\` | Anonymous-auth JWT for the free managed tier |
-| `debug/` | `%APPDATA%\com.navisual.app\` | Off by default; opt-in via `.env` flags. Cleaned at startup if >7 days old. |
-| `locate_log.jsonl` | `%APPDATA%\com.navisual.app\` | Off by default; same cleanup rule |
+| `.env` | `%LOCALAPPDATA%\com.navisual.app\` | User settings (atomic write on Settings → Save) |
+| `sessions/<uuid>.json` | `%LOCALAPPDATA%\com.navisual.app\` | Conversation history + state summary, resumable across launches |
+| `usage.json` | `%LOCALAPPDATA%\com.navisual.app\` | Token usage for cost-cap enforcement |
+| `supabase_session.json` | `%LOCALAPPDATA%\com.navisual.app\` | Anonymous-auth JWT for the free managed tier |
+| `debug/` | `%LOCALAPPDATA%\com.navisual.app\` | Off by default; opt-in via `.env` flags. Cleaned at startup if >7 days old. |
+| `locate_log.jsonl` | `%LOCALAPPDATA%\com.navisual.app\` | Off by default; same cleanup rule |
 
 Screenshots themselves are **not persisted** — chat thumbnails and the lightbox image live in process memory only.
 

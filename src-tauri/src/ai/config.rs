@@ -75,7 +75,7 @@ pub struct Config {
     pub debug_show_response_info: bool,
     /// Render the locator-trace drawer in the panel (Phase 0.1).
     pub debug_locate_trace_enabled: bool,
-    /// Append every locate trace to %APPDATA%\com.navisual.app\locate_log.jsonl.
+    /// Append every locate trace to %LOCALAPPDATA%\com.navisual.app\locate_log.jsonl.
     pub debug_locate_log_file_enabled: bool,
     /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
     pub debug_show_ai_bbox: bool,

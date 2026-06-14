@@ -3,7 +3,7 @@
 //! Records what each tier of the locator considered and which candidate was
 //! returned. Surfaced in two places:
 //!  - The frontend DebugDrawer (when debug toggle is on).
-//!  - A rolling JSONL log at `%APPDATA%\com.navisual.app\locate_log.jsonl`.
+//!  - A rolling JSONL log at `%LOCALAPPDATA%\com.navisual.app\locate_log.jsonl`.
 
 use crate::capture::Rect;
 use std::io::Write;

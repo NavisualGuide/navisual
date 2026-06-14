@@ -439,7 +439,7 @@ fn log_model_timing(
     steps: usize,
 ) {
     use std::io::Write;
-    let Ok(dir) = app.path().app_data_dir() else {
+    let Ok(dir) = app.path().app_local_data_dir() else {
         return;
     };
     let path = dir.join("model_timings.csv");
@@ -466,7 +466,7 @@ fn maybe_log_trace(app: &AppHandle, trace: &locator::trace::LocateTrace, log_ena
     if !log_enabled {
         return;
     }
-    if let Ok(dir) = app.path().app_data_dir() {
+    if let Ok(dir) = app.path().app_local_data_dir() {
         let path = dir.join("locate_log.jsonl");
         if let Err(e) = locator::trace::append_jsonl(&path, trace) {
             log::warn!("locate_log.jsonl write failed: {e}");
@@ -660,6 +660,52 @@ fn get_chat_full_screenshot(state: State<'_, AppState>) -> Option<String> {
     Some(capture::to_base64(&bytes))
 }
 
+/// On first launch after the Roaming→Local migration (v0.5.24+), move any
+/// files written to `%APPDATA%\com.navisual.app` to `%LOCALAPPDATA%\com.navisual.app`.
+/// API keys, auth tokens, sessions, and logs are machine-specific and must not
+/// sync across devices via roaming profiles.
+fn migrate_roaming_to_local(old_dir: &std::path::Path, new_dir: &std::path::Path) {
+    if old_dir == new_dir || !old_dir.exists() {
+        return;
+    }
+    const FILES: &[&str] = &[
+        ".env",
+        "usage.json",
+        "supabase_session.json",
+        "locate_log.jsonl",
+        "locate_log.jsonl.1",
+        "model_timings.csv",
+    ];
+    const DIRS: &[&str] = &["sessions", "debug"];
+    let mut moved = 0usize;
+    for name in FILES {
+        let src = old_dir.join(name);
+        let dst = new_dir.join(name);
+        if src.exists() && !dst.exists() {
+            if std::fs::rename(&src, &dst).is_ok() {
+                moved += 1;
+            } else {
+                log::warn!("migrate {name}: rename failed");
+            }
+        }
+    }
+    for name in DIRS {
+        let src = old_dir.join(name);
+        let dst = new_dir.join(name);
+        if src.exists() && !dst.exists() {
+            if std::fs::rename(&src, &dst).is_ok() {
+                moved += 1;
+            } else {
+                log::warn!("migrate dir {name}: rename failed");
+            }
+        }
+    }
+    if moved > 0 {
+        log::info!("migrated {moved} item(s) from Roaming to Local AppData");
+        std::fs::remove_dir(old_dir).ok(); // clean up if now empty
+    }
+}
+
 /// On startup, delete debug-mode artifacts older than 7 days. Both flags
 /// (`DEBUG_SCREENSHOT_ENABLED`, `DEBUG_LOCATE_LOG_FILE_ENABLED`) are off
 /// by default — this is a safety net for developers who turn them on,
@@ -755,7 +801,7 @@ async fn guide(
     let exclude = capture::get_panel_rects();
 
     // Debug folder is a sub-directory of the app data dir.
-    let debug_dir = app.path().app_data_dir().map(|p| p.join("debug")).ok();
+    let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
 
     // Clear the previous step's pointer before capture — prevents it from
     // appearing in the AI's screenshot. Stop the tracker first so it can't
@@ -1138,7 +1184,7 @@ async fn guide(
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path()
-            .app_data_dir()
+            .app_local_data_dir()
             .ok()
             .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
@@ -1242,7 +1288,7 @@ async fn next_step(
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path()
-            .app_data_dir()
+            .app_local_data_dir()
             .ok()
             .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
@@ -1326,7 +1372,7 @@ async fn send_correction(
     let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
     drop(router); // Release lock before blocking capture
 
-    let debug_dir = app.path().app_data_dir().map(|p| p.join("debug")).ok();
+    let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
 
     // Clear the previous pointer before capture.
     state.tracker.clear();
@@ -1612,7 +1658,7 @@ async fn send_correction(
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path()
-            .app_data_dir()
+            .app_local_data_dir()
             .ok()
             .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
@@ -1957,8 +2003,8 @@ async fn open_debug_folder(app: AppHandle) -> Result<(), String> {
     }
     let dir = app
         .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir: {e}"))?
+        .app_local_data_dir()
+        .map_err(|e| format!("app_local_data_dir: {e}"))?
         .join("debug");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir: {e}"))?;
     #[cfg(windows)]
@@ -2462,13 +2508,17 @@ pub fn run() {
             let tts = tts::TtsEngine::new();
             let tracker = track::WindowTracker::new();
 
-            // Resolve the app data directory (user-writable on all platforms).
+            // Resolve the local app data directory (machine-specific, never roams).
             // Falls back to CWD so dev builds with no installation still work.
             let app_data_dir = app
                 .path()
-                .app_data_dir()
+                .app_local_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
             std::fs::create_dir_all(&app_data_dir).ok();
+            // One-time migration: move files written to Roaming AppData before v0.5.24.
+            if let Ok(old_roaming) = app.path().app_data_dir() {
+                migrate_roaming_to_local(&old_roaming, &app_data_dir);
+            }
             cleanup_old_debug_artifacts(&app_data_dir);
             let env_path = app_data_dir.join(".env");
 

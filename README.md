@@ -92,7 +92,7 @@ Additional notes:
 - Screenshots are held in memory only — never written to disk at default settings
 - Full-screen / multi-monitor capture requires explicit one-time permission each time
 - Assign a Pause hotkey in **Settings → Hotkeys** to stop all capture instantly
-- Settings and auth token live in `%APPDATA%\com.navisual.app\`
+- Settings and auth token live in `%LOCALAPPDATA%\com.navisual.app\`
 - Voice input (optional) uses the WebView2 Web Speech API, which sends your spoken audio to Microsoft's online speech service
 - Debug captures are off by default; when enabled, files older than 7 days are auto-deleted
 
@@ -130,7 +130,7 @@ npm run tauri dev      # development (hot reload)
 npm run tauri build    # production binary → src-tauri/target/release/
 ```
 
-Settings (dev and production) are read from `%APPDATA%\com.navisual.app\.env`. Copy `.env.example` there to pre-configure. The project-root `.env` is not read.
+Settings (dev and production) are read from `%LOCALAPPDATA%\com.navisual.app\.env`. Copy `.env.example` there to pre-configure. The project-root `.env` is not read.
 
 ---
 
