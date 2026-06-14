@@ -14,6 +14,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
   import HotkeyInput from "./HotkeyInput.svelte";
+  import { prettyHotkey } from "./lib/hotkey";
 
   type Rect = { x: number; y: number; width: number; height: number };
   type LocateResult = { bbox: Rect; name: string; role: string; confidence: number };
@@ -1703,10 +1704,21 @@ See the LICENSE file in the root of this repository for complete details.
         {/if}
       </div>
       <div class="shortcut-legend">
-        <span>{settingsForm.hotkey_next} <span class="hk-label">Next</span></span>
-        <span>{settingsForm.hotkey_wrong} <span class="hk-label">Wrong</span></span>
-        <span>{settingsForm.hotkey_pause} <span class="hk-label">Pause</span></span>
-        <span>{settingsForm.hotkey_icon} <span class="hk-label">Icon</span></span>
+        {#each [
+          { accel: settingsForm.hotkey_next,  label: "Next" },
+          { accel: settingsForm.hotkey_wrong, label: "Wrong" },
+          { accel: settingsForm.hotkey_pause, label: "Pause" },
+          { accel: settingsForm.hotkey_icon,  label: "Icon" },
+        ] as hk (hk.label)}
+          <span class="hk-item" class:hk-unset={!hk.accel}>
+            <span class="hk-label">{hk.label}</span>
+            {#if hk.accel}
+              <kbd class="hk-key">{prettyHotkey(hk.accel)}</kbd>
+            {:else}
+              <span class="hk-none">not set</span>
+            {/if}
+          </span>
+        {/each}
       </div>
     </footer>
   </main>
@@ -3292,19 +3304,40 @@ See the LICENSE file in the root of this repository for complete details.
 
   .shortcut-legend {
     display: flex;
-    gap: 10px;
+    gap: 16px;
     flex-wrap: wrap;
+    align-items: center;
   }
-  .shortcut-legend span {
-    font-size: 10px;
-    color: var(--text-tertiary);
-    font-family: "JetBrains Mono", ui-monospace, monospace;
+  .hk-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     white-space: nowrap;
   }
-  .shortcut-legend .hk-label {
+  .hk-key {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 10px;
+    line-height: 1;
     color: var(--text-secondary);
-    font-family: inherit;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 2px 5px;
+  }
+  .hk-none {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    font-style: italic;
+    opacity: 0.7;
+  }
+  .hk-label {
+    font-size: 10px;
+    color: var(--text-secondary);
     font-weight: 500;
+  }
+  .hk-item.hk-unset .hk-label {
+    color: var(--text-tertiary);
   }
 
   /* ── Shared buttons ──────────────────────────────── */

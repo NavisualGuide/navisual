@@ -1,8 +1,12 @@
 <script lang="ts">
+  import { prettyHotkey } from "./lib/hotkey";
+
   let { value = $bindable("") }: { value: string } = $props();
 
   let recording = $state(false);
-  let displayValue = $derived(value || "—");
+  // `value` stays the raw Tauri accelerator (needed for registration);
+  // the badge shows the humanized form. See lib/hotkey.
+  let displayValue = $derived(value ? prettyHotkey(value) : "—");
 
   // Convert a KeyboardEvent into a Tauri accelerator string like "Ctrl+Shift+KeyE"
   function eventToAccelerator(e: KeyboardEvent): string | null {
@@ -38,6 +42,12 @@
     recording = true;
   }
 
+  function clear(e: MouseEvent) {
+    e.stopPropagation(); // don't trigger startRecording on the parent
+    value = "";
+    recording = false;
+  }
+
   function onBlur() {
     recording = false;
   }
@@ -58,6 +68,15 @@
   {:else}
     <span class="hotkey-badge">{displayValue}</span>
     <span class="click-hint">click to change</span>
+    {#if value}
+      <button
+        type="button"
+        class="clear-btn"
+        title="Clear — set to none"
+        aria-label="Clear hotkey"
+        onclick={clear}
+      >×</button>
+    {/if}
   {/if}
 </div>
 
@@ -106,5 +125,27 @@
     color: #FF6B35;
     font-size: 11px;
     font-style: italic;
+  }
+  .clear-btn {
+    margin-left: auto;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.45);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .clear-btn:hover {
+    background: rgba(255,107,53,0.18);
+    color: #FF6B35;
   }
 </style>
