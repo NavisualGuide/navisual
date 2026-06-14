@@ -770,11 +770,12 @@ fn match_in_subtree_all(
 
 /// Name-filter decision for the deep find, tiered by evidence strength:
 /// `Some(true)` = anchored match (the name IS the target, modulo accelerator /
-/// paren-suffix decoration); `Some(false)` = loose containment, allowed only
-/// when the name is **label-sized** relative to the target; `None` = reject.
-/// The label-likeness cap is what keeps short targets safe: "to" must match
-/// the field named "To", never the tooltip "Attach a file to this item." —
-/// prose containing the target word is not a label (live Outlook false hit).
+/// paren-suffix / keybinding-annotation decoration); `Some(false)` = loose
+/// containment, allowed only when the name is **label-sized** relative to the
+/// target; `None` = reject. The label-likeness cap is what keeps short targets
+/// safe: "to" must match the field named "To", never the tooltip "Attach a file
+/// to this item." — prose containing the target word is not a label (live Outlook
+/// false hit).
 fn deep_name_filter(name: &str, needle: &str, name_re: &Regex) -> Option<bool> {
     if name.is_empty() {
         return None;
@@ -782,6 +783,16 @@ fn deep_name_filter(name: &str, needle: &str, name_re: &Regex) -> Option<bool> {
     let normed = strip_accelerator(&norm_dashes(name));
     if name_re.is_match(&normed) || name_re.is_match(&strip_paren_suffix(&normed)) {
         return Some(true);
+    }
+    // Chromium activity-bar pattern (VS Code): the UIA Name is the label followed by a
+    // " (keybinding)" annotation and an optional badge, and is sometimes DOUBLED — the live
+    // name is `Extensions (Ctrl+Shift+X) - 4 require restart` repeated twice. The label is
+    // the leading token before the first " (" annotation; anchored-match THAT. Still exact,
+    // so a short target ("To") can't latch onto a longer leading label ("Tools (Ctrl+T)…").
+    if let Some(lead) = normed.split(" (").next() {
+        if lead != normed && name_re.is_match(lead) {
+            return Some(true);
+        }
     }
     let needle_len = needle.chars().count();
     let cap = (needle_len * 3).max(needle_len + 20);
@@ -1240,6 +1251,104 @@ mod tests {
         assert!(!hits.is_empty(), "expected Pane 'Vibrance' to match");
     }
 
+    // Live diagnostic: dump how a Chromium app (e.g. VS Code) exposes every element
+    // whose UIA Name contains "ext" — the real Name / ControlType / tree-view of the
+    // "Extensions" activity-bar item, which the deep find reports as 0 candidates.
+    // `control-view` is exactly what the deep find scans; `raw-view` also catches
+    // IsControlElement=false items the deep find can't see. Pass VS Code's window
+    // handle (decimal) in NAVISUAL_TEST_HWND — e.g. PowerShell:
+    //   (Get-Process code | ? { $_.MainWindowHandle -ne 0 } | select -First 1).MainWindowHandle
+    // Run: $env:NAVISUAL_TEST_HWND=<hwnd>; cargo test --lib vscode_extensions_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn vscode_extensions_live() {
+        use uiautomation::types::{TreeScope, UIProperty};
+        use uiautomation::variants::Variant;
+        use uiautomation::UIAutomation;
+        use windows::Win32::Foundation::HWND;
+
+        let hwnd_raw: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+        let automation = UIAutomation::new().unwrap();
+        let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+        let root = automation.element_from_handle(hwnd.into()).unwrap();
+        eprintln!("framework = {:?}", super::framework_of(&automation, hwnd_raw));
+
+        // --- Control view: the BROAD clickable+text type set the deep find scans ---
+        let mut cond = None;
+        for &id in super::role_control_type_ids(None) {
+            let c = automation
+                .create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+                .unwrap();
+            cond = Some(match cond.take() {
+                None => c,
+                Some(prev) => automation.create_or_condition(prev, c).unwrap(),
+            });
+        }
+        let cache = automation.create_cache_request().unwrap();
+        let _ = cache.add_property(UIProperty::Name);
+        let _ = cache.add_property(UIProperty::ControlType);
+        let els = root
+            .find_all_build_cache(TreeScope::Descendants, &cond.unwrap(), &cache)
+            .unwrap_or_default();
+        eprintln!("control-view scanned = {}", els.len());
+        let mut ctrl = 0;
+        for el in &els {
+            let name = el.get_cached_name().unwrap_or_default();
+            if name.to_ascii_lowercase().contains("ext") {
+                ctrl += 1;
+                eprintln!(
+                    "  [control] {:<11} name='{}'",
+                    el.get_cached_control_type()
+                        .map(|c| format!("{c:?}"))
+                        .unwrap_or_default(),
+                    name
+                );
+            }
+        }
+        eprintln!("control-view 'ext' hits = {ctrl}");
+
+        // --- Raw view: catches IsControlElement=false items the deep find can't see ---
+        fn walk(
+            w: &uiautomation::UITreeWalker,
+            el: &uiautomation::UIElement,
+            depth: usize,
+            hits: &mut usize,
+        ) {
+            if depth > 40 {
+                return;
+            }
+            let name = el.get_name().unwrap_or_default();
+            if name.to_ascii_lowercase().contains("ext") {
+                *hits += 1;
+                eprintln!(
+                    "  [raw d{:<2}] {:<11} name='{}'",
+                    depth,
+                    el.get_control_type()
+                        .map(|c| format!("{c:?}"))
+                        .unwrap_or_default(),
+                    name
+                );
+            }
+            if let Ok(child) = w.get_first_child(el) {
+                let mut cur = child;
+                loop {
+                    walk(w, &cur, depth + 1, hits);
+                    match w.get_next_sibling(&cur) {
+                        Ok(next) => cur = next,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        let walker = automation.get_raw_view_walker().unwrap();
+        let mut raw = 0;
+        walk(&walker, &root, 0, &mut raw);
+        eprintln!("raw-view 'ext' hits = {raw}");
+    }
+
     #[test]
     fn deep_name_filter_tiers_short_targets_safely() {
         use super::{deep_name_filter, norm_dashes};
@@ -1291,6 +1400,24 @@ mod tests {
             deep_name_filter("Search Extensions in Marketplace", &needle, &re),
             Some(false)
         );
+
+        // Live probe 2026-06-13: VS Code's real activity-bar Name is badged AND doubled.
+        // The leading-label split (before the " (" keybinding) still anchors to "Extensions".
+        let needle = norm_dashes("extensions");
+        let re = build_name_regex("Extensions").unwrap();
+        assert_eq!(
+            deep_name_filter(
+                "Extensions (Ctrl+Shift+X) - 4 require restart Extensions (Ctrl+Shift+X) - 4 require restart",
+                &needle,
+                &re,
+            ),
+            Some(true)
+        );
+        // The leading-label tier stays exact: a short target must NOT prefix-latch a
+        // longer leading label.
+        let needle = norm_dashes("to");
+        let re = build_name_regex("To").unwrap();
+        assert_eq!(deep_name_filter("Tools (Ctrl+T) - 2 issues", &needle, &re), None);
     }
 
     #[test]
