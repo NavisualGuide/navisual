@@ -34,7 +34,6 @@ See the LICENSE file in the root of this repository for complete details.
     instruction: string;
     located: LocateResult | null;
     needs_input: boolean;
-    request_full_screen: boolean;
     provider: string;
     model: string | null;
     input_tokens: number | null;
@@ -45,7 +44,7 @@ See the LICENSE file in the root of this repository for complete details.
     locate_trace: LocateTrace | null;
     ai_bbox: Rect | null;
   };
-  type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "consent_prompt" | "error";
+  type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer";
@@ -66,6 +65,9 @@ See the LICENSE file in the root of this repository for complete details.
     qwen_api_key: string;
     qwen_model: string;
     qwen_base_url: string;
+    custom_api_key: string;
+    custom_model: string;
+    custom_base_url: string;
     overlay_color: string;
     overlay_thickness: number;
     subtitle_enabled: boolean;
@@ -159,7 +161,6 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Core state
   let task = $state("");
-  let lastUserTask = $state("");  // most recent real user task; restated in consent grant/deny messages so weak models keep context
   let lastCompletedInstruction = $state("");  // passed to AI on Next re-query
   let phase = $state<AppPhase>("idle");
 
@@ -221,6 +222,10 @@ See the LICENSE file in the root of this repository for complete details.
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   let pinnedHwnd = $state<number | null>(null);
+  // User chose "Entire desktop" in the target picker (backend full_screen_mode).
+  // Mutually exclusive with pinnedHwnd; the user-initiated replacement for the
+  // old AI-requested full-screen consent flow.
+  let fullScreenTarget = $state(false);
 
   // Friendly names for exe stems shown in the "Shared:" chip (mirrors Rust's friendly_exe_name).
   const EXE_DISPLAY: Record<string, string> = {
@@ -290,6 +295,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function selectTarget(hwnd: number | null) {
     targetPickerOpen = false;
+    fullScreenTarget = false;
     if (hwnd === null) {
       await invoke("unpin_target_window");
       pinnedHwnd = null;
@@ -297,6 +303,15 @@ See the LICENSE file in the root of this repository for complete details.
       await invoke("pin_target_window", { hwnd });
       pinnedHwnd = hwnd;
     }
+  }
+
+  // "Entire desktop" — the user-initiated full-screen capture target. Sticky like
+  // a pin; survives new tasks until the user picks a window or Auto-detect again.
+  async function selectDesktop() {
+    targetPickerOpen = false;
+    await invoke("pin_full_screen_target");
+    pinnedHwnd = null;
+    fullScreenTarget = true;
   }
 
   // UI state
@@ -349,6 +364,7 @@ See the LICENSE file in the root of this repository for complete details.
     deepseek_api_key: "", deepseek_model: "deepseek-v4-flash",
     qwen_api_key: "", qwen_model: "qwen3.6-plus",
     qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    custom_api_key: "", custom_model: "", custom_base_url: "",
     overlay_color: "#FF6B35", overlay_thickness: 4,
     subtitle_enabled: true, auto_advance: false,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
@@ -370,12 +386,35 @@ See the LICENSE file in the root of this repository for complete details.
   const MODEL_PRESETS_OPENAI    = ["gpt-5.5","gpt-5.4-mini"];
   const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro"];
   const MODEL_PRESETS_QWEN      = ["qwen3.6-plus","qwen3.5-omni-plus"];
+  // Qwen DashScope OpenAI-compatible endpoints by region. Picking a region in the
+  // Settings "Endpoint" dropdown auto-fills qwen_base_url; "Custom" reveals a free
+  // field for local servers (LM Studio / llama.cpp) and workspace URLs (e.g. HK ws-xxx…).
+  const QWEN_ENDPOINTS = {
+    intl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    beijing: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  };
+  let qwenEndpointChoice = $derived(
+    settingsForm.qwen_base_url === QWEN_ENDPOINTS.intl ? "intl" : "beijing"
+  );
+  // Qwen now offers only the two cloud regions (custom/local moved to its own
+  // "Custom" provider). Pin a stale or non-preset qwen_base_url back to a region
+  // the moment Qwen is active, so the dropdown and the saved value never disagree.
+  $effect(() => {
+    if (
+      settingsForm.api_provider === "qwen" &&
+      settingsForm.qwen_base_url !== QWEN_ENDPOINTS.intl &&
+      settingsForm.qwen_base_url !== QWEN_ENDPOINTS.beijing
+    ) {
+      settingsForm.qwen_base_url = QWEN_ENDPOINTS.beijing;
+    }
+  });
 
   let showKeyAnthropic = $state(false);
   let showKeyGemini = $state(false);
   let showKeyOpenAI = $state(false);
   let showKeyDeepSeek = $state(false);
   let showKeyQwen = $state(false);
+  let showKeyCustom = $state(false);
   let debugShowInfo = $state(false);
   let showQuickMenu = $state(false);
   let isMuted = $state(false);
@@ -767,7 +806,7 @@ See the LICENSE file in the root of this repository for complete details.
   async function openSettings() {
     settingsError = null;
     settingsSaved = false;
-    showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false;
+    showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false; showKeyCustom = false;
     ollamaModels = []; ollamaModelsMsg = "";
     showSettings = true;
     // Load voices and settings in parallel, but wait for both before assigning
@@ -899,11 +938,7 @@ See the LICENSE file in the root of this repository for complete details.
     sessionId = res.session_id;
     if (res.provider) provider = res.provider;
     if (res.model) routedModel = res.model;
-    if (res.request_full_screen) {
-      phase = "consent_prompt";
-    } else {
-      phase = res.needs_input ? "needs_input" : "guiding";
-    }
+    phase = res.needs_input ? "needs_input" : "guiding";
     if (res.instruction) {
       const cleanInstruction = res.instruction;
       let meta: string | undefined;
@@ -926,35 +961,12 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  function allowFullScreen() {
-    guide_impl(true);
-  }
-
-  function denyFullScreen() {
-    task = lastUserTask
-      ? `Permission to capture full screen was denied. Original task: "${lastUserTask}". Ask the user to manually bring the correct application window into focus so you can continue.`
-      : "Permission to capture full screen was denied. Ask the user to manually bring the correct application window into focus so you can continue.";
-    correction();
-  }
-
   async function guide() {
-    guide_impl(false);
-  }
-
-  async function guide_impl(fullScreen: boolean) {
-    if (!task.trim() && !fullScreen) return;
-    let taskText: string;
-    if (fullScreen) {
-      taskText = lastUserTask
-        ? `[User granted permission to capture full desktop for the next step. Original task: "${lastUserTask}"]`
-        : "[User granted permission to capture full desktop for the next step]";
-    } else {
-      taskText = task.trim();
-      lastUserTask = taskText;
-    }
+    if (!task.trim()) return;
+    const taskText = task.trim();
     task = "";
     // Keep session context when in the middle of a task; start fresh from idle/error.
-    const isReply = phase === "guiding" || phase === "needs_input" || phase === "consent_prompt";
+    const isReply = phase === "guiding" || phase === "needs_input";
     const prevPhase = phase;
     const userEntryId = await addToHistory("user", taskText);
     currentInstruction = "";
@@ -964,36 +976,24 @@ See the LICENSE file in the root of this repository for complete details.
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply, fullScreen });
+      const res = await invoke<GuideResponse>("guide", { task: taskText, isReply });
       stopTimer();
       if (token !== requestToken) return;
       if (res.chat_thumb_b64) attachThumb(userEntryId, res.chat_thumb_b64);
       if (!res.ok) {
-        phase = errorFallbackPhase(prevPhase, fullScreen);
+        phase = prevPhase;
         addToHistory("system", "⚠️ " + (res.error ?? "guide failed"));
-        if (!fullScreen && taskText !== "") task = taskText;
+        if (taskText !== "") task = taskText;
         return;
       }
       applyResponse(res, 0, token);
     } catch (e) {
       stopTimer();
       if (token !== requestToken) return;
-      phase = errorFallbackPhase(prevPhase, fullScreen);
+      phase = prevPhase;
       addToHistory("system", "⚠️ " + String(e));
-      if (!fullScreen && taskText !== "") task = taskText;
+      if (taskText !== "") task = taskText;
     }
-  }
-
-  // After a failed guide call, pick the phase to revert to. Normally that's
-  // prevPhase — but when the user just clicked "Allow Once" (fullScreen=true)
-  // and the request errored (e.g. upstream 429), reverting to consent_prompt
-  // would re-ask for permission and trap them in a click → 429 → click loop.
-  // Surface the error and drop back to a non-consent phase instead.
-  function errorFallbackPhase(prev: AppPhase, fullScreen: boolean): AppPhase {
-    if (fullScreen && prev === "consent_prompt") {
-      return steps.length > 0 ? "guiding" : "idle";
-    }
-    return prev;
   }
 
   async function nextStep() {
@@ -1175,7 +1175,6 @@ See the LICENSE file in the root of this repository for complete details.
     : phase === "thinking"  ? `thinking`
     : phase === "guiding"   ? `step ${stepIndex + 1}/${steps.length}`
     : phase === "needs_input" ? "needs input"
-    : phase === "consent_prompt" ? "needs permission"
     : "error"
   );
 
@@ -1188,6 +1187,7 @@ See the LICENSE file in the root of this repository for complete details.
     : settingsForm.api_provider === "ollama" ? settingsForm.ollama_model
     : settingsForm.api_provider === "deepseek" ? settingsForm.deepseek_model
     : settingsForm.api_provider === "qwen" ? settingsForm.qwen_model
+    : settingsForm.api_provider === "custom" ? (settingsForm.custom_model || "custom")
     : settingsForm.api_provider === "managed" ? "managed"
     : settingsForm.openai_model
   );
@@ -1349,17 +1349,21 @@ See the LICENSE file in the root of this repository for complete details.
     <div class="titlebar" role="toolbar" tabindex="-1" data-tauri-drag-region onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
       <span class="header-title">Navisual</span>
-      {#if sharedApp}
+      {#if sharedApp || fullScreenTarget}
         <button
           class="header-shared"
-          class:header-shared-pinned={pinnedHwnd !== null}
-          title={pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
+          class:header-shared-pinned={pinnedHwnd !== null || fullScreenTarget}
+          title={fullScreenTarget ? "Sharing the entire desktop — click to switch target" : pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
           onmousedown={(e) => e.stopPropagation()}
           onclick={openTargetPicker}
         >
           <span class="header-shared-dot"></span>
-          {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
-          {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
+          {#if fullScreenTarget}
+            🖥️ Entire desktop
+          {:else if sharedApp}
+            {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
+            {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
+          {/if}
           <span class="header-shared-caret">▾</span>
         </button>
       {/if}
@@ -1614,34 +1618,23 @@ See the LICENSE file in the root of this repository for complete details.
 
     <!-- Task input — always enabled; Enter submits, isReply detected from phase -->
     <section class="task-section">
-      {#if phase === "consent_prompt"}
-        <div class="consent-box" style="padding: 8px; font-size: 0.9em; line-height: 1.4; color: var(--fg);">
-          <p style="margin: 0 0 8px 0;">🛡️ <strong>Permission Request</strong><br/>
-            The AI needs to look outside your current window to find what you're looking for. Allow Navisual to capture your entire screen for this next step?</p>
-          <div style="display: flex; gap: 8px;">
-            <button class="btn-primary" style="flex: 1" onclick={allowFullScreen}>Allow Once</button>
-            <button class="btn-ghost" style="flex: 1" onclick={denyFullScreen}>Deny</button>
-          </div>
-        </div>
+      {#if phase === "needs_input"}
+        <div class="input-hint">💬 AI needs your input — type your answer below</div>
+      {:else if phase === "guiding"}
+        <div class="input-hint">Type a follow-up or correction · ＋ for a new task</div>
+      {/if}
+      <textarea
+        bind:value={task}
+        onkeydown={handleKeydown}
+        placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
+        rows={2}
+      ></textarea>
+      {#if isThinking}
+        <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
       {:else}
-        {#if phase === "needs_input"}
-          <div class="input-hint">💬 AI needs your input — type your answer below</div>
-        {:else if phase === "guiding"}
-          <div class="input-hint">Type a follow-up or correction · ＋ for a new task</div>
-        {/if}
-        <textarea
-          bind:value={task}
-          onkeydown={handleKeydown}
-          placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
-          rows={2}
-        ></textarea>
-        {#if isThinking}
-          <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
-        {:else}
-          <button class="btn-primary btn-full" onclick={submitTask} disabled={!task.trim()}>
-            {phase === "needs_input" ? "↩ Send answer" : phase === "guiding" ? "↩ Follow up" : "Guide me"}
-          </button>
-        {/if}
+        <button class="btn-primary btn-full" onclick={submitTask} disabled={!task.trim()}>
+          {phase === "needs_input" ? "↩ Send answer" : phase === "guiding" ? "↩ Follow up" : "Guide me"}
+        </button>
       {/if}
     </section>
 
@@ -1722,8 +1715,8 @@ See the LICENSE file in the root of this repository for complete details.
   {#if targetPickerOpen}
     <div class="target-picker-backdrop" role="presentation" onclick={() => (targetPickerOpen = false)}></div>
     <div class="target-picker" role="listbox" aria-label="Choose target app">
-      <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null} onclick={() => selectTarget(null)}>
-        <span class="target-pick-check">{pinnedHwnd === null ? "✓" : ""}</span>
+      <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null && !fullScreenTarget} onclick={() => selectTarget(null)}>
+        <span class="target-pick-check">{pinnedHwnd === null && !fullScreenTarget ? "✓" : ""}</span>
         <span class="target-pick-name">Auto-detect</span>
         <span class="target-pick-sub">follow the foreground window</span>
       </button>
@@ -1736,6 +1729,11 @@ See the LICENSE file in the root of this repository for complete details.
           {/if}
         </button>
       {/each}
+      <button class="target-pick-item" class:target-pick-selected={fullScreenTarget} onclick={selectDesktop}>
+        <span class="target-pick-check">{fullScreenTarget ? "✓" : ""}</span>
+        <span class="target-pick-name">🖥️ Entire desktop</span>
+        <span class="target-pick-sub">share the whole screen — all windows</span>
+      </button>
     </div>
   {/if}
 
@@ -1877,18 +1875,27 @@ See the LICENSE file in the root of this repository for complete details.
 
         <div class="modal-body">
           {#if settingsTab === "provider"}
-            <!-- Provider radio group -->
+            <!-- Provider selector — grouped so it scales as providers + paid tiers grow -->
             <div class="setting-group">
-              <p class="setting-label">Provider</p>
-              <div class="provider-radios">
-                {#each (["managed","anthropic","gemini","ollama","openai","deepseek","qwen"] as const) as p}
-                  <label class="radio-opt" class:radio-active={settingsForm.api_provider === p}>
-                    <input type="radio" name="provider" value={p} bind:group={settingsForm.api_provider}
-                      onchange={() => { if (settingsForm.api_provider === "ollama" && ollamaModels.length === 0) refreshOllamaModels(); }} />
-                    {p === "managed" ? "Managed (free)" : p === "qwen" ? "Qwen / OpenAI-compat" : p.charAt(0).toUpperCase() + p.slice(1)}
-                  </label>
-                {/each}
-              </div>
+              <label class="setting-label" for="provider-select">Provider</label>
+              <select id="provider-select" class="setting-select"
+                bind:value={settingsForm.api_provider}
+                onchange={() => { if (settingsForm.api_provider === "ollama" && ollamaModels.length === 0) refreshOllamaModels(); }}>
+                <optgroup label="Navisual (hosted)">
+                  <option value="managed">Managed — free + paid</option>
+                </optgroup>
+                <optgroup label="Bring your own key">
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="qwen">Qwen (DashScope)</option>
+                </optgroup>
+                <optgroup label="Local &amp; custom">
+                  <option value="ollama">Ollama</option>
+                  <option value="custom">Custom (OpenAI-compatible)</option>
+                </optgroup>
+              </select>
             </div>
 
             <!-- Per-provider contextual hint -->
@@ -1904,9 +1911,11 @@ See the LICENSE file in the root of this repository for complete details.
               {:else if settingsForm.api_provider === "deepseek"}
                 ⚠ Text-only — DeepSeek cannot see your screen (its API rejects images). Guidance is inferred from your description, so it may be wrong on unfamiliar or custom apps. For mainland China <em>with</em> screen analysis, use Qwen instead.
               {:else if settingsForm.api_provider === "qwen"}
-                Qwen (DashScope) <em>and</em> any OpenAI-compatible endpoint — point the Base URL at a local server (LM Studio, llama.cpp, llamafile, vLLM) to run fully offline, no key needed. Supports image analysis. Also the recommended cloud option for mainland China, where US AI services are geoblocked.
+                Qwen (DashScope) — pick your region below and the endpoint fills in automatically. Supports image analysis, and is the recommended cloud option for mainland China where US AI services are geoblocked.
               {:else if settingsForm.api_provider === "ollama"}
                 Free · runs locally · no data leaves your machine. Requires Ollama installed with a vision model (e.g. llama3.2-vision).
+              {:else if settingsForm.api_provider === "custom"}
+                Any OpenAI-compatible <code>/v1</code> endpoint — a local server (LM Studio, llama.cpp, vLLM) to run fully offline, a DashScope workspace URL, or another cloud. Use a <em>vision</em> model so it can see the screen; the API key is optional for local servers.
               {/if}
             </p>
 
@@ -2107,14 +2116,51 @@ See the LICENSE file in the root of this repository for complete details.
                 {/if}
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="qwen-url">Base URL (OpenAI-compatible)</label>
-                <input id="qwen-url" class="setting-input" type="text"
-                  bind:value={settingsForm.qwen_base_url}
-                  placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
+                <label class="setting-label" for="qwen-endpoint">Region</label>
+                <select id="qwen-endpoint" class="setting-select"
+                  value={qwenEndpointChoice}
+                  onchange={(e) => {
+                    settingsForm.qwen_base_url = e.currentTarget.value === "intl" ? QWEN_ENDPOINTS.intl : QWEN_ENDPOINTS.beijing;
+                  }}>
+                  <option value="intl">International — Singapore</option>
+                  <option value="beijing">China — Beijing</option>
+                </select>
+                <p class="setting-hint">DashScope endpoint, filled in automatically. For a local server, a DashScope workspace URL, or another cloud, use the <strong>Custom (OpenAI-compatible)</strong> provider instead.</p>
+              </div>
+            {:else if settingsForm.api_provider === "custom"}
+              <div class="setting-group">
+                <label class="setting-label" for="custom-url">Base URL</label>
+                <input id="custom-url" class="setting-input" type="text"
+                  bind:value={settingsForm.custom_base_url}
+                  placeholder="http://localhost:1234/v1" spellcheck="false" />
                 <p class="setting-hint">
-                  The <code>/v1</code> endpoint — Navisual appends <code>/chat/completions</code>. Blank = DashScope (Qwen).<br />
-                  Local servers: LM Studio <code>http://localhost:1234/v1</code> · llama.cpp / llamafile <code>http://localhost:8080/v1</code> (use the host's LAN IP if it's another machine). For local servers, set Model to a <em>vision</em> model and enter any dummy API key above.
+                  OpenAI-compatible <code>/v1</code> endpoint — Navisual appends <code>/chat/completions</code>.<br />
+                  LM Studio <code>http://localhost:1234/v1</code> · llama.cpp / llamafile <code>http://localhost:8080/v1</code> (use the host's LAN IP from another machine). Also accepts a DashScope workspace URL (<code>ws-xxx.&lt;region&gt;.maas.aliyuncs.com/compatible-mode/v1</code>) or any other OpenAI-compatible cloud.
                 </p>
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="custom-model">Model</label>
+                <input id="custom-model" class="setting-input" type="text"
+                  bind:value={settingsForm.custom_model}
+                  placeholder="e.g. qwen2.5-vl-7b-instruct" spellcheck="false" />
+                <p class="setting-hint">Use a <em>vision</em> model so it can see the screen.</p>
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="custom-key">API Key <span style="opacity:.55">· optional for local servers</span></label>
+                <div class="key-row">
+                  {#if showKeyCustom}
+                    <input id="custom-key" class="setting-input" type="text"
+                      bind:value={settingsForm.custom_api_key}
+                      placeholder="sk-… or leave blank" spellcheck="false" />
+                  {:else}
+                    <input id="custom-key" class="setting-input" type="password"
+                      bind:value={settingsForm.custom_api_key}
+                      placeholder="sk-… or leave blank" spellcheck="false" />
+                  {/if}
+                  <button class="key-toggle" onclick={() => { showKeyCustom = !showKeyCustom; }}>
+                    {showKeyCustom ? "Hide" : "Show"}
+                  </button>
+                </div>
               </div>
             {/if}
 
@@ -3502,35 +3548,6 @@ See the LICENSE file in the root of this repository for complete details.
     width: 100%;
     accent-color: var(--accent-500);
     cursor: pointer;
-  }
-
-  .provider-radios {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-
-  .radio-opt {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 5px 10px;
-    border-radius: 6px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    transition: background 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
-    user-select: none;
-  }
-  .radio-opt input[type="radio"] { display: none; }
-  .radio-opt:hover { background: var(--surface-3); color: var(--text-primary); }
-  .radio-active {
-    background: rgba(255, 107, 53, 0.12) !important;
-    border-color: rgba(255, 107, 53, 0.4) !important;
-    color: var(--accent-400) !important;
   }
 
   .settings-error {

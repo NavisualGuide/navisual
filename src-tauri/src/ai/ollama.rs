@@ -12,7 +12,7 @@ use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType,
 /// so we use prompt engineering instead and parse JSON from the text response.
 const JSON_FORMAT_INSTRUCTION: &str = r#"
 
-IMPORTANT: Respond ONLY with a single valid JSON object — no markdown, no explanation. The top-level object has exactly four keys: "steps", "state_summary", "needs_input", "request_full_screen".
+IMPORTANT: Respond ONLY with a single valid JSON object — no markdown, no explanation. The top-level object has exactly three keys: "steps", "state_summary", "needs_input".
 
 Example (copy this structure exactly):
 {
@@ -26,8 +26,7 @@ Example (copy this structure exactly):
     }
   ],
   "state_summary": "User is opening the Layout tab.",
-  "needs_input": false,
-  "request_full_screen": false
+  "needs_input": false
 }
 
 Step fields (inside "steps" array only):
@@ -41,8 +40,7 @@ Step fields (inside "steps" array only):
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
-- needs_input: true only if you must ask the user a question before continuing
-- request_full_screen: true only if you need to see beyond the current window"#;
+- needs_input: true only if you must ask the user a question before continuing"#;
 
 pub struct OllamaClient {
     client: Client,
@@ -296,10 +294,9 @@ fn navigate_step_schema() -> Value {
                 }
             },
             "state_summary": { "type": "string", "maxLength": 300 },
-            "needs_input": { "type": "boolean" },
-            "request_full_screen": { "type": "boolean" }
+            "needs_input": { "type": "boolean" }
         },
-        "required": ["steps", "state_summary", "needs_input", "request_full_screen"]
+        "required": ["steps", "state_summary", "needs_input"]
     })
 }
 

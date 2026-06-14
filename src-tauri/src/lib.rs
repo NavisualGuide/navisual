@@ -51,6 +51,12 @@ struct GuidanceState {
     /// User-explicitly pinned window (via the target-picker dropdown). Survives
     /// new tasks; only cleared by `unpin_target_window` or when the window closes.
     pinned_hwnd: Option<usize>,
+    /// User-selected "Entire desktop" target (via the target-picker dropdown).
+    /// When true, every capture path (guide / correction) grabs the whole virtual
+    /// desktop instead of a single window. A deliberate, sticky user choice —
+    /// the AI can no longer request full-screen on its own. Mutually exclusive
+    /// with `pinned_hwnd`; survives new tasks like a pin.
+    full_screen_mode: bool,
 }
 
 /// Shared app state.
@@ -564,6 +570,9 @@ struct SettingsPayload {
     qwen_api_key: String,
     qwen_model: String,
     qwen_base_url: String,
+    custom_api_key: String,
+    custom_model: String,
+    custom_base_url: String,
     overlay_color: String,
     overlay_thickness: u32,
     subtitle_enabled: bool,
@@ -701,7 +710,6 @@ async fn guide(
     state: State<'_, AppState>,
     task: String,
     is_reply: bool,
-    full_screen: Option<bool>,
 ) -> Result<GuideResponse, String> {
     let is_next_requery = task.starts_with("[User completed:");
     // Only reset session state for a genuine new task (not resume, not reply, not next-requery).
@@ -733,9 +741,13 @@ async fn guide(
 
     let debug_screenshot_enabled = { state.ai_router.lock().await.config.debug_screenshot_enabled };
 
-    let stored_hwnd = {
+    // `is_fs` is the user's sticky "Entire desktop" choice from the target picker
+    // (GuidanceState.full_screen_mode). The AI no longer decides this — full-screen
+    // is now an explicit, user-initiated capture scope. When set, pinned/target HWNDs
+    // are ignored and the whole virtual desktop is captured.
+    let (stored_hwnd, is_fs) = {
         let g = state.guidance.lock();
-        g.pinned_hwnd.or(g.target_hwnd)
+        (g.pinned_hwnd.or(g.target_hwnd), g.full_screen_mode)
     };
 
     // Get the panel rect before entering spawn_blocking — blanked from the
@@ -756,7 +768,6 @@ async fn guide(
 
     #[allow(clippy::type_complexity)]
     let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>, Option<u64>, Option<Vec<u8>>, Option<capture::Rect>), ()> {
-        let is_fs = full_screen.unwrap_or(false);
         let (bytes, rect_opt, hwnd_opt) = if is_fs {
             match capture::capture_virtual_desktop_jpeg(75, &exclude) {
                 Ok((bytes, rect)) => (bytes, Some(rect), None),
@@ -1301,11 +1312,13 @@ async fn send_correction(
     // Clear the stored HWND so the correction capture always re-discovers the
     // currently focused window. If the first guide pointed at the wrong app,
     // the user can switch focus to the right app then press Wrong and the next
-    // capture will find the correct window.
-    {
+    // capture will find the correct window. In sticky "Entire desktop" mode
+    // (full_screen_mode) the capture grabs the whole virtual desktop instead.
+    let is_fs = {
         let mut g = state.guidance.lock();
         g.target_hwnd = None;
-    }
+        g.full_screen_mode
+    };
 
     let exclude = capture::get_panel_rects();
 
@@ -1343,13 +1356,27 @@ async fn send_correction(
         Option<u64>,
         Option<(Vec<u8>, capture::Rect)>,
     ) = tokio::task::spawn_blocking(move || {
-        if let Ok((bytes, rect, hwnd)) = capture::capture_active_window_jpeg(75, &exclude) {
+        // Full desktop (sticky "Entire desktop" user choice) or the focused window.
+        let captured: Option<(Vec<u8>, capture::Rect, Option<usize>)> = if is_fs {
+            capture::capture_virtual_desktop_jpeg(75, &exclude)
+                .ok()
+                .map(|(bytes, rect)| (bytes, rect, None))
+        } else {
+            capture::capture_active_window_jpeg(75, &exclude)
+                .ok()
+                .map(|(bytes, rect, hwnd)| (bytes, rect, Some(hwnd)))
+        };
+        if let Some((bytes, rect, hwnd_opt)) = captured {
             let final_bytes = bytes;
             // Native-res OCR image, captured now (overlay cleared, before the streamed subtitle)
-            // so the locator's OCR never reads our own caption — see guide().
-            let pre_ocr = capture::recapture_window_raw(hwnd, &exclude)
-                .ok()
-                .and_then(|(raw, r)| capture::encode_png_for_ocr(&raw).ok().map(|png| (png, r)));
+            // so the locator's OCR never reads our own caption — see guide(). No single
+            // window in full-screen mode, so OCR re-capture is skipped (A11y still runs).
+            let pre_ocr = match hwnd_opt {
+                Some(hwnd) => capture::recapture_window_raw(hwnd, &exclude)
+                    .ok()
+                    .and_then(|(raw, r)| capture::encode_png_for_ocr(&raw).ok().map(|png| (png, r))),
+                None => None,
+            };
 
             let debug_path = if debug_screenshot_enabled {
                 if let Some(ref dir) = debug_dir {
@@ -1359,7 +1386,7 @@ async fn send_correction(
                     let txt_path = dir.join(format!("screenshot_corr_{ts}.txt"));
 
                     #[cfg(windows)]
-                    {
+                    if let Some(hwnd) = hwnd_opt {
                         let info = capture::get_window_info(hwnd);
                         let _ = std::fs::write(&txt_path, info);
                     }
@@ -1382,7 +1409,7 @@ async fn send_correction(
             (
                 b64,
                 Some(rect),
-                Some(hwnd),
+                hwnd_opt,
                 debug_path,
                 thumb_b64,
                 Some(final_bytes),
@@ -1712,11 +1739,23 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
         let mut g = state.guidance.lock();
         g.pinned_hwnd = Some(hwnd);
         g.target_hwnd = Some(hwnd);
+        g.full_screen_mode = false; // a specific window and full-screen are mutually exclusive
     }
     #[cfg(windows)]
     announce_shared_app(&app, hwnd);
     #[cfg(not(windows))]
     let _ = app;
+}
+
+/// Select "Entire desktop" as the guidance target — the user-initiated replacement
+/// for the old AI-requested full-screen consent flow. Sticky like a pin: every
+/// subsequent capture (guide / correction) grabs the whole virtual desktop until
+/// the user picks a specific window or returns to the active-window default.
+#[tauri::command]
+fn pin_full_screen_target(state: State<'_, AppState>) {
+    let mut g = state.guidance.lock();
+    g.full_screen_mode = true;
+    g.pinned_hwnd = None;
 }
 
 /// Reset target_hwnd (and session state) when the user explicitly starts a new task.
@@ -1736,6 +1775,7 @@ fn new_session(state: State<'_, AppState>) {
 fn unpin_target_window(state: State<'_, AppState>) {
     let mut g = state.guidance.lock();
     g.pinned_hwnd = None;
+    g.full_screen_mode = false; // back to the active-window default
     // target_hwnd retains the last auto-discovered window for the current session.
 }
 
@@ -2051,6 +2091,9 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         qwen_api_key: c.qwen_api_key.clone().unwrap_or_default(),
         qwen_model: c.qwen_model.clone(),
         qwen_base_url: c.qwen_base_url.clone(),
+        custom_api_key: c.custom_api_key.clone().unwrap_or_default(),
+        custom_model: c.custom_model.clone(),
+        custom_base_url: c.custom_base_url.clone(),
         overlay_color: c.overlay_color.clone(),
         overlay_thickness: c.overlay_thickness,
         subtitle_enabled: c.subtitle_enabled,
@@ -2109,6 +2152,8 @@ async fn save_settings(
         ("DEEPSEEK_MODEL".into(), payload.deepseek_model.clone()),
         ("QWEN_MODEL".into(), payload.qwen_model.clone()),
         ("QWEN_BASE_URL".into(), payload.qwen_base_url.clone()),
+        ("CUSTOM_MODEL".into(), payload.custom_model.clone()),
+        ("CUSTOM_BASE_URL".into(), payload.custom_base_url.clone()),
         ("OVERLAY_COLOR".into(), payload.overlay_color.clone()),
         (
             "OVERLAY_THICKNESS".into(),
@@ -2171,6 +2216,9 @@ async fn save_settings(
     }
     if !payload.qwen_api_key.trim().is_empty() {
         updates.push(("QWEN_API_KEY".into(), payload.qwen_api_key.clone()));
+    }
+    if !payload.custom_api_key.trim().is_empty() {
+        updates.push(("CUSTOM_API_KEY".into(), payload.custom_api_key.clone()));
     }
 
     // Atomic write to .env
@@ -2365,12 +2413,15 @@ pub fn run() {
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
                 .level_for("tauri_plugin_updater", log::LevelFilter::Debug)
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
-                ))
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                ))
+                // `Builder::new()` already ships DEFAULT_LOG_TARGETS (Stdout + LogDir) and
+                // `.target()` APPENDS — adding them again wrote every record to the file (and
+                // stdout) TWICE. `.targets()` REPLACES the set, so we get exactly these two.
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                ])
                 .max_file_size(2_000_000)
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                 .build(),
@@ -2494,6 +2545,7 @@ pub fn run() {
             exit_for_update,
             list_target_windows,
             pin_target_window,
+            pin_full_screen_target,
             unpin_target_window,
             new_session,
             list_tts_voices,

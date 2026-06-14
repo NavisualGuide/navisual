@@ -168,6 +168,11 @@ pub struct NavigateStepResponse {
     pub state_summary: String,
     #[serde(default)]
     pub needs_input: bool,
+    /// Inert. The AI no longer drives full-screen capture — it is now a
+    /// user-initiated, sticky "Entire desktop" choice in the target picker
+    /// (`GuidanceState.full_screen_mode`). The key was removed from every provider
+    /// schema/prompt; this field is kept only so any stray model output that still
+    /// emits it deserializes cleanly (always false in practice).
     #[serde(default)]
     pub request_full_screen: bool,
 }

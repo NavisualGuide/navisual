@@ -88,8 +88,7 @@ impl GeminiClient {
                         }
                     },
                     "state_summary": {"type": "string"},
-                    "needs_input": {"type": "boolean"},
-                    "request_full_screen": {"type": "boolean"}
+                    "needs_input": {"type": "boolean"}
                 }
             }
         });

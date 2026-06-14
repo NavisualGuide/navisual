@@ -20,6 +20,10 @@ pub enum ApiClient {
     DeepSeek(DeepSeekClient),
     OpenAI(DeepSeekClient),
     Qwen(DeepSeekClient),
+    /// Any OpenAI-compatible endpoint the user configures (local LM Studio /
+    /// llama.cpp / vLLM, a DashScope workspace URL, or another cloud). Reuses
+    /// the DeepSeek client and the OpenAI-compat message builder.
+    Custom(DeepSeekClient),
     Managed(ManagedClient),
 }
 
@@ -81,6 +85,7 @@ impl AiRouter {
             "openai" => self.config.openai_model.clone(),
             "deepseek" => self.config.deepseek_model.clone(),
             "qwen" => self.config.qwen_model.clone(),
+            "custom" => self.config.custom_model.clone(),
             "managed" => self.config.managed_model.clone(),
             other => other.to_string(),
         }
@@ -221,6 +226,26 @@ impl AiRouter {
                     }
                 }
             }
+            // Any OpenAI-compatible endpoint. No API-key gate — local servers
+            // (LM Studio / llama.cpp) accept an empty or dummy key; gate on the
+            // Base URL being set instead.
+            "custom" if !self.config.custom_base_url.trim().is_empty() => {
+                let chat_url = format!(
+                    "{}/chat/completions",
+                    self.config.custom_base_url.trim_end_matches('/')
+                );
+                let key = self.config.custom_api_key.clone().unwrap_or_default();
+                match DeepSeekClient::new(
+                    key,
+                    self.config.custom_model.clone(),
+                    self.config.api_timeout_sec,
+                    Some(chat_url),
+                    Some("Custom".to_string()),
+                ) {
+                    Ok(client) => self.client = Some(ApiClient::Custom(client)),
+                    Err(e) => log::error!("Custom client init failed: {e}"),
+                }
+            }
             "managed" => {
                 let url = match &self.config.supabase_url {
                     Some(u) => u.clone(),
@@ -287,7 +312,7 @@ impl AiRouter {
                 let msgs = build_deepseek(user_text, screenshot_b64, state_summary, &conversation);
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
-            Some(ApiClient::OpenAI(c)) | Some(ApiClient::Qwen(c)) => {
+            Some(ApiClient::OpenAI(c)) | Some(ApiClient::Qwen(c)) | Some(ApiClient::Custom(c)) => {
                 // OpenAI (api.openai.com) and Qwen (DashScope) are both OpenAI-compat
                 // vision endpoints — they accept image_url and need the screenshot.
                 let msgs = build_openai(user_text, screenshot_b64, state_summary, &conversation);

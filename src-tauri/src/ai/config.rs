@@ -33,6 +33,12 @@ pub struct Config {
     pub qwen_model: String,
     pub qwen_base_url: String,
 
+    // Custom — any OpenAI-compatible endpoint (local LM Studio / llama.cpp / vLLM,
+    // a DashScope workspace URL, or another cloud). Reuses the DeepSeek client.
+    pub custom_api_key: Option<String>,
+    pub custom_model: String,
+    pub custom_base_url: String,
+
     // Supabase managed relay (S.1 free trial + paid tiers)
     pub supabase_url: Option<String>,
     pub supabase_anon_key: Option<String>,
@@ -95,6 +101,9 @@ impl Default for Config {
             qwen_api_key: None,
             qwen_model: "qwen3.6-plus".to_string(),
             qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            custom_api_key: None,
+            custom_model: String::new(),
+            custom_base_url: String::new(),
             supabase_url: Some("https://gwekzberpfuxsoddwwqj.supabase.co".to_string()),
             supabase_anon_key: Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3ZWt6YmVycGZ1eHNvZGR3d3FqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMTUxMjEsImV4cCI6MjA5MzY5MTEyMX0.gCXLsnFq3NMv8_JvZGcR9TB9bAfyjCnEnj4u0RZnRbg".to_string()),
             managed_model: "openrouter/free".to_string(),
@@ -209,6 +218,21 @@ impl Config {
         if let Ok(v) = env::var("QWEN_BASE_URL") {
             if !v.is_empty() {
                 config.qwen_base_url = v;
+            }
+        }
+        if let Ok(v) = env::var("CUSTOM_API_KEY") {
+            if !v.is_empty() {
+                config.custom_api_key = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("CUSTOM_MODEL") {
+            if !v.is_empty() {
+                config.custom_model = v;
+            }
+        }
+        if let Ok(v) = env::var("CUSTOM_BASE_URL") {
+            if !v.is_empty() {
+                config.custom_base_url = v;
             }
         }
 

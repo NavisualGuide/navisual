@@ -11,7 +11,7 @@ use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType,
 /// for vision models, so we use prompt engineering + response_format:json_object.
 const JSON_FORMAT_INSTRUCTION: &str = r#"
 
-IMPORTANT: Respond ONLY with a single valid JSON object — no markdown, no explanation. The top-level object has exactly four keys: "steps", "state_summary", "needs_input", "request_full_screen".
+IMPORTANT: Respond ONLY with a single valid JSON object — no markdown, no explanation. The top-level object has exactly three keys: "steps", "state_summary", "needs_input".
 
 Example (copy this structure exactly):
 {
@@ -25,8 +25,7 @@ Example (copy this structure exactly):
     }
   ],
   "state_summary": "User is opening the Layout tab.",
-  "needs_input": false,
-  "request_full_screen": false
+  "needs_input": false
 }
 
 Step fields (inside "steps" array only):
@@ -40,8 +39,7 @@ Step fields (inside "steps" array only):
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
-- needs_input: true only if you must ask the user a question before continuing
-- request_full_screen: true only if you need to see beyond the current window"#;
+- needs_input: true only if you must ask the user a question before continuing"#;
 
 pub struct DeepSeekClient {
     client: Client,
@@ -293,12 +291,14 @@ impl DeepSeekClient {
 /// Parse the first complete `NavigateStepResponse` from `text`, tolerating code
 /// fences and trailing duplicate JSON / explanatory prose.
 ///
-/// Accepts a non-empty plan, OR a valid no-step response that asks the user
-/// something (`needs_input` / `request_full_screen`) — the latter is legitimate
-/// (e.g. answering "can you see my screen?") and must NOT fall through to the
-/// raw-JSON wrap. When such a response carries no instruction text, a neutral
-/// prompt is synthesized so the user never sees raw JSON. Returns `None` only
-/// when nothing usable parses.
+/// Accepts a non-empty plan, OR any valid no-step response (the model asking via
+/// `needs_input`, or signalling the task is complete). For the no-step case a clean
+/// instruction is synthesized so the user never sees raw JSON — the old behaviour
+/// fell through to `wrap_as_single_step`, which leaked the literal
+/// `{ "steps": [], "state_summary": "...task complete", ... }` object as the guidance
+/// text (observed on Qwen after a finished task). Returns `None` only when nothing
+/// parses into the schema at all (genuinely unparseable output, still wrapped at the
+/// call site).
 fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
     let stripped = text
         .trim_start_matches("```json")
@@ -311,22 +311,29 @@ fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
         if !resp.steps.is_empty() {
             return Some(resp);
         }
-        if resp.needs_input || resp.request_full_screen {
-            resp.steps.push(GuidanceStep {
-                instruction:
-                    "Tell me what you'd like to do and which app or window you're in, and I'll guide you."
-                        .to_string(),
-                target_text: None,
-                target_role: None,
-                target_region: None,
-                target_nearby_text: None,
-                overlay_type: OverlayType::None,
-                clipboard: None,
-                checkpoint: true,
-                target_bbox: None,
-            });
-            return Some(resp);
-        }
+        // Valid object, no steps — still a legitimate response. Synthesize a clean
+        // instruction instead of falling through to the raw-JSON wrap:
+        //   • needs_input → the model is asking the user something
+        //   • otherwise   → the model is signalling the task is finished
+        let instruction = if resp.needs_input {
+            "Tell me what you'd like to do and which app or window you're in, and I'll guide you."
+                .to_string()
+        } else {
+            "✓ That looks complete — let me know if there's anything else you'd like help with."
+                .to_string()
+        };
+        resp.steps.push(GuidanceStep {
+            instruction,
+            target_text: None,
+            target_role: None,
+            target_region: None,
+            target_nearby_text: None,
+            overlay_type: OverlayType::None,
+            clipboard: None,
+            checkpoint: true,
+            target_bbox: None,
+        });
+        return Some(resp);
     }
     None
 }
