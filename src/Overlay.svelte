@@ -46,6 +46,16 @@
     return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 107, 53];
   }
 
+  // Device-pixel ratio for the overlay canvas: the backing buffer is physical px
+  // (virtual_size) while CSS displays it at logical px, so width/clientWidth is the
+  // DPR of the monitor it's on — 1 at 100%, 2 at 200%, 1.5 at 150%. Used to keep
+  // fixed-pixel decorations (caption + pointer) a constant perceived size on any DPI.
+  function dprOf(ctx: CanvasRenderingContext2D): number {
+    return ctx.canvas.clientWidth > 0
+      ? ctx.canvas.width / ctx.canvas.clientWidth
+      : window.devicePixelRatio || 1;
+  }
+
   // Combined A+B pointer: ripple rings from center (A) + bold corner brackets (B)
   // + animated scan line (B) + subtle crosshair center dot.
   function drawBox(
@@ -53,6 +63,15 @@
     bx: number, by: number, bw: number, bh: number,
     t: number,
   ) {
+    // High-DPI: draw in logical coordinates (divide the physical bbox by the DPR,
+    // then ctx.scale back up) so every fixed-pixel decoration — bracket arms, line
+    // widths, ring gaps, crosshair, corner dots — is a constant perceived size.
+    // Element-proportional terms (bw*0.38, max(bw,bh)*0.7) and the bbox position are
+    // unchanged, and scale=1 on a 100% display makes this an exact no-op.
+    const scale = dprOf(ctx);
+    ctx.save();
+    ctx.scale(scale, scale);
+    bx /= scale; by /= scale; bw /= scale; bh /= scale;
     const [r, g, b] = hexToRgb(theme.color);
     const pulse = (Math.sin(t / 700) + 1) / 2;
     const cx = bx + bw / 2;
@@ -135,6 +154,7 @@
     ctx.beginPath(); ctx.moveTo(cx - cr, cy); ctx.lineTo(cx + cr, cy); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(cx, cy - cr); ctx.lineTo(cx, cy + cr); ctx.stroke();
     ctx.shadowBlur = 0;
+    ctx.restore();
   }
 
   // Arrow variant: same bracket+ripple combo, but adds a floating beacon
@@ -146,6 +166,11 @@
   ) {
     drawBox(ctx, bx, by, bw, bh, t);
 
+    // Beacon + drop-line + halo rings are fixed-pixel — scale for high-DPI (see drawBox).
+    const scale = dprOf(ctx);
+    ctx.save();
+    ctx.scale(scale, scale);
+    bx /= scale; by /= scale; bw /= scale; bh /= scale;
     const [r, g, b] = hexToRgb(theme.color);
     const pulse = (Math.sin(t / 600) + 1) / 2;
     const cx = bx + bw / 2;
@@ -191,6 +216,7 @@
     ctx.moveTo(cx - 5, chevY); ctx.lineTo(cx, chevY + 5); ctx.lineTo(cx + 5, chevY);
     ctx.stroke();
     ctx.shadowBlur = 0;
+    ctx.restore();
   }
 
   // Draw subtitle strip confined to a single screen.
@@ -207,14 +233,18 @@
     const sw = activeScreen ? activeScreen.width  : canvasW;
     const sh = activeScreen ? activeScreen.height : canvasH;
 
-    const hPad = 22;
-    const vPad = 12;
-    const r = 10;
+    // Scale every caption metric by the DPR so the strip is a constant *logical*
+    // size on any display (a fixed-px font would be half-size at 200%). See dprOf.
+    const scale = dprOf(ctx);
+
+    const hPad = 22 * scale;
+    const vPad = 12 * scale;
+    const r = 10 * scale;
     const maxTextW = sw * 0.78;
     const cx = sx + sw / 2;
 
     // Measure text first so strip width can fit the content
-    ctx.font = "bold 18px Inter, -apple-system, 'Segoe UI', sans-serif";
+    ctx.font = `bold ${Math.round(18 * scale)}px Inter, -apple-system, 'Segoe UI', sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
@@ -228,7 +258,7 @@
     }
     if (line) lines.push(line);
 
-    const lineH = 22;
+    const lineH = 22 * scale;
     const maxLineW = Math.max(...lines.map(l => ctx.measureText(l).width));
     const stripW = Math.min(maxLineW + hPad * 2, maxTextW + hPad * 2);
     const stripH = lines.length * lineH + vPad * 2;
@@ -286,6 +316,15 @@
     const [r, g, b] = hexToRgb(theme.color);
     const lw = Math.max(2, theme.thickness);
 
+    // Inset the rect by half the widest stroke so the centered outline sits just
+    // INSIDE the window edge instead of straddling it — on a fullscreen window the
+    // straddling outer half is what bleeds onto the adjacent monitor. The soft glow
+    // beyond is clipped to the active screen by the caller (renderFrame).
+    const inset = lw * 1.1;
+    bx += inset; by += inset;
+    bw = Math.max(0, bw - inset * 2);
+    bh = Math.max(0, bh - inset * 2);
+
     // Subtle inset accent fill during the flash phase only
     if (age < flashEnd) {
       const flashFill = (1 - age / flashEnd) * 0.10;
@@ -328,6 +367,11 @@
     bx: number, by: number, bw: number, bh: number,
     t: number,
   ) {
+    // High-DPI: draw in logical coordinates (see drawBox). Paired ctx.restore() below.
+    const scale = dprOf(ctx);
+    ctx.save();
+    ctx.scale(scale, scale);
+    bx /= scale; by /= scale; bw /= scale; bh /= scale;
     const [r, g, b] = hexToRgb(theme.color);
     const pulse = (Math.sin(t / 700) + 1) / 2;
     const cx = bx + bw / 2;
@@ -376,7 +420,8 @@
     bracket(bx + bw, by,     -1, 1);
     bracket(bx,      by + bh, 1, -1);
     bracket(bx + bw, by + bh,-1, -1);
-    ctx.restore();
+    ctx.restore();   // inner: dash settings
+    ctx.restore();   // outer: high-DPI transform
   }
 
   /**
@@ -479,7 +524,17 @@
       const aby = abBox.y - oy;
       const abw = abBox.width;
       const abh = abBox.height;
+      // Confine the boundary (stroke + glow) to the monitor the app is on, so a
+      // fullscreen window's outline never bleeds onto an adjacent screen.
+      const abScreen = appBoundary.active_screen;
+      ctx.save();
+      if (abScreen) {
+        ctx.beginPath();
+        ctx.rect(abScreen.x - ox, abScreen.y - oy, abScreen.width, abScreen.height);
+        ctx.clip();
+      }
       const stillRunning = drawAppBoundary(ctx, abx, aby, abw, abh, ageMs);
+      ctx.restore();
       if (stillRunning) {
         needNextFrame = true;
       } else {
