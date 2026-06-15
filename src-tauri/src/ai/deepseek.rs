@@ -91,13 +91,22 @@ impl DeepSeekClient {
         // counts and the usage display records 0. DeepSeek sends usage by
         // default and accepts the option. The extra final chunk it produces has
         // an empty `choices` array, which the parser below already tolerates.
-        let payload = json!({
+        let mut payload = json!({
             "model": effective_model,
             "messages": messages,
             "stream": true,
             "stream_options": { "include_usage": true },
-            "response_format": { "type": "json_object" }
         });
+
+        // `response_format: json_object` improves reliability on the hosted
+        // OpenAI-compat providers (DeepSeek / OpenAI / Qwen), but the Custom
+        // provider points at arbitrary local servers whose support varies —
+        // LM Studio rejects `json_object` outright ("must be 'json_schema' or
+        // 'text'"). The prompt already mandates JSON-only output, so for Custom
+        // we omit the field and let the prompt carry it.
+        if self.name != "Custom" {
+            payload["response_format"] = json!({ "type": "json_object" });
+        }
 
         // DeepSeek V4 is a reasoning model and intermittently ends a stream having
         // emitted only `reasoning_content` and no answer `content` — surfaced as an
