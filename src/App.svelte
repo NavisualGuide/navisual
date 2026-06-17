@@ -48,7 +48,7 @@ See the LICENSE file in the root of this repository for complete details.
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
-  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer";
+  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "billing";
   type SettingsPayload = {
     api_provider: string;
     anthropic_api_key: string;
@@ -205,9 +205,13 @@ See the LICENSE file in the root of this repository for complete details.
   // Surfaces a soft banner over the instruction so the user knows the
   // guidance may be referring to state that no longer exists.
   let staleResponse = $state(false);
-  // Managed provider (S.1) state
+  // Managed provider (S.1 / S.2) state
   let freeRemaining = $state<number | null>(null);
+  let coinBalance = $state<number | null>(null);       // µ$ (divide by 200_000 for coins)
+  let managedTier = $state<"free" | "paid">("free");
   let showTrialExhausted = $state(false);
+  let oauthPending = $state(false);     // true while waiting for Google OAuth callback
+  let checkoutPending = $state(false);  // true while waiting for user to pay in browser
 
   // Phase 0.2: which app is currently shared with the AI.
   type SharedAppInfo = {
@@ -1282,7 +1286,7 @@ See the LICENSE file in the root of this repository for complete details.
     // app while Navisual was running. Voice input remains available via the
     // mic button in the action row.)
 
-    // S.1 — Managed provider: anonymous sign-in on first launch.
+    // S.1/S.2 — Managed provider: anonymous sign-in on first launch.
     if (settingsForm.api_provider === "managed") {
       try {
         await invokeReady("sign_in_anon");
@@ -1290,19 +1294,32 @@ See the LICENSE file in the root of this repository for complete details.
         addToHistory("system", "⚠️ Managed sign-in failed: " + String(e));
       }
       try {
-        const bal = await invokeReady<{ tier: string; free_remaining: number }>("get_balance");
+        const bal = await invokeReady<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
         freeRemaining = bal.free_remaining;
+        coinBalance = bal.coin_balance_microdollars;
+        managedTier = (bal.tier === "paid") ? "paid" : "free";
       } catch (_) {}
     }
 
     listen<number>("balance_update", (event) => {
       freeRemaining = event.payload;
-      if (freeRemaining <= 0) showTrialExhausted = true;
+      if (freeRemaining <= 0 && managedTier === "free") showTrialExhausted = true;
     });
 
     listen("trial_exhausted", () => {
       freeRemaining = 0;
       showTrialExhausted = true;
+    });
+
+    listen("oauth_complete", async () => {
+      oauthPending = false;
+      // Refresh balance — tier is now paid if the user had pre-existing coins.
+      try {
+        const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
+        freeRemaining = bal.free_remaining;
+        coinBalance = bal.coin_balance_microdollars;
+        managedTier = (bal.tier === "paid") ? "paid" : "free";
+      } catch (_) {}
     });
 
     // Backend detected the screen drifted enough during AI thinking
@@ -1841,14 +1858,49 @@ See the LICENSE file in the root of this repository for complete details.
         <div class="modal-body" style="padding: 20px; text-align: center; line-height: 1.6;">
           <p style="font-size: 2em; margin-bottom: 12px;">🎯</p>
           <p style="margin-bottom: 8px; font-weight: 600;">Your 50 free requests have been used.</p>
-          <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 8px;">
-            Coin purchases are coming soon — stay tuned.
-          </p>
-          <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
-            Meanwhile you can keep going free with your own key: Settings → Provider → Gemini
-            (free tier from Google AI Studio) or Ollama (local).
-          </p>
-          <button class="btn-primary btn-full" onclick={() => (showTrialExhausted = false)}>Close</button>
+
+          {#if oauthPending}
+            <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
+              Waiting for Google sign-in in your browser…
+            </p>
+          {:else if checkoutPending}
+            <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
+              Checkout opened in your browser. Come back once you've paid — your balance will update automatically.
+            </p>
+            <button class="btn-primary btn-full" onclick={async () => {
+              checkoutPending = false;
+              try {
+                const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
+                coinBalance = bal.coin_balance_microdollars;
+                managedTier = (bal.tier === "paid") ? "paid" : "free";
+                if (managedTier === "paid") showTrialExhausted = false;
+              } catch (_) {}
+            }}>I've paid — check balance</button>
+          {:else}
+            <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 16px;">
+              Top up with coins to continue on the Navisual managed relay.
+            </p>
+            <button class="btn-primary btn-full" style="margin-bottom: 10px;" onclick={async () => {
+              try {
+                oauthPending = true;
+                await invoke("start_google_oauth");
+                // oauth_complete event triggers the listener above
+                // Once signed in, open checkout
+                const url = await invoke<string>("create_checkout", { amountUsd: 20 });
+                checkoutPending = true;
+                openUrl(url);
+              } catch (e) {
+                oauthPending = false;
+                addToHistory("system", "⚠️ Sign-in failed: " + String(e));
+              }
+            }}>Sign in with Google &amp; Buy coins ($20)</button>
+            <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 16px;">
+              Or keep going free with your own key:
+              Settings → Provider → Gemini (Google AI Studio) or Ollama (local).
+            </p>
+          {/if}
+
+          <button class="btn-ghost btn-full" onclick={() => { showTrialExhausted = false; oauthPending = false; checkoutPending = false; }}>Close</button>
         </div>
       </div>
     </div>
@@ -1877,6 +1929,9 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
+          {#if settingsForm.api_provider === "managed"}
+            <button class="tab-btn {settingsTab === 'billing' ? 'tab-active' : ''}" onclick={() => (settingsTab = "billing")}>Billing</button>
+          {/if}
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
@@ -1886,7 +1941,49 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
 
         <div class="modal-body">
-          {#if settingsTab === "provider"}
+          {#if settingsTab === "billing"}
+            <div class="setting-group">
+              <span class="setting-label">Account</span>
+              <p class="setting-hint">{managedTier === "paid" ? "Paid (coins)" : "Free trial"}</p>
+            </div>
+            {#if managedTier === "paid" && coinBalance !== null}
+              <div class="setting-group">
+                <span class="setting-label">Balance</span>
+                <p class="setting-hint">{(coinBalance / 200_000).toFixed(1)} coins · ${(coinBalance / 1_000_000).toFixed(2)} USD</p>
+              </div>
+            {:else if managedTier === "free"}
+              <div class="setting-group">
+                <span class="setting-label">Free requests</span>
+                <p class="setting-hint">{freeRemaining ?? "—"} remaining of 50</p>
+              </div>
+            {/if}
+            <div class="setting-group" style="margin-top: 16px;">
+              <button class="btn-primary" onclick={async () => {
+                try {
+                  if (managedTier !== "paid") {
+                    oauthPending = true;
+                    showSettings = false;
+                    showTrialExhausted = true;
+                    await invoke("start_google_oauth");
+                    // oauth_complete listener updates managedTier; fall through to checkout
+                  }
+                  const url = await invoke<string>("create_checkout", { amountUsd: 20 });
+                  checkoutPending = true;
+                  showSettings = false;
+                  openUrl(url);
+                } catch (e) {
+                  oauthPending = false;
+                  checkoutPending = false;
+                  addToHistory("system", "⚠️ Checkout failed: " + String(e));
+                }
+              }} disabled={oauthPending || checkoutPending}>
+                {oauthPending ? "Waiting for browser…" : checkoutPending ? "Checkout open in browser…" : managedTier === "paid" ? "Buy more coins" : "Sign in with Google &amp; Buy coins"}
+              </button>
+            </div>
+            <p class="setting-hint" style="margin-top: 8px;">
+              Purchases open Stripe Checkout in your default browser. After payment, return here and your balance updates automatically.
+            </p>
+          {:else if settingsTab === "provider"}
             <!-- Provider selector — grouped so it scales as providers + paid tiers grow -->
             <div class="setting-group">
               <label class="setting-label" for="provider-select">Provider</label>

@@ -2380,6 +2380,87 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
         .map_err(|e| e.to_string())
 }
 
+/// Sign in with Google via PKCE OAuth in the system browser.
+/// Opens the Google consent page in the default browser, starts a local
+/// HTTP server on port 9876 for the callback, exchanges the code for a
+/// session, and emits `oauth_complete` to the frontend.  The anonymous
+/// session is replaced — the user_profiles row starts fresh for the Google
+/// account (link-identity / preserve-row is deferred to a later release).
+#[tauri::command]
+async fn start_google_oauth(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let (supabase_url, anon_key) = {
+        let router = state.ai_router.lock().await;
+        let url = router
+            .config
+            .supabase_url
+            .clone()
+            .ok_or("SUPABASE_URL not configured")?;
+        let key = router
+            .config
+            .supabase_anon_key
+            .clone()
+            .ok_or("SUPABASE_ANON_KEY not configured")?;
+        (url, key)
+    };
+
+    let pkce = server::generate_pkce(9876);
+    let auth_url = server::google_oauth_url(&supabase_url, &pkce);
+
+    // Open the OAuth URL in the system browser (not the WebView2).
+    tauri_plugin_opener::open_url(&auth_url, None::<&str>)
+        .map_err(|e| format!("Failed to open browser: {e}"))?;
+
+    // Wait for the redirect callback (up to 120 s).
+    let code = server::wait_for_oauth_code(pkce.port)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let new_session = server::exchange_pkce_code(&supabase_url, &anon_key, &code, &pkce.verifier)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    server::save_session(&state.supabase_session_path, &new_session);
+    {
+        let mut router = state.ai_router.lock().await;
+        router.set_managed_session(new_session);
+    }
+
+    let _ = app
+        .get_webview_window("panel")
+        .map(|w| w.emit("oauth_complete", ()));
+    Ok(())
+}
+
+/// Open a Stripe Checkout session for a coin top-up.
+/// Returns the checkout URL. The frontend is responsible for opening it
+/// (via tauri-plugin-opener) so the system browser handles the payment page.
+#[tauri::command]
+async fn create_checkout(
+    state: State<'_, AppState>,
+    amount_usd: f64,
+) -> Result<String, String> {
+    let (supabase_url, access_token) = {
+        let router = state.ai_router.lock().await;
+        let url = router
+            .config
+            .supabase_url
+            .clone()
+            .ok_or("SUPABASE_URL not configured")?;
+        let token = router
+            .client_access_token()
+            .ok_or("Not signed in to managed provider")?;
+        (url, token)
+    };
+
+    let amount = if amount_usd > 0.0 { amount_usd } else { 20.0 };
+    server::create_checkout_session(&supabase_url, &access_token, amount)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Called from the frontend after `downloadAndInstall()` has spawned the NSIS
 /// installer in the background. NSIS is waiting for us to exit so it can
 /// replace the locked binary; it re-launches the new app itself via /UPDATE.
@@ -2591,6 +2672,8 @@ pub fn run() {
             sign_in_anon,
             get_balance,
             get_session_status,
+            start_google_oauth,
+            create_checkout,
             submit_feedback,
             exit_for_update,
             list_target_windows,
