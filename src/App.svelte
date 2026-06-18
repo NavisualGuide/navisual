@@ -1434,7 +1434,7 @@ See the LICENSE file in the root of this repository for complete details.
         </button>
       {/if}
       {#if settingsForm.api_provider === "managed" && managedTier === "paid" && coinBalance !== null}
-        <button class="header-balance" class:header-balance-low={coinBalance < 200_000} onclick={() => openAbout("usage")} title="View coin balance">{(coinBalance / 200_000).toFixed(0)} 🪙</button>
+        <button class="header-balance" class:header-balance-low={coinBalance < 200_000} onclick={() => openAbout("usage")} title="View coin balance">{Number((coinBalance / 200_000).toFixed(1))} 🪙</button>
       {:else if settingsForm.api_provider === "managed" && freeRemaining !== null}
         <button class="header-balance" class:header-balance-low={freeRemaining <= 5} onclick={() => openAbout("usage")} title="View usage">{freeRemaining} left</button>
       {/if}
