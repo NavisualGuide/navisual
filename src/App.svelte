@@ -811,12 +811,23 @@ See the LICENSE file in the root of this repository for complete details.
     showAbout = true;
   }
 
+  async function setPanelOnTop(onTop: boolean) {
+    try { await getCurrentWindow().setAlwaysOnTop(onTop); } catch (_) {}
+  }
+
   // Buy coins. Tries to create a Stripe Checkout session directly; if the
   // backend says oauth_required (anonymous session), it runs Google OAuth
   // first and retries. Signed-in users skip OAuth entirely — no need to track
   // is_anonymous on the client. Opens Stripe Checkout in the system browser.
   async function buyCoins(amountUsd = 20) {
     if (oauthPending || checkoutPending) return;
+    // The checkout/OAuth pages open in the system browser. The panel is
+    // alwaysOnTop, so it would sit OVER the browser even when the browser has
+    // focus — and the open Settings modal covers the draggable titlebar. So
+    // close Settings and drop always-on-top here; refreshBalance() restores it
+    // when the user returns (auto via the focus listener, or the manual button).
+    showSettings = false;
+    await setPanelOnTop(false);
     try {
       let url: string;
       try {
@@ -835,6 +846,7 @@ See the LICENSE file in the root of this repository for complete details.
       openUrl(url);
     } catch (e) {
       addToHistory("system", "⚠️ Checkout failed: " + String(e));
+      await setPanelOnTop(true); // nothing opened — restore immediately
     } finally {
       oauthPending = false;
     }
@@ -854,6 +866,7 @@ See the LICENSE file in the root of this repository for complete details.
     } catch (_) {}
     oauthPending = false;
     checkoutPending = false;
+    await setPanelOnTop(true); // back from the browser — restore always-on-top
   }
 
   async function openSettings() {
