@@ -196,13 +196,26 @@ fn pct_encode(s: &str) -> String {
     }).collect()
 }
 
-/// Spin up a minimal TCP listener, serve a redirect page, return the OAuth code.
-/// Times out after 120 s so we don't block forever if the user closes the browser.
-pub async fn wait_for_oauth_code(port: u16) -> Result<String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+/// Bind the loopback callback port. Done BEFORE opening the browser so a busy
+/// port (a previous attempt still waiting) fails fast with a clear message
+/// instead of after the user has already been sent to Google.
+pub async fn bind_callback_listener(port: u16) -> Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow!("A sign-in is already in progress — finish it in your browser, or wait a moment and try again.")
+            } else {
+                anyhow!("Could not start the sign-in listener: {e}")
+            }
+        })
+}
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+/// Accept one connection on the pre-bound listener, parse the OAuth code from
+/// the redirect, and serve a minimal success page. 120 s timeout.
+pub async fn accept_oauth_code(listener: tokio::net::TcpListener) -> Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
         let (mut stream, _) = listener.accept().await?;
         let mut buf = [0u8; 4096];

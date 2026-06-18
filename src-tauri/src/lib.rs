@@ -2409,12 +2409,18 @@ async fn start_google_oauth(
     let pkce = server::generate_pkce(9876);
     let auth_url = server::google_oauth_url(&supabase_url, &pkce);
 
+    // Bind the callback port FIRST so a busy port (a prior attempt still
+    // waiting) fails fast before we send the user to Google.
+    let listener = server::bind_callback_listener(pkce.port)
+        .await
+        .map_err(|e| e.to_string())?;
+
     // Open the OAuth URL in the system browser (not the WebView2).
     tauri_plugin_opener::open_url(&auth_url, None::<&str>)
         .map_err(|e| format!("Failed to open browser: {e}"))?;
 
     // Wait for the redirect callback (up to 120 s).
-    let code = server::wait_for_oauth_code(pkce.port)
+    let code = server::accept_oauth_code(listener)
         .await
         .map_err(|e| e.to_string())?;
 

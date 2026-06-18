@@ -808,6 +808,46 @@ See the LICENSE file in the root of this repository for complete details.
     showAbout = true;
   }
 
+  // Buy coins. Tries to create a Stripe Checkout session directly; if the
+  // backend says oauth_required (anonymous session), it runs Google OAuth
+  // first and retries. Signed-in users skip OAuth entirely — no need to track
+  // is_anonymous on the client. Opens Stripe Checkout in the system browser.
+  async function buyCoins(amountUsd = 20) {
+    if (oauthPending || checkoutPending) return;
+    try {
+      let url: string;
+      try {
+        url = await invoke<string>("create_checkout", { amountUsd });
+      } catch (e) {
+        if (String(e).includes("oauth_required")) {
+          oauthPending = true;
+          await invoke("start_google_oauth"); // oauth_complete listener refreshes balance
+          oauthPending = false;
+          url = await invoke<string>("create_checkout", { amountUsd });
+        } else {
+          throw e;
+        }
+      }
+      checkoutPending = true;
+      openUrl(url);
+    } catch (e) {
+      addToHistory("system", "⚠️ Checkout failed: " + String(e));
+    } finally {
+      oauthPending = false;
+    }
+  }
+
+  // Re-fetch balance from the relay (after returning from Stripe Checkout).
+  async function refreshBalance() {
+    try {
+      const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
+      freeRemaining = bal.free_remaining;
+      coinBalance = bal.coin_balance_microdollars;
+      managedTier = (bal.tier === "paid") ? "paid" : "free";
+      if (managedTier === "paid") { showTrialExhausted = false; checkoutPending = false; }
+    } catch (_) {}
+  }
+
   async function openSettings() {
     settingsError = null;
     settingsSaved = false;
@@ -1861,39 +1901,18 @@ See the LICENSE file in the root of this repository for complete details.
 
           {#if oauthPending}
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
-              Waiting for Google sign-in in your browser…
+              Signing in with Google in your browser…
             </p>
           {:else if checkoutPending}
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
               Checkout opened in your browser. Come back once you've paid — your balance will update automatically.
             </p>
-            <button class="btn-primary btn-full" onclick={async () => {
-              checkoutPending = false;
-              try {
-                const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
-                coinBalance = bal.coin_balance_microdollars;
-                managedTier = (bal.tier === "paid") ? "paid" : "free";
-                if (managedTier === "paid") showTrialExhausted = false;
-              } catch (_) {}
-            }}>I've paid — check balance</button>
+            <button class="btn-primary btn-full" onclick={refreshBalance}>I've paid — check balance</button>
           {:else}
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 16px;">
               Top up with coins to continue on the Navisual managed relay.
             </p>
-            <button class="btn-primary btn-full" style="margin-bottom: 10px;" onclick={async () => {
-              try {
-                oauthPending = true;
-                await invoke("start_google_oauth");
-                // oauth_complete event triggers the listener above
-                // Once signed in, open checkout
-                const url = await invoke<string>("create_checkout", { amountUsd: 20 });
-                checkoutPending = true;
-                openUrl(url);
-              } catch (e) {
-                oauthPending = false;
-                addToHistory("system", "⚠️ Sign-in failed: " + String(e));
-              }
-            }}>Sign in with Google &amp; Buy coins ($20)</button>
+            <button class="btn-primary btn-full" style="margin-bottom: 10px;" onclick={() => buyCoins(20)}>Buy coins ($20)</button>
             <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 16px;">
               Or keep going free with your own key:
               Settings → Provider → Gemini (Google AI Studio) or Ollama (local).
@@ -1929,9 +1948,7 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
-          {#if settingsForm.api_provider === "managed"}
-            <button class="tab-btn {settingsTab === 'billing' ? 'tab-active' : ''}" onclick={() => (settingsTab = "billing")}>Billing</button>
-          {/if}
+          <button class="tab-btn {settingsTab === 'billing' ? 'tab-active' : ''}" onclick={() => { settingsTab = "billing"; refreshBalance(); }}>Billing</button>
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
@@ -1946,42 +1963,32 @@ See the LICENSE file in the root of this repository for complete details.
               <span class="setting-label">Account</span>
               <p class="setting-hint">{managedTier === "paid" ? "Paid (coins)" : "Free trial"}</p>
             </div>
-            {#if managedTier === "paid" && coinBalance !== null}
+            {#if coinBalance !== null && coinBalance > 0}
               <div class="setting-group">
-                <span class="setting-label">Balance</span>
+                <span class="setting-label">Coin balance</span>
                 <p class="setting-hint">{(coinBalance / 200_000).toFixed(1)} coins · ${(coinBalance / 1_000_000).toFixed(2)} USD</p>
               </div>
-            {:else if managedTier === "free"}
-              <div class="setting-group">
-                <span class="setting-label">Free requests</span>
-                <p class="setting-hint">{freeRemaining ?? "—"} remaining of 50</p>
-              </div>
             {/if}
+            <div class="setting-group">
+              <span class="setting-label">Free requests</span>
+              <p class="setting-hint">{freeRemaining ?? "—"} remaining of 50</p>
+            </div>
             <div class="setting-group" style="margin-top: 16px;">
-              <button class="btn-primary" onclick={async () => {
-                try {
-                  if (managedTier !== "paid") {
-                    oauthPending = true;
-                    showSettings = false;
-                    showTrialExhausted = true;
-                    await invoke("start_google_oauth");
-                    // oauth_complete listener updates managedTier; fall through to checkout
-                  }
-                  const url = await invoke<string>("create_checkout", { amountUsd: 20 });
-                  checkoutPending = true;
-                  showSettings = false;
-                  openUrl(url);
-                } catch (e) {
-                  oauthPending = false;
-                  checkoutPending = false;
-                  addToHistory("system", "⚠️ Checkout failed: " + String(e));
-                }
-              }} disabled={oauthPending || checkoutPending}>
-                {oauthPending ? "Waiting for browser…" : checkoutPending ? "Checkout open in browser…" : managedTier === "paid" ? "Buy more coins" : "Sign in with Google &amp; Buy coins"}
+              <button class="btn-primary" onclick={() => buyCoins(20)} disabled={oauthPending || checkoutPending}>
+                {oauthPending ? "Signing in…" : checkoutPending ? "Checkout open in browser…" : "Buy coins ($20)"}
               </button>
+              {#if checkoutPending}
+                <button class="btn-ghost" style="margin-top: 8px;" onclick={refreshBalance}>I've paid — refresh balance</button>
+              {/if}
             </div>
             <p class="setting-hint" style="margin-top: 8px;">
-              Purchases open Stripe Checkout in your default browser. After payment, return here and your balance updates automatically.
+              Coins power the Managed provider's paid tiers. Checkout opens in your default
+              browser; if you're not signed in yet, Google sign-in runs first. Your balance
+              updates automatically when you return.
+              {#if settingsForm.api_provider !== "managed"}
+                <br /><br />Note: you're currently on the <strong>{settingsForm.api_provider}</strong>
+                provider. Switch to <strong>Managed</strong> on the Provider tab to spend coins.
+              {/if}
             </p>
           {:else if settingsTab === "provider"}
             <!-- Provider selector — grouped so it scales as providers + paid tiers grow -->
