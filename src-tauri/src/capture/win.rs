@@ -70,22 +70,16 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
         let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut title);
         let title_str = String::from_utf16_lossy(&title[..len as usize]);
 
-        let mut class = [0u16; 256];
-        let clen = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut class);
-        let class_str = String::from_utf16_lossy(&class[..clen as usize]);
-
         let mut rect = windows::Win32::Foundation::RECT::default();
         let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
 
-        let mut pid: u32 = 0;
-        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
-            hwnd,
-            Some(&mut pid as *mut u32),
-        );
-
+        // Title (app + document) + size are the only useful context for the AI.
+        // Class (Win32-internal name) and PID (random per-launch integer) were
+        // dropped — noise to the model, no guidance value. The locator uses the
+        // HWND directly, not this string.
         format!(
-            "Title: '{}'\nClass: '{}'\nRect: [{}, {}, {}, {}]\nPID: {}",
-            title_str, class_str, rect.left, rect.top, rect.right, rect.bottom, pid
+            "Title: '{}'\nRect: [{}, {}, {}, {}]",
+            title_str, rect.left, rect.top, rect.right, rect.bottom
         )
     }
 }
