@@ -841,14 +841,19 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Re-fetch balance from the relay (after returning from Stripe Checkout).
+  // Always clears the pending flags — by the time we refresh, the checkout/OAuth
+  // round-trip is over (whether the user paid or cancelled), so the UI shouldn't
+  // stay stuck on "Checkout open in browser…".
   async function refreshBalance() {
     try {
       const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
       freeRemaining = bal.free_remaining;
       coinBalance = bal.coin_balance_microdollars;
       managedTier = (bal.tier === "paid") ? "paid" : "free";
-      if (managedTier === "paid") { showTrialExhausted = false; checkoutPending = false; }
+      if (managedTier === "paid") showTrialExhausted = false;
     } catch (_) {}
+    oauthPending = false;
+    checkoutPending = false;
   }
 
   async function openSettings() {
@@ -1355,6 +1360,12 @@ See the LICENSE file in the root of this repository for complete details.
       coinBalance = event.payload;
       managedTier = "paid";
       if (coinBalance <= 0) showTrialExhausted = true;
+    });
+
+    // When the panel regains focus after a checkout, pull the fresh balance and
+    // clear the pending state — covers both "paid" and "cancelled the page".
+    getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused && checkoutPending) refreshBalance();
     });
 
     listen("trial_exhausted", () => {
@@ -1920,7 +1931,7 @@ See the LICENSE file in the root of this repository for complete details.
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
               Checkout opened in your browser. Come back once you've paid — your balance will update automatically.
             </p>
-            <button class="btn-primary btn-full" onclick={refreshBalance}>I've paid — check balance</button>
+            <button class="btn-primary btn-full" onclick={refreshBalance}>Refresh balance</button>
           {:else}
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 16px;">
               Top up with coins to continue on the Navisual managed relay.
@@ -2022,7 +2033,7 @@ See the LICENSE file in the root of this repository for complete details.
                 {oauthPending ? "Signing in…" : checkoutPending ? "Checkout open in browser…" : `Buy coins ($${buyAmount})`}
               </button>
               {#if checkoutPending}
-                <button class="btn-ghost" style="margin-top: 8px;" onclick={refreshBalance}>I've paid — refresh balance</button>
+                <button class="btn-ghost" style="margin-top: 8px;" onclick={refreshBalance}>Refresh balance</button>
               {/if}
             </div>
             <p class="setting-hint" style="margin-top: 8px;">
