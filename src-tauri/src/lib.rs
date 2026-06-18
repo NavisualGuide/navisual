@@ -1055,6 +1055,26 @@ async fn guide(
     };
 
     let ai_elapsed_ms = ai_started.elapsed().as_millis();
+
+    // Payload audit (debug captures on): write the exact dynamic text we sent to
+    // the AI alongside screenshot_<ts>.jpg. The appended [Current Window Info]
+    // (incl. the window title) is the least-obvious thing that leaves the machine,
+    // so this lets you verify nothing unintended is sent. System prompt is static
+    // (src-tauri/src/ai/prompts.rs); conversation history is reset on a new task.
+    if debug_screenshot_enabled {
+        if let Ok(base) = app.path().app_local_data_dir() {
+            let dir = base.join("debug");
+            let _ = std::fs::create_dir_all(&dir);
+            let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+            let dump = format!(
+                "Dynamic text sent to the AI (system prompt is static — see \
+                 src-tauri/src/ai/prompts.rs; screenshot is screenshot_<ts>.jpg).\n\n\
+                 === USER MESSAGE ===\n{sent_user_prompt}\n"
+            );
+            let _ = std::fs::write(dir.join(format!("prompt_{ts}.txt")), dump);
+        }
+    }
+
     let (timing_ok, timing_steps) = match &resp {
         Ok(r) => (true, r.steps.len()),
         Err(_) => (false, 0),
