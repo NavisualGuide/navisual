@@ -133,6 +133,17 @@ impl AiRouter {
         }
     }
 
+    /// Refresh the managed access token if expired. Call before any direct
+    /// Supabase request (get_balance, create_checkout) so a stale token doesn't
+    /// get rejected by the gateway with "Invalid JWT". No-op for other providers.
+    pub async fn ensure_managed_token(&mut self) -> anyhow::Result<()> {
+        if let Some(ApiClient::Managed(ref mut c)) = self.client {
+            c.ensure_token().await
+        } else {
+            Ok(())
+        }
+    }
+
     /// Returns true if the managed client has a session (even if expired — ensure_token refreshes it).
     pub fn has_managed_session(&self) -> bool {
         if let Some(ApiClient::Managed(ref c)) = self.client {

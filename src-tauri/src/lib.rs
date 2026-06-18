@@ -2362,7 +2362,11 @@ async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, Strin
 #[tauri::command]
 async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceResponse, String> {
     let (supabase_url, access_token) = {
-        let router = state.ai_router.lock().await;
+        let mut router = state.ai_router.lock().await;
+        router
+            .ensure_managed_token()
+            .await
+            .map_err(|e| format!("Session refresh failed: {e}"))?;
         let url = router
             .config
             .supabase_url
@@ -2449,7 +2453,11 @@ async fn create_checkout(
     amount_usd: f64,
 ) -> Result<String, String> {
     let (supabase_url, access_token) = {
-        let router = state.ai_router.lock().await;
+        let mut router = state.ai_router.lock().await;
+        router
+            .ensure_managed_token()
+            .await
+            .map_err(|e| format!("Session refresh failed: {e}"))?;
         let url = router
             .config
             .supabase_url
