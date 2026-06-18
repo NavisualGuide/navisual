@@ -811,8 +811,16 @@ See the LICENSE file in the root of this repository for complete details.
     showAbout = true;
   }
 
+  // The user's always-on-top preference (default on — instructions stay visible
+  // over the target app during guidance). The checkout flow temporarily drops it
+  // and restores back to THIS value, so unpinning sticks across a purchase.
+  let panelPinned = $state(true);
   async function setPanelOnTop(onTop: boolean) {
     try { await getCurrentWindow().setAlwaysOnTop(onTop); } catch (_) {}
+  }
+  async function togglePin() {
+    panelPinned = !panelPinned;
+    await setPanelOnTop(panelPinned);
   }
 
   // Buy coins. Tries to create a Stripe Checkout session directly; if the
@@ -846,7 +854,7 @@ See the LICENSE file in the root of this repository for complete details.
       openUrl(url);
     } catch (e) {
       addToHistory("system", "⚠️ Checkout failed: " + String(e));
-      await setPanelOnTop(true); // nothing opened — restore immediately
+      await setPanelOnTop(panelPinned); // nothing opened — restore the user's choice
     } finally {
       oauthPending = false;
     }
@@ -866,7 +874,7 @@ See the LICENSE file in the root of this repository for complete details.
     } catch (_) {}
     oauthPending = false;
     checkoutPending = false;
-    await setPanelOnTop(true); // back from the browser — restore always-on-top
+    await setPanelOnTop(panelPinned); // back from the browser — restore the user's choice
   }
 
   async function openSettings() {
@@ -1476,6 +1484,13 @@ See the LICENSE file in the root of this repository for complete details.
         </button>
         <button class="hdr-btn" onclick={openSettings} title="Settings" aria-label="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button class="hdr-btn" class:hdr-btn-active={panelPinned} onmousedown={(e) => e.stopPropagation()} onclick={togglePin} title={panelPinned ? "Always on top — click to unpin" : "Not on top — click to keep on top"} aria-label="Toggle always on top" aria-pressed={panelPinned}>
+          {#if panelPinned}
+            <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M16 3l5 5-1.5 1.5-1-1-3.2 3.2.2 4.3-2 2-3.6-3.6-4.4 4.4-1 0 0-1 4.4-4.4L4.5 12l2-2 4.3.2L14 7l-1-1L14.5 4.5 16 3z"/></svg>
+          {:else}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4v6l-2 3v1h10v-1l-2-3V4"/><line x1="12" y1="15" x2="12" y2="21"/><line x1="8" y1="4" x2="16" y2="4"/><line x1="3" y1="3" x2="21" y2="21" stroke="var(--text-tertiary)"/></svg>
+          {/if}
         </button>
         <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to floating icon" aria-label="Collapse to floating icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12.5" y="12" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg>
@@ -2715,6 +2730,12 @@ See the LICENSE file in the root of this repository for complete details.
     cursor: default;
     user-select: none;
     outline: none;
+    /* Above .modal-backdrop (z-index 100) so the window stays draggable and the
+       titlebar controls (pin, collapse, close) stay clickable even with a modal
+       open. Opaque bg + z-index keeps it bright/live while the body dims. */
+    position: relative;
+    z-index: 200;
+    background: var(--surface-1);
   }
 
   .header-dot {
@@ -2917,6 +2938,9 @@ See the LICENSE file in the root of this repository for complete details.
   .hdr-btn svg { width: 17px; height: 17px; display: block; }
   .hdr-btn:hover { background: var(--surface-3); color: var(--text-primary); }
   .hdr-btn-close:hover { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+  /* Pin = always-on-top engaged: tint accent so the state is readable at a glance. */
+  .hdr-btn-active { color: var(--accent-500); }
+  .hdr-btn-active:hover { color: var(--accent-500); }
 
   /* ── Latest instruction box ─────────────────────── */
 
@@ -3564,6 +3588,10 @@ See the LICENSE file in the root of this repository for complete details.
   .modal-backdrop {
     position: fixed;
     inset: 0;
+    /* Leave the titlebar (~44px) uncovered so the window stays draggable and the
+       titlebar controls stay clickable while a modal is open. */
+    padding-top: 44px;
+    box-sizing: border-box;
     background: rgba(0, 0, 0, 0.6);
     display: flex;
     align-items: center;
