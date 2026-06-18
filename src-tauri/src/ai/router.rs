@@ -286,6 +286,7 @@ impl AiRouter {
                     url,
                     key,
                     self.config.managed_model.clone(),
+                    self.config.managed_tier.clone(),
                     self.managed_session_path.clone(),
                     self.config.api_timeout_sec,
                 ) {

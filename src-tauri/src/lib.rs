@@ -573,6 +573,8 @@ struct SettingsPayload {
     custom_api_key: String,
     custom_model: String,
     custom_base_url: String,
+    #[serde(default)]
+    managed_tier: String,
     overlay_color: String,
     overlay_thickness: u32,
     subtitle_enabled: bool,
@@ -2146,6 +2148,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         custom_api_key: c.custom_api_key.clone().unwrap_or_default(),
         custom_model: c.custom_model.clone(),
         custom_base_url: c.custom_base_url.clone(),
+        managed_tier: c.managed_tier.clone(),
         overlay_color: c.overlay_color.clone(),
         overlay_thickness: c.overlay_thickness,
         subtitle_enabled: c.subtitle_enabled,
@@ -2206,6 +2209,7 @@ async fn save_settings(
         ("QWEN_BASE_URL".into(), payload.qwen_base_url.clone()),
         ("CUSTOM_MODEL".into(), payload.custom_model.clone()),
         ("CUSTOM_BASE_URL".into(), payload.custom_base_url.clone()),
+        ("MANAGED_TIER".into(), payload.managed_tier.clone()),
         ("OVERLAY_COLOR".into(), payload.overlay_color.clone()),
         (
             "OVERLAY_THICKNESS".into(),

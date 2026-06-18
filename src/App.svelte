@@ -69,6 +69,7 @@ See the LICENSE file in the root of this repository for complete details.
     custom_api_key: string;
     custom_model: string;
     custom_base_url: string;
+    managed_tier: string;
     overlay_color: string;
     overlay_thickness: number;
     subtitle_enabled: boolean;
@@ -212,6 +213,7 @@ See the LICENSE file in the root of this repository for complete details.
   let showTrialExhausted = $state(false);
   let oauthPending = $state(false);     // true while waiting for Google OAuth callback
   let checkoutPending = $state(false);  // true while waiting for user to pay in browser
+  let buyAmount = $state(20);           // USD top-up amount chosen in the Billing tab
 
   // Phase 0.2: which app is currently shared with the AI.
   type SharedAppInfo = {
@@ -370,6 +372,7 @@ See the LICENSE file in the root of this repository for complete details.
     qwen_api_key: "", qwen_model: "qwen3.6-plus",
     qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     custom_api_key: "", custom_model: "", custom_base_url: "",
+    managed_tier: "regular",
     overlay_color: "#FF6B35", overlay_thickness: 4,
     subtitle_enabled: true, auto_advance: false,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
@@ -1983,9 +1986,40 @@ See the LICENSE file in the root of this repository for complete details.
               <span class="setting-label">Free requests</span>
               <p class="setting-hint">{freeRemaining ?? "—"} remaining of 50</p>
             </div>
-            <div class="setting-group" style="margin-top: 16px;">
-              <button class="btn-primary" onclick={() => buyCoins(20)} disabled={oauthPending || checkoutPending}>
-                {oauthPending ? "Signing in…" : checkoutPending ? "Checkout open in browser…" : "Buy coins ($20)"}
+
+            <!-- Tier selector — quality/cost per request. Persisted via Apply/OK. -->
+            <div class="setting-group" style="margin-top: 14px;">
+              <label class="setting-label" for="tier-select">Quality tier</label>
+              <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
+                <option value="speed">Speed — fastest, $0.03/request</option>
+                <option value="regular">Regular — balanced, $0.06/request</option>
+                <option value="smart">Smart — best grounding, $0.10/request</option>
+              </select>
+              <p class="setting-hint">
+                {#if settingsForm.managed_tier === "speed"}
+                  GPT-5.4-mini, falls back to Gemini 3 Flash. Cheapest; good for simple, text-heavy UIs.
+                {:else if settingsForm.managed_tier === "smart"}
+                  Gemini 3 Pro, falls back to GPT-5.4. Best at pointing precisely on dense/visual UIs.
+                {:else}
+                  Gemini 3.5 Flash, falls back to GPT-5.4-mini. The best all-round default. Click Apply to save.
+                {/if}
+              </p>
+            </div>
+
+            <!-- Amount picker -->
+            <div class="setting-group" style="margin-top: 14px;">
+              <label class="setting-label" for="amount-select">Top-up amount</label>
+              <select id="amount-select" class="setting-select" bind:value={buyAmount}>
+                <option value={5}>$5 · 25 coins</option>
+                <option value={10}>$10 · 50 coins</option>
+                <option value={20}>$20 · 100 coins</option>
+                <option value={50}>$50 · 250 coins</option>
+              </select>
+            </div>
+
+            <div class="setting-group" style="margin-top: 12px;">
+              <button class="btn-primary" onclick={() => buyCoins(buyAmount)} disabled={oauthPending || checkoutPending}>
+                {oauthPending ? "Signing in…" : checkoutPending ? "Checkout open in browser…" : `Buy coins ($${buyAmount})`}
               </button>
               {#if checkoutPending}
                 <button class="btn-ghost" style="margin-top: 8px;" onclick={refreshBalance}>I've paid — refresh balance</button>

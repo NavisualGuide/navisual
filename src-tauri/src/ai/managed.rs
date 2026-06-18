@@ -16,6 +16,7 @@ pub struct ManagedClient {
     pub supabase_url: String,
     pub anon_key: String,
     pub model: String,
+    pub tier: String, // "speed" | "regular" | "smart" — sent to the relay on paid requests
     pub session: Option<SupabaseSession>,
     session_path: Option<PathBuf>,
     free_remaining: AtomicI64, // -1 = unknown
@@ -30,6 +31,7 @@ impl ManagedClient {
         supabase_url: String,
         anon_key: String,
         model: String,
+        tier: String,
         session_path: Option<PathBuf>,
         timeout_sec: u64,
     ) -> Result<Self> {
@@ -44,6 +46,7 @@ impl ManagedClient {
             supabase_url,
             anon_key,
             model,
+            tier,
             session,
             session_path,
             free_remaining: AtomicI64::new(-1),
@@ -119,6 +122,9 @@ impl ManagedClient {
         let tool = navigate_step_tool();
         let payload = json!({
             "model": self.model,
+            // Paid-tier hint. The relay ignores it for free users (tier='free' in
+            // their profile) and uses it to pick the model + price for paid users.
+            "tier": self.tier,
             "max_tokens": 1024,
             "messages": messages,
             "tools": [tool],
