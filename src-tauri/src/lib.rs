@@ -1076,6 +1076,9 @@ async fn guide(
     if let Some(remaining) = router.get_managed_free_remaining() {
         let _ = app.emit("balance_update", remaining);
     }
+    if let Some(coins) = router.get_managed_coin_balance() {
+        let _ = app.emit("coin_balance_update", coins);
+    }
 
     let response = match resp {
         Ok(r) => r,
@@ -1573,6 +1576,9 @@ async fn send_correction(
 
     if let Some(remaining) = router.get_managed_free_remaining() {
         let _ = app.emit("balance_update", remaining);
+    }
+    if let Some(coins) = router.get_managed_coin_balance() {
+        let _ = app.emit("coin_balance_update", coins);
     }
 
     let response = match resp {

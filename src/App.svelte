@@ -1346,6 +1346,14 @@ See the LICENSE file in the root of this repository for complete details.
       if (freeRemaining <= 0 && managedTier === "free") showTrialExhausted = true;
     });
 
+    // Paid tier — coins debited server-side after each request; relay returns
+    // the new µ$ balance in X-Coin-Balance and the backend forwards it here.
+    listen<number>("coin_balance_update", (event) => {
+      coinBalance = event.payload;
+      managedTier = "paid";
+      if (coinBalance <= 0) showTrialExhausted = true;
+    });
+
     listen("trial_exhausted", () => {
       freeRemaining = 0;
       showTrialExhausted = true;

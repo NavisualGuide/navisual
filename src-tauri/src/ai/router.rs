@@ -101,6 +101,16 @@ impl AiRouter {
         }
     }
 
+    /// µ$ coin balance from the relay's last paid request (None for non-managed
+    /// or before any paid request this session).
+    pub fn get_managed_coin_balance(&self) -> Option<i64> {
+        if let Some(ApiClient::Managed(ref c)) = self.client {
+            c.coin_balance_micro()
+        } else {
+            None
+        }
+    }
+
     /// The concrete model OpenRouter routed the last managed request to (the relay
     /// sends the `openrouter/free` router). None for non-managed providers or before
     /// the first request.

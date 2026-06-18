@@ -19,6 +19,7 @@ pub struct ManagedClient {
     pub session: Option<SupabaseSession>,
     session_path: Option<PathBuf>,
     free_remaining: AtomicI64, // -1 = unknown
+    coin_balance_micro: AtomicI64, // -1 = unknown; µ$ after the last paid request
     // The model OpenRouter actually routed to on the last request (the relay sends
     // `openrouter/free`, a router; the response `model` names the concrete model used).
     last_model: parking_lot::Mutex<Option<String>>,
@@ -46,6 +47,7 @@ impl ManagedClient {
             session,
             session_path,
             free_remaining: AtomicI64::new(-1),
+            coin_balance_micro: AtomicI64::new(-1),
             last_model: parking_lot::Mutex::new(None),
         })
     }
@@ -56,6 +58,17 @@ impl ManagedClient {
             None
         } else {
             Some(v as u32)
+        }
+    }
+
+    /// µ$ coin balance reported by the relay on the last paid request (None if
+    /// no paid request has run this session).
+    pub fn coin_balance_micro(&self) -> Option<i64> {
+        let v = self.coin_balance_micro.load(Ordering::Relaxed);
+        if v < 0 {
+            None
+        } else {
+            Some(v)
         }
     }
 
@@ -132,7 +145,8 @@ impl ManagedClient {
             bail!("relay error ({}): {}", status, text);
         }
 
-        // Capture X-Free-Remaining before consuming the response body.
+        // Capture balance headers before consuming the response body.
+        // Free tier → X-Free-Remaining; paid tier → X-Coin-Balance (µ$).
         let remaining = resp
             .headers()
             .get("x-free-remaining")
@@ -141,6 +155,16 @@ impl ManagedClient {
 
         if let Some(r) = remaining {
             self.free_remaining.store(r as i64, Ordering::Relaxed);
+        }
+
+        let coin_balance = resp
+            .headers()
+            .get("x-coin-balance")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok());
+
+        if let Some(c) = coin_balance {
+            self.coin_balance_micro.store(c, Ordering::Relaxed);
         }
 
         let body: Value = resp.json().await?;
