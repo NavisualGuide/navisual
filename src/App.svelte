@@ -213,7 +213,10 @@ See the LICENSE file in the root of this repository for complete details.
   let showTrialExhausted = $state(false);
   let oauthPending = $state(false);     // true while waiting for Google OAuth callback
   let checkoutPending = $state(false);  // true while waiting for user to pay in browser
-  let buyAmount = $state(20);           // USD top-up amount chosen in the Billing tab
+  let buyAmount = $state<number | "custom">(20);  // USD top-up; "custom" reveals a field
+  let customAmount = $state(20);                   // USD entered when buyAmount === "custom"
+  let effectiveAmount = $derived(buyAmount === "custom" ? customAmount : buyAmount);
+  let amountValid = $derived(effectiveAmount >= 5 && effectiveAmount <= 500);
 
   // Phase 0.2: which app is currently shared with the AI.
   type SharedAppInfo = {
@@ -2047,12 +2050,23 @@ See the LICENSE file in the root of this repository for complete details.
                 <option value={10}>$10 · 2,000 coins</option>
                 <option value={20}>$20 · 4,000 coins</option>
                 <option value={50}>$50 · 10,000 coins</option>
+                <option value="custom">Custom…</option>
               </select>
+              {#if buyAmount === "custom"}
+                <input
+                  class="setting-input" type="number" min="5" max="500" step="1"
+                  bind:value={customAmount} placeholder="Enter $5–$500" style="margin-top: 8px;" />
+                <p class="setting-hint">
+                  {amountValid
+                    ? `${(customAmount * 200).toLocaleString()} coins`
+                    : "Amount must be $5–$500"}
+                </p>
+              {/if}
             </div>
 
             <div class="setting-group" style="margin-top: 12px;">
-              <button class="btn-primary" onclick={() => buyCoins(buyAmount)} disabled={oauthPending || checkoutPending}>
-                {oauthPending ? "Signing in…" : checkoutPending ? "Checkout open in browser…" : `Buy coins ($${buyAmount})`}
+              <button class="btn-primary" onclick={() => buyCoins(effectiveAmount)} disabled={oauthPending || checkoutPending || !amountValid}>
+                {oauthPending ? "Signing in…" : checkoutPending ? "Checkout open in browser…" : `Buy coins ($${effectiveAmount})`}
               </button>
               {#if checkoutPending}
                 <button class="btn-ghost" style="margin-top: 8px;" onclick={refreshBalance}>Refresh balance</button>
