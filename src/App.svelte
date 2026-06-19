@@ -208,7 +208,7 @@ See the LICENSE file in the root of this repository for complete details.
   let staleResponse = $state(false);
   // Managed provider (S.1 / S.2) state
   let freeRemaining = $state<number | null>(null);
-  let coinBalance = $state<number | null>(null);       // µ$ (divide by 200_000 for coins)
+  let coinBalance = $state<number | null>(null);       // µ$ (divide by 5_000 for coins; 1 coin = $0.005)
   let managedTier = $state<"free" | "paid">("free");
   let showTrialExhausted = $state(false);
   let oauthPending = $state(false);     // true while waiting for Google OAuth callback
@@ -1464,7 +1464,7 @@ See the LICENSE file in the root of this repository for complete details.
         </button>
       {/if}
       {#if settingsForm.api_provider === "managed" && managedTier === "paid" && coinBalance !== null}
-        <button class="header-balance" class:header-balance-low={coinBalance < 200_000} onclick={() => openAbout("usage")} title="View coin balance">{Number((coinBalance / 200_000).toFixed(1))} 🪙</button>
+        <button class="header-balance" class:header-balance-low={coinBalance < 200_000} onclick={() => openAbout("usage")} title="View coin balance">{Math.floor(coinBalance / 5_000)} 🪙</button>
       {:else if settingsForm.api_provider === "managed" && freeRemaining !== null}
         <button class="header-balance" class:header-balance-low={freeRemaining <= 5} onclick={() => openAbout("usage")} title="View usage">{freeRemaining} left</button>
       {/if}
@@ -2012,7 +2012,7 @@ See the LICENSE file in the root of this repository for complete details.
             {#if coinBalance !== null && coinBalance > 0}
               <div class="setting-group">
                 <span class="setting-label">Coin balance</span>
-                <p class="setting-hint">{(coinBalance / 200_000).toFixed(1)} coins · ${(coinBalance / 1_000_000).toFixed(2)} USD</p>
+                <p class="setting-hint">{Math.floor(coinBalance / 5_000)} coins</p>
               </div>
             {/if}
             <div class="setting-group">
@@ -2024,9 +2024,9 @@ See the LICENSE file in the root of this repository for complete details.
             <div class="setting-group" style="margin-top: 14px;">
               <label class="setting-label" for="tier-select">Quality tier</label>
               <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
-                <option value="speed">Speed — fastest, $0.03/request</option>
-                <option value="regular">Regular — balanced, $0.06/request</option>
-                <option value="smart">Smart — best grounding, $0.10/request</option>
+                <option value="speed">Speed — fastest · 6 coins/request</option>
+                <option value="regular">Regular — balanced · 12 coins/request</option>
+                <option value="smart">Smart — best grounding · 18 coins/request</option>
               </select>
               <p class="setting-hint">
                 {#if settingsForm.managed_tier === "speed"}
@@ -2043,10 +2043,10 @@ See the LICENSE file in the root of this repository for complete details.
             <div class="setting-group" style="margin-top: 14px;">
               <label class="setting-label" for="amount-select">Top-up amount</label>
               <select id="amount-select" class="setting-select" bind:value={buyAmount}>
-                <option value={5}>$5 · 25 coins</option>
-                <option value={10}>$10 · 50 coins</option>
-                <option value={20}>$20 · 100 coins</option>
-                <option value={50}>$50 · 250 coins</option>
+                <option value={5}>$5 · 1,000 coins</option>
+                <option value={10}>$10 · 2,000 coins</option>
+                <option value={20}>$20 · 4,000 coins</option>
+                <option value={50}>$50 · 10,000 coins</option>
               </select>
             </div>
 
