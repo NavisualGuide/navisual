@@ -964,9 +964,9 @@ See the LICENSE file in the root of this repository for complete details.
         settingsSaved = true;
         setTimeout(() => { settingsSaved = false; }, 2000);
       }
-      if (activeModel && activeModel !== lastAppliedModel) {
-        addToHistory("system", `Switched to ${activeModel}`);
-        lastAppliedModel = activeModel;
+      if (providerLabel && providerLabel !== lastAppliedModel) {
+        addToHistory("system", `AI provider switched to ${providerLabel}`);
+        lastAppliedModel = providerLabel;
       }
     } catch (e) {
       settingsError = String(e);
@@ -1264,6 +1264,22 @@ See the LICENSE file in the root of this repository for complete details.
     : settingsForm.openai_model
   );
   let headerLabel = $derived(activeModel || provider);
+  // Human-readable "supplier — detail" for the chat status messages. For managed
+  // it names the selected quality tier (Speed/Regular/Smart) so the user can see
+  // which managed model is active; for BYOK it's the provider + model.
+  const TIER_LABELS: Record<string, string> = { speed: "Speed", regular: "Regular", smart: "Smart" };
+  const TIER_COINS: Record<string, number> = { speed: 6, regular: 12, smart: 18 };
+  let providerLabel = $derived(
+    settingsForm.api_provider === "managed" ? `Managed (${TIER_LABELS[settingsForm.managed_tier] ?? "Regular"})`
+    : settingsForm.api_provider === "anthropic" ? `Anthropic · ${settingsForm.anthropic_model}`
+    : settingsForm.api_provider === "gemini" ? `Google Gemini · ${settingsForm.gemini_model}`
+    : settingsForm.api_provider === "openai" ? `OpenAI · ${settingsForm.openai_model}`
+    : settingsForm.api_provider === "deepseek" ? `DeepSeek · ${settingsForm.deepseek_model}`
+    : settingsForm.api_provider === "qwen" ? `Qwen · ${settingsForm.qwen_model}`
+    : settingsForm.api_provider === "ollama" ? `Ollama · ${settingsForm.ollama_model}`
+    : settingsForm.api_provider === "custom" ? `Custom · ${settingsForm.custom_model || "model"}`
+    : activeModel
+  );
   let lastAppliedModel = $state<string>("");
 
   onMount(async () => {
@@ -1421,8 +1437,8 @@ See the LICENSE file in the root of this repository for complete details.
       pointerOccluded = false;
     });
 
-    lastAppliedModel = activeModel;
-    await addToHistory("system", `Navisual ready — using ${activeModel}`);
+    lastAppliedModel = providerLabel;
+    await addToHistory("system", `Navisual ready — using ${providerLabel}`);
   });
 
   onDestroy(async () => {
@@ -2022,25 +2038,7 @@ See the LICENSE file in the root of this repository for complete details.
               <span class="setting-label">Free requests</span>
               <p class="setting-hint">{freeRemaining ?? "—"} remaining of 50</p>
             </div>
-
-            <!-- Tier selector — quality/cost per request. Persisted via Apply/OK. -->
-            <div class="setting-group" style="margin-top: 14px;">
-              <label class="setting-label" for="tier-select">Quality tier</label>
-              <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
-                <option value="speed">Speed — fastest · 6 coins/request</option>
-                <option value="regular">Regular — balanced · 12 coins/request</option>
-                <option value="smart">Smart — best grounding · 18 coins/request</option>
-              </select>
-              <p class="setting-hint">
-                {#if settingsForm.managed_tier === "speed"}
-                  GPT-5.4-mini, falls back to Gemini 3 Flash. Cheapest; good for simple, text-heavy UIs.
-                {:else if settingsForm.managed_tier === "smart"}
-                  Gemini 3 Pro, falls back to GPT-5.4. Best at pointing precisely on dense/visual UIs.
-                {:else}
-                  Gemini 3.5 Flash, falls back to GPT-5.4-mini. The best all-round default. Click Apply to save.
-                {/if}
-              </p>
-            </div>
+            <p class="setting-hint">Change your <strong>quality tier</strong> (which model answers, and its coin cost) on the <strong>Provider</strong> tab.</p>
 
             <!-- Amount picker -->
             <div class="setting-group" style="margin-top: 14px;">
@@ -2131,6 +2129,28 @@ See the LICENSE file in the root of this repository for complete details.
                 Any OpenAI-compatible <code>/v1</code> endpoint — a local server (LM Studio, llama.cpp, vLLM) to run fully offline, a DashScope workspace URL, or another cloud. Use a <em>vision</em> model so it can see the screen; the API key is optional for local servers.
               {/if}
             </p>
+
+            {#if settingsForm.api_provider === "managed"}
+              <!-- Quality tier — which managed model answers (and its coin cost). Persisted via Apply/OK. -->
+              <div class="setting-group">
+                <label class="setting-label" for="tier-select">Quality tier</label>
+                <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
+                  <option value="speed">Speed — fastest · 6 coins/request</option>
+                  <option value="regular">Regular — balanced · 12 coins/request</option>
+                  <option value="smart">Smart — best grounding · 18 coins/request</option>
+                </select>
+                <p class="setting-hint">
+                  {#if settingsForm.managed_tier === "speed"}
+                    GPT-5.4-mini, falls back to Gemini 3 Flash. Cheapest; good for simple, text-heavy UIs.
+                  {:else if settingsForm.managed_tier === "smart"}
+                    Gemini 3 Pro, falls back to GPT-5.4. Best at pointing precisely on dense/visual UIs.
+                  {:else}
+                    Gemini 3.5 Flash, falls back to GPT-5.4-mini. The best all-round default.
+                  {/if}
+                  Coins are bought on the Billing tab.
+                </p>
+              </div>
+            {/if}
 
             {#if settingsForm.api_provider === "anthropic"}
               <div class="setting-group">
@@ -2643,6 +2663,9 @@ See the LICENSE file in the root of this repository for complete details.
               {/if}
             {/if}
 
+            {#if settingsForm.api_provider === "managed" && managedTier === "paid" && coinBalance != null}
+              <p class="setting-hint" style="margin-top:8px">Managed (paid): {Math.floor(coinBalance / 5_000).toLocaleString()} coins left · {TIER_LABELS[settingsForm.managed_tier] ?? "Regular"} tier · {TIER_COINS[settingsForm.managed_tier] ?? 12} coins/request</p>
+            {/if}
             {#if usageManagedRemaining != null}
               <p class="setting-hint" style="margin-top:8px">Managed (free): {usageManagedRemaining} / 50 requests left</p>
             {/if}
