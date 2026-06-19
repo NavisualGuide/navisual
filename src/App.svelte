@@ -1952,7 +1952,13 @@ See the LICENSE file in the root of this repository for complete details.
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 16px;">
               Top up with coins to continue on the Navisual managed relay.
             </p>
-            <button class="btn-primary btn-full" style="margin-bottom: 10px;" onclick={() => buyCoins(20)}>Buy coins ($20)</button>
+            <button class="btn-primary btn-full" style="margin-bottom: 6px;" onclick={() => buyCoins(20)}>Buy coins ($20)</button>
+            <p class="legal-agree" style="margin-bottom: 14px;">
+              By buying coins you agree to our
+              <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/terms.html")}>Terms</button>
+              and
+              <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy Policy</button>.
+            </p>
             <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 16px;">
               Or keep going free with your own key:
               Settings → Provider → Gemini (Google AI Studio) or Ollama (local).
@@ -2052,6 +2058,12 @@ See the LICENSE file in the root of this repository for complete details.
                 <button class="btn-ghost" style="margin-top: 8px;" onclick={refreshBalance}>Refresh balance</button>
               {/if}
             </div>
+            <p class="setting-hint legal-agree">
+              By buying coins you agree to our
+              <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/terms.html")}>Terms</button>
+              and
+              <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy Policy</button>.
+            </p>
             <p class="setting-hint" style="margin-top: 8px;">
               Coins power the Managed provider's paid tiers. Checkout opens in your default
               browser; if you're not signed in yet, Google sign-in runs first. Your balance
@@ -2926,6 +2938,26 @@ See the LICENSE file in the root of this repository for complete details.
   .hdr-btn svg { width: 17px; height: 17px; display: block; }
   .hdr-btn:hover { background: var(--surface-3); color: var(--text-primary); }
   .hdr-btn-close:hover { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+
+  /* Point-of-purchase legal agreement line + inline links */
+  .legal-agree {
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
+    text-align: center;
+    margin-top: 8px;
+  }
+  .legal-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--text-secondary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .legal-link:hover { color: var(--accent-500); }
 
   /* ── Latest instruction box ─────────────────────── */
 
