@@ -1966,11 +1966,13 @@ See the LICENSE file in the root of this repository for complete details.
   {/if}
 
   <!-- Settings modal (E.6) -->
+  <!-- Click-outside does NOT dismiss: Settings is a form with unsaved state, so a
+       stray click must not silently discard edits. Close only via Cancel / X
+       (discard) or Apply / OK (save). Esc also cancels. -->
   {#if showSettings}
     <div
       class="modal-backdrop"
       role="presentation"
-      onclick={() => (showSettings = false)}
       onkeydown={(e) => { if (e.key === "Escape") showSettings = false; }}
     >
       <div
@@ -1979,8 +1981,6 @@ See the LICENSE file in the root of this repository for complete details.
         tabindex="-1"
         aria-modal="true"
         aria-label="Settings"
-        onclick={(e) => e.stopPropagation()}
-        onkeydown={(e) => e.stopPropagation()}
       >
         <div class="modal-header">
           <span class="modal-title">Settings</span>
