@@ -2419,7 +2419,10 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
 /// HTTP server on port 9876 for the callback, exchanges the code for a
 /// session, and emits `oauth_complete` to the frontend.  The anonymous
 /// session is replaced — the user_profiles row starts fresh for the Google
-/// account (link-identity / preserve-row is deferred to a later release).
+/// account. In-place identity linking (preserve the row, matching the email
+/// upgrade path) is deferred per server-plan §S.2.1: it needs Supabase manual
+/// linking + a live before/after regression test, so this purchase-critical
+/// flow is left untouched until that can be verified live.
 #[tauri::command]
 async fn start_google_oauth(
     state: State<'_, AppState>,
@@ -2503,6 +2506,258 @@ async fn create_checkout(
     server::create_checkout_session(&supabase_url, &access_token, amount)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ── Email / password auth + account management (S.2.1) ───────────────────────
+
+/// (supabase_url, anon_key) from config. Lightweight — no token needed
+/// (used by calls that authenticate with the anon key only: sign-in, verify,
+/// recover, fresh anonymous sign-in).
+async fn managed_url_key(state: &State<'_, AppState>) -> Result<(String, String), String> {
+    let router = state.ai_router.lock().await;
+    let url = router
+        .config
+        .supabase_url
+        .clone()
+        .ok_or("SUPABASE_URL not configured")?;
+    let key = router
+        .config
+        .supabase_anon_key
+        .clone()
+        .ok_or("SUPABASE_ANON_KEY not configured")?;
+    Ok((url, key))
+}
+
+/// (supabase_url, anon_key, access_token) with the managed token refreshed first.
+/// Errors if there is no managed session — account actions are a Managed-provider
+/// feature (anonymous sign-in runs on launch when the provider is `managed`).
+async fn managed_auth_ctx(
+    state: &State<'_, AppState>,
+) -> Result<(String, String, String), String> {
+    let mut router = state.ai_router.lock().await;
+    router
+        .ensure_managed_token()
+        .await
+        .map_err(|e| format!("Session refresh failed: {e}"))?;
+    let url = router
+        .config
+        .supabase_url
+        .clone()
+        .ok_or("SUPABASE_URL not configured")?;
+    let key = router
+        .config
+        .supabase_anon_key
+        .clone()
+        .ok_or("SUPABASE_ANON_KEY not configured")?;
+    let token = router
+        .client_access_token()
+        .ok_or("Not signed in to managed provider")?;
+    Ok((url, key, token))
+}
+
+/// Replace the on-disk + in-memory session with a fresh anonymous one (used after
+/// sign-out and account deletion so the free tier keeps working). Returns the
+/// new free-remaining count.
+async fn reset_to_anonymous(
+    state: &State<'_, AppState>,
+    url: &str,
+    key: &str,
+) -> Result<Option<u32>, String> {
+    {
+        let mut r = state.ai_router.lock().await;
+        r.clear_managed_session();
+    }
+    let _ = std::fs::remove_file(&state.supabase_session_path);
+    let new_session = server::sign_in_anonymously(url, key)
+        .await
+        .map_err(|e| e.to_string())?;
+    server::save_session(&state.supabase_session_path, &new_session);
+    let mut r = state.ai_router.lock().await;
+    r.set_managed_session(new_session);
+    Ok(r.get_managed_free_remaining())
+}
+
+fn emit_account_changed(app: &tauri::AppHandle) {
+    let _ = app
+        .get_webview_window("panel")
+        .map(|w| w.emit("account_changed", ()));
+}
+
+/// Upgrade the current anonymous account in place by adding an email + password.
+/// Triggers a confirmation email with the 6-digit OTP; the session stays
+/// anonymous until `verify_email_otp` confirms it.
+#[tauri::command]
+async fn sign_up_email(
+    state: State<'_, AppState>,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    let (url, key, token) = managed_auth_ctx(&state).await?;
+    server::sign_up_email(&url, &key, &token, email.trim(), &password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Resend the sign-up verification code (a fresh OTP; the previous one is voided).
+/// Used by the "Resend code" action and the unverified-login recovery path.
+#[tauri::command]
+async fn resend_email_otp(state: State<'_, AppState>, email: String) -> Result<(), String> {
+    let (url, key, token) = managed_auth_ctx(&state).await?;
+    server::resend_signup_otp(&url, &key, &token, email.trim())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Confirm a sign-up OTP. GoTrue's OTP `type` for an anonymous→email upgrade
+/// varies by version, so try the candidates in order (a failed verify does not
+/// consume the token). On success the (same-id) account is confirmed.
+///
+/// `email_change` is tried FIRST: live testing (2026-06-19) confirmed the
+/// anonymous→email upgrade fires GoTrue's email-change flow (the confirmation
+/// email is titled "Confirm Change of Email"), so its OTP type is `email_change`,
+/// not `signup`. The others remain as version fallbacks.
+#[tauri::command]
+async fn verify_email_otp(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    email: String,
+    token: String,
+) -> Result<(), String> {
+    let (url, key) = managed_url_key(&state).await?;
+    let email = email.trim();
+    let token = token.trim();
+    let mut diags: Vec<String> = Vec::new();
+    for otp_type in ["email_change", "signup", "email"] {
+        match server::verify_email_otp(&url, &key, email, token, otp_type).await {
+            Ok(session) => {
+                server::save_session(&state.supabase_session_path, &session);
+                {
+                    let mut r = state.ai_router.lock().await;
+                    r.set_managed_session(session);
+                }
+                emit_account_changed(&app);
+                return Ok(());
+            }
+            Err(e) => diags.push(format!("{}={}", otp_type, e)),
+        }
+    }
+    // Surface the per-type breakdown: identical messages across all three ⇒ the
+    // token isn't stored for ANY type (stale/superseded/expired code), whereas a
+    // single differing message points at a type/flow mismatch.
+    log::warn!("[verify_email_otp] all types failed: {}", diags.join(" | "));
+    Err(format!("Verification failed — {}", diags.join("  |  ")))
+}
+
+/// Sign in with an existing email + password.
+#[tauri::command]
+async fn sign_in_email(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    let (url, key) = managed_url_key(&state).await?;
+    let session = server::sign_in_email(&url, &key, email.trim(), &password)
+        .await
+        .map_err(|e| e.to_string())?;
+    server::save_session(&state.supabase_session_path, &session);
+    {
+        let mut r = state.ai_router.lock().await;
+        r.set_managed_session(session);
+    }
+    emit_account_changed(&app);
+    Ok(())
+}
+
+/// Sign out: revoke the session server-side (best-effort), clear it locally, and
+/// seed a fresh anonymous session so the free tier keeps working.
+#[tauri::command]
+async fn sign_out(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<SessionStatus, String> {
+    if let Ok((url, key, token)) = managed_auth_ctx(&state).await {
+        let _ = server::sign_out(&url, &key, &token).await;
+    }
+    let (url, key) = managed_url_key(&state).await?;
+    let free_remaining = reset_to_anonymous(&state, &url, &key).await?;
+    emit_account_changed(&app);
+    Ok(SessionStatus {
+        signed_in: true,
+        free_remaining,
+    })
+}
+
+/// Send a password-reset email containing the recovery OTP.
+#[tauri::command]
+async fn request_password_reset(state: State<'_, AppState>, email: String) -> Result<(), String> {
+    let (url, key) = managed_url_key(&state).await?;
+    server::request_password_reset(&url, &key, email.trim())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Verify the recovery OTP and set a new password (forgot-password flow).
+#[tauri::command]
+async fn verify_password_reset(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    email: String,
+    token: String,
+    new_password: String,
+) -> Result<(), String> {
+    let (url, key) = managed_url_key(&state).await?;
+    let session = server::verify_recovery_otp(&url, &key, email.trim(), token.trim())
+        .await
+        .map_err(|e| e.to_string())?;
+    server::change_password(&url, &key, &session.access_token, &new_password)
+        .await
+        .map_err(|e| e.to_string())?;
+    server::save_session(&state.supabase_session_path, &session);
+    {
+        let mut r = state.ai_router.lock().await;
+        r.set_managed_session(session);
+    }
+    emit_account_changed(&app);
+    Ok(())
+}
+
+/// Change the password of the signed-in account.
+#[tauri::command]
+async fn change_password(state: State<'_, AppState>, new_password: String) -> Result<(), String> {
+    let (url, key, token) = managed_auth_ctx(&state).await?;
+    server::change_password(&url, &key, &token, &new_password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Current account email + anonymous flag, for the Account UI.
+#[tauri::command]
+async fn get_account_info(state: State<'_, AppState>) -> Result<server::AccountInfo, String> {
+    let (url, key, token) = managed_auth_ctx(&state).await?;
+    server::get_account_info(&url, &key, &token)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Permanently delete the account (service-role Edge Function), then fall back to
+/// a fresh anonymous session. Coins are NOT refunded.
+#[tauri::command]
+async fn delete_account(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<SessionStatus, String> {
+    let (url, _key, token) = managed_auth_ctx(&state).await?;
+    server::delete_account(&url, &token)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (url, key) = managed_url_key(&state).await?;
+    let free_remaining = reset_to_anonymous(&state, &url, &key).await?;
+    emit_account_changed(&app);
+    Ok(SessionStatus {
+        signed_in: true,
+        free_remaining,
+    })
 }
 
 /// Called from the frontend after `downloadAndInstall()` has spawned the NSIS
@@ -2718,6 +2973,16 @@ pub fn run() {
             get_session_status,
             start_google_oauth,
             create_checkout,
+            sign_up_email,
+            resend_email_otp,
+            verify_email_otp,
+            sign_in_email,
+            sign_out,
+            request_password_reset,
+            verify_password_reset,
+            change_password,
+            get_account_info,
+            delete_account,
             submit_feedback,
             exit_for_update,
             list_target_windows,

@@ -134,6 +134,15 @@ impl AiRouter {
         }
     }
 
+    /// Drop the in-memory managed session (sign-out). The caller deletes the
+    /// on-disk session file and seeds a fresh anonymous session afterwards so
+    /// the free tier keeps working. No-op for other providers.
+    pub fn clear_managed_session(&mut self) {
+        if let Some(ApiClient::Managed(ref mut c)) = self.client {
+            c.session = None;
+        }
+    }
+
     /// Returns the current access token if the managed client has a valid session.
     pub fn client_access_token(&self) -> Option<String> {
         if let Some(ApiClient::Managed(ref c)) = self.client {

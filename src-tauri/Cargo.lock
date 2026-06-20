@@ -2561,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "navisual-backend"
-version = "0.5.25"
+version = "0.5.26"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2578,6 +2578,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",

@@ -48,7 +48,7 @@ See the LICENSE file in the root of this repository for complete details.
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
-  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "billing";
+  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "billing" | "account";
   type SettingsPayload = {
     api_provider: string;
     anthropic_api_key: string;
@@ -218,6 +218,29 @@ See the LICENSE file in the root of this repository for complete details.
   let effectiveAmount = $derived(buyAmount === "custom" ? customAmount : buyAmount);
   let amountValid = $derived(effectiveAmount >= 5 && effectiveAmount <= 500);
 
+  // Account management (S.2.1) state
+  type AccountInfo = { email: string | null; is_anonymous: boolean; providers: string[] };
+  let accountInfo = $state<AccountInfo | null>(null);
+  type AccountView = "signin" | "signup" | "verify_signup" | "forgot" | "verify_reset" | "account";
+  let accountView = $state<AccountView>("signin");
+  let acctEmail = $state("");
+  let acctPassword = $state("");
+  let acctCode = $state("");          // 6-digit OTP
+  let acctNewPassword = $state("");
+  let acctBusy = $state(false);
+  let acctError = $state("");
+  let acctNotice = $state("");
+  let showChangePw = $state(false);
+  let showDeleteConfirm = $state(false);
+  // Signed in with a real (non-anonymous) email account?
+  let acctSignedIn = $derived(!!accountInfo && !accountInfo.is_anonymous && !!accountInfo.email);
+  // How they authenticated — drives password UI. A Google (OAuth) account's
+  // password is managed by Google, so we don't offer "Change password" for it.
+  let acctIsGoogle = $derived(!!accountInfo && accountInfo.providers.includes("google"));
+  let acctHasPassword = $derived(!!accountInfo && accountInfo.providers.includes("email"));
+  // Show the change-password control unless it's an OAuth-only account.
+  let acctShowChangePw = $derived(acctHasPassword || !acctIsGoogle);
+
   // Phase 0.2: which app is currently shared with the AI.
   type SharedAppInfo = {
     hwnd: number;
@@ -350,13 +373,19 @@ See the LICENSE file in the root of this repository for complete details.
   let usageManagedRemaining = $state<number | null>(null);
   let usagePeriod = $state<"today" | "month">("today");
   let usageLoaded = $state(false);
+  // BYOK / local token usage only. Managed rows are coins, not tokens (managed
+  // requests record 0 tokens) — they're shown in the separate "Navisual account"
+  // section, never in this token table.
   let usageView = $derived(
-    usageRows.map((r) => ({
-      model: r.model,
-      tokens: usagePeriod === "today" ? r.daily_in + r.daily_out : r.monthly_in + r.monthly_out,
-      cost: usagePeriod === "today" ? r.daily_cost : r.monthly_cost,
-      free: r.free,
-    })),
+    usageRows
+      .filter((r) => r.provider !== "managed")
+      .map((r) => ({
+        provider: r.provider,
+        model: r.model,
+        tokens: usagePeriod === "today" ? r.daily_in + r.daily_out : r.monthly_in + r.monthly_out,
+        cost: usagePeriod === "today" ? r.daily_cost : r.monthly_cost,
+        free: r.free,
+      })),
   );
   let usageTotalCost = $derived(usageView.reduce((s, r) => s + (r.cost ?? 0), 0));
   let usageHasEstimate = $derived(usageView.some((r) => r.cost != null && !r.free));
@@ -875,6 +904,219 @@ See the LICENSE file in the root of this repository for complete details.
     await setPanelOnTop(true); // back from the browser — restore always-on-top
   }
 
+  // ── Account management (S.2.1) ──────────────────────────────────────────────
+
+  // Fetch the current identity and pick the right Account view. Called when the
+  // Account tab opens and on every `account_changed` event. Pass force=true from a
+  // flow that has just *completed* (verify success) so it advances past the guard.
+  async function loadAccountInfo(force = false) {
+    try {
+      accountInfo = await invoke<AccountInfo>("get_account_info");
+    } catch (_) {
+      accountInfo = null;
+    }
+    // Don't yank the user out of a multi-step flow (verify/forgot) on a passive refresh.
+    if (!force && (accountView === "verify_signup" || accountView === "verify_reset" || accountView === "forgot")) return;
+    accountView = acctSignedIn ? "account" : "signin";
+  }
+
+  function resetAcctFields() {
+    acctPassword = "";
+    acctCode = "";
+    acctNewPassword = "";
+    acctError = "";
+    acctNotice = "";
+  }
+
+  // Add an email + password to the current anonymous account (in-place upgrade),
+  // then move to the OTP-entry step.
+  async function acctSignUp() {
+    if (acctBusy) return;
+    acctError = ""; acctNotice = "";
+    if (!acctEmail.trim() || acctPassword.length < 6) {
+      acctError = "Enter an email and a password of at least 6 characters.";
+      return;
+    }
+    acctBusy = true;
+    try {
+      await invoke("sign_up_email", { email: acctEmail.trim(), password: acctPassword });
+      acctNotice = `Enter the verification code we emailed to ${acctEmail.trim()}. Already requested one? It's valid for 1 hour.`;
+      accountView = "verify_signup";
+    } catch (e) {
+      const msg = String(e);
+      if (/sign in instead/i.test(msg)) {
+        // Email already belongs to a confirmed account — route to sign-in (email stays prefilled).
+        accountView = "signin";
+        acctNotice = "This email already has an account. Enter your password to sign in.";
+      } else {
+        acctError = msg;
+      }
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  // Resend a fresh sign-up code (used by "Resend code" and the unverified-login path).
+  async function acctResend() {
+    if (acctBusy) return;
+    acctError = ""; acctNotice = "";
+    if (!acctEmail.trim()) { acctError = "Enter your email first."; return; }
+    acctBusy = true;
+    try {
+      await invoke("resend_email_otp", { email: acctEmail.trim() });
+      acctNotice = `New code sent to ${acctEmail.trim()}. Enter it below.`;
+      accountView = "verify_signup";
+    } catch (e) {
+      acctError = String(e);
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  async function acctVerifySignup() {
+    if (acctBusy) return;
+    acctError = "";
+    if (acctCode.trim().length < 6) { acctError = "Enter the code from your email."; return; }
+    acctBusy = true;
+    try {
+      await invoke("verify_email_otp", { email: acctEmail.trim(), token: acctCode.trim() });
+      resetAcctFields();
+      await loadAccountInfo(true);   // flow complete → leave the verify page for "account"
+      await refreshBalance();
+    } catch (e) {
+      acctError = String(e);
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  async function acctSignIn() {
+    if (acctBusy) return;
+    acctError = ""; acctNotice = "";
+    if (!acctEmail.trim() || !acctPassword) { acctError = "Enter your email and password."; return; }
+    acctBusy = true;
+    try {
+      await invoke("sign_in_email", { email: acctEmail.trim(), password: acctPassword });
+      resetAcctFields();
+      await loadAccountInfo();   // → "account"
+      await refreshBalance();
+    } catch (e) {
+      const msg = String(e);
+      if (/EMAIL_NOT_CONFIRMED/i.test(msg)) {
+        // Account exists but its email was never verified → finish verification.
+        accountView = "verify_signup";
+        try {
+          await invoke("resend_email_otp", { email: acctEmail.trim() });
+          acctNotice = `Your email isn't verified yet — we sent a new code to ${acctEmail.trim()}. Enter it below.`;
+        } catch {
+          acctNotice = `Your email isn't verified yet. Enter the code we emailed to ${acctEmail.trim()}, or tap Resend code.`;
+        }
+      } else {
+        acctError = msg;
+      }
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  async function acctSignOut() {
+    if (acctBusy) return;
+    acctBusy = true; acctError = "";
+    try {
+      await invoke("sign_out");  // backend re-signs anonymously
+      accountInfo = null;
+      acctEmail = "";
+      resetAcctFields();
+      accountView = "signin";
+      showChangePw = false;
+      showDeleteConfirm = false;
+      await loadAccountInfo();
+      await refreshBalance();
+    } catch (e) {
+      acctError = String(e);
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  async function acctForgot() {
+    if (acctBusy) return;
+    acctError = ""; acctNotice = "";
+    if (!acctEmail.trim()) { acctError = "Enter your account email."; return; }
+    acctBusy = true;
+    try {
+      await invoke("request_password_reset", { email: acctEmail.trim() });
+      acctNotice = `We sent a reset code to ${acctEmail.trim()}. Enter it with your new password.`;
+      accountView = "verify_reset";
+    } catch (e) {
+      acctError = String(e);
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  async function acctVerifyReset() {
+    if (acctBusy) return;
+    acctError = "";
+    if (acctCode.trim().length < 6 || acctNewPassword.length < 6) {
+      acctError = "Enter the code from your email and a new password (min 6 characters).";
+      return;
+    }
+    acctBusy = true;
+    try {
+      await invoke("verify_password_reset", {
+        email: acctEmail.trim(),
+        token: acctCode.trim(),
+        newPassword: acctNewPassword,
+      });
+      resetAcctFields();
+      await loadAccountInfo(true);   // reset complete → leave the verify page for "account"
+      await refreshBalance();
+    } catch (e) {
+      acctError = String(e);
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  async function acctChangePassword() {
+    if (acctBusy) return;
+    acctError = ""; acctNotice = "";
+    if (acctNewPassword.length < 6) { acctError = "New password must be at least 6 characters."; return; }
+    acctBusy = true;
+    try {
+      await invoke("change_password", { newPassword: acctNewPassword });
+      acctNewPassword = "";
+      showChangePw = false;
+      acctNotice = "Password changed.";
+    } catch (e) {
+      acctError = String(e);
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  async function acctDeleteAccount() {
+    if (acctBusy) return;
+    acctBusy = true; acctError = "";
+    try {
+      await invoke("delete_account");  // backend re-signs anonymously
+      accountInfo = null;
+      acctEmail = "";
+      resetAcctFields();
+      showDeleteConfirm = false;
+      showChangePw = false;
+      accountView = "signin";
+      await loadAccountInfo();
+      await refreshBalance();
+    } catch (e) {
+      acctError = String(e);
+      showDeleteConfirm = false;
+    } finally {
+      acctBusy = false;
+    }
+  }
+
   async function openSettings() {
     settingsError = null;
     settingsSaved = false;
@@ -1282,6 +1524,15 @@ See the LICENSE file in the root of this repository for complete details.
   );
   let lastAppliedModel = $state<string>("");
 
+  // Friendly provider names for the Usage tab's "your own key" note.
+  const PROVIDER_NAMES: Record<string, string> = {
+    managed: "Navisual", anthropic: "Anthropic", gemini: "Google Gemini",
+    openai: "OpenAI", deepseek: "DeepSeek", qwen: "Qwen", ollama: "Ollama",
+    custom: "custom endpoint",
+  };
+  // BYOK = a provider billed on the user's own account (not managed, not local Ollama).
+  let isByok = $derived(!["managed", "ollama"].includes(settingsForm.api_provider));
+
   onMount(async () => {
     getVersion().then(v => { appVersion = v; }).catch(() => {});
     setTimeout(() => checkForUpdates(), 5000);
@@ -1417,6 +1668,12 @@ See the LICENSE file in the root of this repository for complete details.
         coinBalance = bal.coin_balance_microdollars;
         managedTier = (bal.tier === "paid") ? "paid" : "free";
       } catch (_) {}
+    });
+
+    // Emitted after any account change (sign in/up/out, delete) so the Account
+    // tab reflects the new identity if it's open.
+    listen("account_changed", () => {
+      if (showSettings && settingsTab === "account") loadAccountInfo();
     });
 
     // Backend detected the screen drifted enough during AI thinking
@@ -2014,6 +2271,7 @@ See the LICENSE file in the root of this repository for complete details.
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
           <button class="tab-btn {settingsTab === 'billing' ? 'tab-active' : ''}" onclick={() => { settingsTab = "billing"; refreshBalance(); }}>Billing</button>
+          <button class="tab-btn {settingsTab === 'account' ? 'tab-active' : ''}" onclick={() => { settingsTab = "account"; loadAccountInfo(); }}>Account</button>
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
@@ -2085,6 +2343,145 @@ See the LICENSE file in the root of this repository for complete details.
                 provider. Switch to <strong>Managed</strong> on the Provider tab to spend coins.
               {/if}
             </p>
+          {:else if settingsTab === "account"}
+            <!-- Account management (S.2.1): sign in/up/out, forgot/change password, delete -->
+            {#if acctError}<p class="setting-hint acct-error">⚠️ {acctError}</p>{/if}
+            {#if acctNotice}<p class="setting-hint acct-notice">{acctNotice}</p>{/if}
+
+            {#if accountView === "account"}
+              <div class="setting-group">
+                <span class="setting-label">Signed in as</span>
+                <p class="setting-hint"><strong>{accountInfo?.email}</strong></p>
+              </div>
+              {#if coinBalance !== null && coinBalance > 0}
+                <p class="setting-hint">{Math.floor(coinBalance / 5_000)} coins · your balance and purchases stay with this account.</p>
+              {/if}
+
+              {#if acctShowChangePw}
+                {#if !showChangePw}
+                  <div class="setting-group" style="margin-top: 12px;">
+                    <button class="btn-ghost" onclick={() => { showChangePw = true; acctError = ""; acctNotice = ""; }}>Change password</button>
+                  </div>
+                {:else}
+                  <div class="setting-group" style="margin-top: 12px;">
+                    <label class="setting-label" for="acct-newpw">New password</label>
+                    <input id="acct-newpw" class="setting-input" type="password" bind:value={acctNewPassword} placeholder="At least 6 characters" />
+                    <div style="display:flex; gap:8px; margin-top:8px;">
+                      <button class="btn-primary" onclick={acctChangePassword} disabled={acctBusy}>{acctBusy ? "Saving…" : "Save password"}</button>
+                      <button class="btn-ghost" onclick={() => { showChangePw = false; acctNewPassword = ""; }}>Cancel</button>
+                    </div>
+                  </div>
+                {/if}
+              {:else if acctIsGoogle}
+                <p class="setting-hint" style="margin-top: 12px;">
+                  Signed in with Google — your password is managed by Google, not Navisual. Change it at
+                  <button class="legal-link" onclick={() => openUrl("https://myaccount.google.com/security")}>myaccount.google.com</button>.
+                </p>
+              {/if}
+
+              <div class="setting-group" style="margin-top: 12px;">
+                <button class="btn-ghost" onclick={acctSignOut} disabled={acctBusy}>Sign out</button>
+              </div>
+
+              <hr class="acct-sep" />
+              {#if !showDeleteConfirm}
+                <button class="legal-link acct-danger" onclick={() => { showDeleteConfirm = true; acctError = ""; }}>Delete account</button>
+              {:else}
+                <div class="setting-group">
+                  <p class="setting-hint acct-error">This permanently deletes your account. Coins are <strong>not</strong> refunded and cannot be recovered.</p>
+                  <div style="display:flex; gap:8px; margin-top:8px;">
+                    <button class="btn-danger" onclick={acctDeleteAccount} disabled={acctBusy}>{acctBusy ? "Deleting…" : "Delete permanently"}</button>
+                    <button class="btn-ghost" onclick={() => (showDeleteConfirm = false)}>Cancel</button>
+                  </div>
+                </div>
+              {/if}
+
+            {:else if accountView === "signin"}
+              <p class="setting-hint">Sign in to keep your coins and purchases across devices.</p>
+              <div class="setting-group">
+                <label class="setting-label" for="acct-email">Email</label>
+                <input id="acct-email" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="acct-pw">Password</label>
+                <input id="acct-pw" class="setting-input" type="password" autocomplete="current-password" bind:value={acctPassword} placeholder="Your password" />
+              </div>
+              <div class="setting-group" style="margin-top: 10px;">
+                <button class="btn-primary" onclick={acctSignIn} disabled={acctBusy}>{acctBusy ? "Signing in…" : "Sign in"}</button>
+              </div>
+              <div class="acct-links">
+                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signup"; }}>Create account</button>
+                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "forgot"; }}>Forgot password?</button>
+              </div>
+              <p class="setting-hint" style="margin-top: 8px;">
+                Signed up but never verified?
+                <button class="legal-link" onclick={acctResend} disabled={acctBusy}>Resend verification code</button>
+              </p>
+              <hr class="acct-sep" />
+              <button class="btn-ghost" onclick={async () => { if (oauthPending) return; oauthPending = true; acctError = ""; try { await invoke("start_google_oauth"); await loadAccountInfo(); await refreshBalance(); } catch (e) { acctError = String(e); } finally { oauthPending = false; } }} disabled={oauthPending}>
+                {oauthPending ? "Signing in…" : "Continue with Google"}
+              </button>
+
+            {:else if accountView === "signup"}
+              <p class="setting-hint">Create an account — your current free requests and any coins carry over.</p>
+              <div class="setting-group">
+                <label class="setting-label" for="acct-email-up">Email</label>
+                <input id="acct-email-up" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="acct-pw-up">Password</label>
+                <input id="acct-pw-up" class="setting-input" type="password" autocomplete="new-password" bind:value={acctPassword} placeholder="At least 6 characters" />
+              </div>
+              <div class="setting-group" style="margin-top: 10px;">
+                <button class="btn-primary" onclick={acctSignUp} disabled={acctBusy}>{acctBusy ? "Sending code…" : "Create account"}</button>
+              </div>
+              <div class="acct-links">
+                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signin"; }}>Already have an account? Sign in</button>
+              </div>
+
+            {:else if accountView === "verify_signup"}
+              <div class="setting-group">
+                <label class="setting-label" for="acct-code">Verification code</label>
+                <input id="acct-code" class="setting-input" inputmode="numeric" maxlength="10" bind:value={acctCode} placeholder="Code from email" />
+              </div>
+              <div class="setting-group" style="margin-top: 10px;">
+                <button class="btn-primary" onclick={acctVerifySignup} disabled={acctBusy}>{acctBusy ? "Verifying…" : "Verify & finish"}</button>
+              </div>
+              <div class="acct-links">
+                <button class="legal-link" onclick={acctResend} disabled={acctBusy}>Resend code</button>
+                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signin"; }}>Cancel</button>
+              </div>
+
+            {:else if accountView === "forgot"}
+              <p class="setting-hint">Enter your account email and we'll send a reset code.</p>
+              <div class="setting-group">
+                <label class="setting-label" for="acct-email-fp">Email</label>
+                <input id="acct-email-fp" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
+              </div>
+              <div class="setting-group" style="margin-top: 10px;">
+                <button class="btn-primary" onclick={acctForgot} disabled={acctBusy}>{acctBusy ? "Sending…" : "Send reset code"}</button>
+              </div>
+              <div class="acct-links">
+                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signin"; }}>Back to sign in</button>
+              </div>
+
+            {:else if accountView === "verify_reset"}
+              <div class="setting-group">
+                <label class="setting-label" for="acct-code-r">Reset code</label>
+                <input id="acct-code-r" class="setting-input" inputmode="numeric" maxlength="10" bind:value={acctCode} placeholder="Code from email" />
+              </div>
+              <div class="setting-group">
+                <label class="setting-label" for="acct-newpw-r">New password</label>
+                <input id="acct-newpw-r" class="setting-input" type="password" autocomplete="new-password" bind:value={acctNewPassword} placeholder="At least 6 characters" />
+              </div>
+              <div class="setting-group" style="margin-top: 10px;">
+                <button class="btn-primary" onclick={acctVerifyReset} disabled={acctBusy}>{acctBusy ? "Saving…" : "Set new password"}</button>
+              </div>
+              <div class="acct-links">
+                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signin"; }}>Cancel</button>
+              </div>
+            {/if}
+
           {:else if settingsTab === "provider"}
             <!-- Provider selector — grouped so it scales as providers + paid tiers grow -->
             <div class="setting-group">
@@ -2627,53 +3024,72 @@ See the LICENSE file in the root of this repository for complete details.
           <p class="about-license">Licensed under FSL-1.1-Apache-2.0 — converts to Apache 2.0 two years after each release.</p>
         </div>
         {:else}
-        <!-- Usage tab — read-only token-usage report (moved here from Settings) -->
+        <!-- Usage tab — Navisual account (coins/free) kept separate from your-own-key token usage -->
         <div class="modal-body">
+          <!-- Section 1 — Navisual managed account (coins or free requests) -->
           <div class="setting-group">
-            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px">
-              <p class="setting-label" style="margin:0">Token usage</p>
-              <div style="display:flex; gap:6px">
-                <button class="tab-btn {usagePeriod === 'today' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "today")}>Today</button>
-                <button class="tab-btn {usagePeriod === 'month' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "month")}>This month</button>
-              </div>
-            </div>
-
-            {#if !usageLoaded}
-              <p class="setting-hint">Loading…</p>
-            {:else if usageView.length === 0}
-              <p class="setting-hint">No usage recorded yet — run a guidance task and it'll appear here.</p>
+            <p class="setting-label" style="margin:0 0 8px">Navisual account</p>
+            {#if managedTier === "paid" && coinBalance != null}
+              <p class="setting-hint">🪙 {Math.floor(coinBalance / 5_000).toLocaleString()} coins left · {TIER_LABELS[settingsForm.managed_tier] ?? "Regular"} tier · {TIER_COINS[settingsForm.managed_tier] ?? 12} coins/request</p>
+            {:else if usageManagedRemaining != null}
+              <p class="setting-hint">Free tier — {usageManagedRemaining} / 50 requests left</p>
             {:else}
-              <div style="display:flex; flex-direction:column; gap:5px">
-                {#each usageView as r}
-                  <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; font-size:13px">
-                    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model}</span>
-                    <span style="white-space:nowrap; color:var(--text-secondary)">{fmtTok(r.tokens)} tok</span>
-                    <span style="white-space:nowrap; min-width:62px; text-align:right; color:{r.free ? 'var(--text-secondary)' : 'var(--text-primary)'}">{fmtCost(r.cost, r.free)}</span>
-                  </div>
-                {/each}
-                {#if usageHasEstimate}
-                  <div style="display:flex; justify-content:space-between; gap:10px; font-size:13px; font-weight:600; border-top:1px solid var(--border); margin-top:4px; padding-top:7px">
-                    <span>Estimated total</span>
-                    <span style="min-width:62px; text-align:right">~${usageTotalCost.toFixed(2)}</span>
-                  </div>
-                {/if}
-              </div>
-              {#if usageHasEstimate}
-                <p class="setting-hint" style="margin-top:8px">Estimates only — based on each provider's published list pricing, which is set by the provider and subject to change. Check your provider's dashboard for actual charges.</p>
-              {/if}
+              <p class="setting-hint">Free tier</p>
             {/if}
-
-            {#if settingsForm.api_provider === "managed" && managedTier === "paid" && coinBalance != null}
-              <p class="setting-hint" style="margin-top:8px">Managed (paid): {Math.floor(coinBalance / 5_000).toLocaleString()} coins left · {TIER_LABELS[settingsForm.managed_tier] ?? "Regular"} tier · {TIER_COINS[settingsForm.managed_tier] ?? 12} coins/request</p>
-            {/if}
-            {#if usageManagedRemaining != null}
-              <p class="setting-hint" style="margin-top:8px">Managed (free): {usageManagedRemaining} / 50 requests left</p>
-            {/if}
-
-            <div style="margin-top:14px">
-              <button class="btn-ghost" type="button" onclick={resetUsage}>↻ Reset usage</button>
-            </div>
           </div>
+
+          <!-- Section 2 — Your own API keys. Detailed token table is developer-only;
+               regular BYOK users get one honest line pointing to their provider. -->
+          {#if settingsForm.developer_mode}
+            <div class="setting-group">
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px">
+                <p class="setting-label" style="margin:0">Your own keys — token usage</p>
+                <div style="display:flex; gap:6px">
+                  <button class="tab-btn {usagePeriod === 'today' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "today")}>Today</button>
+                  <button class="tab-btn {usagePeriod === 'month' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "month")}>This month</button>
+                </div>
+              </div>
+
+              {#if !usageLoaded}
+                <p class="setting-hint">Loading…</p>
+              {:else if usageView.length === 0}
+                <p class="setting-hint">No bring-your-own-key usage recorded yet.</p>
+              {:else}
+                <div style="display:flex; flex-direction:column; gap:5px">
+                  {#each usageView as r}
+                    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; font-size:13px">
+                      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model}</span>
+                      <span style="white-space:nowrap; color:var(--text-secondary)">{fmtTok(r.tokens)} tok</span>
+                      <span style="white-space:nowrap; min-width:62px; text-align:right; color:{r.free ? 'var(--text-secondary)' : 'var(--text-primary)'}">{fmtCost(r.cost, r.free)}</span>
+                    </div>
+                  {/each}
+                  {#if usageHasEstimate}
+                    <div style="display:flex; justify-content:space-between; gap:10px; font-size:13px; font-weight:600; border-top:1px solid var(--border); margin-top:4px; padding-top:7px">
+                      <span>Estimated total</span>
+                      <span style="min-width:62px; text-align:right">~${usageTotalCost.toFixed(2)}</span>
+                    </div>
+                  {/if}
+                </div>
+                {#if usageHasEstimate}
+                  <p class="setting-hint" style="margin-top:8px">Estimates only — based on each provider's published list pricing, which is set by the provider and subject to change. Check your provider's dashboard for actual charges.</p>
+                {/if}
+              {/if}
+
+              <div style="margin-top:14px">
+                <button class="btn-ghost" type="button" onclick={resetUsage}>↻ Reset usage</button>
+              </div>
+            </div>
+          {:else if isByok}
+            <div class="setting-group">
+              <p class="setting-label" style="margin:0 0 8px">Your own key</p>
+              <p class="setting-hint">Requests run on your own {PROVIDER_NAMES[settingsForm.api_provider] ?? "provider"} account — usage and charges are billed by your provider, not Navisual. Check your provider's dashboard for token counts and costs.</p>
+            </div>
+          {:else if settingsForm.api_provider === "ollama"}
+            <div class="setting-group">
+              <p class="setting-label" style="margin:0 0 8px">Local model</p>
+              <p class="setting-hint">Running locally with Ollama — nothing is billed and no usage leaves your machine.</p>
+            </div>
+          {/if}
         </div>
         {/if}
       </div>
@@ -3618,6 +4034,31 @@ See the LICENSE file in the root of this repository for complete details.
     border-color: var(--border);
   }
   .btn-ghost:hover { background: #2d2d33; }
+
+  .btn-danger {
+    background: #b91c1c;
+    color: #fff;
+    border-color: transparent;
+  }
+  .btn-danger:hover:not(:disabled) { background: #dc2626; }
+  .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Account tab ─────────────────────────────────── */
+  .acct-error { color: #f87171; }
+  .acct-notice { color: var(--accent-400); }
+  .acct-sep {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 14px 0;
+  }
+  .acct-links {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .acct-danger { color: #f87171; }
+  .acct-danger:hover { color: #fca5a5; }
 
   .btn-full { width: 100%; }
 
