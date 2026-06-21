@@ -1023,7 +1023,7 @@ See the LICENSE file in the root of this repository for complete details.
     if (acctBusy) return;
     acctBusy = true; acctError = "";
     try {
-      await invoke("sign_out");  // backend re-signs anonymously
+      await invoke("sign_out");  // backend re-signs anonymously (free quota is per-device)
       accountInfo = null;
       acctEmail = "";
       resetAcctFields();
@@ -1100,7 +1100,7 @@ See the LICENSE file in the root of this repository for complete details.
     if (acctBusy) return;
     acctBusy = true; acctError = "";
     try {
-      await invoke("delete_account");  // backend re-signs anonymously
+      await invoke("delete_account");  // backend re-signs anonymously (free quota is per-device)
       accountInfo = null;
       acctEmail = "";
       resetAcctFields();
@@ -2169,6 +2169,7 @@ See the LICENSE file in the root of this repository for complete details.
             <li>Screenshots are held in memory only — never written to disk by Navisual.</li>
             <li>Only the active window is captured by default; full-screen needs your permission each time.</li>
             <li>Your selected provider may log requests per their own terms.</li>
+            <li>On the free tier, a one-way hash of a device identifier counts your 50 free requests per machine — it can't identify you and isn't used on paid or your-own-key providers.</li>
             <li>Voice input (optional) sends audio to Microsoft's online speech service via the WebView2 Web Speech API.</li>
             <li>For zero data sharing, use the Ollama provider — it runs locally.</li>
           </ul>
@@ -2528,25 +2529,37 @@ See the LICENSE file in the root of this repository for complete details.
             </p>
 
             {#if settingsForm.api_provider === "managed"}
-              <!-- Quality tier — which managed model answers (and its coin cost). Persisted via Apply/OK. -->
-              <div class="setting-group">
-                <label class="setting-label" for="tier-select">Quality tier</label>
-                <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
-                  <option value="speed">Speed — fastest · 6 coins/request</option>
-                  <option value="regular">Regular — balanced · 12 coins/request</option>
-                  <option value="smart">Smart — best grounding · 18 coins/request</option>
-                </select>
-                <p class="setting-hint">
-                  {#if settingsForm.managed_tier === "speed"}
-                    GPT-5.4-mini, falls back to Gemini 3 Flash. Cheapest; good for simple, text-heavy UIs.
-                  {:else if settingsForm.managed_tier === "smart"}
-                    Gemini 3 Pro, falls back to GPT-5.4. Best at pointing precisely on dense/visual UIs.
-                  {:else}
-                    Gemini 3.5 Flash, falls back to GPT-5.4-mini. The best all-round default.
-                  {/if}
-                  Coins are bought on the Billing tab.
-                </p>
-              </div>
+              {#if managedTier === "paid"}
+                <!-- Quality tier — which managed model answers (and its coin cost). Persisted via
+                     Apply/OK. Paid only: the relay routes free users to the free model chain and
+                     ignores this tier, so showing Speed/Regular/Smart to them is misleading. -->
+                <div class="setting-group">
+                  <label class="setting-label" for="tier-select">Quality tier</label>
+                  <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
+                    <option value="speed">Speed — fastest · 6 coins/request</option>
+                    <option value="regular">Regular — balanced · 12 coins/request</option>
+                    <option value="smart">Smart — best grounding · 18 coins/request</option>
+                  </select>
+                  <p class="setting-hint">
+                    {#if settingsForm.managed_tier === "speed"}
+                      GPT-5.4-mini, falls back to Gemini 3 Flash. Cheapest; good for simple, text-heavy UIs.
+                    {:else if settingsForm.managed_tier === "smart"}
+                      Gemini 3 Pro, falls back to GPT-5.4. Best at pointing precisely on dense/visual UIs.
+                    {:else}
+                      Gemini 3.5 Flash, falls back to GPT-5.4-mini. The best all-round default.
+                    {/if}
+                    Coins are bought on the Billing tab.
+                  </p>
+                </div>
+              {:else}
+                <div class="setting-group">
+                  <span class="setting-label">Quality tier</span>
+                  <p class="setting-hint">
+                    You're on the <strong>free tier</strong> — requests use the free model.
+                    Buy coins on the <strong>Billing</strong> tab to choose Speed / Regular / Smart.
+                  </p>
+                </div>
+              {/if}
             {/if}
 
             {#if settingsForm.api_provider === "anthropic"}

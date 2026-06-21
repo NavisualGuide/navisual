@@ -96,14 +96,77 @@ fn parse_session(body: &serde_json::Value) -> Result<SupabaseSession> {
     })
 }
 
+/// A stable, privacy-preserving per-machine identifier used to enforce the free
+/// quota **per device** server-side. The relay keys the 50-request free cap on
+/// this hash (sent as the `X-Device-Hash` header) rather than on the throwaway
+/// anonymous user id, so signing out / deleting the account / re-anonymizing
+/// can't farm a fresh 50 — a new anon on the same machine shares the same device
+/// pool and sees the real remaining count.
+///
+/// Derived from the Windows `MachineGuid` (survives app reinstall + clear-app-data
+/// because it lives in the registry), SHA-256'd so the raw machine id never
+/// leaves the device. `None` if the source can't be read — the relay then falls
+/// back to per-user enforcement (the pre-device-binding behaviour). Computed once
+/// and cached. This is a device fingerprint and must be disclosed in the privacy
+/// policy / first-run modal.
+pub fn device_hash() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            raw_machine_guid().map(|g| {
+                let digest = Sha256::digest(g.as_bytes());
+                URL_SAFE_NO_PAD.encode(digest)
+            })
+        })
+        .clone()
+}
+
+#[cfg(windows)]
+fn raw_machine_guid() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW — don't flash a console window for the one-time query.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Cryptography",
+            "/v",
+            "MachineGuid",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Output line looks like: "    MachineGuid    REG_SZ    <guid>"
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(idx) = line.find("REG_SZ") {
+            let val = line[idx + "REG_SZ".len()..].trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn raw_machine_guid() -> Option<String> {
+    None
+}
+
 pub async fn get_balance(supabase_url: &str, access_token: &str) -> Result<BalanceResponse> {
     let client = Client::new();
     let url = format!("{}/functions/v1/relay", supabase_url);
-    let resp = client
+    let mut req = client
         .get(&url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
-        .await?;
+        .header("Authorization", format!("Bearer {}", access_token));
+    if let Some(dh) = device_hash() {
+        req = req.header("X-Device-Hash", dh);
+    }
+    let resp = req.send().await?;
     if !resp.status().is_success() {
         bail!(
             "get_balance failed ({}): {}",
@@ -211,40 +274,149 @@ pub async fn bind_callback_listener(port: u16) -> Result<tokio::net::TcpListener
         })
 }
 
-/// Accept one connection on the pre-bound listener, parse the OAuth code from
-/// the redirect, and serve a minimal success page. 120 s timeout.
-pub async fn accept_oauth_code(listener: tokio::net::TcpListener) -> Result<String> {
+/// The outcome parsed from the OAuth loopback callback: either the PKCE auth
+/// `code`, or an `error` GoTrue redirected back with (e.g. the identity is
+/// already linked to a different account during an in-place link attempt).
+pub enum OAuthCallback {
+    Code(String),
+    Error { error: String, description: String },
+}
+
+/// Accept the OAuth loopback callback on the pre-bound listener and parse the
+/// PKCE `code` (or `error`) from the redirect. 120 s timeout. Borrows the
+/// listener (`accept` takes `&self`) so the caller can reuse the same bound port
+/// for a follow-up round-trip — e.g. the in-place-link → replace fallback —
+/// without rebinding (and racing TIME_WAIT).
+///
+/// Loops rather than handling a single connection because:
+/// (1) GoTrue returns OAuth **errors** in the URL **fragment** (`#error=...`),
+///     which a browser never sends to a server. The first hit (bare `/callback`,
+///     fragment withheld) is answered with a tiny page whose JS copies
+///     `location.hash` into the query and reloads, so the follow-up request
+///     carries the error where we can read it — this is what lets the "identity
+///     already linked" conflict reach the replace fallback instead of dying as
+///     "no code in callback". PKCE **success** arrives as `?code=` in the query
+///     and returns on the first hit, before the bounce page is ever served.
+/// (2) Stray requests (favicon, browser liveness probes) must not be mistaken
+///     for the callback — non-`/callback` paths are answered 204 and skipped.
+pub async fn accept_oauth_callback(
+    listener: &tokio::net::TcpListener,
+) -> Result<OAuthCallback> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // Charset must be declared — the em-dash is multi-byte UTF-8 and browsers
+    // otherwise default to Latin-1/Windows-1252 (mojibake "â€"").
+    let close_page = "<html><head><meta charset=\"utf-8\"></head>\
+        <body style='font-family:sans-serif;padding:40px'>\
+        <h2>You can close this tab and return to Navisual.</h2></body></html>";
+    // Served on a fragment-only callback: move `location.hash` into the query and
+    // reload so the next request carries the params (GoTrue puts errors there).
+    let bounce_page = "<html><head><meta charset=\"utf-8\"></head>\
+        <body style='font-family:sans-serif;padding:40px'>\
+        <h2>You can close this tab and return to Navisual.</h2>\
+        <script>(function(){var h=location.hash?location.hash.slice(1):'';\
+        if(h){location.replace(location.pathname+'?'+h);}})();</script></body></html>";
+
     let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-        let (mut stream, _) = listener.accept().await?;
-        let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).await?;
-        let request = String::from_utf8_lossy(&buf[..n]);
-        // First line: "GET /callback?code=XXX&... HTTP/1.1"
-        let first_line = request.lines().next().unwrap_or("");
-        let path = first_line.split_whitespace().nth(1).unwrap_or("");
-        let query = path.split('?').nth(1).unwrap_or("");
-        let code = query.split('&')
-            .find(|p| p.starts_with("code="))
-            .and_then(|p| p.strip_prefix("code="))
-            .map(|s| s.to_string());
-        // Send a minimal success page so the browser tab shows something.
-        // Must declare charset=utf-8 — the em-dash is multi-byte UTF-8 and
-        // browsers default to Latin-1/Windows-1252 without it (mojibake "â€"").
-        let body = "<html><head><meta charset=\"utf-8\"></head>\
-            <body style='font-family:sans-serif;padding:40px'>\
-            <h2>Signed in — you can close this tab and return to Navisual.</h2></body></html>";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(), body
-        );
-        stream.write_all(response.as_bytes()).await?;
-        code.ok_or_else(|| anyhow!("no code in callback"))
+        let mut bounced = false;
+        loop {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).await?;
+            let request = String::from_utf8_lossy(&buf[..n]);
+            // First line: "GET /callback?code=XXX&... HTTP/1.1"
+            let first_line = request.lines().next().unwrap_or("");
+            let target = first_line.split_whitespace().nth(1).unwrap_or("");
+            let (path, query) = target.split_once('?').unwrap_or((target, ""));
+
+            // Ignore stray requests (favicon, liveness probes) so they aren't
+            // mistaken for the callback — keep listening for the real redirect.
+            if !path.starts_with("/callback") {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    .await;
+                continue;
+            }
+
+            // Pull `code` / `error` / `error_description` out of the callback query.
+            let (mut code, mut error, mut description) = (None, None, String::new());
+            for pair in query.split('&') {
+                let Some((k, v)) = pair.split_once('=') else { continue };
+                match k {
+                    "code" => code = Some(url_decode(v)),
+                    "error" => error = Some(url_decode(v)),
+                    // Fallback only — prefer the human-readable `error` over the code.
+                    "error_code" if error.is_none() => error = Some(url_decode(v)),
+                    "error_description" => description = url_decode(v),
+                    _ => {}
+                }
+            }
+
+            if let Some(code) = code {
+                let _ = stream.write_all(http_html(close_page).as_bytes()).await;
+                return Ok(OAuthCallback::Code(code));
+            }
+            if let Some(error) = error {
+                let _ = stream.write_all(http_html(close_page).as_bytes()).await;
+                return Ok(OAuthCallback::Error { error, description });
+            }
+
+            // Neither in the query — the params are probably in the URL fragment.
+            // Bounce once to surface them; if the retry is still empty, give up.
+            if !bounced {
+                bounced = true;
+                let _ = stream.write_all(http_html(bounce_page).as_bytes()).await;
+                continue;
+            }
+            let _ = stream.write_all(http_html(close_page).as_bytes()).await;
+            return Err(anyhow!("no code in callback"));
+        }
     })
     .await
     .map_err(|_| anyhow!("OAuth timed out (no browser response within 120 s)"))??;
     Ok(result)
+}
+
+/// Build a `200 OK` HTTP/1.1 response with an HTML body and `Connection: close`.
+fn http_html(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+/// Percent-decode an `application/x-www-form-urlencoded` query value (`%XX`
+/// escapes + `+` for space). Byte-wise so it never panics on a multi-byte UTF-8
+/// sequence split across escapes.
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Exchange the PKCE auth code for a session.
@@ -268,6 +440,55 @@ pub async fn exchange_pkce_code(
     }
     let body: serde_json::Value = resp.json().await?;
     parse_session(&body)
+}
+
+/// Begin an **in-place** OAuth identity link for the current signed-in user.
+/// Hits GoTrue's manual-linking authorize endpoint WITH the user's Bearer token,
+/// so the provider identity attaches to *this* user id — preserving the
+/// `user_profiles` row (free-request count + coins) instead of minting a brand-new
+/// account the way the plain `/authorize` sign-in does. Requires "Manual linking"
+/// enabled in the Supabase dashboard (Authentication → Sign In / Providers).
+/// Returns the provider consent URL to open in the system browser; the PKCE `code`
+/// comes back to the loopback callback and is redeemed with `exchange_pkce_code`,
+/// identical to the sign-in flow. Mirrors the auth-js `linkIdentity` request
+/// (`GET …/user/identities/authorize?…&skip_http_redirect=true`).
+pub async fn link_identity_url(
+    supabase_url: &str,
+    anon_key: &str,
+    access_token: &str,
+    provider: &str,
+    pkce: &OAuthPkce,
+) -> Result<String> {
+    let client = Client::new();
+    let url = format!(
+        "{}/auth/v1/user/identities/authorize?provider={}\
+         &code_challenge={}\
+         &code_challenge_method=S256\
+         &redirect_to={}\
+         &skip_http_redirect=true",
+        supabase_url,
+        pct_encode(provider),
+        pct_encode(&pkce.challenge),
+        pct_encode(&pkce.redirect_uri),
+    );
+    let resp = client
+        .get(&url)
+        .header("apikey", anon_key)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        bail!(
+            "identity-link init failed ({}): {}",
+            resp.status(),
+            friendly_auth_error(resp).await
+        );
+    }
+    let body: serde_json::Value = resp.json().await?;
+    body["url"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("identity-link authorize returned no url"))
 }
 
 // ── Stripe Checkout ──────────────────────────────────────────────────────────

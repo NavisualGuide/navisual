@@ -132,13 +132,17 @@ impl ManagedClient {
         });
 
         let relay_url = format!("{}/functions/v1/relay", self.supabase_url);
-        let resp = self
+        let mut req = self
             .client
             .post(&relay_url)
-            .header("Authorization", format!("Bearer {}", access_token))
-            .json(&payload)
-            .send()
-            .await?;
+            .header("Authorization", format!("Bearer {}", access_token));
+        // Per-device free-quota key (see server::device_hash). The relay enforces
+        // the 50-request free cap on this so re-anonymizing can't reset to a fresh
+        // 50; absent (old client / unreadable) → relay falls back to per-user.
+        if let Some(dh) = crate::server::device_hash() {
+            req = req.header("X-Device-Hash", dh);
+        }
+        let resp = req.json(&payload).send().await?;
 
         let status = resp.status();
 

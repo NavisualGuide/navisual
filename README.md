@@ -93,6 +93,7 @@ Additional notes:
 - Full-screen / multi-monitor capture requires explicit one-time permission each time
 - Assign a Pause hotkey in **Settings → Hotkeys** to stop all capture instantly
 - Settings and auth token live in `%LOCALAPPDATA%\com.navisual.app\`
+- On the free tier, a one-way hash of a Windows machine identifier is sent with requests so the 50 free requests are counted per device (it can't be reversed to identify your machine, and is used only to enforce the free limit — not on paid or bring-your-own-key providers)
 - Voice input (optional) uses the WebView2 Web Speech API, which sends your spoken audio to Microsoft's online speech service
 - Debug captures are off by default; when enabled, files older than 7 days are auto-deleted
 

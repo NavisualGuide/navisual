@@ -2415,53 +2415,144 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
 }
 
 /// Sign in with Google via PKCE OAuth in the system browser.
-/// Opens the Google consent page in the default browser, starts a local
-/// HTTP server on port 9876 for the callback, exchanges the code for a
-/// session, and emits `oauth_complete` to the frontend.  The anonymous
-/// session is replaced — the user_profiles row starts fresh for the Google
-/// account. In-place identity linking (preserve the row, matching the email
-/// upgrade path) is deferred per server-plan §S.2.1: it needs Supabase manual
-/// linking + a live before/after regression test, so this purchase-critical
-/// flow is left untouched until that can be verified live.
+///
+/// **In-place identity linking (S.2.1 §4).** Opens the Google consent page in the
+/// default browser, runs a loopback HTTP server on port 9876 for the callback,
+/// exchanges the code for a session, and emits `oauth_complete` + `account_changed`.
+///
+/// The flow tries to **link** the Google identity onto the *current* (anonymous)
+/// user first — preserving its `user_profiles` row (free-request count + coins),
+/// matching the email-upgrade path. It falls back to the original **replace**
+/// sign-in (a fresh session for the Google account) when in-place linking can't
+/// apply:
+///   * "Manual linking" is disabled in the dashboard, or there is no session to
+///     link onto → the link init fails before the browser opens; or
+///   * the Google identity already belongs to a *different* Navisual account
+///     (a returning user) → GoTrue reports it on the callback. We then sign them
+///     into that existing account (their coins live there, not on the throwaway
+///     anon session); Google usually skips the second prompt since consent was
+///     just granted.
 #[tauri::command]
 async fn start_google_oauth(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let (supabase_url, anon_key) = {
-        let router = state.ai_router.lock().await;
-        let url = router
-            .config
-            .supabase_url
-            .clone()
-            .ok_or("SUPABASE_URL not configured")?;
-        let key = router
-            .config
-            .supabase_anon_key
-            .clone()
-            .ok_or("SUPABASE_ANON_KEY not configured")?;
-        (url, key)
-    };
+    let (supabase_url, anon_key) = managed_url_key(&state).await?;
 
     let pkce = server::generate_pkce(9876);
-    let auth_url = server::google_oauth_url(&supabase_url, &pkce);
 
-    // Bind the callback port FIRST so a busy port (a prior attempt still
-    // waiting) fails fast before we send the user to Google.
+    // Bind the callback port FIRST so a busy port (a prior attempt still waiting)
+    // fails fast before we send the user to Google. One listener serves the whole
+    // flow — including the in-place-link → replace fallback's second round-trip —
+    // so we never rebind (which could race the just-closed port on Windows).
     let listener = server::bind_callback_listener(pkce.port)
         .await
         .map_err(|e| e.to_string())?;
 
-    // Open the OAuth URL in the system browser (not the WebView2).
+    // A Bearer token for the current session is required to link in place. With no
+    // managed session yet, there's nothing to preserve → go straight to replace.
+    let access_token = {
+        let mut router = state.ai_router.lock().await;
+        if router.has_managed_session() {
+            let _ = router.ensure_managed_token().await;
+            router.client_access_token()
+        } else {
+            None
+        }
+    };
+    let Some(access_token) = access_token else {
+        return google_oauth_replace(&state, &app, &supabase_url, &anon_key, &listener).await;
+    };
+
+    // 1) Ask GoTrue for the in-place link consent URL (Bearer = current session).
+    let consent_url = match server::link_identity_url(
+        &supabase_url,
+        &anon_key,
+        &access_token,
+        "google",
+        &pkce,
+    )
+    .await
+    {
+        Ok(url) => url,
+        Err(e) => {
+            // Manual linking off / not linkable → degrade to the replace sign-in so
+            // Google sign-in still works (without the in-place row-preserve benefit).
+            log::warn!("[oauth] in-place link unavailable ({e}); using replace flow");
+            return google_oauth_replace(&state, &app, &supabase_url, &anon_key, &listener).await;
+        }
+    };
+
+    tauri_plugin_opener::open_url(&consent_url, None::<&str>)
+        .map_err(|e| format!("Failed to open browser: {e}"))?;
+
+    match server::accept_oauth_callback(&listener)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        server::OAuthCallback::Code(code) => {
+            // Same user id, now carrying the Google identity → the row is preserved.
+            let session =
+                server::exchange_pkce_code(&supabase_url, &anon_key, &code, &pkce.verifier)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            server::save_session(&state.supabase_session_path, &session);
+            {
+                let mut router = state.ai_router.lock().await;
+                router.set_managed_session(session);
+            }
+            let _ = app
+                .get_webview_window("panel")
+                .map(|w| w.emit("oauth_complete", ()));
+            emit_account_changed(&app);
+            Ok(())
+        }
+        server::OAuthCallback::Error { error, description } => {
+            // Surface the exact GoTrue error so a returning-user/conflict callback is
+            // diagnosable live (and confirms the heuristic below matched its wording).
+            log::info!("[oauth] link callback returned error: {error} — {description}");
+            if oauth_identity_already_linked(&format!("{error} {description}")) {
+                // Returning user: this Google account is attached to a DIFFERENT
+                // Navisual account. Sign into that one (replace) so they recover it,
+                // reusing the still-bound listener for the second round-trip.
+                log::info!("[oauth] google identity already linked elsewhere; signing in to it");
+                google_oauth_replace(&state, &app, &supabase_url, &anon_key, &listener).await
+            } else {
+                Err(oauth_error_message(&error, &description))
+            }
+        }
+    }
+}
+
+/// The original "replace the session" Google sign-in. Used as the fallback from
+/// `start_google_oauth` when in-place linking can't apply (manual linking off, no
+/// session to link onto, or the identity already belongs to another account).
+/// Loads/mints the Google account's OWN session, replacing the current one.
+/// Reuses the caller's already-bound loopback `listener` (no rebind).
+async fn google_oauth_replace(
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
+    supabase_url: &str,
+    anon_key: &str,
+    listener: &tokio::net::TcpListener,
+) -> Result<(), String> {
+    let pkce = server::generate_pkce(9876);
+    let auth_url = server::google_oauth_url(supabase_url, &pkce);
+
     tauri_plugin_opener::open_url(&auth_url, None::<&str>)
         .map_err(|e| format!("Failed to open browser: {e}"))?;
 
-    // Wait for the redirect callback (up to 120 s).
-    let code = server::accept_oauth_code(listener)
+    let code = match server::accept_oauth_callback(listener)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    {
+        server::OAuthCallback::Code(c) => c,
+        server::OAuthCallback::Error { error, description } => {
+            return Err(oauth_error_message(&error, &description));
+        }
+    };
 
-    let new_session = server::exchange_pkce_code(&supabase_url, &anon_key, &code, &pkce.verifier)
+    let new_session = server::exchange_pkce_code(supabase_url, anon_key, &code, &pkce.verifier)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -2470,11 +2561,33 @@ async fn start_google_oauth(
         let mut router = state.ai_router.lock().await;
         router.set_managed_session(new_session);
     }
-
     let _ = app
         .get_webview_window("panel")
         .map(|w| w.emit("oauth_complete", ()));
+    emit_account_changed(app);
     Ok(())
+}
+
+/// True when an OAuth callback error means the provider identity is already
+/// attached to a different account (so an in-place link can't proceed and we
+/// should sign into that existing account instead).
+fn oauth_identity_already_linked(haystack: &str) -> bool {
+    let h = haystack.to_lowercase();
+    h.contains("already")
+        && (h.contains("link")
+            || h.contains("regist")
+            || h.contains("exist")
+            || h.contains("identit"))
+}
+
+/// Human-readable message for a non-recoverable OAuth callback error.
+fn oauth_error_message(error: &str, description: &str) -> String {
+    let detail = if description.is_empty() { error } else { description };
+    if detail.is_empty() {
+        "Google sign-in failed.".to_string()
+    } else {
+        format!("Google sign-in failed: {detail}")
+    }
 }
 
 /// Open a Stripe Checkout session for a coin top-up.
@@ -2558,6 +2671,13 @@ async fn managed_auth_ctx(
 /// Replace the on-disk + in-memory session with a fresh anonymous one (used after
 /// sign-out and account deletion so the free tier keeps working). Returns the
 /// new free-remaining count.
+///
+/// Re-anonymizing is SAFE against free-tier farming because the free quota is
+/// enforced per-device server-side (the relay keys the 50-request cap on the
+/// `X-Device-Hash` it receives, not on the throwaway anonymous user id — see
+/// `server::device_hash` + the `device_free_usage` table). So a new anon on the
+/// same machine inherits the same remaining count (e.g. 47 left), and cannot
+/// reset to a fresh 50 by signing out.
 async fn reset_to_anonymous(
     state: &State<'_, AppState>,
     url: &str,
