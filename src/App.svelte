@@ -373,9 +373,9 @@ See the LICENSE file in the root of this repository for complete details.
   let usageManagedRemaining = $state<number | null>(null);
   let usagePeriod = $state<"today" | "month">("today");
   let usageLoaded = $state(false);
-  // BYOK / local token usage only. Managed rows are coins, not tokens (managed
-  // requests record 0 tokens) — they're shown in the separate "Navisual account"
-  // section, never in this token table.
+  // BYOK / local token usage only. Managed rows are billed as coins, not tokens —
+  // they're shown in the separate "Navisual account" section, never in this token
+  // table (filtered by provider name, so real token counts on managed are harmless).
   let usageView = $derived(
     usageRows
       .filter((r) => r.provider !== "managed")
@@ -3070,9 +3070,9 @@ See the LICENSE file in the root of this repository for complete details.
               {:else}
                 <div style="display:flex; flex-direction:column; gap:5px">
                   {#each usageView as r}
-                    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; font-size:13px">
-                      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model}</span>
-                      <span style="white-space:nowrap; color:var(--text-secondary)">{fmtTok(r.tokens)} tok</span>
+                    <div style="display:flex; align-items:baseline; gap:10px; font-size:13px">
+                      <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model || PROVIDER_NAMES[r.provider] || r.provider}</span>
+                      <span style="white-space:nowrap; min-width:84px; text-align:right; color:var(--text-secondary)">{fmtTok(r.tokens)} tok</span>
                       <span style="white-space:nowrap; min-width:62px; text-align:right; color:{r.free ? 'var(--text-secondary)' : 'var(--text-primary)'}">{fmtCost(r.cost, r.free)}</span>
                     </div>
                   {/each}
