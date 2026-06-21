@@ -1145,6 +1145,7 @@ async fn guide(
     let needs_input = response.needs_input;
     let request_full_screen = response.request_full_screen;
     let provider = router.config.api_provider.clone();
+    let bbox_distrust = router.config.bbox_distrust_models.clone();
 
     if let Some(session) = &mut router.session_manager.current_session {
         session.update_state(state_summary.clone());
@@ -1221,7 +1222,7 @@ async fn guide(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[0], capture_rect_opt, &provider);
-    let bbox_decisive = ai::bbox::bbox_is_decisive(&used_model);
+    let bbox_decisive = ai::bbox::bbox_is_decisive(&used_model, &bbox_distrust);
 
     // Stale detection must run BEFORE execute_step draws the new pointer.
     // Capturing afterwards would include our own overlay pointer — a large
@@ -1316,7 +1317,7 @@ async fn next_step(
         (
             router.config.debug_locate_log_file_enabled,
             router.config.debug_screenshot_enabled,
-            ai::bbox::bbox_is_decisive(&used_model),
+            ai::bbox::bbox_is_decisive(&used_model, &router.config.bbox_distrust_models),
         )
     };
     let stored_hwnd = {
@@ -1634,6 +1635,7 @@ async fn send_correction(
     let needs_input = response.needs_input;
     let request_full_screen = response.request_full_screen;
     let provider = router.config.api_provider.clone();
+    let bbox_distrust = router.config.bbox_distrust_models.clone();
 
     if let Some(session) = &mut router.session_manager.current_session {
         session.update_state(state_summary.clone());
@@ -1707,7 +1709,7 @@ async fn send_correction(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[0], new_capture_rect, &provider);
-    let bbox_decisive = ai::bbox::bbox_is_decisive(&used_model);
+    let bbox_decisive = ai::bbox::bbox_is_decisive(&used_model, &bbox_distrust);
 
     // Stale detection before the pointer is drawn — see guide() for rationale.
     let stale_hash = tokio::task::spawn_blocking(ahash_of_screen)

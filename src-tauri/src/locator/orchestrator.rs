@@ -37,11 +37,10 @@ pub struct LocateOptions {
     /// so the correction retry surfaces the second-best match instead of
     /// deterministically repeating the same wrong pick.
     pub avoid_bbox: Option<Rect>,
-    /// The answering model is a strong grounder (Gemini 3+ / Qwen-omni), so its
-    /// `ai_bbox` may *corroborate* (rescue) a borderline OCR match. Weak grounders
-    /// (GPT/Claude/Nemotron/Gemma) produce inconsistent bboxes, so theirs gets no
-    /// corroboration vote — "no pointer beats wrong pointer". See
-    /// `ai::bbox::bbox_is_decisive`.
+    /// The answering model's `ai_bbox` is trusted to *corroborate* (rescue) a borderline
+    /// OCR match. Trust is default-on; only models on the configurable distrust list
+    /// (default: the managed free-tier chain) get no corroboration vote — "no pointer
+    /// beats wrong pointer". See `ai::bbox::bbox_is_decisive` / `BBOX_DISTRUST_MODELS`.
     pub bbox_decisive: bool,
     pub a11y_timeout_ms: u64,
     pub min_confidence: f32,

@@ -34,17 +34,24 @@ pub fn bbox_format_for_provider(_provider: &str) -> BboxFormat {
     BboxFormat::Normalized1000
 }
 
-/// Whether this model's `target_bbox` is reliable enough to weight *decisively* in the
-/// locator (tighter disambiguation filter + a corroboration vote that can rescue a
-/// borderline OCR match). Only grounding-trained families qualify: hands-on testing
-/// (model-comparison.md) found **Gemini 3+** and **Qwen-omni** excellent, while GPT,
-/// Claude, Nemotron, Gemma and Kimi are inconsistent or omit the bbox — for those the
-/// bbox stays a soft hint (loose filter, never decisive). Conservative by design:
-/// unknown / unlisted models are treated as **not** decisive.
-pub fn bbox_is_decisive(model: &str) -> bool {
+/// Whether this model's `target_bbox` is trusted to *corroborate* (rescue) a borderline
+/// OCR match in the locator's corroboration gate.
+///
+/// **Trust is default-ON.** A model qualifies UNLESS its name contains a substring from
+/// `distrust_csv` (comma-separated, case-insensitive). This is a denylist, not an
+/// allowlist, precisely so model churn doesn't require a code change: frontier models
+/// (Gemini 3+, GPT-5.x, Claude Opus, Qwen-omni — and whatever ships next) are trusted
+/// without edits, and a model that proves bad at grounding is muted by adding it to
+/// `BBOX_DISTRUST_MODELS` in `.env`. The default list is the managed free-tier chain
+/// (Nemotron / Gemma / Kimi), which emit inconsistent or degenerate bboxes
+/// (model-comparison.md). An empty `distrust_csv` trusts every model.
+pub fn bbox_is_decisive(model: &str, distrust_csv: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    // gemini-3, gemini-3.5, gemini-3-pro, future gemini-4…; qwen*-omni*.
-    m.contains("gemini-3") || m.contains("gemini-4") || m.contains("omni")
+    !distrust_csv
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .any(|bad| m.contains(&bad))
 }
 
 /// Convert an AI-returned `[ymin, xmin, ymax, xmax]` to a screen Rect.
@@ -249,17 +256,20 @@ mod tests {
 
     #[test]
     fn bbox_trust_classifier() {
-        // Strong grounders.
-        assert!(bbox_is_decisive("gemini-3-flash"));
-        assert!(bbox_is_decisive("gemini-3.5-flash"));
-        assert!(bbox_is_decisive("gemini-3-pro"));
-        assert!(bbox_is_decisive("qwen3.5-omni-plus"));
-        // Weak / no-bbox / inconsistent → not decisive.
-        assert!(!bbox_is_decisive("gemini-2.5-flash"));
-        assert!(!bbox_is_decisive("gpt-5.4-mini"));
-        assert!(!bbox_is_decisive("claude-sonnet-4-6"));
-        assert!(!bbox_is_decisive("nvidia/nemotron-nano-12b-v2-vl"));
-        assert!(!bbox_is_decisive("google/gemma-4-26b-a4b-it"));
-        assert!(!bbox_is_decisive("qwen3.6-plus"));
+        const DEFAULT: &str = "nemotron,gemma,kimi";
+        // Trusted by default — frontier models (incl. ones the original allowlist excluded).
+        assert!(bbox_is_decisive("gemini-3-flash", DEFAULT));
+        assert!(bbox_is_decisive("qwen3.5-omni-plus", DEFAULT));
+        assert!(bbox_is_decisive("gpt-5.5", DEFAULT));
+        assert!(bbox_is_decisive("claude-opus-4-7", DEFAULT));
+        assert!(bbox_is_decisive("some-future-model-x9", DEFAULT));
+        // Muted: the managed free-tier chain.
+        assert!(!bbox_is_decisive("nvidia/nemotron-nano-12b-v2-vl", DEFAULT));
+        assert!(!bbox_is_decisive("google/gemma-4-26b-a4b-it", DEFAULT));
+        assert!(!bbox_is_decisive("moonshotai/kimi-k2.6", DEFAULT));
+        // Empty distrust list trusts everything.
+        assert!(bbox_is_decisive("nvidia/nemotron-nano", ""));
+        // Whitespace / casing in the list are tolerated.
+        assert!(!bbox_is_decisive("GPT-5.5", " gpt-5.5 , foo "));
     }
 }

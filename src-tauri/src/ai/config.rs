@@ -50,6 +50,14 @@ pub struct Config {
     // Shared
     pub api_timeout_sec: u64,
 
+    // Locator — comma-separated, case-insensitive substrings of model names whose AI
+    // `target_bbox` is NOT trusted to corroborate (rescue) a borderline OCR match. Trust
+    // is default-ON for every model; only models matching this list are muted. Default is
+    // the managed free-tier chain (weak / degenerate grounders). Frontier models — current
+    // and future — are trusted without a code change; mute a newly-bad one by adding it to
+    // BBOX_DISTRUST_MODELS in .env (no rebuild/release). Empty string = trust all.
+    pub bbox_distrust_models: String,
+
     // Overlay appearance
     pub overlay_color: String,
     pub overlay_thickness: u32,
@@ -112,6 +120,7 @@ impl Default for Config {
             managed_model: "openrouter/free".to_string(),
             managed_tier: "regular".to_string(),
             api_timeout_sec: 90,
+            bbox_distrust_models: "nemotron,gemma,kimi".to_string(),
             overlay_color: "#FF6B35".to_string(),
             overlay_thickness: 4,
             subtitle_enabled: true,
@@ -260,6 +269,10 @@ impl Config {
             if v == "speed" || v == "regular" || v == "smart" {
                 config.managed_tier = v;
             }
+        }
+        // No is_empty guard: an explicit empty value means "trust every model".
+        if let Ok(v) = env::var("BBOX_DISTRUST_MODELS") {
+            config.bbox_distrust_models = v;
         }
 
         if let Ok(v) = env::var("OVERLAY_COLOR") {
