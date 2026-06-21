@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use crate::ai::prompts::SYSTEM_PROMPT;
-use crate::ai::types::{Message, NavigateStepResponse, Role};
+use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType, Role};
 use crate::server::{
     load_session, refresh_session, save_session, sign_in_anonymously, SupabaseSession,
 };
@@ -186,29 +186,65 @@ impl ManagedClient {
         log::info!("[managed] requested={} routed={routed:?}", self.model);
         *self.last_model.lock() = routed;
 
-        let json_str = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
-            .as_str()
-            .ok_or_else(|| {
-                log::warn!(
-                    "[managed] no tool_calls in relay response: {}",
-                    serde_json::to_string(&body).unwrap_or_default()
-                );
-                anyhow!("The free model returned an unreadable response. Please try again.")
-            })?;
+        // Token usage. The relay forwards the upstream body verbatim, and both
+        // OpenRouter (free) and Gemini/OpenAI (paid) include an OpenAI-style `usage`
+        // object — read it so the debug meta shows real counts instead of a
+        // misleading "0 in · 0 out". (Managed rows are still filtered out of the
+        // BYOK token table by provider name, so this never affects billing.)
+        let in_tokens = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+        let out_tokens = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);
 
-        // Free models occasionally emit malformed tool args (leaked </think>, whitespace
-        // runaway → truncated JSON). Surface a friendly retry, keep the detail in the log.
-        let nav_response: NavigateStepResponse = serde_json::from_str(json_str).map_err(|e| {
-            log::warn!("[managed] navigate_step parse error: {e}\njson: {json_str}");
-            anyhow!("The free model returned an unreadable response. Please try again.")
-        })?;
+        let message = &body["choices"][0]["message"];
+        let nav_response: NavigateStepResponse =
+            match message["tool_calls"][0]["function"]["arguments"].as_str() {
+                // Free models occasionally emit malformed tool args (leaked </think>,
+                // whitespace runaway → truncated JSON). Surface a friendly retry, keep
+                // the detail in the log.
+                Some(json_str) => serde_json::from_str(json_str).map_err(|e| {
+                    log::warn!("[managed] navigate_step parse error: {e}\njson: {json_str}");
+                    anyhow!("The free model returned an unreadable response. Please try again.")
+                })?,
+                // No tool call at all. Weak free models answer a greeting or a general
+                // question ("hi", "what can you do?") as a plain assistant message
+                // instead of calling navigate_step — surface that text as a
+                // conversational, no-pointer reply rather than an error.
+                None => {
+                    let content = message["content"].as_str().unwrap_or("").trim();
+                    if content.is_empty() {
+                        log::warn!(
+                            "[managed] no tool_calls and no content: {}",
+                            serde_json::to_string(&body).unwrap_or_default()
+                        );
+                        return Err(anyhow!(
+                            "The free model returned an unreadable response. Please try again."
+                        ));
+                    }
+                    log::info!("[managed] no tool_call; surfacing plain message as a reply");
+                    NavigateStepResponse {
+                        steps: vec![GuidanceStep {
+                            instruction: content.to_string(),
+                            target_text: None,
+                            target_role: None,
+                            target_region: None,
+                            target_nearby_text: None,
+                            overlay_type: OverlayType::None,
+                            clipboard: None,
+                            checkpoint: true,
+                            target_bbox: None,
+                        }],
+                        state_summary: String::new(),
+                        needs_input: true,
+                        request_full_screen: false,
+                    }
+                }
+            };
 
         // Emit the first instruction as a single chunk (managed tier is non-streaming).
         if let Some(step) = nav_response.steps.first() {
             on_chunk(&step.instruction);
         }
 
-        Ok((nav_response, 0, 0))
+        Ok((nav_response, in_tokens, out_tokens))
     }
 }
 
