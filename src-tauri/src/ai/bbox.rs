@@ -34,6 +34,19 @@ pub fn bbox_format_for_provider(_provider: &str) -> BboxFormat {
     BboxFormat::Normalized1000
 }
 
+/// Whether this model's `target_bbox` is reliable enough to weight *decisively* in the
+/// locator (tighter disambiguation filter + a corroboration vote that can rescue a
+/// borderline OCR match). Only grounding-trained families qualify: hands-on testing
+/// (model-comparison.md) found **Gemini 3+** and **Qwen-omni** excellent, while GPT,
+/// Claude, Nemotron, Gemma and Kimi are inconsistent or omit the bbox — for those the
+/// bbox stays a soft hint (loose filter, never decisive). Conservative by design:
+/// unknown / unlisted models are treated as **not** decisive.
+pub fn bbox_is_decisive(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    // gemini-3, gemini-3.5, gemini-3-pro, future gemini-4…; qwen*-omni*.
+    m.contains("gemini-3") || m.contains("gemini-4") || m.contains("omni")
+}
+
 /// Convert an AI-returned `[ymin, xmin, ymax, xmax]` to a screen Rect.
 ///
 /// Auto-corrects format mismatch: if all four values are ≤ 1.001 we treat
@@ -92,6 +105,17 @@ pub fn ai_bbox_to_screen_rect(
     let ai_ymin = ai_ymin.clamp(0.0, ai_h as f64);
     let ai_ymax = ai_ymax.clamp(0.0, ai_h as f64);
     if ai_xmax - ai_xmin < 1.0 || ai_ymax - ai_ymin < 1.0 {
+        return None;
+    }
+
+    // Reject a box that spans almost the whole frame: it carries no localization
+    // signal (the model failed to point at anything specific), and as a locator
+    // filter / proximity centre it's pure noise that drags the pick toward screen
+    // centre. Weak grounders (Nemotron especially) emit these. Falling back to
+    // text-only locating is strictly better than steering on a whole-screen box.
+    let cover_x = (ai_xmax - ai_xmin) / ai_w as f64;
+    let cover_y = (ai_ymax - ai_ymin) / ai_h as f64;
+    if cover_x >= 0.85 && cover_y >= 0.85 {
         return None;
     }
 
@@ -155,28 +179,32 @@ mod tests {
 
     #[test]
     fn capture_origin_offset_is_applied() {
+        // 60% box anchored at the top-left of a left-secondary monitor — the capture
+        // origin (-1920, 50) must be added. (Not whole-frame, so not rejected.)
         let r = ai_bbox_to_screen_rect(
-            [0.0, 0.0, 1000.0, 1000.0],
+            [0.0, 0.0, 600.0, 600.0],
             BboxFormat::Normalized1000,
             1000,
             500,
-            capture(-1920, 50, 1000, 500), // left-secondary monitor
+            capture(-1920, 50, 1000, 500),
         )
         .unwrap();
-        assert_eq!((r.x, r.y, r.width, r.height), (-1920, 50, 1000, 500));
+        assert_eq!((r.x, r.y, r.width, r.height), (-1920, 50, 600, 300));
     }
 
     #[test]
     fn overshoot_is_clamped_to_image() {
+        // Right edge overshoots (xmax 2000 → clamped to image width 1000); the box is
+        // full-width but only 70% tall, so it's a legitimate target, not whole-frame.
         let r = ai_bbox_to_screen_rect(
-            [0.0, 0.0, 2000.0, 2000.0],
+            [0.0, 0.0, 700.0, 2000.0],
             BboxFormat::Normalized1000,
             1000,
             500,
             capture(0, 0, 2000, 1000),
         )
         .unwrap();
-        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 2000, 1000));
+        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 2000, 700));
     }
 
     #[test]
@@ -197,5 +225,41 @@ mod tests {
             ai_bbox_to_screen_rect([0.0, 0.0, 10.0, 10.0], BboxFormat::Normalized1000, 0, 0, cap)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn whole_frame_box_is_rejected() {
+        let cap = capture(0, 0, 2000, 1000);
+        // ~the entire image (0–1000 on both axes) → no localization signal.
+        assert!(
+            ai_bbox_to_screen_rect([0.0, 0.0, 1000.0, 1000.0], BboxFormat::Normalized1000, 1000, 500, cap)
+                .is_none()
+        );
+        // 90% of both axes also rejected.
+        assert!(
+            ai_bbox_to_screen_rect([50.0, 50.0, 950.0, 950.0], BboxFormat::Normalized1000, 1000, 500, cap)
+                .is_none()
+        );
+        // A large-but-real dialog (70% wide, 60% tall) still passes.
+        assert!(
+            ai_bbox_to_screen_rect([200.0, 150.0, 800.0, 850.0], BboxFormat::Normalized1000, 1000, 500, cap)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn bbox_trust_classifier() {
+        // Strong grounders.
+        assert!(bbox_is_decisive("gemini-3-flash"));
+        assert!(bbox_is_decisive("gemini-3.5-flash"));
+        assert!(bbox_is_decisive("gemini-3-pro"));
+        assert!(bbox_is_decisive("qwen3.5-omni-plus"));
+        // Weak / no-bbox / inconsistent → not decisive.
+        assert!(!bbox_is_decisive("gemini-2.5-flash"));
+        assert!(!bbox_is_decisive("gpt-5.4-mini"));
+        assert!(!bbox_is_decisive("claude-sonnet-4-6"));
+        assert!(!bbox_is_decisive("nvidia/nemotron-nano-12b-v2-vl"));
+        assert!(!bbox_is_decisive("google/gemma-4-26b-a4b-it"));
+        assert!(!bbox_is_decisive("qwen3.6-plus"));
     }
 }

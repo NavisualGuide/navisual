@@ -37,6 +37,12 @@ pub struct LocateOptions {
     /// so the correction retry surfaces the second-best match instead of
     /// deterministically repeating the same wrong pick.
     pub avoid_bbox: Option<Rect>,
+    /// The answering model is a strong grounder (Gemini 3+ / Qwen-omni), so its
+    /// `ai_bbox` may *corroborate* (rescue) a borderline OCR match. Weak grounders
+    /// (GPT/Claude/Nemotron/Gemma) produce inconsistent bboxes, so theirs gets no
+    /// corroboration vote — "no pointer beats wrong pointer". See
+    /// `ai::bbox::bbox_is_decisive`.
+    pub bbox_decisive: bool,
     pub a11y_timeout_ms: u64,
     pub min_confidence: f32,
     /// Raw HWND captured at AI-call time. When set, A11y searches this HWND
@@ -279,7 +285,9 @@ pub fn locate(
     }
 
     // (1) UIA role hit-test — primary; works native AND primed-Electron.
-    let role = hit_test::verify_role(cx, cy);
+    // On an interactive hit it also hands back the control's bounding rect, used below to
+    // snap the pointer off the OCR text span onto the whole clickable control.
+    let (role, role_rect) = hit_test::verify_role(cx, cy);
     let (uia_control_type, uia_interactive) = match &role {
         RoleHit::Interactive(ct) => (Some(ct.clone()), true),
         RoleHit::Content(ct) => (Some(ct.clone()), false),
@@ -296,8 +304,12 @@ pub fn locate(
         .filter(|a| !a.trim().eq_ignore_ascii_case(target_text.trim()))
         .map(|a| ocr::anchor_near(&hit.bbox, a, &results, img_w, img_h))
         .unwrap_or(false);
-    // (4) AI bbox region proximity (soft).
-    let near_ai_bbox = ai_bbox_img
+    // (4) AI bbox region proximity (soft) — but only a corroboration vote when the
+    // answering model is a strong grounder. A weak model's bbox is too unreliable to
+    // *rescue* an otherwise-uncorroborated OCR match (it would let a near-coincidental
+    // content word through), so its proximity carries no vote. The raw proximity is
+    // still recorded in the trace for debugging.
+    let near_ai_bbox_raw = ai_bbox_img
         .map(|ab| {
             let wcx = hit.bbox.0 as f32 + hit.bbox.2 as f32 / 2.0;
             let wcy = hit.bbox.1 as f32 + hit.bbox.3 as f32 / 2.0;
@@ -307,6 +319,7 @@ pub fn locate(
             ((acx - wcx).powi(2) + (acy - wcy).powi(2)).sqrt() <= thresh
         })
         .unwrap_or(false);
+    let near_ai_bbox = near_ai_bbox_raw && opts.bbox_decisive;
 
     // UIA role is authoritative when it has an opinion. Interactive → accept. Content
     // (Document/Text/terminal) is a hard negative: the SOFT corroborators (anchor/bbox)
@@ -325,8 +338,10 @@ pub fn locate(
         isolation_line_len: line_len,
         isolation_ok,
         near_anchor,
-        near_ai_bbox,
+        near_ai_bbox: near_ai_bbox_raw,
+        bbox_decisive: opts.bbox_decisive,
         accepted: accept,
+        snapped_to_uia: false,
     });
 
     if !accept {
@@ -345,15 +360,107 @@ pub fn locate(
         return Ok((None, trace));
     }
 
+    // Pointer snap: OCR's `bbox` is only the matched *text* span — a single word (so a
+    // multi-word link/title pointer covers just one word) or a whole long line. When the
+    // UIA role hit-test resolved an interactive control under the match, its rect is the
+    // real clickable element, so snap the pointer to it. This tightens OCR pointers to the
+    // same precision as A11y hits and fixes the "short bbox on substring match" gap.
+    let pointer_bbox = match role_rect {
+        Some(er) if uia_snap_plausible(&er, &bbox, &crop_rect) => {
+            if let Some(c) = ocr_trace.corroboration.as_mut() {
+                c.snapped_to_uia = true;
+            }
+            er
+        }
+        _ => bbox,
+    };
+
     let result = LocateResult {
-        bbox,
+        bbox: pointer_bbox,
         name: hit.text.clone(),
         role: "Ocr".to_string(),
         confidence: hit.confidence,
     };
     trace.ocr = ocr_trace;
     trace.final_decision = FinalDecision::HitOcr;
-    trace.final_bbox = Some(bbox);
+    trace.final_bbox = Some(pointer_bbox);
     trace.elapsed_ms = started.elapsed().as_millis() as u32;
     Ok((Some(result), trace))
+}
+
+/// Whether the UIA element rect under the OCR match is a sound pointer target. Requires the
+/// element to actually sit under the match (its rect contains the OCR winner's centre) and
+/// rejects container-sized rects (a whole pane / list / window), which would make the
+/// pointer vague rather than precise. The size cap only applies when the captured-window
+/// size (`crop`) is known.
+fn uia_snap_plausible(er: &Rect, ocr: &Rect, crop: &Rect) -> bool {
+    let cx = ocr.x + ocr.width as i32 / 2;
+    let cy = ocr.y + ocr.height as i32 / 2;
+    let contains =
+        cx >= er.x && cx < er.x + er.width as i32 && cy >= er.y && cy < er.y + er.height as i32;
+    if !contains {
+        return false;
+    }
+    if crop.width > 0
+        && crop.height > 0
+        && (er.width as f32 > crop.width as f32 * 0.9
+            || er.height as f32 > crop.height as f32 * 0.6)
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(x: i32, y: i32, w: u32, h: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn snap_accepts_control_sized_element_over_word() {
+        // OCR matched the word "mini" (tight span); UIA resolves the whole link/title.
+        let ocr = r(300, 200, 40, 16);
+        let element = r(120, 196, 380, 24); // the full clickable title, contains the word
+        let crop = r(0, 0, 1280, 1024);
+        assert!(uia_snap_plausible(&element, &ocr, &crop));
+    }
+
+    #[test]
+    fn snap_rejects_element_not_under_match() {
+        // ElementFromPoint resolved something whose rect doesn't cover the OCR centre —
+        // never snap there (would move the pointer off the matched text).
+        let ocr = r(300, 200, 40, 16);
+        let element = r(600, 600, 80, 24);
+        let crop = r(0, 0, 1280, 1024);
+        assert!(!uia_snap_plausible(&element, &ocr, &crop));
+    }
+
+    #[test]
+    fn snap_rejects_container_sized_rect() {
+        let ocr = r(300, 200, 40, 16);
+        let crop = r(0, 0, 1280, 1024);
+        // Whole-pane width → vague pointer, reject.
+        let too_wide = r(0, 190, 1200, 30);
+        assert!(!uia_snap_plausible(&too_wide, &ocr, &crop));
+        // Whole-column height (a list/tree pane) → reject.
+        let too_tall = r(280, 0, 120, 800);
+        assert!(!uia_snap_plausible(&too_tall, &ocr, &crop));
+    }
+
+    #[test]
+    fn snap_size_cap_skipped_when_crop_unknown() {
+        // Full-screen JPEG fallback path: crop is degenerate, so only containment gates.
+        let ocr = r(300, 200, 40, 16);
+        let crop = r(0, 0, 0, 0);
+        let big = r(0, 190, 1200, 30);
+        assert!(uia_snap_plausible(&big, &ocr, &crop));
+    }
 }

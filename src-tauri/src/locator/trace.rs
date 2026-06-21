@@ -90,9 +90,19 @@ pub struct Corroboration {
     pub isolation_line_len: usize,
     pub isolation_ok: bool,
     pub near_anchor: bool,
+    /// Raw geometric proximity of the winner to the AI bbox. Only counts as a
+    /// corroboration vote when `bbox_decisive` (a strong-grounding model) — a weak
+    /// model's bbox is recorded here but does not rescue the match.
     pub near_ai_bbox: bool,
-    /// Final verdict (`uia_interactive || isolation_ok || near_anchor || near_ai_bbox`).
+    /// The answering model is a strong grounder, so `near_ai_bbox` is allowed to vote.
+    pub bbox_decisive: bool,
+    /// Final verdict (`uia_interactive || isolation_ok || near_anchor ||
+    /// (near_ai_bbox && bbox_decisive)`).
     pub accepted: bool,
+    /// The accepted pointer was snapped from the OCR text span to the true UIA element
+    /// rect under it (`ElementFromPoint` resolved an interactive control) — so the box
+    /// covers the whole clickable control, not just the matched word/line.
+    pub snapped_to_uia: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

@@ -183,6 +183,10 @@ fn execute_step(
     tracker: &track::WindowTracker,
     last_overlay: &parking_lot::Mutex<Option<LastOverlay>>,
     ai_bbox: Option<capture::Rect>,
+    // Whether the answering model is a strong grounder, so its ai_bbox may corroborate
+    // a borderline OCR match (`ai::bbox::bbox_is_decisive`). Weak grounders' bboxes get
+    // no corroboration vote.
+    bbox_decisive: bool,
     // "Wrong spot" memory: the bbox the previous pointer occupied, which the user
     // explicitly rejected. The locator excludes candidates there (§ fix for the
     // deterministic same-wrong-pick retry loop). Only the correction path sets it.
@@ -214,6 +218,7 @@ fn execute_step(
                         .map(|r| format!("{:?}", r).to_lowercase()),
                     nearby_text: step.target_nearby_text.clone(),
                     ai_bbox,
+                    bbox_decisive,
                     avoid_bbox,
                     a11y_timeout_ms: 500,
                     min_confidence: 0.5,
@@ -1216,6 +1221,7 @@ async fn guide(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[0], capture_rect_opt, &provider);
+    let bbox_decisive = ai::bbox::bbox_is_decisive(&used_model);
 
     // Stale detection must run BEFORE execute_step draws the new pointer.
     // Capturing afterwards would include our own overlay pointer — a large
@@ -1241,6 +1247,7 @@ async fn guide(
         &state.tracker,
         &state.last_overlay,
         ai_bbox,
+        bbox_decisive,
         None,
         capture_rect_opt,
         pre_ocr,
@@ -1299,11 +1306,17 @@ async fn next_step(
         ));
     }
 
-    let (log_trace, debug_screenshot_enabled) = {
-        let cfg = &state.ai_router.lock().await.config;
+    let (log_trace, debug_screenshot_enabled, bbox_decisive) = {
+        let router = state.ai_router.lock().await;
+        // No AI call here; the cached routed/active model is the one that produced
+        // these steps (and their bboxes), so its trust still applies.
+        let used_model = router
+            .get_managed_routed_model()
+            .unwrap_or_else(|| router.active_model());
         (
-            cfg.debug_locate_log_file_enabled,
-            cfg.debug_screenshot_enabled,
+            router.config.debug_locate_log_file_enabled,
+            router.config.debug_screenshot_enabled,
+            ai::bbox::bbox_is_decisive(&used_model),
         )
     };
     let stored_hwnd = {
@@ -1328,6 +1341,7 @@ async fn next_step(
         &state.tracker,
         &state.last_overlay,
         ai_bbox,
+        bbox_decisive,
         None,
         capture_rect,
         None, // next_step reuses the prior capture; locator re-captures for OCR
@@ -1693,6 +1707,7 @@ async fn send_correction(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[0], new_capture_rect, &provider);
+    let bbox_decisive = ai::bbox::bbox_is_decisive(&used_model);
 
     // Stale detection before the pointer is drawn — see guide() for rationale.
     let stale_hash = tokio::task::spawn_blocking(ahash_of_screen)
@@ -1714,6 +1729,7 @@ async fn send_correction(
         &state.tracker,
         &state.last_overlay,
         ai_bbox,
+        bbox_decisive,
         avoid_bbox,
         new_capture_rect,
         pre_ocr,
@@ -1938,6 +1954,7 @@ async fn locate_a11y(
             role,
             nearby_text: None,
             ai_bbox: None,
+            bbox_decisive: false,
             avoid_bbox: None,
             a11y_timeout_ms: timeout_ms.unwrap_or(1500),
             min_confidence: 0.5,
@@ -1975,6 +1992,7 @@ async fn locate_element(
             role,
             nearby_text,
             ai_bbox: None,
+            bbox_decisive: false,
             avoid_bbox: None,
             a11y_timeout_ms: timeout_ms.unwrap_or(500),
             min_confidence: 0.5,

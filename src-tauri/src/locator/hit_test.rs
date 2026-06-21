@@ -12,9 +12,10 @@
 //! Only applied to OCR hits.  A11y results carry UIA control-type information
 //! that already filters non-interactive roles.
 
+use crate::capture::Rect;
 use uiautomation::controls::ControlType;
 use uiautomation::types::Point;
-use uiautomation::UIAutomation;
+use uiautomation::{UIAutomation, UIElement};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, WindowFromPoint};
 
@@ -96,30 +97,57 @@ pub enum RoleHit {
 /// Resolve the control type under `(cx, cy)` (virtual-desktop pixels). `ElementFromPoint`
 /// returns the *deepest* element — a button's deepest node is often a Text run — so we walk
 /// up a few ancestors looking for an interactive control before concluding "content".
-pub fn verify_role(cx: i32, cy: i32) -> RoleHit {
+///
+/// On an `Interactive` hit, the second tuple element is that control's **bounding
+/// rectangle** (virtual-desktop pixels) — the true clickable-element rect, which the
+/// orchestrator snaps the OCR pointer to so the box covers the whole control instead of
+/// just the matched text span. `None` for content/unknown or when the rect is unreadable.
+pub fn verify_role(cx: i32, cy: i32) -> (RoleHit, Option<Rect>) {
     let Ok(automation) = UIAutomation::new() else {
-        return RoleHit::Unknown;
+        return (RoleHit::Unknown, None);
     };
     let mut el = match automation.element_from_point(Point::new(cx, cy)) {
         Ok(e) => e,
-        Err(_) => return RoleHit::Unknown,
+        Err(_) => return (RoleHit::Unknown, None),
     };
     let walker = automation.get_control_view_walker().ok();
     for _ in 0..3 {
         match el.get_control_type() {
-            Ok(ct) if is_interactive(ct) => return RoleHit::Interactive(format!("{ct:?}")),
-            Ok(ct) if is_content(ct) => return RoleHit::Content(format!("{ct:?}")),
+            Ok(ct) if is_interactive(ct) => {
+                return (RoleHit::Interactive(format!("{ct:?}")), element_rect(&el));
+            }
+            Ok(ct) if is_content(ct) => return (RoleHit::Content(format!("{ct:?}")), None),
             Ok(_) => {
                 // Neutral container (Group/Pane/Custom/Text-run) — try the parent.
                 match walker.as_ref().and_then(|w| w.get_parent(&el).ok()) {
                     Some(parent) => el = parent,
-                    None => return RoleHit::Unknown,
+                    None => return (RoleHit::Unknown, None),
                 }
             }
-            Err(_) => return RoleHit::Unknown,
+            Err(_) => return (RoleHit::Unknown, None),
         }
     }
-    RoleHit::Unknown
+    (RoleHit::Unknown, None)
+}
+
+/// Read a UIA element's on-screen bounding rectangle as a virtual-desktop `Rect`.
+/// Mirrors `a11y::element_to_result`'s guards: rejects zero-area and off-screen
+/// (minimised windows report ~-32000) rects.
+fn element_rect(el: &UIElement) -> Option<Rect> {
+    let rect = el.get_bounding_rectangle().ok()?;
+    let left = rect.get_left();
+    let top = rect.get_top();
+    let width = rect.get_width().max(0) as u32;
+    let height = rect.get_height().max(0) as u32;
+    if width == 0 || height == 0 || left.abs() > 10_000 || top.abs() > 10_000 {
+        return None;
+    }
+    Some(Rect {
+        x: left,
+        y: top,
+        width,
+        height,
+    })
 }
 
 fn is_interactive(ct: ControlType) -> bool {
