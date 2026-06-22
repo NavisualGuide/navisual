@@ -8,6 +8,7 @@ mod ai;
 mod capture;
 mod locator;
 mod overlay;
+mod packs;
 mod server;
 mod track;
 mod tts;
@@ -83,6 +84,9 @@ struct AppState {
     /// written to disk — so the lightbox can re-open it without persisting
     /// the user's screen content to storage. Cleared on new task / on quit.
     chat_full_jpeg: parking_lot::Mutex<Option<Vec<u8>>>,
+    /// Nav-Packs loaded at startup (bundled + user). Read-only after load; the active pack
+    /// for the focused window injects app-specific guidance + shortcuts into the prompt.
+    packs: packs::PackRegistry,
 }
 
 /// Snapshot of the most recent non-clear overlay. Stored so `restore_overlay`
@@ -481,6 +485,27 @@ fn maybe_log_trace(app: &AppHandle, trace: &locator::trace::LocateTrace, log_ena
         if let Err(e) = locator::trace::append_jsonl(&path, trace) {
             log::warn!("locate_log.jsonl write failed: {e}");
         }
+    }
+}
+
+/// Nav-Pack prompt injection (Workstream C): if a loaded pack's `window_title_pattern`
+/// matches the focused window, return its formatted guidance + shortcut block to append to
+/// the prompt; empty string otherwise. Keeps the lookup out of the two guidance call sites.
+fn active_pack_context(registry: &packs::PackRegistry, hwnd: usize) -> String {
+    if registry.is_empty() {
+        return String::new();
+    }
+    let title = capture::get_window_title(hwnd);
+    match registry.get_active_pack(&title) {
+        Some(pack) => {
+            log::debug!("nav-pack '{}' active for '{}'", pack.manifest.id, title);
+            ai::prompts::pack_context_block(
+                &pack.manifest.target_app,
+                &pack.manifest.system_prompt_injection,
+                &pack.manifest.shortcuts,
+            )
+        }
+        None => String::new(),
     }
 }
 
@@ -980,6 +1005,7 @@ async fn guide(
     if let Some(hwnd) = new_hwnd_opt {
         let info = capture::get_window_info(hwnd);
         window_context = format!("\n[Current Window Info]\n{}", info);
+        window_context.push_str(&active_pack_context(&state.packs, hwnd));
     }
 
     // Append window context to the prompt (no grid suffix any more — AI returns
@@ -1566,6 +1592,7 @@ async fn send_correction(
     if let Some(hwnd) = new_hwnd {
         let info = capture::get_window_info(hwnd);
         window_context = format!("\n[Current Window Info]\n{}", info);
+        window_context.push_str(&active_pack_context(&state.packs, hwnd));
     }
 
     let final_user_text = if !window_context.is_empty() {
@@ -3113,6 +3140,20 @@ pub fn run() {
                 Some(supabase_session_path.clone()),
             );
             log::info!("AiRouter ready (provider: {})", router.config.api_provider);
+
+            // Nav-Packs: user packs (writable app-data dir) shadow bundled packs (Tauri
+            // resource). Both dirs are optional — a missing dir just yields fewer packs.
+            let user_packs_dir = app_data_dir.join("packs");
+            let bundled_packs_dir = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|r| r.join("packs"));
+            let packs = packs::PackRegistry::load(
+                Some(user_packs_dir.as_path()),
+                bundled_packs_dir.as_deref(),
+            );
+
             handle.manage(AppState {
                 ai_router: tokio::sync::Mutex::new(router),
                 guidance: parking_lot::Mutex::new(GuidanceState::default()),
@@ -3123,6 +3164,7 @@ pub fn run() {
                 supabase_session_path,
                 screen_hash: parking_lot::Mutex::new(None),
                 chat_full_jpeg: parking_lot::Mutex::new(None),
+                packs,
             });
 
             Ok(())

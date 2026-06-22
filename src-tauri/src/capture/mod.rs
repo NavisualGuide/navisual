@@ -327,6 +327,20 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
     }
 }
 
+/// Raw window title for `hwnd_raw` (untruncated) — used to match Nav-Pack
+/// `window_title_pattern`s. Empty string on failure / non-Windows.
+pub fn get_window_title(hwnd_raw: usize) -> String {
+    #[cfg(windows)]
+    {
+        win::get_window_title(hwnd_raw)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd_raw;
+        String::new()
+    }
+}
+
 /// Phase 0.2: structured info about the active capture target (used for the
 /// "Shared: <App>" indicator). Returns `None` if no plausible target.
 #[cfg(windows)]

@@ -84,6 +84,19 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
     }
 }
 
+/// Raw, untruncated window title for `hwnd_raw` — used to match Nav-Pack title patterns.
+pub fn get_window_title(hwnd_raw: usize) -> String {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        let mut buf = [0u16; 512];
+        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut buf);
+        if len <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
 /// True when the target window (`target_hwnd`) is **visible anywhere** within the
 /// located rect `(x, y, w, h)` (physical pixels) — i.e. the pointer's target area
 /// overlaps the part of the target window that isn't hidden behind another app.
