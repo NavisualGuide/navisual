@@ -58,13 +58,58 @@ pub enum PackSource {
     User,
 }
 
-/// A loaded pack: its manifest plus the compiled title regex and provenance.
+/// One icon-crop file discovered in a pack's `icons/` directory, for template matching
+/// (Workstream B). `stem` is the lowercased filename without extension ("move_tool"), used to
+/// associate the icon with an AI target ("Move tool").
+#[derive(Debug, Clone)]
+pub struct IconAsset {
+    pub stem: String,
+    pub path: PathBuf,
+}
+
+/// A loaded pack: its manifest plus the compiled title regex, provenance, and any icon crops.
 #[derive(Debug, Clone)]
 pub struct Pack {
     pub manifest: PackManifest,
     pub title_re: regex::Regex,
     pub source: PackSource,
     pub dir: PathBuf,
+    /// Icon crops from `<dir>/icons/*.png|jpg` for template matching (empty for most packs).
+    pub icons: Vec<IconAsset>,
+}
+
+impl Pack {
+    /// Icons whose filename stem is associated with `target_text` (Workstream B Pass-3
+    /// candidates). Capped so a sloppy match can't blow up latency — the locator still gates
+    /// each by NCC, so over-selection only costs a few extra correlation passes.
+    pub fn candidate_icons(&self, target_text: &str) -> Vec<&IconAsset> {
+        self.icons
+            .iter()
+            .filter(|a| icon_stem_matches_target(&a.stem, target_text))
+            .take(8)
+            .collect()
+    }
+}
+
+/// Lowercased alphanumeric tokens of `s` ("Move tool" / "move_tool" → ["move","tool"]).
+fn normalize_tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether an icon filename `stem` is associated with the AI's `target_text`: one token set
+/// fully contains the other ("move_tool" ↔ "Move tool"; "render_button" ⊇ "Render"). Keeps a
+/// short generic target from latching everything while tolerating naming-style differences.
+pub fn icon_stem_matches_target(stem: &str, target: &str) -> bool {
+    let st = normalize_tokens(stem);
+    let tt = normalize_tokens(target);
+    if st.is_empty() || tt.is_empty() {
+        return false;
+    }
+    st.iter().all(|t| tt.contains(t)) || tt.iter().all(|t| st.contains(t))
 }
 
 /// All loaded packs, in match-priority order (user packs first).
@@ -148,12 +193,42 @@ fn scan_dir(dir: &Path, source: PackSource) -> Vec<Pack> {
             continue;
         }
         match load_manifest(&manifest_path) {
-            Ok(pack) => out.push(Pack {
-                source,
-                dir: path,
-                ..pack
-            }),
+            Ok(pack) => {
+                let icons = scan_icons(&path.join("icons"));
+                out.push(Pack {
+                    source,
+                    dir: path,
+                    icons,
+                    ..pack
+                });
+            }
             Err(e) => log::warn!("skipping pack at {}: {e}", manifest_path.display()),
+        }
+    }
+    out
+}
+
+/// Collect PNG/JPEG icon crops from a pack's `icons/` directory (empty if absent).
+fn scan_icons(icons_dir: &Path) -> Vec<IconAsset> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(icons_dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_image = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"))
+            .unwrap_or(false);
+        if !is_image {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            out.push(IconAsset {
+                stem: stem.to_ascii_lowercase(),
+                path: path.clone(),
+            });
         }
     }
     out
@@ -173,6 +248,7 @@ fn load_manifest(path: &Path) -> anyhow::Result<Pack> {
         title_re,
         source: PackSource::Bundled, // overwritten by caller
         dir: PathBuf::new(),         // overwritten by caller
+        icons: Vec::new(),           // populated by scan_dir
     })
 }
 
@@ -343,6 +419,41 @@ mod tests {
             .is_none());
         // The Blender pack carries shortcuts; the browser pack is prompt-injection only.
         assert!(!reg.get_active_pack("x.blend - Blender").unwrap().manifest.shortcuts.is_empty());
+    }
+
+    #[test]
+    fn icon_stem_target_association() {
+        assert!(icon_stem_matches_target("move_tool", "Move tool")); // naming-style diff
+        assert!(icon_stem_matches_target("move_tool", "move")); // target ⊆ stem
+        assert!(icon_stem_matches_target("render_button", "Render")); // target ⊆ stem
+        assert!(!icon_stem_matches_target("select_tool", "Move tool")); // disjoint
+        assert!(!icon_stem_matches_target("move_tool", "")); // empty target
+        assert!(!icon_stem_matches_target("", "Move")); // empty stem
+    }
+
+    #[test]
+    fn candidate_icons_filters_and_caps() {
+        let root = tmp();
+        let dir = root.join("p");
+        fs::create_dir_all(dir.join("icons")).unwrap();
+        fs::write(
+            dir.join("pack.json"),
+            r#"{"id":"p","window_title_pattern":"x"}"#,
+        )
+        .unwrap();
+        for f in ["move_tool.png", "select_tool.png", "render_button.jpg", "notes.txt"] {
+            fs::write(dir.join("icons").join(f), b"stub").unwrap();
+        }
+        let reg = PackRegistry::load(Some(&root), None);
+        let pack = reg.get_active_pack("x window").unwrap();
+        assert_eq!(pack.icons.len(), 3, "only image files become icons (notes.txt excluded)");
+        let cands: Vec<_> = pack
+            .candidate_icons("Move tool")
+            .iter()
+            .map(|a| a.stem.clone())
+            .collect();
+        assert_eq!(cands, vec!["move_tool".to_string()]);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

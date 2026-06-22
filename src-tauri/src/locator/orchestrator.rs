@@ -12,8 +12,8 @@
 
 use super::adapters;
 use super::hit_test::{self, HitTestOutcome, RoleHit};
-use super::trace::{AdapterTrace, Corroboration, FinalDecision, LocateTrace, OcrTrace};
-use super::{a11y, ocr, LocateResult};
+use super::trace::{AdapterTrace, Corroboration, FinalDecision, LocateTrace, OcrTrace, TemplateTrace};
+use super::{a11y, ocr, template, LocateResult};
 use crate::capture::{self, Rect};
 use anyhow::Result;
 use std::time::Instant;
@@ -53,6 +53,10 @@ pub struct LocateOptions {
     /// When set, the orchestrator writes the lossless PNG sent to OCR to this
     /// path. Useful for diagnosing why OCR misses specific UI elements.
     pub debug_ocr_image_path: Option<std::path::PathBuf>,
+    /// Pass-3 icon templates (Workstream B): `(icon_name, png/jpg bytes)` candidates the active
+    /// nav-pack supplies for this target. Tried by NCC against the capture only when A11y + OCR
+    /// both miss. Empty (the common case) → Pass 3 is skipped entirely.
+    pub icon_templates: Vec<(String, Vec<u8>)>,
 }
 
 pub fn locate(
@@ -265,6 +269,17 @@ pub fn locate(
     // not upscaling. The `ocr_scale_sweep` harness is kept for that evaluation.
     let Some(hit) = outcome.winner.cloned() else {
         trace.ocr = ocr_trace;
+        // Pass 3 — icon template matching (nav-pack icons), the last resort for icon-only
+        // controls A11y + OCR can't name. No-op when the pack supplied no candidates.
+        let (tmpl_hit, tmpl_trace) =
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, &opts.icon_templates);
+        trace.template = tmpl_trace;
+        if let Some(result) = tmpl_hit {
+            trace.final_decision = FinalDecision::HitTemplate;
+            trace.final_bbox = Some(result.bbox);
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((Some(result), trace));
+        }
         trace.final_decision = FinalDecision::Miss;
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
         return Ok((None, trace));
@@ -371,6 +386,17 @@ pub fn locate(
             RoleHit::Unknown => "unknown",
         };
         trace.ocr = ocr_trace;
+        // Pass 3 — the OCR name match was an uncorroborated false-positive; try pack icon
+        // templates before giving up (the real icon control may still be on screen).
+        let (tmpl_hit, tmpl_trace) =
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, &opts.icon_templates);
+        trace.template = tmpl_trace;
+        if let Some(result) = tmpl_hit {
+            trace.final_decision = FinalDecision::HitTemplate;
+            trace.final_bbox = Some(result.bbox);
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((Some(result), trace));
+        }
         trace.final_decision = FinalDecision::RejectedUncorroborated {
             detail: format!(
                 "uia={role_label} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox}"
@@ -406,6 +432,78 @@ pub fn locate(
     trace.final_bbox = Some(pointer_bbox);
     trace.elapsed_ms = started.elapsed().as_millis() as u32;
     Ok((Some(result), trace))
+}
+
+/// Pass 3 — match the active nav-pack's candidate icon crops against the capture by NCC.
+/// `haystack_png` is the same native-res capture OCR ran on; matches are mapped from image
+/// pixels back to virtual-desktop coords with the same scale+origin transform as OCR hits.
+/// Returns `(accepted hit, trace)`; `(None, None)` when there were no candidates so the trace
+/// stays absent. Accepts only above `template::DEFAULT_MIN_SCORE` — "no pointer beats wrong
+/// pointer". The per-template `match_icon` floor is set to `-1.0` so the trace records the
+/// best raw score even on a reject (useful for tuning).
+fn try_template_pass(
+    haystack_png: &[u8],
+    crop_rect: &Rect,
+    img_w: u32,
+    img_h: u32,
+    templates: &[(String, Vec<u8>)],
+) -> (Option<LocateResult>, Option<TemplateTrace>) {
+    if templates.is_empty() {
+        return (None, None);
+    }
+    let Ok(haystack) = template::load_gray_from_bytes(haystack_png) else {
+        return (None, Some(TemplateTrace::default()));
+    };
+    let mut tr = TemplateTrace {
+        best_score: -1.0,
+        ..Default::default()
+    };
+    let mut best: Option<(template::TemplateMatch, String)> = None;
+    for (name, bytes) in templates {
+        let Ok(needle) = template::load_gray_from_bytes(bytes) else {
+            continue;
+        };
+        tr.templates_tried += 1;
+        // min_score -1.0 → return the raw best so we can record it even when rejected.
+        if let Some(m) = template::match_icon(&haystack, &needle, template::DEFAULT_SCALES, -1.0) {
+            if m.score > tr.best_score {
+                tr.best_score = m.score;
+                tr.best_scale = m.scale;
+                tr.best_icon = Some(name.clone());
+                best = Some((m, name.clone()));
+            }
+        }
+    }
+    let accepted = best
+        .as_ref()
+        .map(|(m, _)| m.score >= template::DEFAULT_MIN_SCORE)
+        .unwrap_or(false);
+    tr.accepted = accepted;
+    if !accepted {
+        return (None, Some(tr));
+    }
+    let (m, name) = best.expect("accepted implies a best match");
+    let (sx, sy) = if img_w > 0 && img_h > 0 && crop_rect.width > 0 && crop_rect.height > 0 {
+        (
+            crop_rect.width as f32 / img_w as f32,
+            crop_rect.height as f32 / img_h as f32,
+        )
+    } else {
+        (1.0, 1.0)
+    };
+    let bbox = Rect {
+        x: (m.x as f32 * sx).round() as i32 + crop_rect.x,
+        y: (m.y as f32 * sy).round() as i32 + crop_rect.y,
+        width: (m.width as f32 * sx).round() as u32,
+        height: (m.height as f32 * sy).round() as u32,
+    };
+    let result = LocateResult {
+        bbox,
+        name,
+        role: "Template".to_string(),
+        confidence: m.score,
+    };
+    (Some(result), Some(tr))
 }
 
 /// Whether the UIA element rect under the OCR match is a sound pointer target. Requires the

@@ -23,6 +23,8 @@ pub mod hit_test;
 
 pub mod keepwarm;
 
+pub mod template;
+
 pub mod trace;
 
 /// If `target` ends with an ellipsis ("…" or "..."), return the text before it

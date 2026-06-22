@@ -205,6 +205,9 @@ fn execute_step(
     // subtitle). When present the locator's OCR uses it instead of re-capturing — so it never
     // reads our own caption and there's no clear/redraw flicker. None → locator re-captures.
     pre_ocr: Option<(Vec<u8>, capture::Rect)>,
+    // Loaded nav-packs — when the focused window matches a pack with icon crops for this
+    // target, those crops feed the locator's Pass-3 template matching (Workstream B).
+    packs: &packs::PackRegistry,
 ) -> Result<
     (
         Option<locator::LocateResult>,
@@ -233,6 +236,7 @@ fn execute_step(
                     min_confidence: 0.5,
                     target_hwnd,
                     debug_ocr_image_path: debug_ocr_path,
+                    icon_templates: pack_icon_templates(packs, target_hwnd, text),
                 };
                 let text_owned = text.clone();
                 let pre = pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r));
@@ -507,6 +511,31 @@ fn active_pack_context(registry: &packs::PackRegistry, hwnd: usize) -> String {
         }
         None => String::new(),
     }
+}
+
+/// Workstream B: candidate icon crops `(name, bytes)` the active nav-pack supplies for
+/// `target_text`, fed to the locator's Pass-3 template matching. Empty (the common case) when
+/// there's no focused window, no active pack, or no name-associated icons — so Pass 3 is a
+/// no-op. Reads each icon file lazily here; only reached on a real locate.
+fn pack_icon_templates(
+    registry: &packs::PackRegistry,
+    hwnd: Option<usize>,
+    target_text: &str,
+) -> Vec<(String, Vec<u8>)> {
+    let Some(hwnd) = hwnd.filter(|h| *h != 0) else {
+        return Vec::new();
+    };
+    if registry.is_empty() {
+        return Vec::new();
+    }
+    let title = capture::get_window_title(hwnd);
+    let Some(pack) = registry.get_active_pack(&title) else {
+        return Vec::new();
+    };
+    pack.candidate_icons(target_text)
+        .into_iter()
+        .filter_map(|a| std::fs::read(&a.path).ok().map(|bytes| (a.stem.clone(), bytes)))
+        .collect()
 }
 
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
@@ -1301,6 +1330,7 @@ async fn guide(
         None,
         capture_rect_opt,
         pre_ocr,
+        &state.packs,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1395,6 +1425,7 @@ async fn next_step(
         None,
         capture_rect,
         None, // next_step reuses the prior capture; locator re-captures for OCR
+        &state.packs,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1791,6 +1822,7 @@ async fn send_correction(
         avoid_bbox,
         new_capture_rect,
         pre_ocr,
+        &state.packs,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -2043,6 +2075,7 @@ async fn locate_a11y(
             min_confidence: 0.5,
             target_hwnd: None,
             debug_ocr_image_path: None,
+            icon_templates: Vec::new(),
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::a11y::find_element(&text, &opts))
@@ -2081,6 +2114,7 @@ async fn locate_element(
             min_confidence: 0.5,
             target_hwnd: None,
             debug_ocr_image_path: None,
+            icon_templates: Vec::new(),
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts, None))

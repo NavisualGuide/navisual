@@ -42,6 +42,9 @@ parking_lot = "0.12"
 # left-secondary monitors at negative virtual-desktop x. Per-monitor CreateDCW
 # in src/capture/win.rs is the correct path. See SDD §2.5 and §A v2.2.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# v0.6 Workstream B: pure-Rust template matching (NCC) for icon-only UI elements.
+# Chosen over OpenCV to keep the "built-in, nothing to download" locator (Design Decision #7).
+imageproc = { version = "0.25", default-features = false }
 base64 = "0.22"
 sha2 = "0.10"
 regex = "1"

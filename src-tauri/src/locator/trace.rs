@@ -22,6 +22,9 @@ pub struct LocateTrace {
     pub adapter: Option<AdapterTrace>,
     pub a11y: A11yTrace,
     pub ocr: OcrTrace,
+    /// Pass 3 — icon template matching (Workstream B). `None` when not reached (A11y/OCR hit,
+    /// or no pack icon candidates for the target).
+    pub template: Option<TemplateTrace>,
     pub final_decision: FinalDecision,
     pub final_bbox: Option<Rect>,
     pub elapsed_ms: u32,
@@ -39,6 +42,22 @@ pub struct AdapterTrace {
     pub hit: bool,
     /// Human-readable outcome: accepted, or why it fell through to A11y/OCR.
     pub detail: String,
+}
+
+/// Pass-3 icon template-matching outcome (Workstream B). Runs only after A11y + OCR miss and
+/// the active pack supplies icon candidates for the target. Surfaced in the debug drawer.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TemplateTrace {
+    /// Number of candidate icon crops matched against the capture.
+    pub templates_tried: usize,
+    /// Filename stem of the best-scoring icon, if any cleared decoding.
+    pub best_icon: Option<String>,
+    /// Best NCC score seen across all candidates/scales ([-1, 1]).
+    pub best_score: f32,
+    /// Template scale factor that produced the best match.
+    pub best_scale: f32,
+    /// The best match cleared the acceptance threshold and was used as the located target.
+    pub accepted: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -165,6 +184,8 @@ pub enum FinalDecision {
     HitAdapter,
     HitA11y,
     HitOcr,
+    /// Pass 3 — a nav-pack icon template matched (A11y + OCR both missed).
+    HitTemplate,
     /// Phase 1 C5: WindowFromPoint hit-test rejected the locate.
     RejectedByHitTest {
         leaf_class: String,
