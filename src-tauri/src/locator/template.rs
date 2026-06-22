@@ -177,6 +177,90 @@ mod tests {
         assert!(match_icon(&hay, &tmpl, DEFAULT_SCALES, 0.5).is_none());
     }
 
+    // Live helper for building icon packs: capture a window through Navisual's OWN capture
+    // pipeline (the same per-monitor BitBlt + masking the locator's OCR path uses) and save it
+    // as a native-resolution PNG. Icon crops taken from this file are in the exact pixel space
+    // Pass-3 matches against at runtime, so they match cleanly. Pass the window handle in
+    // NAVISUAL_TEST_HWND and optionally an output path in OUT. Run:
+    //   $env:NAVISUAL_TEST_HWND=<hwnd>; $env:OUT="C:\path\cap.png";
+    //   cargo test --lib capture_window_png -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn capture_window_png() {
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND to the target window handle")
+            .parse()
+            .expect("NAVISUAL_TEST_HWND must be a decimal handle");
+        let out = std::env::var("OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("navisual_capture.png"));
+        let (img, rect) =
+            crate::capture::recapture_window_raw(hwnd, &[]).expect("capture failed");
+        let png = crate::capture::encode_png_for_ocr(&img).expect("encode failed");
+        std::fs::write(&out, &png).expect("write failed");
+        eprintln!(
+            "captured {}x{} (window rect {:?}) -> {}",
+            img.width(),
+            img.height(),
+            rect,
+            out.display()
+        );
+    }
+
+    // Live helper: crop IN by CROP="x,y,w,h", optionally upscale by SCALE (integer, nearest —
+    // for eyeballing tiny icons), write OUT. Used to extract an icon template from a capture.
+    //   $env:IN="cap.png"; $env:CROP="0,58,26,170"; $env:SCALE="5"; $env:OUT="strip.png";
+    //   cargo test --lib crop_png -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn crop_png() {
+        let inp = std::env::var("IN").expect("set IN");
+        let out = std::env::var("OUT").expect("set OUT");
+        let parts: Vec<u32> = std::env::var("CROP")
+            .expect("set CROP=x,y,w,h")
+            .split(',')
+            .map(|s| s.trim().parse().expect("CROP ints"))
+            .collect();
+        let [x, y, w, h] = parts[..] else {
+            panic!("CROP must be x,y,w,h")
+        };
+        let scale: u32 = std::env::var("SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let img = image::open(&inp).expect("open IN").to_rgba8();
+        let mut sub = image::imageops::crop_imm(&img, x, y, w, h).to_image();
+        if scale > 1 {
+            sub = image::imageops::resize(&sub, w * scale, h * scale, FilterType::Nearest);
+        }
+        sub.save(&out).expect("save OUT");
+        eprintln!("cropped {w}x{h} @ ({x},{y}) scale {scale} -> {out}");
+    }
+
+    // Live: run the real engine — match TEMPLATE against HAYSTACK and print the best result.
+    // Proves an icon crop is findable in a real capture before wiring up the full app test.
+    //   $env:HAYSTACK="cap.png"; $env:TEMPLATE="move.png";
+    //   cargo test --lib match_icon_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn match_icon_live() {
+        let hay = load_gray_from_bytes(&std::fs::read(std::env::var("HAYSTACK").unwrap()).unwrap())
+            .unwrap();
+        let tmpl =
+            load_gray_from_bytes(&std::fs::read(std::env::var("TEMPLATE").unwrap()).unwrap())
+                .unwrap();
+        match match_icon(&hay, &tmpl, DEFAULT_SCALES, -1.0) {
+            Some(m) => eprintln!(
+                "best: pos=({},{}) {}x{} score={:.4} scale={} accepted={}",
+                m.x,
+                m.y,
+                m.width,
+                m.height,
+                m.score,
+                m.scale,
+                m.score >= DEFAULT_MIN_SCORE
+            ),
+            None => eprintln!("no match"),
+        }
+    }
+
     #[test]
     fn load_gray_from_png_bytes_roundtrips() {
         let mut rgba = RgbaImage::new(8, 8);
