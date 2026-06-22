@@ -10,8 +10,9 @@
 //! eventual overlay renderer can consume it directly without further
 //! translation.
 
+use super::adapters;
 use super::hit_test::{self, HitTestOutcome, RoleHit};
-use super::trace::{Corroboration, FinalDecision, LocateTrace, OcrTrace};
+use super::trace::{AdapterTrace, Corroboration, FinalDecision, LocateTrace, OcrTrace};
 use super::{a11y, ocr, LocateResult};
 use crate::capture::{self, Rect};
 use anyhow::Result;
@@ -64,6 +65,26 @@ pub fn locate(
     trace.target_role = opts.role.clone();
     trace.nearby_text = opts.nearby_text.clone();
     trace.ai_bbox = opts.ai_bbox;
+
+    // Pass 0 — app-specific adapters (Excel cells, …). Deterministic local geometry for
+    // targets where AI grounding is weakest. An adapter only runs when it recognises the
+    // focused app *and* the target shape; otherwise we fall straight through to A11y.
+    if let Some(outcome) = adapters::try_locate(opts.target_hwnd, target_text) {
+        let hit = outcome.result;
+        trace.adapter = Some(AdapterTrace {
+            name: outcome.name,
+            hit: hit.is_some(),
+            detail: outcome.detail,
+        });
+        if let Some(result) = hit {
+            trace.final_decision = FinalDecision::HitAdapter;
+            trace.final_bbox = Some(result.bbox);
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((Some(result), trace));
+        }
+        // Adapter claimed the target but couldn't resolve it (e.g. a scrolled-out cell);
+        // the trace records why, and we fall through to the untouched A11y → OCR path.
+    }
 
     // Pass 1 — A11y.
     let mut a11y_opts = opts.clone();

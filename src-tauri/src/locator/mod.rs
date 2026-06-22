@@ -10,6 +10,8 @@
 #[cfg(windows)]
 pub mod a11y;
 
+pub mod adapters;
+
 #[cfg(windows)]
 pub mod ocr;
 

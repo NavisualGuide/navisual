@@ -17,11 +17,28 @@ pub struct LocateTrace {
     pub nearby_text: Option<String>,
     /// AI-predicted target bbox in virtual-desktop physical pixels (was: `grid_cell`).
     pub ai_bbox: Option<Rect>,
+    /// Pass 0 — app-specific locator adapter (Excel cells, …). `None` when no adapter
+    /// claimed the focused app + target, so the standard A11y → OCR path ran untouched.
+    pub adapter: Option<AdapterTrace>,
     pub a11y: A11yTrace,
     pub ocr: OcrTrace,
     pub final_decision: FinalDecision,
     pub final_bbox: Option<Rect>,
     pub elapsed_ms: u32,
+}
+
+/// Pass-0 adapter outcome. An adapter "claims" a locate when it recognises the focused app
+/// *and* the target shape (e.g. Excel + a cell ref like "Q34"); a claimed locate either
+/// produces a deterministic geometry hit or falls through to A11y → OCR (recorded here so
+/// the debug drawer shows why the adapter didn't resolve — e.g. an off-screen cell).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AdapterTrace {
+    /// Adapter that claimed the target ("excel", …).
+    pub name: String,
+    /// The adapter produced a `LocateResult` (vs. claimed-but-fell-through).
+    pub hit: bool,
+    /// Human-readable outcome: accepted, or why it fell through to A11y/OCR.
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -143,6 +160,9 @@ pub struct OcrCandidate {
 pub enum FinalDecision {
     #[default]
     Miss,
+    /// Pass 0 — an app-specific adapter (Excel cells, …) resolved the target by
+    /// deterministic geometry, no A11y/OCR needed.
+    HitAdapter,
     HitA11y,
     HitOcr,
     /// Phase 1 C5: WindowFromPoint hit-test rejected the locate.
