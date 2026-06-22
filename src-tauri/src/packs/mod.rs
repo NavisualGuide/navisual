@@ -39,7 +39,7 @@ pub struct PackManifest {
     pub window_title_pattern: String,
     /// Match priority — **lower is checked first**, so a specific pack (default 0) wins over a
     /// broad fallback like the generic-browser pack (e.g. 100) when both patterns match the
-    /// same title (a tax site open in a browser → the TurboTax pack, not generic-browser).
+    /// same title (an app-specific web pack vs. the catch-all browser pack for the same window).
     #[serde(default)]
     pub priority: i32,
     /// Free-text guidance appended to the prompt when this pack is active.
@@ -262,6 +262,31 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    // Live: print which bundled pack matches a real window TITLE and the injection block it
+    // would add to the prompt. Confirms the title patterns hit real-world titles and don't
+    // false-match. Run:
+    //   TITLE="x - Google Chrome" cargo test --lib pack_match_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn pack_match_live() {
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("packs");
+        let reg = PackRegistry::load(None, Some(&bundled));
+        let title = std::env::var("TITLE").unwrap_or_default();
+        eprintln!("title = {title:?}");
+        match reg.get_active_pack(&title) {
+            Some(p) => {
+                eprintln!("  matched pack: {}", p.manifest.id);
+                let block = crate::ai::prompts::pack_context_block(
+                    &p.manifest.target_app,
+                    &p.manifest.system_prompt_injection,
+                    &p.manifest.shortcuts,
+                );
+                eprintln!("--- injection block ---{block}--- end ---");
+            }
+            None => eprintln!("  no pack matched"),
+        }
+    }
+
     #[test]
     fn specific_pack_beats_lower_priority_fallback() {
         // A tax site open in a browser matches both patterns; the specific pack (default
@@ -296,7 +321,7 @@ mod tests {
         // pack.json or a bad window_title_pattern in a shipped pack at test time.
         let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("packs");
         let reg = PackRegistry::load(None, Some(&bundled));
-        assert!(reg.len() >= 3, "expected the bundled packs to load (got {})", reg.len());
+        assert!(reg.len() >= 2, "expected the bundled packs to load (got {})", reg.len());
         // Smoke-test routing against representative titles.
         assert_eq!(
             reg.get_active_pack("untitled.blend - Blender 4.2").map(|p| p.manifest.id.as_str()),
@@ -306,11 +331,17 @@ mod tests {
             reg.get_active_pack("Amazon.com - Google Chrome").map(|p| p.manifest.id.as_str()),
             Some("generic-browser")
         );
+        // Edge injects a zero-width space into its title ("Microsoft\u{200b} Edge"); the
+        // pattern must still match it (regression for the live-found bug).
         assert_eq!(
-            reg.get_active_pack("TurboTax Online — Mozilla Firefox").map(|p| p.manifest.id.as_str()),
-            Some("turbotax")
+            reg.get_active_pack("Inbox - Outlook - Microsoft\u{200b} Edge").map(|p| p.manifest.id.as_str()),
+            Some("generic-browser")
         );
-        // The Blender pack carries shortcuts; the others are prompt-injection only.
+        // A non-browser window matches nothing.
+        assert!(reg
+            .get_active_pack("v0.6-plan.md - Navisual-workspace (Workspace) - Visual Studio Code")
+            .is_none());
+        // The Blender pack carries shortcuts; the browser pack is prompt-injection only.
         assert!(!reg.get_active_pack("x.blend - Blender").unwrap().manifest.shortcuts.is_empty());
     }
 

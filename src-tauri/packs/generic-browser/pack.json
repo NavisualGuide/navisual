@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "min_app_version": "0.6.0",
   "target_app": "Web Browser",
-  "window_title_pattern": "(?i)(google chrome|mozilla firefox|microsoft\\s*edge|chromium|opera|brave|vivaldi)\\s*$",
+  "window_title_pattern": "(?i)(google\\W+chrome|mozilla\\W+firefox|microsoft\\W+edge|chromium|opera|brave|vivaldi)\\W*$",
   "priority": 100,
   "system_prompt_injection": "The user is in a web browser. Always refer to the browser generically ('your browser'), never by name. The accessibility tree is rich here, so target on-screen text labels directly. Layout: the address/search bar is the wide field across the top; tabs sit in a strip above it (the active tab is highlighted, each has a close X on the right); back/forward/reload are top-left; the menu (⋮ or ☰) and extensions are top-right; bookmarks may show in a bar under the address bar. To open a site, tell the user to click the address bar, then put the URL in the clipboard field so they can paste it, then press Enter. The page title (left part of the window title) tells you which site is loaded — use it to confirm navigation before pointing inside the page."
 }
