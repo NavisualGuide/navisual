@@ -57,6 +57,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": ["packs/**/*"],
     "publisher": "Jin Fu",
     "copyright": "Copyright 2024-2026 Jin Fu",
     "category": "Utility",

@@ -1,0 +1,26 @@
+{
+  "id": "blender",
+  "name": "Blender Nav-Pack",
+  "version": "1.0.0",
+  "min_app_version": "0.6.0",
+  "target_app": "Blender",
+  "window_title_pattern": "(?i)blender",
+  "system_prompt_injection": "The user is in Blender (3D creation suite). Its UI is an OpenGL surface with almost no accessibility tree, so prefer keyboard shortcuts over pointing at icons whenever a shortcut exists. Layout: 3D viewport in the centre; Toolbar on the left (toggle with T); Properties/N-panel on the right (toggle with N); Timeline along the bottom; the top header menu has File, Edit, Render, Window, Help; the Outliner is top-right. Many tools are modal — after pressing G/R/S the user moves the mouse and left-clicks to confirm or right-clicks/Esc to cancel; say so. Tabs at the top switch workspaces (Layout, Modeling, Sculpting, Shading, Animation, Rendering). When no shortcut fits, describe the menu path (e.g. Render menu > Render Image).",
+  "shortcuts": {
+    "Move (grab)": "G",
+    "Rotate": "R",
+    "Scale": "S",
+    "Insert Keyframe": "I",
+    "Render Image": "F12",
+    "Render Animation": "Ctrl+F12",
+    "Toggle Toolbar": "T",
+    "Toggle Side Panel": "N",
+    "Add Object menu": "Shift+A",
+    "Delete selected": "X",
+    "Duplicate": "Shift+D",
+    "Frame selected in view": "Numpad .",
+    "Toggle Edit/Object mode": "Tab",
+    "Save": "Ctrl+S",
+    "Undo": "Ctrl+Z"
+  }
+}

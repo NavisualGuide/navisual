@@ -135,10 +135,84 @@ pub fn session_resume_template(state_summary: &str) -> String {
     )
 }
 
+/// Format a Nav-Pack's context for injection into the prompt (Workstream C, hooks 1 & 2):
+/// the pack's free-text guidance plus, when present, a shortcut table that steers the AI to
+/// return a `clipboard` key press instead of pointing at an icon. Returns an empty string when
+/// the pack carries neither, so callers can append unconditionally. Shortcuts iterate in the
+/// map's stable (sorted) order.
+pub fn pack_context_block(
+    target_app: &str,
+    injection: &str,
+    shortcuts: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let injection = injection.trim();
+    if injection.is_empty() && shortcuts.is_empty() {
+        return String::new();
+    }
+    let app = if target_app.trim().is_empty() {
+        "this application".to_string()
+    } else {
+        target_app.trim().to_string()
+    };
+    let mut block = format!("\n[App Guide: {app}]\n");
+    if !injection.is_empty() {
+        block.push_str(injection);
+        block.push('\n');
+    }
+    if !shortcuts.is_empty() {
+        block.push_str(
+            "Keyboard shortcuts for this app — when one matches the user's goal, instruct \
+them to press it and put the key combo in the instruction (NOT the clipboard — shortcuts \
+are pressed, not pasted), instead of pointing at a button:\n",
+        );
+        for (action, key) in shortcuts {
+            block.push_str(&format!("  • {action}: {key}\n"));
+        }
+    }
+    block
+}
+
 pub fn initial_context_template(task_description: &str) -> String {
     format!(
         "The user wants help with the following task: {}\n\n\
         Here is their current screen. Analyze it and provide the first navigation instruction.",
         task_description
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pack_context_block;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn empty_pack_yields_empty_block() {
+        assert!(pack_context_block("Blender", "   ", &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn injection_only_has_no_shortcut_section() {
+        let block = pack_context_block("TurboTax", "TurboTax web.", &BTreeMap::new());
+        assert!(block.contains("[App Guide: TurboTax]"));
+        assert!(block.contains("TurboTax web."));
+        assert!(!block.contains("shortcuts"));
+    }
+
+    #[test]
+    fn shortcuts_render_sorted_and_labeled() {
+        let mut sc = BTreeMap::new();
+        sc.insert("Rotate".to_string(), "R".to_string());
+        sc.insert("Move (grab)".to_string(), "G".to_string());
+        let block = pack_context_block("Blender", "Blender 3D.", &sc);
+        assert!(block.contains("• Move (grab): G"));
+        assert!(block.contains("• Rotate: R"));
+        // BTreeMap order is alphabetical: "Move…" before "Rotate".
+        assert!(block.find("Move (grab)").unwrap() < block.find("Rotate").unwrap());
+    }
+
+    #[test]
+    fn blank_target_app_falls_back() {
+        let block = pack_context_block("", "Some guidance.", &BTreeMap::new());
+        assert!(block.contains("[App Guide: this application]"));
+    }
 }
