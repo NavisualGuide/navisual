@@ -5,13 +5,12 @@
 //! sidesteps grounding entirely — the AI emits a cell ref ("Q34") and we resolve the exact
 //! pixels deterministically via UIA `GridPattern`, making cell-pointing work on *every* model.
 //!
-//! Resolution: `"Q34"` → column 17, row 34 (both 1-based) → `GridPattern::GetItem(33, 16)`
-//! (0-based) → the cell element's `BoundingRectangle`.
+//! Resolution: `"Q34"` → column 17, row 34 (both 1-based) → `GridPattern::GetItem(34, 17)`
+//! → the cell element's `BoundingRectangle`. Excel's UIA grid reserves index 0 for the
+//! header row/column (Select-All corner at (0,0)), so a 1-based cell ref maps **directly** to
+//! `GetItem(row, col)` with no offset — verified live (`GetItem(1,1)`=A1, `GetItem(34,17)`=Q34).
 //!
-//! Caveats (documented; live-calibrate / second-cut later):
-//!   - **0-vs-1 / header offset.** We assume Excel's UIA grid item (0,0) is cell A1. If a
-//!     build exposes a header row/column inside the grid, the offset must be re-calibrated
-//!     here. Verify against a live sheet (the `excel_cell_live` ignored test is the harness).
+//! Caveats:
 //!   - **Virtualized off-screen cells.** A cell scrolled out of view may be absent from the
 //!     grid (or report an off-screen rect). We *fall through* (no wrong pointer) rather than
 //!     guess; emitting a scroll / Ctrl+G step is a later enhancement (v0.6.x).
@@ -70,20 +69,23 @@ impl Adapter for ExcelAdapter {
             ));
         };
 
-        // GridPattern is 0-based. Out-of-range usually means the cell is below/right of the
-        // grid the tree currently exposes (virtualized) — fall through, don't guess.
-        let (r0, c0) = (row - 1, col - 1);
-        if (rows > 0 && r0 >= rows) || (cols > 0 && c0 >= cols) {
+        // Calibration (verified live against Excel): the UIA grid reserves index 0 for the
+        // header row (column letters) and index 0 for the header column (row numbers), with
+        // the Select-All corner at (0,0). So a data cell (row R, col C, both 1-based) maps
+        // DIRECTLY to GetItem(R, C) — GetItem(1,1)=A1, GetItem(34,17)=Q34. No subtraction.
+        // Out-of-range usually means the cell is below/right of the grid the tree currently
+        // exposes (virtualized) — fall through, don't guess.
+        if (rows > 0 && row >= rows) || (cols > 0 && col >= cols) {
             return Ok(AdapterHit::fell_through(format!(
                 "{target_text} (row {row}, col {col}) outside the live grid {rows}×{cols} — likely scrolled out"
             )));
         }
 
-        let cell = match grid.get_item(r0, c0) {
+        let cell = match grid.get_item(row, col) {
             Ok(c) => c,
             Err(e) => {
                 return Ok(AdapterHit::fell_through(format!(
-                    "GridPattern.GetItem({r0},{c0}) failed: {e} — cell likely off-screen"
+                    "GridPattern.GetItem({row},{col}) failed: {e} — cell likely off-screen"
                 )))
             }
         };
@@ -117,7 +119,7 @@ impl Adapter for ExcelAdapter {
                 role: "ExcelCell".to_string(),
                 confidence: 1.0,
             }),
-            detail: format!("{target_text} → GridPattern.GetItem({r0},{c0})"),
+            detail: format!("{target_text} → GridPattern.GetItem({row},{col})"),
         })
     }
 }
@@ -167,10 +169,12 @@ fn find_grid(
     best
 }
 
-/// Sanity-bound an absolute screen coordinate (mirrors a11y's check). Cells dragged far
-/// off-screen report absurd coords; reject those.
+/// Sanity-bound an absolute screen coordinate. A minimized Excel window places its elements
+/// at the Windows minimized sentinel (~-32000), and dragged-off / virtualized cells report
+/// absurd coords — reject both so we fall through instead of pointing into nowhere. (In the
+/// live flow the target window is visible, but this keeps the adapter honest if it isn't.)
 fn rect_is_onscreen(left: i32, top: i32) -> bool {
-    left.abs() <= 100_000 && top.abs() <= 100_000
+    left > -30_000 && top > -30_000 && left.abs() <= 100_000 && top.abs() <= 100_000
 }
 
 /// Parse an A1-style cell ref into 1-based `(row, col)`. Rejects ranges ("A1:B2"), bare
