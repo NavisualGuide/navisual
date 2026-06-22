@@ -42,6 +42,29 @@ pub fn enumerate_monitor_rects() -> Vec<Rect> {
     }
 }
 
+/// Re-export so lib.rs can use `capture::MonitorInfo`.
+#[cfg(windows)]
+pub use win::MonitorInfo;
+
+/// Enumerate connected monitors (index, primary flag, rect) for the target picker's
+/// per-screen choices.
+#[cfg(windows)]
+pub fn list_monitors() -> Vec<win::MonitorInfo> {
+    win::list_monitors()
+}
+
+/// Resolve a monitor index (from `list_monitors`) back to its virtual-desktop rect.
+/// `None` if the index is out of range (e.g. a monitor was unplugged after picking).
+#[cfg(windows)]
+pub fn monitor_rect(index: usize) -> Option<Rect> {
+    win::list_monitors().get(index).map(|m| Rect {
+        x: m.x,
+        y: m.y,
+        width: m.width,
+        height: m.height,
+    })
+}
+
 /// Capture the primary monitor and encode as JPEG. The primary monitor is, by
 /// Windows convention, the monitor whose top-left is at (0, 0) in virtual-
 /// desktop coordinates.
@@ -122,6 +145,44 @@ pub fn capture_virtual_desktop_jpeg(quality: u8, exclude: &[Rect]) -> Result<(Ve
         Err(anyhow!(
             "virtual desktop capture only implemented for Windows"
         ))
+    }
+}
+
+/// Capture one explicit desktop region (e.g. a single chosen monitor) and encode as
+/// JPEG. Same pipeline as `capture_virtual_desktop_jpeg` but for a caller-supplied
+/// rect instead of the whole virtual desktop. Returns (jpeg bytes, the rect).
+pub fn capture_region_jpeg(rect: Rect, quality: u8, exclude: &[Rect]) -> Result<(Vec<u8>, Rect)> {
+    #[cfg(windows)]
+    {
+        let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_rects(&mut img, &rect, exclude);
+        let buf = encode_jpeg(&cap_size(img), quality)?;
+        Ok((buf, rect))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (rect, quality, exclude);
+        Err(anyhow!("region capture only implemented for Windows"))
+    }
+}
+
+/// Capture one explicit desktop region as a raw RGBA ImageBuffer (no JPEG, no downscale).
+/// The OCR-path counterpart of `capture_region_jpeg` — used so that in full-screen mode the
+/// locator's OCR sees the *same* region the AI did (the chosen monitor / whole desktop) at
+/// native resolution, instead of the foreground window. Blanks `exclude` (our own panel).
+pub fn capture_region_raw(rect: Rect, exclude: &[Rect]) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+    #[cfg(windows)]
+    {
+        let mut img = win::capture_desktop_region(&rect)?;
+        win::blank_rects(&mut img, &rect, exclude);
+        Ok(img)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (rect, exclude);
+        Err(anyhow!("region capture only implemented for Windows"))
     }
 }
 

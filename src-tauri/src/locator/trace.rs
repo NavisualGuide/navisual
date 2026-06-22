@@ -46,7 +46,29 @@ pub struct A11yTrace {
     /// didn't run). `Some(0)` = the tree wasn't built (lazy app); `Some(n>0)` with no candidates
     /// = the elements were there but none matched the name.
     pub element_count: Option<usize>,
+    /// Outcome of the AI-bbox `ElementFromPoint` probe — the name-agnostic fallback tried when
+    /// the name search found nothing and a trusted AI bbox is present. `None` = not reached
+    /// (name search succeeded, or no bbox).
+    pub bbox_probe: Option<BboxProbe>,
     pub elapsed_ms: u32,
+}
+
+/// The AI-bbox hit-test probe: when the name search misses, `ElementFromPoint` at the AI's
+/// predicted point reaches on-screen controls the role-family find_all can miss (a browser
+/// tab's close button) and sidesteps name mismatches ("Close" vs "close tab"). The bbox is
+/// not trusted blindly — the element it lands on is verified by role family + size.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct BboxProbe {
+    /// The probe actually ran `ElementFromPoint` (vs skipped — e.g. an untrusted model bbox).
+    pub attempted: bool,
+    /// Control type resolved under the bbox (after walking up to an interactive ancestor).
+    pub resolved_role: Option<String>,
+    /// Accessible name of that element — often differs from `target_text`, which is the point.
+    pub resolved_name: Option<String>,
+    /// The probed element passed validation and was used as the located target.
+    pub accepted: bool,
+    /// Human-readable outcome: accepted, why rejected, or why skipped.
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

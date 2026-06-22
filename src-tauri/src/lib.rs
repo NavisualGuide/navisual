@@ -57,6 +57,11 @@ struct GuidanceState {
     /// the AI can no longer request full-screen on its own. Mutually exclusive
     /// with `pinned_hwnd`; survives new tasks like a pin.
     full_screen_mode: bool,
+    /// When `full_screen_mode` is set, the specific monitor the user chose to share
+    /// (its virtual-desktop rect). `None` = the whole stitched virtual desktop — used
+    /// only on single-monitor systems; with 2+ monitors the picker requires choosing a
+    /// single screen (a stitched multi-monitor capture is downscaled to uselessness).
+    full_screen_monitor: Option<capture::Rect>,
 }
 
 /// Shared app state.
@@ -798,9 +803,13 @@ async fn guide(
     // (GuidanceState.full_screen_mode). The AI no longer decides this — full-screen
     // is now an explicit, user-initiated capture scope. When set, pinned/target HWNDs
     // are ignored and the whole virtual desktop is captured.
-    let (stored_hwnd, is_fs) = {
+    let (stored_hwnd, is_fs, fs_monitor) = {
         let g = state.guidance.lock();
-        (g.pinned_hwnd.or(g.target_hwnd), g.full_screen_mode)
+        (
+            g.pinned_hwnd.or(g.target_hwnd),
+            g.full_screen_mode,
+            g.full_screen_monitor,
+        )
     };
 
     // Get the panel rect before entering spawn_blocking — blanked from the
@@ -822,7 +831,12 @@ async fn guide(
     #[allow(clippy::type_complexity)]
     let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>, Option<u64>, Option<Vec<u8>>, Option<capture::Rect>), ()> {
         let (bytes, rect_opt, hwnd_opt) = if is_fs {
-            match capture::capture_virtual_desktop_jpeg(75, &exclude) {
+            // A chosen single monitor, else (single-monitor systems) the whole desktop.
+            let cap = match fs_monitor {
+                Some(r) => capture::capture_region_jpeg(r, 75, &exclude),
+                None => capture::capture_virtual_desktop_jpeg(75, &exclude),
+            };
+            match cap {
                 Ok((bytes, rect)) => (bytes, Some(rect), None),
                 Err(_) => return Err(()),
             }
@@ -886,7 +900,16 @@ async fn guide(
                 None => (None, None),
             }
         } else {
-            (None, None)
+            // Full-screen: OCR must see the SAME region the AI saw (chosen monitor or
+            // whole desktop), at native resolution — not the foreground window — so the
+            // OCR coordinate space matches the AI image. rect_opt is that capture rect.
+            match rect_opt {
+                Some(r) => match capture::capture_region_raw(r, &exclude) {
+                    Ok(raw) => (capture::encode_png_for_ocr(&raw).ok(), Some(r)),
+                    Err(_) => (None, None),
+                },
+                None => (None, None),
+            }
         };
 
         let thumb_b64 = make_chat_thumbnail(&final_bytes);
@@ -1400,10 +1423,10 @@ async fn send_correction(
     // the user can switch focus to the right app then press Wrong and the next
     // capture will find the correct window. In sticky "Entire desktop" mode
     // (full_screen_mode) the capture grabs the whole virtual desktop instead.
-    let is_fs = {
+    let (is_fs, fs_monitor) = {
         let mut g = state.guidance.lock();
         g.target_hwnd = None;
-        g.full_screen_mode
+        (g.full_screen_mode, g.full_screen_monitor)
     };
 
     let exclude = capture::get_panel_rects();
@@ -1444,9 +1467,12 @@ async fn send_correction(
     ) = tokio::task::spawn_blocking(move || {
         // Full desktop (sticky "Entire desktop" user choice) or the focused window.
         let captured: Option<(Vec<u8>, capture::Rect, Option<usize>)> = if is_fs {
-            capture::capture_virtual_desktop_jpeg(75, &exclude)
-                .ok()
-                .map(|(bytes, rect)| (bytes, rect, None))
+            match fs_monitor {
+                Some(r) => capture::capture_region_jpeg(r, 75, &exclude),
+                None => capture::capture_virtual_desktop_jpeg(75, &exclude),
+            }
+            .ok()
+            .map(|(bytes, rect)| (bytes, rect, None))
         } else {
             capture::capture_active_window_jpeg(75, &exclude)
                 .ok()
@@ -1455,13 +1481,16 @@ async fn send_correction(
         if let Some((bytes, rect, hwnd_opt)) = captured {
             let final_bytes = bytes;
             // Native-res OCR image, captured now (overlay cleared, before the streamed subtitle)
-            // so the locator's OCR never reads our own caption — see guide(). No single
-            // window in full-screen mode, so OCR re-capture is skipped (A11y still runs).
+            // so the locator's OCR never reads our own caption — see guide(). In full-screen
+            // mode there's no single window, so OCR re-captures the SAME region the AI saw
+            // (chosen monitor / whole desktop) so its coordinate space matches the AI image.
             let pre_ocr = match hwnd_opt {
                 Some(hwnd) => capture::recapture_window_raw(hwnd, &exclude)
                     .ok()
                     .and_then(|(raw, r)| capture::encode_png_for_ocr(&raw).ok().map(|png| (png, r))),
-                None => None,
+                None => capture::capture_region_raw(rect, &exclude)
+                    .ok()
+                    .and_then(|raw| capture::encode_png_for_ocr(&raw).ok().map(|png| (png, rect))),
             };
 
             let debug_path = if debug_screenshot_enabled {
@@ -1832,6 +1861,7 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
         g.pinned_hwnd = Some(hwnd);
         g.target_hwnd = Some(hwnd);
         g.full_screen_mode = false; // a specific window and full-screen are mutually exclusive
+        g.full_screen_monitor = None;
     }
     #[cfg(windows)]
     announce_shared_app(&app, hwnd);
@@ -1839,15 +1869,38 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
     let _ = app;
 }
 
-/// Select "Entire desktop" as the guidance target — the user-initiated replacement
-/// for the old AI-requested full-screen consent flow. Sticky like a pin: every
-/// subsequent capture (guide / correction) grabs the whole virtual desktop until
-/// the user picks a specific window or returns to the active-window default.
+/// Select a full-screen capture target — the user-initiated replacement for the old
+/// AI-requested full-screen consent flow. `monitor_index` (from `list_monitors`) pins a
+/// single screen; `None` shares the whole virtual desktop (single-monitor systems). On a
+/// multi-monitor setup the picker only offers individual screens — a stitched all-screens
+/// capture is downscaled past the point of usefulness. Sticky like a pin: every
+/// subsequent capture grabs this scope until the user picks a window or Auto-detect.
 #[tauri::command]
-fn pin_full_screen_target(state: State<'_, AppState>) {
+fn pin_full_screen_target(state: State<'_, AppState>, monitor_index: Option<usize>) {
+    #[cfg(windows)]
+    let monitor: Option<capture::Rect> = monitor_index.and_then(capture::monitor_rect);
+    #[cfg(not(windows))]
+    let monitor: Option<capture::Rect> = {
+        let _ = monitor_index;
+        None
+    };
     let mut g = state.guidance.lock();
     g.full_screen_mode = true;
+    g.full_screen_monitor = monitor;
     g.pinned_hwnd = None;
+}
+
+/// List connected monitors for the target picker's per-screen "share this screen" choices.
+#[tauri::command]
+fn list_monitors() -> Vec<capture::MonitorInfo> {
+    #[cfg(windows)]
+    {
+        capture::list_monitors()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![]
+    }
 }
 
 /// Reset target_hwnd (and session state) when the user explicitly starts a new task.
@@ -1868,6 +1921,7 @@ fn unpin_target_window(state: State<'_, AppState>) {
     let mut g = state.guidance.lock();
     g.pinned_hwnd = None;
     g.full_screen_mode = false; // back to the active-window default
+    g.full_screen_monitor = None;
     // target_hwnd retains the last auto-discovered window for the current session.
 }
 
@@ -3126,6 +3180,7 @@ pub fn run() {
             submit_feedback,
             exit_for_update,
             list_target_windows,
+            list_monitors,
             pin_target_window,
             pin_full_screen_target,
             unpin_target_window,

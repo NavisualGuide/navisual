@@ -432,6 +432,40 @@ pub fn enumerate_monitor_rects() -> Vec<Rect> {
         .collect()
 }
 
+/// A single connected monitor, for the target picker's per-screen "share this screen"
+/// choices. `index` is the position in `collect_all_monitors()` and is what
+/// `pin_full_screen_target` resolves back to a rect.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitorInfo {
+    pub index: usize,
+    pub primary: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Enumerate connected monitors as `MonitorInfo` (index, primary flag, rect). Same
+/// ordering as `enumerate_monitor_rects()` so an index from one matches the other.
+pub fn list_monitors() -> Vec<MonitorInfo> {
+    collect_all_monitors()
+        .iter()
+        .enumerate()
+        .map(|(index, info)| {
+            let r = info.monitorInfo.rcMonitor;
+            MonitorInfo {
+                index,
+                // MONITORINFOF_PRIMARY (0x1) — not re-exported by windows-rs 0.62, inlined.
+                primary: info.monitorInfo.dwFlags & 0x0000_0001 != 0,
+                x: r.left,
+                y: r.top,
+                width: (r.right - r.left).max(0) as u32,
+                height: (r.bottom - r.top).max(0) as u32,
+            }
+        })
+        .collect()
+}
+
 /// Returns the rect of the entire multi-monitor virtual desktop.
 pub fn get_virtual_desktop_rect() -> Rect {
     unsafe {

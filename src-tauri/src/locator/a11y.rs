@@ -14,7 +14,7 @@
 //!   and search each one that belongs to a different process.
 //! - Reject elements with obviously bogus coordinates (|x|,|y| > 10 000 px).
 
-use super::trace::{A11yCandidate, A11yTrace};
+use super::trace::{A11yCandidate, A11yTrace, BboxProbe};
 use super::LocateResult;
 use crate::capture::Rect;
 use anyhow::{anyhow, Context, Result};
@@ -22,7 +22,7 @@ use regex::Regex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uiautomation::controls::ControlType;
-use uiautomation::types::{TreeScope, UIProperty};
+use uiautomation::types::{Point, TreeScope, UIProperty};
 use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
 use windows::Win32::Foundation::{FALSE, HWND, LPARAM, RECT, TRUE};
@@ -206,6 +206,195 @@ fn is_container_role(ct: ControlType) -> bool {
 /// Off-screen / bogus coordinate guard (minimised windows report ~-32000).
 fn rect_is_onscreen(left: i32, top: i32) -> bool {
     left.abs() <= 10_000 && top.abs() <= 10_000
+}
+
+/// Interactive (clickable / focusable) control types — the probe accepts only these.
+/// Mirrors `hit_test::is_interactive`.
+fn is_interactive_ct(ct: ControlType) -> bool {
+    matches!(
+        ct,
+        ControlType::Button
+            | ControlType::Hyperlink
+            | ControlType::MenuItem
+            | ControlType::TabItem
+            | ControlType::ListItem
+            | ControlType::CheckBox
+            | ControlType::RadioButton
+            | ControlType::ComboBox
+            | ControlType::SplitButton
+            | ControlType::TreeItem
+    )
+}
+
+/// Does the resolved control type satisfy the AI's requested role? Exact match, plus a lenient
+/// "button" family — web UIs surface buttons inconsistently as Button / Hyperlink / SplitButton /
+/// MenuItem. All other roles must match exactly (so a textbox request can't accept a button).
+fn ct_family_matches(resolved: ControlType, want: ControlType) -> bool {
+    resolved == want
+        || (want == ControlType::Button
+            && matches!(
+                resolved,
+                ControlType::Button
+                    | ControlType::SplitButton
+                    | ControlType::Hyperlink
+                    | ControlType::MenuItem
+            ))
+}
+
+/// True when `b`'s centre is outside `ai` expanded ±300% on each side (a 7× keep-box).
+/// Mirrors the OCR ai-bbox filter — generous enough that a slightly-off bbox doesn't reject a
+/// real match, but a stray same-named element across the screen is caught.
+fn center_outside_expanded(b: Rect, ai: Rect) -> bool {
+    let pad_x = ai.width as f32 * 3.0;
+    let pad_y = ai.height as f32 * 3.0;
+    let cx = b.x as f32 + b.width as f32 / 2.0;
+    let cy = b.y as f32 + b.height as f32 / 2.0;
+    cx < ai.x as f32 - pad_x
+        || cx > (ai.x + ai.width as i32) as f32 + pad_x
+        || cy < ai.y as f32 - pad_y
+        || cy > (ai.y + ai.height as i32) as f32 + pad_y
+}
+
+/// Find a Button inside a composite item (the close X is a child of a browser TabItem, not
+/// reachable by walking up from a point on the tab body). Returns the first Button descendant,
+/// preferring one whose name mentions "close". Control-type id 50000 = Button.
+fn find_button_descendant(automation: &UIAutomation, parent: &UIElement) -> Option<UIElement> {
+    let cond = automation
+        .create_property_condition(UIProperty::ControlType, Variant::from(50000i32), None)
+        .ok()?;
+    let buttons = parent.find_all(TreeScope::Descendants, &cond).ok()?;
+    let mut first: Option<UIElement> = None;
+    for b in buttons {
+        if b.get_name()
+            .map(|n| n.to_ascii_lowercase().contains("close"))
+            .unwrap_or(false)
+        {
+            return Some(b);
+        }
+        if first.is_none() {
+            first = Some(b);
+        }
+    }
+    first
+}
+
+/// AI-bbox hit-test probe — the name-agnostic fallback. `ElementFromPoint` is a *spatial*
+/// query: it reaches on-screen controls the role-family `find_all` can miss (a browser tab's
+/// close button) and sidesteps name mismatches (Chrome names it "Close", the AI said "Close
+/// tab"). The bbox is NOT trusted blindly — we VERIFY the element it lands on: walk up to the
+/// nearest interactive control, then accept only if its role matches the AI's requested family
+/// and its rect is control-sized (≤ 20× the bbox area, on-screen). A bad bbox lands on the
+/// wrong thing / a container and is rejected → no pointer (the safe outcome).
+fn ai_bbox_probe(
+    automation: &UIAutomation,
+    ai_bbox: Rect,
+    desired_ct: Option<ControlType>,
+) -> (Option<LocateResult>, BboxProbe) {
+    let mut probe = BboxProbe {
+        attempted: true,
+        ..Default::default()
+    };
+    let cx = ai_bbox.x + ai_bbox.width as i32 / 2;
+    let cy = ai_bbox.y + ai_bbox.height as i32 / 2;
+
+    let Ok(mut el) = automation.element_from_point(Point::new(cx, cy)) else {
+        probe.detail = "element_from_point failed".to_string();
+        return (None, probe);
+    };
+    // The deepest element under the point is often a Text/Image run inside the control —
+    // walk up to the first interactive ancestor, stopping at a container (Window/Pane).
+    let walker = automation.get_control_view_walker().ok();
+    let mut found_ct: Option<ControlType> = None;
+    for _ in 0..4 {
+        let Ok(ct) = el.get_control_type() else { break };
+        if is_interactive_ct(ct) {
+            found_ct = Some(ct);
+            break;
+        }
+        if is_container_role(ct) {
+            break; // reached a window/pane before any interactive ancestor
+        }
+        match walker.as_ref().and_then(|w| w.get_parent(&el).ok()) {
+            Some(parent) => el = parent,
+            None => break,
+        }
+    }
+
+    let Some(mut ct) = found_ct else {
+        probe.detail = "no interactive control under bbox".to_string();
+        return (None, probe);
+    };
+
+    // Descend for a "close the tab" target. The AI asks for a `button` and points at the tab,
+    // but the X is a *child* of the TabItem — ElementFromPoint on the tab body resolves the
+    // TabItem, and the X is off to the side, so walking UP can't reach it. When we wanted a
+    // Button but landed on a composite item (tab / list row / tree row), descend to a Button
+    // inside it (Chrome's tab close button is a child Button named "Close").
+    let mut descended = false;
+    if desired_ct == Some(ControlType::Button)
+        && matches!(
+            ct,
+            ControlType::TabItem | ControlType::ListItem | ControlType::TreeItem
+        )
+    {
+        if let Some(btn) = find_button_descendant(automation, &el) {
+            el = btn;
+            ct = ControlType::Button;
+            descended = true;
+        }
+    }
+
+    probe.resolved_role = Some(format!("{ct:?}"));
+    probe.resolved_name = el.get_name().ok().filter(|s| !s.is_empty());
+
+    // Role-family validation: when the AI named a role, the resolved control must match it
+    // (so a bbox that drifted onto the whole TabItem can't satisfy a "button" request).
+    if let Some(want) = desired_ct {
+        if !ct_family_matches(ct, want) {
+            probe.detail = format!("role mismatch: {ct:?} ≠ {want:?}");
+            return (None, probe);
+        }
+    }
+
+    let Ok(rect) = el.get_bounding_rectangle() else {
+        probe.detail = "element has no rect".to_string();
+        return (None, probe);
+    };
+    let (left, top) = (rect.get_left(), rect.get_top());
+    let (w, h) = (rect.get_width().max(0) as u32, rect.get_height().max(0) as u32);
+    if w == 0 || h == 0 || !rect_is_onscreen(left, top) {
+        probe.detail = "element rect off-screen/empty".to_string();
+        return (None, probe);
+    }
+    // Size guard: a real control is ~bbox-sized; a far larger rect means the probe walked up
+    // into a container (or landed on a big element the AI didn't mean).
+    let bbox_area = (ai_bbox.width.max(1) as u64) * (ai_bbox.height.max(1) as u64);
+    if (w as u64) * (h as u64) > bbox_area.saturating_mul(20) {
+        probe.detail = format!(
+            "rect too large ({w}×{h} vs bbox {}×{})",
+            ai_bbox.width, ai_bbox.height
+        );
+        return (None, probe);
+    }
+
+    probe.accepted = true;
+    probe.detail = if descended {
+        "accepted (descended item → close Button)".to_string()
+    } else {
+        "accepted".to_string()
+    };
+    let result = LocateResult {
+        bbox: Rect {
+            x: left,
+            y: top,
+            width: w,
+            height: h,
+        },
+        name: probe.resolved_name.clone().unwrap_or_default(),
+        role: format!("{ct:?}"),
+        confidence: 1.0,
+    };
+    (Some(result), probe)
 }
 
 /// Our own process ID (for "foreground is us" detection).
@@ -432,6 +621,10 @@ pub fn find_element(
     // from redirecting us to the wrong window — common when the AI takes a
     // long time (e.g. local Ollama models) and the user switches focus.
     let our_pid = own_pid();
+    // The window whose UI framework we classify. With a pinned target that's it; in
+    // full-screen / no-pin mode it's the window we actually search (set below), so a Chrome
+    // browser isn't mislabeled `Other` (which skipped the fast path and timed out).
+    let mut framework_hwnd: Option<usize> = opts.target_hwnd;
 
     let search_roots: Vec<UIElement> = if let Some(hwnd_raw) = opts.target_hwnd {
         let hwnd = HWND(hwnd_raw as *mut _);
@@ -457,13 +650,15 @@ pub fn find_element(
     } else {
         let (fg_hwnd, fg_pid) = foreground_pid();
         if fg_pid != 0 && fg_pid != our_pid {
+            framework_hwnd = Some(fg_hwnd.0 as usize);
             match automation.element_from_handle(fg_hwnd.into()) {
                 Ok(el) => vec![el],
                 Err(_) => Vec::new(),
             }
         } else {
-            collect_visible_top_windows(our_pid, 8)
-                .into_iter()
+            let wins = collect_visible_top_windows(our_pid, 8);
+            framework_hwnd = wins.first().map(|h| h.0 as usize);
+            wins.into_iter()
                 .filter_map(|h| automation.element_from_handle(h.into()).ok())
                 .collect()
         }
@@ -475,8 +670,7 @@ pub fn find_element(
         return Ok((None, trace));
     }
 
-    let framework = opts
-        .target_hwnd
+    let framework = framework_hwnd
         .map(|h| framework_of(&automation, h))
         .unwrap_or(Framework::Other);
     let is_chrome = framework == Framework::Chrome;
@@ -640,6 +834,34 @@ pub fn find_element(
     }
 
     if candidates.is_empty() {
+        // Name search found nothing. Before giving up, try the AI-bbox probe: ElementFromPoint
+        // at the AI's predicted point, verified by role + size (see `ai_bbox_probe`). Gated by
+        // per-model bbox trust — not as the safety mechanism (the verification is), but to avoid
+        // probing a known-unreliable bbox (free-tier Nemotron) that could land on a coincidental
+        // small control. The outcome is recorded either way so the debug drawer shows it.
+        if let Some(ai) = opts.ai_bbox {
+            if opts.bbox_decisive {
+                let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                trace.bbox_probe = Some(probe);
+                if let Some(hit) = probe_hit {
+                    trace.candidates.push(A11yCandidate {
+                        name: hit.name.clone(),
+                        role: hit.role.clone(),
+                        bbox: (hit.bbox.x, hit.bbox.y, hit.bbox.width, hit.bbox.height),
+                        selected: true,
+                        reject_reason: None,
+                    });
+                    trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                    return Ok((Some(hit), trace));
+                }
+            } else {
+                trace.bbox_probe = Some(BboxProbe {
+                    attempted: false,
+                    detail: "skipped — model bbox not trusted (BBOX_DISTRUST_MODELS)".to_string(),
+                    ..Default::default()
+                });
+            }
+        }
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
         return Ok((None, trace));
     }
@@ -669,6 +891,40 @@ pub fn find_element(
                 da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
             })
         });
+    }
+
+    // Trusted-bbox guard: if the best name match sits far outside a trusted AI bbox, it's
+    // likely a stray same-named element (a Text "localhost:9876" in the screen corner, nowhere
+    // near the tab the AI pointed at). Try the bbox probe and prefer its validated, in-bbox
+    // element. Only fires for a trusted model + a name match well outside the bbox, and only
+    // wins if the probe actually resolves a valid control there — else the name match stands.
+    if opts.bbox_decisive {
+        if let Some(ai) = opts.ai_bbox {
+            if center_outside_expanded(candidates[0].bbox, ai) {
+                let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                trace.bbox_probe = Some(probe);
+                if let Some(hit) = probe_hit {
+                    for c in &candidates {
+                        trace.candidates.push(A11yCandidate {
+                            name: c.name.clone(),
+                            role: c.role.clone(),
+                            bbox: (c.bbox.x, c.bbox.y, c.bbox.width, c.bbox.height),
+                            selected: false,
+                            reject_reason: Some("far from AI bbox — probe preferred".to_string()),
+                        });
+                    }
+                    trace.candidates.push(A11yCandidate {
+                        name: hit.name.clone(),
+                        role: hit.role.clone(),
+                        bbox: (hit.bbox.x, hit.bbox.y, hit.bbox.width, hit.bbox.height),
+                        selected: true,
+                        reject_reason: None,
+                    });
+                    trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                    return Ok((Some(hit), trace));
+                }
+            }
+        }
     }
 
     // Record candidates in the trace. The first one is selected; the rest are

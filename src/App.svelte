@@ -99,6 +99,13 @@ See the LICENSE file in the root of this repository for complete details.
     selected: boolean;
     reject_reason: string | null;
   };
+  type BboxProbe = {
+    attempted: boolean;
+    resolved_role: string | null;
+    resolved_name: string | null;
+    accepted: boolean;
+    detail: string;
+  };
   type A11yTrace = {
     ran: boolean;
     regex_used: string;
@@ -109,6 +116,7 @@ See the LICENSE file in the root of this repository for complete details.
     framework: string | null;
     cached: boolean;
     element_count: number | null;
+    bbox_probe: BboxProbe | null;
     elapsed_ms: number;
   };
   type Corroboration = {
@@ -255,10 +263,17 @@ See the LICENSE file in the root of this repository for complete details.
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   let pinnedHwnd = $state<number | null>(null);
-  // User chose "Entire desktop" in the target picker (backend full_screen_mode).
+  // User chose a full-screen capture target in the picker (backend full_screen_mode).
   // Mutually exclusive with pinnedHwnd; the user-initiated replacement for the
   // old AI-requested full-screen consent flow.
   let fullScreenTarget = $state(false);
+  // Connected monitors. With 2+ the picker offers individual screens (a stitched
+  // all-screens capture is downscaled past usefulness); with 1 it's "Entire desktop".
+  type MonitorInfo = { index: number; primary: boolean; x: number; y: number; width: number; height: number; };
+  let monitors = $state<MonitorInfo[]>([]);
+  // Which screen the full-screen target is pinned to (null = whole desktop, the
+  // single-monitor case). Drives the picker checkmark and the header chip label.
+  let fullScreenMonitorIndex = $state<number | null>(null);
 
   // Friendly names for exe stems shown in the "Shared:" chip (mirrors Rust's friendly_exe_name).
   const EXE_DISPLAY: Record<string, string> = {
@@ -305,7 +320,10 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function openTargetPicker() {
     dismissTargetHint(); // they found the picker — the coach mark is no longer needed
-    targetWindows = await invoke<TargetWindowInfo[]>("list_target_windows");
+    [targetWindows, monitors] = await Promise.all([
+      invoke<TargetWindowInfo[]>("list_target_windows"),
+      invoke<MonitorInfo[]>("list_monitors"),
+    ]);
     targetPickerOpen = true;
   }
 
@@ -338,13 +356,16 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  // "Entire desktop" — the user-initiated full-screen capture target. Sticky like
-  // a pin; survives new tasks until the user picks a window or Auto-detect again.
-  async function selectDesktop() {
+  // Full-screen capture target — the user-initiated full-screen target. `monitorIndex`
+  // pins a single screen (multi-monitor); `null` shares the whole desktop (single
+  // monitor). Sticky like a pin; survives new tasks until the user picks a window or
+  // Auto-detect again.
+  async function selectDesktop(monitorIndex: number | null) {
     targetPickerOpen = false;
-    await invoke("pin_full_screen_target");
+    await invoke("pin_full_screen_target", { monitorIndex });
     pinnedHwnd = null;
     fullScreenTarget = true;
+    fullScreenMonitorIndex = monitorIndex;
   }
 
   // UI state
@@ -1725,13 +1746,13 @@ See the LICENSE file in the root of this repository for complete details.
         <button
           class="header-shared"
           class:header-shared-pinned={pinnedHwnd !== null || fullScreenTarget}
-          title={fullScreenTarget ? "Sharing the entire desktop — click to switch target" : pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
+          title={fullScreenTarget ? "Sharing your screen — click to switch target" : pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
           onmousedown={(e) => e.stopPropagation()}
           onclick={openTargetPicker}
         >
           <span class="header-shared-dot"></span>
           {#if fullScreenTarget}
-            🖥️ Entire desktop
+            🖥️ {fullScreenMonitorIndex !== null ? `Screen ${fullScreenMonitorIndex + 1}` : "Entire desktop"}
           {:else if sharedApp}
             {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
             {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
@@ -1877,6 +1898,15 @@ See the LICENSE file in the root of this repository for complete details.
                   </div>
                   {#if locateTrace.a11y.regex_used}
                     <div class="debug-mono">{locateTrace.a11y.regex_used}</div>
+                  {/if}
+                  {#if locateTrace.a11y.bbox_probe}
+                    {@const p = locateTrace.a11y.bbox_probe}
+                    <div class="debug-cand {p.accepted ? 'cand-selected' : 'cand-rejected'}">
+                      <span class="cand-mark">{p.accepted ? "✔" : "·"}</span>
+                      <span class="cand-text">bbox probe{p.resolved_name ? ` → "${p.resolved_name}"` : ""}</span>
+                      {#if p.resolved_role}<span class="cand-meta">{p.resolved_role}</span>{/if}
+                      <span class="cand-reason">— {p.detail}</span>
+                    </div>
                   {/if}
                   {#each locateTrace.a11y.candidates as c}
                     <div class="debug-cand {c.selected ? 'cand-selected' : 'cand-rejected'}">
@@ -2114,11 +2144,21 @@ See the LICENSE file in the root of this repository for complete details.
           {/if}
         </button>
       {/each}
-      <button class="target-pick-item" class:target-pick-selected={fullScreenTarget} onclick={selectDesktop}>
-        <span class="target-pick-check">{fullScreenTarget ? "✓" : ""}</span>
-        <span class="target-pick-name">🖥️ Entire desktop</span>
-        <span class="target-pick-sub">share the whole screen — all windows</span>
-      </button>
+      {#if monitors.length > 1}
+        {#each monitors as m (m.index)}
+          <button class="target-pick-item" class:target-pick-selected={fullScreenTarget && fullScreenMonitorIndex === m.index} onclick={() => selectDesktop(m.index)}>
+            <span class="target-pick-check">{fullScreenTarget && fullScreenMonitorIndex === m.index ? "✓" : ""}</span>
+            <span class="target-pick-name">🖥️ Screen {m.index + 1}{m.primary ? " (primary)" : ""}</span>
+            <span class="target-pick-sub">{m.width}×{m.height} — this screen only</span>
+          </button>
+        {/each}
+      {:else}
+        <button class="target-pick-item" class:target-pick-selected={fullScreenTarget} onclick={() => selectDesktop(null)}>
+          <span class="target-pick-check">{fullScreenTarget ? "✓" : ""}</span>
+          <span class="target-pick-name">🖥️ Entire desktop</span>
+          <span class="target-pick-sub">share the whole screen — all windows</span>
+        </button>
+      {/if}
     </div>
   {/if}
 
