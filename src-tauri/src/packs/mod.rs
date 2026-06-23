@@ -472,7 +472,20 @@ mod tests {
             .get_active_pack("v0.6-plan.md - Navisual-workspace (Workspace) - Visual Studio Code")
             .is_none());
         // The Blender pack carries shortcuts; the browser pack is prompt-injection only.
-        assert!(!reg.get_active_pack("x.blend - Blender").unwrap().manifest.shortcuts.is_empty());
+        let blender = reg.get_active_pack("x.blend - Blender").unwrap();
+        assert!(!blender.manifest.shortcuts.is_empty());
+        // The full Blender pack ships a toolbar icon set; each tool name resolves to its icon.
+        assert!(blender.icons.len() >= 8, "expected the bundled Blender icons (got {})", blender.icons.len());
+        for (target, want) in [
+            ("Move tool", "move"),
+            ("Rotate", "rotate"),
+            ("Scale", "scale"),
+            ("Annotate", "annotate"),
+            ("Add Cube", "add_cube"),
+        ] {
+            let got: Vec<&str> = blender.candidate_icons(target).iter().map(|a| a.stem.as_str()).collect();
+            assert_eq!(got, vec![want], "target {target:?} should resolve to exactly [{want}]");
+        }
     }
 
     #[test]
