@@ -100,3 +100,10 @@ opt-level = 2
 [profile.dev.package."imageproc"]
 opt-level = 3
 
+# Same for the test profile so timing/measurement harnesses (match_icon_live) reflect a real
+# optimized NCC, not unoptimized test code.
+[profile.test.package."imageproc"]
+opt-level = 3
+[profile.test.package."image"]
+opt-level = 2
+

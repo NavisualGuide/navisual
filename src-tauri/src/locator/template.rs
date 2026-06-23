@@ -311,18 +311,16 @@ mod tests {
         let tmpl =
             load_gray_from_bytes(&std::fs::read(std::env::var("TEMPLATE").unwrap()).unwrap())
                 .unwrap();
-        match match_icon(&hay, &tmpl, DEFAULT_SCALES, -1.0) {
+        eprintln!("haystack {}x{}, template {}x{}, {} scales", hay.width(), hay.height(), tmpl.width(), tmpl.height(), DEFAULT_SCALES.len());
+        let t = std::time::Instant::now();
+        let res = match_icon(&hay, &tmpl, DEFAULT_SCALES, -1.0);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        match res {
             Some(m) => eprintln!(
-                "best: pos=({},{}) {}x{} score={:.4} scale={} accepted={}",
-                m.x,
-                m.y,
-                m.width,
-                m.height,
-                m.score,
-                m.scale,
-                m.score >= DEFAULT_MIN_SCORE
+                "best: pos=({},{}) {}x{} score={:.4} scale={} accepted={} | match_icon took {:.1} ms",
+                m.x, m.y, m.width, m.height, m.score, m.scale, m.score >= DEFAULT_MIN_SCORE, ms
             ),
-            None => eprintln!("no match"),
+            None => eprintln!("no match | match_icon took {ms:.1} ms"),
         }
     }
 
