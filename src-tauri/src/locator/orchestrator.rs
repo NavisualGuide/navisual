@@ -493,19 +493,22 @@ fn corroboration_accept(
     }
 }
 
-/// Resolve the template search window (`x0,y0,x1,y1` in image px), preferring a pack region
-/// hint (bbox-independent, stable for static chrome) over the AI bbox. The hint is a fractional
-/// rect of the captured window; the bbox path expands the bbox by a generous, capped margin so
-/// a loosely-grounded bbox still contains the icon. `None` (skip template) when neither yields a
-/// valid window — full-frame NCC is too slow to do unbounded.
-fn resolve_search_window(
+/// Ordered template search windows (`x0,y0,x1,y1` in image px), most-trusted first: the pack
+/// region hint (a fast *static prior* — see [`region_to_fractional_rect`]) **then** a margin
+/// around the AI bbox (the *dynamic* per-request grounding). Returning both — rather than
+/// letting the hint win outright — is what makes a hint safe for apps with movable/dockable UI:
+/// if the user moved the panel so the hint is stale, the region search misses and we fall back
+/// to the bbox window (one extra bounded search), instead of a miss. Empty when neither yields a
+/// valid window (skip template — full-frame NCC is too slow to do unbounded).
+fn candidate_windows(
     icon_region: Option<[f32; 4]>,
     ai_bbox_img: Option<(i32, i32, u32, u32)>,
     img_w: u32,
     img_h: u32,
-) -> Option<(i32, i32, i32, i32)> {
+) -> Vec<(i32, i32, i32, i32)> {
+    let mut out = Vec::new();
     if img_w == 0 || img_h == 0 {
-        return None;
+        return out;
     }
     let (w, h) = (img_w as f32, img_h as f32);
     if let Some([fx0, fy0, fx1, fy1]) = icon_region {
@@ -514,7 +517,7 @@ fn resolve_search_window(
         let x1 = (fx1.clamp(0.0, 1.0) * w).round() as i32;
         let y1 = (fy1.clamp(0.0, 1.0) * h).round() as i32;
         if x1 > x0 && y1 > y0 {
-            return Some((x0, y0, x1, y1));
+            out.push((x0, y0, x1, y1));
         }
     }
     if let Some((bx, by, bw, bh)) = ai_bbox_img {
@@ -524,19 +527,21 @@ fn resolve_search_window(
         let (x0, y0) = ((cx - half).max(0), (cy - half).max(0));
         let (x1, y1) = ((cx + half).min(img_w as i32), (cy + half).min(img_h as i32));
         if x1 > x0 && y1 > y0 {
-            return Some((x0, y0, x1, y1));
+            out.push((x0, y0, x1, y1));
         }
     }
-    None
+    out
 }
 
 /// Pass 3 — match the active nav-pack's candidate icon crops against the capture by NCC.
 ///
-/// Search is **restricted to a bounded window** (a pack region hint, else a margin around the
-/// AI bbox — see [`resolve_search_window`]): full-frame NCC over a ~2-MP capture × several
-/// scales is multi-second even optimized, whereas a ~400-px window is tens of ms.
+/// Search is **restricted to bounded windows** ([`candidate_windows`]: region hint first, then a
+/// margin around the AI bbox): full-frame NCC over a ~2-MP capture × several scales is
+/// multi-second even optimized, whereas a ~400-px window is tens of ms. Windows are tried in
+/// order and the first whose best icon clears the threshold wins — so a *stale* region hint
+/// (movable UI) degrades to one extra search, not a miss.
 ///
-/// Matches are mapped region-local → image px (add the window origin) → virtual-desktop coords
+/// Matches are mapped window-local → image px (add the window origin) → virtual-desktop coords
 /// (the same scale+origin transform as OCR hits). Accepts only above `DEFAULT_MIN_SCORE` —
 /// "no pointer beats wrong pointer"; the per-template floor is `-1.0` so the trace records the
 /// best raw score even on a reject.
@@ -552,54 +557,21 @@ fn try_template_pass(
     if templates.is_empty() {
         return (None, None);
     }
-    // Window precedence: pack region hint (bbox-independent) → AI bbox window → skip. Without
-    // either there's no affordable bound, so skip rather than risk a full-frame stall.
-    let Some((rx0, ry0, rx1, ry1)) =
-        resolve_search_window(icon_region, ai_bbox_img, img_w, img_h)
-    else {
+    let windows = candidate_windows(icon_region, ai_bbox_img, img_w, img_h);
+    if windows.is_empty() {
         return (None, None);
-    };
+    }
     let Ok(full) = template::load_gray_from_bytes(haystack_png) else {
         return (None, Some(TemplateTrace::default()));
     };
-    let region = image::imageops::crop_imm(
-        &full,
-        rx0 as u32,
-        ry0 as u32,
-        (rx1 - rx0) as u32,
-        (ry1 - ry0) as u32,
-    )
-    .to_image();
+    // Decode each icon crop once; reused across the candidate windows.
+    let needles: Vec<(String, image::GrayImage)> = templates
+        .iter()
+        .filter_map(|(name, bytes)| {
+            template::load_gray_from_bytes(bytes).ok().map(|g| (name.clone(), g))
+        })
+        .collect();
 
-    let mut tr = TemplateTrace {
-        best_score: -1.0,
-        ..Default::default()
-    };
-    let mut best: Option<(template::TemplateMatch, String)> = None;
-    for (name, bytes) in templates {
-        let Ok(needle) = template::load_gray_from_bytes(bytes) else {
-            continue;
-        };
-        tr.templates_tried += 1;
-        // min_score -1.0 → return the raw best so we can record it even when rejected.
-        if let Some(m) = template::match_icon(&region, &needle, template::DEFAULT_SCALES, -1.0) {
-            if m.score > tr.best_score {
-                tr.best_score = m.score;
-                tr.best_scale = m.scale;
-                tr.best_icon = Some(name.clone());
-                best = Some((m, name.clone()));
-            }
-        }
-    }
-    let accepted = best
-        .as_ref()
-        .map(|(m, _)| m.score >= template::DEFAULT_MIN_SCORE)
-        .unwrap_or(false);
-    tr.accepted = accepted;
-    if !accepted {
-        return (None, Some(tr));
-    }
-    let (m, name) = best.expect("accepted implies a best match");
     let (sx, sy) = if img_w > 0 && img_h > 0 && crop_rect.width > 0 && crop_rect.height > 0 {
         (
             crop_rect.width as f32 / img_w as f32,
@@ -608,22 +580,58 @@ fn try_template_pass(
     } else {
         (1.0, 1.0)
     };
-    // region-local → full-image px (add the window origin) → virtual-desktop.
-    let img_x = m.x + rx0;
-    let img_y = m.y + ry0;
-    let bbox = Rect {
-        x: (img_x as f32 * sx).round() as i32 + crop_rect.x,
-        y: (img_y as f32 * sy).round() as i32 + crop_rect.y,
-        width: (m.width as f32 * sx).round() as u32,
-        height: (m.height as f32 * sy).round() as u32,
+
+    let mut tr = TemplateTrace {
+        templates_tried: needles.len(),
+        best_score: -1.0,
+        ..Default::default()
     };
-    let result = LocateResult {
-        bbox,
-        name,
-        role: "Template".to_string(),
-        confidence: m.score,
-    };
-    (Some(result), Some(tr))
+    // Try each window in priority order (region hint, then bbox). Accept at the first window
+    // whose best icon clears the threshold; min_score -1.0 returns the raw best so the trace
+    // records the best score even when rejected.
+    for (rx0, ry0, rx1, ry1) in windows {
+        let region = image::imageops::crop_imm(
+            &full,
+            rx0 as u32,
+            ry0 as u32,
+            (rx1 - rx0) as u32,
+            (ry1 - ry0) as u32,
+        )
+        .to_image();
+        let mut win_best: Option<(template::TemplateMatch, String)> = None;
+        for (name, needle) in &needles {
+            if let Some(m) = template::match_icon(&region, needle, template::DEFAULT_SCALES, -1.0) {
+                let better = win_best.as_ref().map(|(b, _)| m.score > b.score).unwrap_or(true);
+                if better {
+                    win_best = Some((m, name.clone()));
+                }
+            }
+        }
+        let Some((m, name)) = win_best else { continue };
+        if m.score > tr.best_score {
+            tr.best_score = m.score;
+            tr.best_scale = m.scale;
+            tr.best_icon = Some(name.clone());
+        }
+        if m.score >= template::DEFAULT_MIN_SCORE {
+            tr.accepted = true;
+            // window-local → full-image px (add the window origin) → virtual-desktop.
+            let bbox = Rect {
+                x: ((m.x + rx0) as f32 * sx).round() as i32 + crop_rect.x,
+                y: ((m.y + ry0) as f32 * sy).round() as i32 + crop_rect.y,
+                width: (m.width as f32 * sx).round() as u32,
+                height: (m.height as f32 * sy).round() as u32,
+            };
+            let result = LocateResult {
+                bbox,
+                name,
+                role: "Template".to_string(),
+                confidence: m.score,
+            };
+            return (Some(result), Some(tr));
+        }
+    }
+    (None, Some(tr))
 }
 
 /// Whether the UIA element rect under the OCR match is a sound pointer target. Requires the
@@ -694,19 +702,21 @@ mod tests {
     }
 
     #[test]
-    fn search_window_prefers_region_hint_over_bbox() {
-        use super::resolve_search_window;
-        // A "left" hint [0,0,0.18,1.0] on a 1000×800 image → left strip, independent of bbox.
-        let w = resolve_search_window(Some([0.0, 0.0, 0.18, 1.0]), Some((900, 50, 20, 20)), 1000, 800);
-        assert_eq!(w, Some((0, 0, 180, 800)));
-        // No hint → bbox window: center (910,60), half=clamp(2*20,220,360)=220, clamped to the
-        // 1000×800 image → x[690..1000], y[0..280].
-        let w = resolve_search_window(None, Some((900, 50, 20, 20)), 1000, 800);
-        assert_eq!(w, Some((690, 0, 1000, 280)));
-        // Neither → None (template skipped, never full-frame).
-        assert_eq!(resolve_search_window(None, None, 1000, 800), None);
-        // Degenerate image → None.
-        assert_eq!(resolve_search_window(Some([0.0, 0.0, 0.5, 0.5]), None, 0, 0), None);
+    fn candidate_windows_region_first_then_bbox() {
+        use super::candidate_windows;
+        // Hint + bbox → BOTH windows, region first (so a stale hint falls back to the bbox).
+        // "left" [0,0,0.18,1.0] → left strip; bbox center (910,60) half=clamp(40,220,360)=220.
+        let w = candidate_windows(Some([0.0, 0.0, 0.18, 1.0]), Some((900, 50, 20, 20)), 1000, 800);
+        assert_eq!(w, vec![(0, 0, 180, 800), (690, 0, 1000, 280)]);
+        // No hint → just the bbox window.
+        assert_eq!(
+            candidate_windows(None, Some((900, 50, 20, 20)), 1000, 800),
+            vec![(690, 0, 1000, 280)]
+        );
+        // Neither → empty (template skipped, never full-frame).
+        assert!(candidate_windows(None, None, 1000, 800).is_empty());
+        // Degenerate image → empty.
+        assert!(candidate_windows(Some([0.0, 0.0, 0.5, 0.5]), None, 0, 0).is_empty());
     }
 
     #[test]
