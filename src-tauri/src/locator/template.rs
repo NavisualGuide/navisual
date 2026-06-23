@@ -101,6 +101,12 @@ const COARSE_ICON_PX: f32 = 12.0;
 /// similar/repeated icons with a spatial prior). Bounds the fine-refine count.
 const MAX_PEAKS: usize = 5;
 
+/// Scales for the coarse *localization* pass — fewer than `DEFAULT_SCALES` (the full per-locate
+/// cost driver), but still spanning the DPI range so a cross-DPI icon peaks in the right area.
+/// The fine pass re-sweeps `DEFAULT_SCALES` to nail the exact scale, so coarse only needs to get
+/// us to the right neighbourhood.
+const COARSE_SCALES: &[f32] = &[0.67, 1.0, 1.5];
+
 /// NCC result surface from `match_template` (one f32 score per candidate position).
 type NccMap = image::ImageBuffer<image::Luma<f32>, Vec<f32>>;
 
@@ -189,7 +195,7 @@ pub fn match_icon_pyramid(haystack: &GrayImage, template: &GrayImage, min_score:
     }
     let chay = image::imageops::resize(haystack, chw, chh, FilterType::Lanczos3);
     let ctmpl = image::imageops::resize(template, ctw, cth, FilterType::Lanczos3);
-    let Some((cmw, cmh, cmap)) = best_scale_map(&chay, &ctmpl, DEFAULT_SCALES) else {
+    let Some((cmw, cmh, cmap)) = best_scale_map(&chay, &ctmpl, COARSE_SCALES) else {
         return Vec::new();
     };
     let mw = (tw as f32 * 1.5 + 24.0) as i32;
@@ -476,6 +482,17 @@ mod tests {
             }
         }
         eprintln!("haystack {}x{}, template {}x{}, {} scales", hay.width(), hay.height(), tmpl.width(), tmpl.height(), DEFAULT_SCALES.len());
+        // PYRAMID=1 → full-screen coarse-to-fine top-K (the production path); else single full match.
+        if std::env::var("PYRAMID").is_ok() {
+            let t = std::time::Instant::now();
+            let hits = match_icon_pyramid(&hay, &tmpl, -1.0);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("pyramid full-screen: {} match(es) in {:.1} ms", hits.len(), ms);
+            for m in &hits {
+                eprintln!("  pos=({},{}) {}x{} score={:.4} scale={} accepted={}", m.x, m.y, m.width, m.height, m.score, m.scale, m.score >= DEFAULT_MIN_SCORE);
+            }
+            return;
+        }
         let t = std::time::Instant::now();
         let res = match_icon(&hay, &tmpl, DEFAULT_SCALES, -1.0);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
