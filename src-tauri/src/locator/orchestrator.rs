@@ -387,6 +387,25 @@ pub fn locate(
         snapped_to_uia: false,
     });
 
+    // Confidence order: A11y → exact/substring OCR → **template** → fuzzy OCR. A deterministic
+    // NCC icon match is more reliable than an approximate text guess of a *different* word
+    // (live-observed: "Move"→"Mode" 75% beating the real Move icon). So whenever the OCR winner
+    // is fuzzy OR uncorroborated, try the pack's icon templates first and prefer a hit. An
+    // exact/substring match that passed corroboration is authoritative text and skips this.
+    // No-op when the active pack supplied no icon candidates (the common case).
+    if is_fuzzy || !accept {
+        let (tmpl_hit, tmpl_trace) =
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, &opts.icon_templates);
+        trace.template = tmpl_trace;
+        if let Some(result) = tmpl_hit {
+            trace.ocr = ocr_trace;
+            trace.final_decision = FinalDecision::HitTemplate;
+            trace.final_bbox = Some(result.bbox);
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((Some(result), trace));
+        }
+    }
+
     if !accept {
         let role_label = match &role {
             RoleHit::Interactive(_) => "interactive",
@@ -394,17 +413,6 @@ pub fn locate(
             RoleHit::Unknown => "unknown",
         };
         trace.ocr = ocr_trace;
-        // Pass 3 — the OCR name match was an uncorroborated false-positive; try pack icon
-        // templates before giving up (the real icon control may still be on screen).
-        let (tmpl_hit, tmpl_trace) =
-            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, &opts.icon_templates);
-        trace.template = tmpl_trace;
-        if let Some(result) = tmpl_hit {
-            trace.final_decision = FinalDecision::HitTemplate;
-            trace.final_bbox = Some(result.bbox);
-            trace.elapsed_ms = started.elapsed().as_millis() as u32;
-            return Ok((Some(result), trace));
-        }
         trace.final_decision = FinalDecision::RejectedUncorroborated {
             detail: format!(
                 "uia={role_label} fuzzy={is_fuzzy} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox}"
