@@ -91,6 +91,142 @@ pub fn match_icon(
     best.filter(|b| b.score >= min_score)
 }
 
+/// Target coarse icon size (px). The coarse pass downscales so the icon lands near this size —
+/// small enough that full-screen NCC is cheap, large enough to still localize. Deriving the
+/// factor from the icon size keeps coarse cost roughly constant across screen DPIs (UI icon px
+/// scales with DPI, so the factor adapts).
+const COARSE_ICON_PX: f32 = 12.0;
+
+/// Max distinct on-screen instances the coarse pass reports (so callers can disambiguate
+/// similar/repeated icons with a spatial prior). Bounds the fine-refine count.
+const MAX_PEAKS: usize = 5;
+
+/// NCC result surface from `match_template` (one f32 score per candidate position).
+type NccMap = image::ImageBuffer<image::Luma<f32>, Vec<f32>>;
+
+/// For the best-scoring scale, return (scaled template w, h, the NCC result map). Used by the
+/// pyramid coarse pass so we can extract multiple peaks, not just the single global best.
+fn best_scale_map(haystack: &GrayImage, template: &GrayImage, scales: &[f32]) -> Option<(u32, u32, NccMap)> {
+    let (hw, hh) = haystack.dimensions();
+    let mut best: Option<(f32, u32, u32, NccMap)> = None;
+    for &s in scales {
+        let tw = ((template.width() as f32) * s).round() as u32;
+        let th = ((template.height() as f32) * s).round() as u32;
+        if tw < 4 || th < 4 || tw >= hw || th >= hh {
+            continue;
+        }
+        let scaled = if (s - 1.0).abs() < f32::EPSILON {
+            template.clone()
+        } else {
+            image::imageops::resize(template, tw, th, FilterType::Lanczos3)
+        };
+        let map = match_template_parallel(haystack, &scaled, MatchTemplateMethod::CrossCorrelationNormalized);
+        let max = find_extremes(&map).max_value;
+        if best.as_ref().map(|(b, ..)| max > *b).unwrap_or(true) {
+            best = Some((max, tw, th, map));
+        }
+    }
+    best.map(|(_, tw, th, map)| (tw, th, map))
+}
+
+/// Up to `k` well-separated peaks (x, y, score) in an NCC map via greedy non-max suppression
+/// (suppress a ±(tw,th) window around each found peak so the next is a *different* location).
+fn topk_peaks(map: &NccMap, tw: u32, th: u32, k: usize) -> Vec<(u32, u32, f32)> {
+    let (w, h) = map.dimensions();
+    let mut buf: Vec<f32> = map.pixels().map(|p| p.0[0]).collect();
+    let mut peaks = Vec::new();
+    for _ in 0..k {
+        let mut bi = 0usize;
+        let mut bv = f32::MIN;
+        for (i, &v) in buf.iter().enumerate() {
+            if v > bv {
+                bv = v;
+                bi = i;
+            }
+        }
+        if bv <= f32::MIN {
+            break;
+        }
+        let (px, py) = (bi as u32 % w, bi as u32 / w);
+        peaks.push((px, py, bv));
+        let (x0, y0) = (px.saturating_sub(tw), py.saturating_sub(th));
+        let (x1, y1) = ((px + tw).min(w), (py + th).min(h));
+        for yy in y0..y1 {
+            for xx in x0..x1 {
+                buf[(yy * w + xx) as usize] = f32::MIN;
+            }
+        }
+    }
+    peaks
+}
+
+/// Coarse-to-fine **full-screen** match returning **all** on-screen instances (top-K), so the
+/// caller can disambiguate similar/repeated icons with a spatial prior (AI bbox / region).
+/// *Coarse:* downscale haystack+template so the icon is ~`COARSE_ICON_PX`, one cheap full-frame
+/// NCC, then NMS for up to `MAX_PEAKS` rough locations. *Fine:* re-match the **native** template
+/// in a small window around each peak for pixel-precise, ~1.0-score hits. Returns matches in
+/// **native (full-image) coords** with fine score ≥ `min_score`, sorted by score desc and
+/// de-duplicated. Full-screen but ~0.3–0.5 s vs ~5.6 s for a naive native scan.
+pub fn match_icon_pyramid(haystack: &GrayImage, template: &GrayImage, min_score: f32) -> Vec<TemplateMatch> {
+    let (hw, hh) = haystack.dimensions();
+    let (tw, th) = template.dimensions();
+    let cf = (COARSE_ICON_PX / tw.max(th) as f32).clamp(0.1, 1.0);
+    // Template already small → a direct full match (pyramid wouldn't save anything).
+    if cf >= 0.9 {
+        return match_icon(haystack, template, DEFAULT_SCALES, min_score)
+            .into_iter()
+            .collect();
+    }
+    let (chw, chh) = (((hw as f32) * cf) as u32, ((hh as f32) * cf) as u32);
+    let (ctw, cth) = (
+        ((tw as f32) * cf).round().max(4.0) as u32,
+        ((th as f32) * cf).round().max(4.0) as u32,
+    );
+    if ctw >= chw || cth >= chh {
+        return match_icon(haystack, template, DEFAULT_SCALES, min_score)
+            .into_iter()
+            .collect();
+    }
+    let chay = image::imageops::resize(haystack, chw, chh, FilterType::Lanczos3);
+    let ctmpl = image::imageops::resize(template, ctw, cth, FilterType::Lanczos3);
+    let Some((cmw, cmh, cmap)) = best_scale_map(&chay, &ctmpl, DEFAULT_SCALES) else {
+        return Vec::new();
+    };
+    let mw = (tw as f32 * 1.5 + 24.0) as i32;
+    let mh = (th as f32 * 1.5 + 24.0) as i32;
+    let mut out: Vec<TemplateMatch> = Vec::new();
+    for (px, py, _cv) in topk_peaks(&cmap, cmw, cmh, MAX_PEAKS) {
+        // coarse peak centre → native centre.
+        let nx = (px as f32 + cmw as f32 / 2.0) / cf;
+        let ny = (py as f32 + cmh as f32 / 2.0) / cf;
+        let x0 = (nx as i32 - mw).max(0);
+        let y0 = (ny as i32 - mh).max(0);
+        let x1 = (nx as i32 + mw).min(hw as i32);
+        let y1 = (ny as i32 + mh).min(hh as i32);
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        let fwin = image::imageops::crop_imm(haystack, x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
+            .to_image();
+        if let Some(fine) = match_icon(&fwin, template, DEFAULT_SCALES, min_score) {
+            let m = TemplateMatch {
+                x: fine.x + x0,
+                y: fine.y + y0,
+                ..fine
+            };
+            // De-dup: two coarse peaks can refine to the same native spot.
+            if !out
+                .iter()
+                .any(|e| (e.x - m.x).abs() < tw as i32 && (e.y - m.y).abs() < th as i32)
+            {
+                out.push(m);
+            }
+        }
+    }
+    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
 /// Decode image bytes (PNG/JPEG) to grayscale — used for both the captured haystack and a
 /// pack's icon-crop file.
 pub fn load_gray_from_bytes(bytes: &[u8]) -> Result<GrayImage> {
@@ -169,6 +305,19 @@ mod tests {
         // landed near the original footprint.
         assert!(m.scale < 1.0, "expected a down-scaling pass to win, got {}", m.scale);
         assert!((m.x - 50).abs() <= 4 && (m.y - 40).abs() <= 4, "near true location: {m:?}");
+    }
+
+    #[test]
+    fn pyramid_finds_crop_full_screen() {
+        // Coarse-to-fine over a larger image: the bright block is locally unique, so the pyramid
+        // should return it at native precision near (50,40) with a high score.
+        let hay = structured(400, 320);
+        let tmpl = crop(&hay, 50, 40, 40, 30);
+        let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE);
+        assert!(!hits.is_empty(), "pyramid should find the crop");
+        let m = hits[0];
+        assert!((m.x - 50).abs() <= 4 && (m.y - 40).abs() <= 4, "near true location: {m:?}");
+        assert!(m.score >= DEFAULT_MIN_SCORE, "fine score should clear threshold: {}", m.score);
     }
 
     #[test]

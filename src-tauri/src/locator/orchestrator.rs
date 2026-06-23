@@ -493,58 +493,71 @@ fn corroboration_accept(
     }
 }
 
-/// Ordered template search windows (`x0,y0,x1,y1` in image px), most-trusted first: the pack
-/// region hint (a fast *static prior* — see [`region_to_fractional_rect`]) **then** a margin
-/// around the AI bbox (the *dynamic* per-request grounding). Returning both — rather than
-/// letting the hint win outright — is what makes a hint safe for apps with movable/dockable UI:
-/// if the user moved the panel so the hint is stale, the region search misses and we fall back
-/// to the bbox window (one extra bounded search), instead of a miss. Empty when neither yields a
-/// valid window (skip template — full-frame NCC is too slow to do unbounded).
-fn candidate_windows(
+/// Disambiguate when full-screen matching found **more than one** instance of an icon (similar
+/// or repeated glyphs). The spatial priors only **break ties**, never restrict the search, so a
+/// stale/wrong prior can't cause a miss. In order: (1) region containment — keep matches whose
+/// centre is inside the pack's region hint, but if that leaves none (stale hint on moved UI) the
+/// region is ignored; (2) AI-bbox proximity — among the rest, pick the one nearest the model's
+/// predicted point; (3) highest score — last resort, and the only step when there are no priors.
+/// `cands` is non-empty; coords are image px.
+fn pick_match(
+    mut cands: Vec<(template::TemplateMatch, String)>,
     icon_region: Option<[f32; 4]>,
     ai_bbox_img: Option<(i32, i32, u32, u32)>,
     img_w: u32,
     img_h: u32,
-) -> Vec<(i32, i32, i32, i32)> {
-    let mut out = Vec::new();
-    if img_w == 0 || img_h == 0 {
-        return out;
-    }
-    let (w, h) = (img_w as f32, img_h as f32);
-    if let Some([fx0, fy0, fx1, fy1]) = icon_region {
-        let x0 = (fx0.clamp(0.0, 1.0) * w).round() as i32;
-        let y0 = (fy0.clamp(0.0, 1.0) * h).round() as i32;
-        let x1 = (fx1.clamp(0.0, 1.0) * w).round() as i32;
-        let y1 = (fy1.clamp(0.0, 1.0) * h).round() as i32;
-        if x1 > x0 && y1 > y0 {
-            out.push((x0, y0, x1, y1));
+) -> (template::TemplateMatch, String) {
+    let centre = |m: &template::TemplateMatch| {
+        (
+            m.x as f32 + m.width as f32 / 2.0,
+            m.y as f32 + m.height as f32 / 2.0,
+        )
+    };
+    if cands.len() > 1 {
+        if let Some([fx0, fy0, fx1, fy1]) = icon_region {
+            let (rx0, ry0) = (fx0 * img_w as f32, fy0 * img_h as f32);
+            let (rx1, ry1) = (fx1 * img_w as f32, fy1 * img_h as f32);
+            let inside: Vec<_> = cands
+                .iter()
+                .filter(|(m, _)| {
+                    let (cx, cy) = centre(m);
+                    cx >= rx0 && cx < rx1 && cy >= ry0 && cy < ry1
+                })
+                .cloned()
+                .collect();
+            if !inside.is_empty() {
+                cands = inside;
+            }
         }
     }
-    if let Some((bx, by, bw, bh)) = ai_bbox_img {
-        let cx = bx + bw as i32 / 2;
-        let cy = by + bh as i32 / 2;
-        let half = (2 * bw.max(bh) as i32).clamp(220, 360);
-        let (x0, y0) = ((cx - half).max(0), (cy - half).max(0));
-        let (x1, y1) = ((cx + half).min(img_w as i32), (cy + half).min(img_h as i32));
-        if x1 > x0 && y1 > y0 {
-            out.push((x0, y0, x1, y1));
+    if cands.len() > 1 {
+        if let Some((bx, by, bw, bh)) = ai_bbox_img {
+            let (acx, acy) = (bx as f32 + bw as f32 / 2.0, by as f32 + bh as f32 / 2.0);
+            let d2 = |m: &template::TemplateMatch| {
+                let (cx, cy) = centre(m);
+                (cx - acx).powi(2) + (cy - acy).powi(2)
+            };
+            cands.sort_by(|(a, _), (b, _)| {
+                d2(a).partial_cmp(&d2(b)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            return cands.into_iter().next().unwrap();
         }
     }
-    out
+    // Highest score (cands already roughly score-sorted; make it explicit).
+    cands.sort_by(|(a, _), (b, _)| {
+        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    cands.into_iter().next().unwrap()
 }
 
 /// Pass 3 — match the active nav-pack's candidate icon crops against the capture by NCC.
 ///
-/// Search is **restricted to bounded windows** ([`candidate_windows`]: region hint first, then a
-/// margin around the AI bbox): full-frame NCC over a ~2-MP capture × several scales is
-/// multi-second even optimized, whereas a ~400-px window is tens of ms. Windows are tried in
-/// order and the first whose best icon clears the threshold wins — so a *stale* region hint
-/// (movable UI) degrades to one extra search, not a miss.
-///
-/// Matches are mapped window-local → image px (add the window origin) → virtual-desktop coords
-/// (the same scale+origin transform as OCR hits). Accepts only above `DEFAULT_MIN_SCORE` —
-/// "no pointer beats wrong pointer"; the per-template floor is `-1.0` so the trace records the
-/// best raw score even on a reject.
+/// **Full-screen** coarse-to-fine ([`template::match_icon_pyramid`]) finds *every* on-screen
+/// instance of each candidate icon (top-K), so the search never depends on a possibly-wrong AI
+/// bbox or region hint. When more than one instance matches (similar/repeated icons), the priors
+/// only **break the tie** ([`pick_match`]). Accepts only above `DEFAULT_MIN_SCORE` — "no pointer
+/// beats wrong pointer"; the pyramid returns raw scores so the trace records the best even on a
+/// reject. Matches are mapped image px → virtual-desktop (the same transform as OCR hits).
 fn try_template_pass(
     haystack_png: &[u8],
     crop_rect: &Rect,
@@ -557,20 +570,41 @@ fn try_template_pass(
     if templates.is_empty() {
         return (None, None);
     }
-    let windows = candidate_windows(icon_region, ai_bbox_img, img_w, img_h);
-    if windows.is_empty() {
-        return (None, None);
-    }
     let Ok(full) = template::load_gray_from_bytes(haystack_png) else {
         return (None, Some(TemplateTrace::default()));
     };
-    // Decode each icon crop once; reused across the candidate windows.
     let needles: Vec<(String, image::GrayImage)> = templates
         .iter()
         .filter_map(|(name, bytes)| {
             template::load_gray_from_bytes(bytes).ok().map(|g| (name.clone(), g))
         })
         .collect();
+
+    let mut tr = TemplateTrace {
+        templates_tried: needles.len(),
+        best_score: -1.0,
+        ..Default::default()
+    };
+    // Full-screen top-K per icon (min_score -1.0 → raw, so the trace's best_score is recorded
+    // even on a reject), pooled across icons.
+    let mut cands: Vec<(template::TemplateMatch, String)> = Vec::new();
+    for (name, needle) in &needles {
+        for m in template::match_icon_pyramid(&full, needle, -1.0) {
+            if m.score > tr.best_score {
+                tr.best_score = m.score;
+                tr.best_scale = m.scale;
+                tr.best_icon = Some(name.clone());
+            }
+            cands.push((m, name.clone()));
+        }
+    }
+    cands.retain(|(m, _)| m.score >= template::DEFAULT_MIN_SCORE);
+    if cands.is_empty() {
+        return (None, Some(tr));
+    }
+    let (m, name) = pick_match(cands, icon_region, ai_bbox_img, img_w, img_h);
+    tr.accepted = true;
+    tr.best_icon = Some(name.clone());
 
     let (sx, sy) = if img_w > 0 && img_h > 0 && crop_rect.width > 0 && crop_rect.height > 0 {
         (
@@ -580,58 +614,19 @@ fn try_template_pass(
     } else {
         (1.0, 1.0)
     };
-
-    let mut tr = TemplateTrace {
-        templates_tried: needles.len(),
-        best_score: -1.0,
-        ..Default::default()
+    let bbox = Rect {
+        x: (m.x as f32 * sx).round() as i32 + crop_rect.x,
+        y: (m.y as f32 * sy).round() as i32 + crop_rect.y,
+        width: (m.width as f32 * sx).round() as u32,
+        height: (m.height as f32 * sy).round() as u32,
     };
-    // Try each window in priority order (region hint, then bbox). Accept at the first window
-    // whose best icon clears the threshold; min_score -1.0 returns the raw best so the trace
-    // records the best score even when rejected.
-    for (rx0, ry0, rx1, ry1) in windows {
-        let region = image::imageops::crop_imm(
-            &full,
-            rx0 as u32,
-            ry0 as u32,
-            (rx1 - rx0) as u32,
-            (ry1 - ry0) as u32,
-        )
-        .to_image();
-        let mut win_best: Option<(template::TemplateMatch, String)> = None;
-        for (name, needle) in &needles {
-            if let Some(m) = template::match_icon(&region, needle, template::DEFAULT_SCALES, -1.0) {
-                let better = win_best.as_ref().map(|(b, _)| m.score > b.score).unwrap_or(true);
-                if better {
-                    win_best = Some((m, name.clone()));
-                }
-            }
-        }
-        let Some((m, name)) = win_best else { continue };
-        if m.score > tr.best_score {
-            tr.best_score = m.score;
-            tr.best_scale = m.scale;
-            tr.best_icon = Some(name.clone());
-        }
-        if m.score >= template::DEFAULT_MIN_SCORE {
-            tr.accepted = true;
-            // window-local → full-image px (add the window origin) → virtual-desktop.
-            let bbox = Rect {
-                x: ((m.x + rx0) as f32 * sx).round() as i32 + crop_rect.x,
-                y: ((m.y + ry0) as f32 * sy).round() as i32 + crop_rect.y,
-                width: (m.width as f32 * sx).round() as u32,
-                height: (m.height as f32 * sy).round() as u32,
-            };
-            let result = LocateResult {
-                bbox,
-                name,
-                role: "Template".to_string(),
-                confidence: m.score,
-            };
-            return (Some(result), Some(tr));
-        }
-    }
-    (None, Some(tr))
+    let result = LocateResult {
+        bbox,
+        name,
+        role: "Template".to_string(),
+        confidence: m.score,
+    };
+    (Some(result), Some(tr))
 }
 
 /// Whether the UIA element rect under the OCR match is a sound pointer target. Requires the
@@ -702,21 +697,48 @@ mod tests {
     }
 
     #[test]
-    fn candidate_windows_region_first_then_bbox() {
-        use super::candidate_windows;
-        // Hint + bbox → BOTH windows, region first (so a stale hint falls back to the bbox).
-        // "left" [0,0,0.18,1.0] → left strip; bbox center (910,60) half=clamp(40,220,360)=220.
-        let w = candidate_windows(Some([0.0, 0.0, 0.18, 1.0]), Some((900, 50, 20, 20)), 1000, 800);
-        assert_eq!(w, vec![(0, 0, 180, 800), (690, 0, 1000, 280)]);
-        // No hint → just the bbox window.
-        assert_eq!(
-            candidate_windows(None, Some((900, 50, 20, 20)), 1000, 800),
-            vec![(690, 0, 1000, 280)]
+    fn pick_match_uses_priors_only_to_break_ties() {
+        use super::pick_match;
+        let tm = |x, y, score| {
+            (
+                template::TemplateMatch { x, y, width: 20, height: 20, score, scale: 1.0 },
+                "move".to_string(),
+            )
+        };
+        // Single candidate → returned regardless of priors.
+        let (m, _) = pick_match(vec![tm(500, 500, 0.95)], None, None, 1000, 800);
+        assert_eq!((m.x, m.y), (500, 500));
+        // Two candidates + "left" region [0,0,0.2,1] → keep the one inside, even though the
+        // outside one scored higher (region containment disambiguates).
+        let (m, _) = pick_match(
+            vec![tm(800, 100, 0.99), tm(40, 100, 0.92)],
+            Some([0.0, 0.0, 0.2, 1.0]),
+            None,
+            1000,
+            800,
         );
-        // Neither → empty (template skipped, never full-frame).
-        assert!(candidate_windows(None, None, 1000, 800).is_empty());
-        // Degenerate image → empty.
-        assert!(candidate_windows(Some([0.0, 0.0, 0.5, 0.5]), None, 0, 0).is_empty());
+        assert_eq!(m.x, 40);
+        // No region, bbox near the right one → pick nearest the bbox centre.
+        let (m, _) = pick_match(
+            vec![tm(40, 100, 0.99), tm(800, 110, 0.92)],
+            None,
+            Some((790, 100, 20, 20)),
+            1000,
+            800,
+        );
+        assert_eq!(m.x, 800);
+        // No priors → highest score.
+        let (m, _) = pick_match(vec![tm(40, 100, 0.92), tm(800, 100, 0.99)], None, None, 1000, 800);
+        assert_eq!(m.x, 800);
+        // Region matches none (stale hint) → region ignored, fall back to score.
+        let (m, _) = pick_match(
+            vec![tm(800, 100, 0.99), tm(900, 100, 0.92)],
+            Some([0.0, 0.0, 0.2, 1.0]),
+            None,
+            1000,
+            800,
+        );
+        assert_eq!(m.x, 800);
     }
 
     #[test]
