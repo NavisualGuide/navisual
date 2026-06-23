@@ -236,6 +236,69 @@ mod tests {
         eprintln!("cropped {w}x{h} @ ({x},{y}) scale {scale} -> {out}");
     }
 
+    // Live helper: auto-tighten an icon crop. Given a ROUGH box around ONE icon (REGION=x,y,w,h),
+    // find the bright glyph's bounding box (pixels brighter than the dark button background) and
+    // crop the original tightly to it + PAD px. Produces consistently centred, tight templates
+    // without eyeballing. Prints the resolved absolute box. Optional SCALE writes an upscaled
+    // preview to OUT_PREVIEW. THRESH = luma over background (default 45).
+    //   $env:IN="cap.png"; $env:REGION="2,184,28,32"; $env:OUT="move.png";
+    //   cargo test --lib autocrop_icon -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn autocrop_icon() {
+        let inp = std::env::var("IN").expect("set IN");
+        let out = std::env::var("OUT").expect("set OUT");
+        let parts: Vec<i64> = std::env::var("REGION")
+            .expect("set REGION=x,y,w,h")
+            .split(',')
+            .map(|s| s.trim().parse().expect("REGION ints"))
+            .collect();
+        let [rx, ry, rw, rh] = parts[..] else {
+            panic!("REGION must be x,y,w,h")
+        };
+        let pad: i64 = std::env::var("PAD").ok().and_then(|s| s.parse().ok()).unwrap_or(2);
+        let thresh: u16 = std::env::var("THRESH").ok().and_then(|s| s.parse().ok()).unwrap_or(45);
+
+        let img = image::open(&inp).expect("open IN").to_rgba8();
+        let region = image::imageops::crop_imm(&img, rx as u32, ry as u32, rw as u32, rh as u32)
+            .to_image();
+        let gray = image::DynamicImage::ImageRgba8(region).to_luma8();
+        // Background = median luma (the dark button dominates the rough box). Bright glyph
+        // pixels exceed it by THRESH; their bounding box is the icon's true extent.
+        let mut lumas: Vec<u8> = gray.pixels().map(|p| p.0[0]).collect();
+        lumas.sort_unstable();
+        let bg = lumas[lumas.len() / 2] as u16;
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        let mut bright = 0u32;
+        for (px, py, p) in gray.enumerate_pixels() {
+            if p.0[0] as u16 > bg + thresh {
+                bright += 1;
+                x0 = x0.min(px as i64);
+                y0 = y0.min(py as i64);
+                x1 = x1.max(px as i64);
+                y1 = y1.max(py as i64);
+            }
+        }
+        assert!(bright >= 8, "too few bright pixels ({bright}) — adjust REGION/THRESH");
+        // Absolute, padded, clamped to the image.
+        let (iw, ih) = (img.width() as i64, img.height() as i64);
+        let ax0 = (rx + x0 - pad).clamp(0, iw - 1);
+        let ay0 = (ry + y0 - pad).clamp(0, ih - 1);
+        let ax1 = (rx + x1 + pad + 1).clamp(ax0 + 1, iw);
+        let ay1 = (ry + y1 + pad + 1).clamp(ay0 + 1, ih);
+        let (aw, ah) = ((ax1 - ax0) as u32, (ay1 - ay0) as u32);
+        let tight = image::imageops::crop_imm(&img, ax0 as u32, ay0 as u32, aw, ah).to_image();
+        tight.save(&out).expect("save OUT");
+        eprintln!("autocrop: bg={bg} bright={bright} -> box ({ax0},{ay0}) {aw}x{ah} -> {out}");
+        if let Ok(pv) = std::env::var("OUT_PREVIEW") {
+            let s = std::env::var("SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(8u32);
+            image::imageops::resize(&tight, aw * s, ah * s, FilterType::Nearest)
+                .save(&pv)
+                .expect("save preview");
+            eprintln!("  preview {s}x -> {pv}");
+        }
+    }
+
     // Live: run the real engine — match TEMPLATE against HAYSTACK and print the best result.
     // Proves an icon crop is findable in a real capture before wiring up the full app test.
     //   $env:HAYSTACK="cap.png"; $env:TEMPLATE="move.png";
