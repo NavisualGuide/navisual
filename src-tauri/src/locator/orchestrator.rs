@@ -57,6 +57,11 @@ pub struct LocateOptions {
     /// nav-pack supplies for this target. Tried by NCC against the capture only when A11y + OCR
     /// both miss. Empty (the common case) → Pass 3 is skipped entirely.
     pub icon_templates: Vec<(String, Vec<u8>)>,
+    /// Pack `element_hints` search region for this target, as a fractional rect `[x0,y0,x1,y1]`
+    /// (0..1) within the captured window. When set it defines the template search window
+    /// instead of the AI bbox — making icon matching independent of the model's grounding for
+    /// known apps. `None` → fall back to the AI bbox window.
+    pub icon_region: Option<[f32; 4]>,
 }
 
 pub fn locate(
@@ -272,7 +277,7 @@ pub fn locate(
         // Pass 3 — icon template matching (nav-pack icons), the last resort for icon-only
         // controls A11y + OCR can't name. No-op when the pack supplied no candidates.
         let (tmpl_hit, tmpl_trace) =
-            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, ai_bbox_img, &opts.icon_templates);
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates);
         trace.template = tmpl_trace;
         if let Some(result) = tmpl_hit {
             trace.final_decision = FinalDecision::HitTemplate;
@@ -395,7 +400,7 @@ pub fn locate(
     // No-op when the active pack supplied no icon candidates (the common case).
     if is_fuzzy || !accept {
         let (tmpl_hit, tmpl_trace) =
-            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, ai_bbox_img, &opts.icon_templates);
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates);
         trace.template = tmpl_trace;
         if let Some(result) = tmpl_hit {
             trace.ocr = ocr_trace;
@@ -488,13 +493,48 @@ fn corroboration_accept(
     }
 }
 
+/// Resolve the template search window (`x0,y0,x1,y1` in image px), preferring a pack region
+/// hint (bbox-independent, stable for static chrome) over the AI bbox. The hint is a fractional
+/// rect of the captured window; the bbox path expands the bbox by a generous, capped margin so
+/// a loosely-grounded bbox still contains the icon. `None` (skip template) when neither yields a
+/// valid window — full-frame NCC is too slow to do unbounded.
+fn resolve_search_window(
+    icon_region: Option<[f32; 4]>,
+    ai_bbox_img: Option<(i32, i32, u32, u32)>,
+    img_w: u32,
+    img_h: u32,
+) -> Option<(i32, i32, i32, i32)> {
+    if img_w == 0 || img_h == 0 {
+        return None;
+    }
+    let (w, h) = (img_w as f32, img_h as f32);
+    if let Some([fx0, fy0, fx1, fy1]) = icon_region {
+        let x0 = (fx0.clamp(0.0, 1.0) * w).round() as i32;
+        let y0 = (fy0.clamp(0.0, 1.0) * h).round() as i32;
+        let x1 = (fx1.clamp(0.0, 1.0) * w).round() as i32;
+        let y1 = (fy1.clamp(0.0, 1.0) * h).round() as i32;
+        if x1 > x0 && y1 > y0 {
+            return Some((x0, y0, x1, y1));
+        }
+    }
+    if let Some((bx, by, bw, bh)) = ai_bbox_img {
+        let cx = bx + bw as i32 / 2;
+        let cy = by + bh as i32 / 2;
+        let half = (2 * bw.max(bh) as i32).clamp(220, 360);
+        let (x0, y0) = ((cx - half).max(0), (cy - half).max(0));
+        let (x1, y1) = ((cx + half).min(img_w as i32), (cy + half).min(img_h as i32));
+        if x1 > x0 && y1 > y0 {
+            return Some((x0, y0, x1, y1));
+        }
+    }
+    None
+}
+
 /// Pass 3 — match the active nav-pack's candidate icon crops against the capture by NCC.
 ///
-/// Search is **restricted to a window around the AI `ai_bbox`** (the model's grounding),
-/// expanded by a generous margin so a somewhat mis-grounded bbox still contains the icon.
-/// This is the key cost lever: full-frame NCC over a ~2-MP capture × several scales is
-/// multi-second even optimized, whereas a ~400-px window is tens of ms. With no bbox the
-/// search can't be bounded affordably, so template matching is skipped (`(None, None)`).
+/// Search is **restricted to a bounded window** (a pack region hint, else a margin around the
+/// AI bbox — see [`resolve_search_window`]): full-frame NCC over a ~2-MP capture × several
+/// scales is multi-second even optimized, whereas a ~400-px window is tens of ms.
 ///
 /// Matches are mapped region-local → image px (add the window origin) → virtual-desktop coords
 /// (the same scale+origin transform as OCR hits). Accepts only above `DEFAULT_MIN_SCORE` —
@@ -505,29 +545,23 @@ fn try_template_pass(
     crop_rect: &Rect,
     img_w: u32,
     img_h: u32,
+    icon_region: Option<[f32; 4]>,
     ai_bbox_img: Option<(i32, i32, u32, u32)>,
     templates: &[(String, Vec<u8>)],
 ) -> (Option<LocateResult>, Option<TemplateTrace>) {
     if templates.is_empty() {
         return (None, None);
     }
-    // No bbox → no affordable search window → skip (don't risk a full-frame stall).
-    let Some((bx, by, bw, bh)) = ai_bbox_img else {
+    // Window precedence: pack region hint (bbox-independent) → AI bbox window → skip. Without
+    // either there's no affordable bound, so skip rather than risk a full-frame stall.
+    let Some((rx0, ry0, rx1, ry1)) =
+        resolve_search_window(icon_region, ai_bbox_img, img_w, img_h)
+    else {
         return (None, None);
     };
     let Ok(full) = template::load_gray_from_bytes(haystack_png) else {
         return (None, Some(TemplateTrace::default()));
     };
-    // Window = bbox centre ± a margin large enough to tolerate a loosely-grounded bbox,
-    // clamped to the image and capped so cost stays bounded regardless of bbox size.
-    let cx = bx + bw as i32 / 2;
-    let cy = by + bh as i32 / 2;
-    let half = (2 * bw.max(bh) as i32).clamp(220, 360);
-    let (rx0, ry0) = ((cx - half).max(0), (cy - half).max(0));
-    let (rx1, ry1) = ((cx + half).min(img_w as i32), (cy + half).min(img_h as i32));
-    if rx1 <= rx0 || ry1 <= ry0 {
-        return (None, Some(TemplateTrace::default()));
-    }
     let region = image::imageops::crop_imm(
         &full,
         rx0 as u32,
@@ -657,6 +691,22 @@ mod tests {
         // Whole-column height (a list/tree pane) → reject.
         let too_tall = r(280, 0, 120, 800);
         assert!(!uia_snap_plausible(&too_tall, &ocr, &crop));
+    }
+
+    #[test]
+    fn search_window_prefers_region_hint_over_bbox() {
+        use super::resolve_search_window;
+        // A "left" hint [0,0,0.18,1.0] on a 1000×800 image → left strip, independent of bbox.
+        let w = resolve_search_window(Some([0.0, 0.0, 0.18, 1.0]), Some((900, 50, 20, 20)), 1000, 800);
+        assert_eq!(w, Some((0, 0, 180, 800)));
+        // No hint → bbox window: center (910,60), half=clamp(2*20,220,360)=220, clamped to the
+        // 1000×800 image → x[690..1000], y[0..280].
+        let w = resolve_search_window(None, Some((900, 50, 20, 20)), 1000, 800);
+        assert_eq!(w, Some((690, 0, 1000, 280)));
+        // Neither → None (template skipped, never full-frame).
+        assert_eq!(resolve_search_window(None, None, 1000, 800), None);
+        // Degenerate image → None.
+        assert_eq!(resolve_search_window(Some([0.0, 0.0, 0.5, 0.5]), None, 0, 0), None);
     }
 
     #[test]

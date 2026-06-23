@@ -22,5 +22,16 @@
     "Toggle Edit/Object mode": "Tab",
     "Save": "Ctrl+S",
     "Undo": "Ctrl+Z"
-  }
+  },
+  "element_hints": [
+    { "name": "Select Box", "region": "left", "role": "button" },
+    { "name": "Cursor",      "region": "left", "role": "button" },
+    { "name": "Move",        "region": "left", "role": "button" },
+    { "name": "Rotate",      "region": "left", "role": "button" },
+    { "name": "Scale",       "region": "left", "role": "button" },
+    { "name": "Transform",   "region": "left", "role": "button" },
+    { "name": "Annotate",    "region": "left", "role": "button" },
+    { "name": "Measure",     "region": "left", "role": "button" },
+    { "name": "Add Cube",    "region": "left", "role": "button" }
+  ]
 }

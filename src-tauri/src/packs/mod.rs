@@ -49,6 +49,26 @@ pub struct PackManifest {
     /// the AI prefers a key press over visual targeting (BTreeMap = stable, sorted output).
     #[serde(default)]
     pub shortcuts: BTreeMap<String, String>,
+    /// Coarse screen regions for named elements — tells the locator *where* an element lives
+    /// so template matching searches a fixed window independent of the (sometimes mis-grounded)
+    /// AI bbox. Static chrome (toolbars, menus, panels) is stable, so this is the robustness
+    /// lever for icon matching on sparse-A11y apps. See [`region_to_fractional_rect`].
+    #[serde(default)]
+    pub element_hints: Vec<ElementHint>,
+}
+
+/// A named UI element's coarse location (and role) within the app window.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ElementHint {
+    pub name: String,
+    /// A named region ("left", "top-right", …) resolved by [`region_to_fractional_rect`].
+    #[serde(default)]
+    pub region: String,
+    /// UI role of the element. Parsed from the pack but not yet consumed — reserved for biasing
+    /// OCR role search (a future element_hints use); kept so packs can declare it now.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub role: String,
 }
 
 /// Where a pack came from. User packs shadow bundled packs with the same `id`.
@@ -89,6 +109,40 @@ impl Pack {
             .take(8)
             .collect()
     }
+
+    /// Coarse search region for `target_text` from the pack's `element_hints` (matched by name,
+    /// same token-subset rule as icons). `None` when no hint matches — the locator then falls
+    /// back to the AI bbox window. Returns the resolved fractional rect `[x0,y0,x1,y1]`.
+    pub fn region_hint_for(&self, target_text: &str) -> Option<[f32; 4]> {
+        self.manifest
+            .element_hints
+            .iter()
+            .filter(|h| !h.region.is_empty() && icon_stem_matches_target(&h.name, target_text))
+            .find_map(|h| region_to_fractional_rect(&h.region))
+    }
+}
+
+/// Map a coarse region name to a fractional rect `[x0,y0,x1,y1]` (0..1) within the app window.
+/// Edge strips/bands are deliberately generous so a hint reliably contains its chrome; corners
+/// and center cover the rest. Unknown names return `None` (caller falls back to the AI bbox).
+pub fn region_to_fractional_rect(region: &str) -> Option<[f32; 4]> {
+    let rect = match region.trim().to_ascii_lowercase().as_str() {
+        "left" => [0.00, 0.00, 0.18, 1.00],
+        "right" => [0.82, 0.00, 1.00, 1.00],
+        "top" => [0.00, 0.00, 1.00, 0.18],
+        "bottom" => [0.00, 0.82, 1.00, 1.00],
+        "center" => [0.25, 0.25, 0.75, 0.75],
+        "top-left" => [0.00, 0.00, 0.30, 0.30],
+        "top-right" => [0.70, 0.00, 1.00, 0.30],
+        "bottom-left" => [0.00, 0.70, 0.30, 1.00],
+        "bottom-right" => [0.70, 0.70, 1.00, 1.00],
+        "top-center" => [0.25, 0.00, 0.75, 0.22],
+        "bottom-center" => [0.25, 0.78, 0.75, 1.00],
+        "left-center" | "center-left" => [0.00, 0.25, 0.22, 0.75],
+        "right-center" | "center-right" => [0.78, 0.25, 1.00, 0.75],
+        _ => return None,
+    };
+    Some(rect)
 }
 
 /// Lowercased alphanumeric tokens of `s` ("Move tool" / "move_tool" → ["move","tool"]).
@@ -419,6 +473,32 @@ mod tests {
             .is_none());
         // The Blender pack carries shortcuts; the browser pack is prompt-injection only.
         assert!(!reg.get_active_pack("x.blend - Blender").unwrap().manifest.shortcuts.is_empty());
+    }
+
+    #[test]
+    fn region_hints_resolve_by_name() {
+        assert_eq!(region_to_fractional_rect("left"), Some([0.00, 0.00, 0.18, 1.00]));
+        assert_eq!(region_to_fractional_rect("TOP-RIGHT"), Some([0.70, 0.00, 1.00, 0.30]));
+        assert_eq!(region_to_fractional_rect("nonsense"), None);
+
+        let root = tmp();
+        let dir = root.join("p");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("pack.json"),
+            r#"{"id":"p","window_title_pattern":"x",
+                "element_hints":[
+                  {"name":"Move","region":"left","role":"button"},
+                  {"name":"Render Image","region":"top"}
+                ]}"#,
+        )
+        .unwrap();
+        let reg = PackRegistry::load(Some(&root), None);
+        let pack = reg.get_active_pack("x window").unwrap();
+        assert_eq!(pack.region_hint_for("Move tool"), Some([0.00, 0.00, 0.18, 1.00]));
+        assert_eq!(pack.region_hint_for("Render"), Some([0.00, 0.00, 1.00, 0.18]));
+        assert_eq!(pack.region_hint_for("Scale"), None); // no hint for Scale
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

@@ -223,6 +223,8 @@ fn execute_step(
         if let Some(text) = step.target_text.as_ref().filter(|t| !t.trim().is_empty()) {
             #[cfg(windows)]
             {
+                let (icon_templates, icon_region) =
+                    pack_locate_hints(packs, target_hwnd, text);
                 let opts = locator::orchestrator::LocateOptions {
                     role: step
                         .target_role
@@ -236,7 +238,8 @@ fn execute_step(
                     min_confidence: 0.5,
                     target_hwnd,
                     debug_ocr_image_path: debug_ocr_path,
-                    icon_templates: pack_icon_templates(packs, target_hwnd, text),
+                    icon_templates,
+                    icon_region,
                 };
                 let text_owned = text.clone();
                 let pre = pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r));
@@ -513,29 +516,35 @@ fn active_pack_context(registry: &packs::PackRegistry, hwnd: usize) -> String {
     }
 }
 
-/// Workstream B: candidate icon crops `(name, bytes)` the active nav-pack supplies for
-/// `target_text`, fed to the locator's Pass-3 template matching. Empty (the common case) when
-/// there's no focused window, no active pack, or no name-associated icons — so Pass 3 is a
-/// no-op. Reads each icon file lazily here; only reached on a real locate.
-fn pack_icon_templates(
+/// Pass-3 icon templates: `(icon_name, image bytes)` pairs.
+type IconTemplates = Vec<(String, Vec<u8>)>;
+
+/// Workstream B: pack-derived locate hints for `target_text` on the focused window —
+/// candidate icon crops `(name, bytes)` for Pass-3 template matching, plus the `element_hints`
+/// search region (fractional rect) that makes matching independent of the AI bbox. All empty/
+/// None (the common case) when there's no focused window, no active pack, or no match — so
+/// Pass 3 stays a no-op. Reads icon files lazily here; only reached on a real locate.
+fn pack_locate_hints(
     registry: &packs::PackRegistry,
     hwnd: Option<usize>,
     target_text: &str,
-) -> Vec<(String, Vec<u8>)> {
+) -> (IconTemplates, Option<[f32; 4]>) {
     let Some(hwnd) = hwnd.filter(|h| *h != 0) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     if registry.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let title = capture::get_window_title(hwnd);
     let Some(pack) = registry.get_active_pack(&title) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    pack.candidate_icons(target_text)
+    let icons = pack
+        .candidate_icons(target_text)
         .into_iter()
         .filter_map(|a| std::fs::read(&a.path).ok().map(|bytes| (a.stem.clone(), bytes)))
-        .collect()
+        .collect();
+    (icons, pack.region_hint_for(target_text))
 }
 
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
@@ -2076,6 +2085,7 @@ async fn locate_a11y(
             target_hwnd: None,
             debug_ocr_image_path: None,
             icon_templates: Vec::new(),
+            icon_region: None,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::a11y::find_element(&text, &opts))
@@ -2115,6 +2125,7 @@ async fn locate_element(
             target_hwnd: None,
             debug_ocr_image_path: None,
             icon_templates: Vec::new(),
+            icon_region: None,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts, None))
