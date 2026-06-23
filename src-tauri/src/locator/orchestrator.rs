@@ -58,10 +58,15 @@ pub struct LocateOptions {
     /// both miss. Empty (the common case) → Pass 3 is skipped entirely.
     pub icon_templates: Vec<(String, Vec<u8>)>,
     /// Pack `element_hints` search region for this target, as a fractional rect `[x0,y0,x1,y1]`
-    /// (0..1) within the captured window. When set it defines the template search window
-    /// instead of the AI bbox — making icon matching independent of the model's grounding for
-    /// known apps. `None` → fall back to the AI bbox window.
+    /// (0..1) within the captured window. Used by template matching only to break ties between
+    /// multiple matches (region containment); never restricts the search. `None` → no region prior.
     pub icon_region: Option<[f32; 4]>,
+    /// The active pack supplied an icon template for this target — i.e. it's a known icon-only
+    /// element. A11y skips its expensive dead-end fallbacks (the `pane_fallback` raw-view walk,
+    /// up to 2.5 s, and the empty-candidate `deep_role_match`) on non-Chrome surfaces, since an
+    /// icon-only glyph has no accessible name to find; the bounded matcher passes still run, and
+    /// template matching is the real path. Halves the locate time on sparse-A11y apps (Blender).
+    pub icon_target: bool,
 }
 
 pub fn locate(

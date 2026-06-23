@@ -225,6 +225,10 @@ fn execute_step(
             {
                 let (icon_templates, icon_region) =
                     pack_locate_hints(packs, target_hwnd, text);
+                // A pack icon for this target ⇒ a known icon-only element → A11y skips its
+                // expensive dead-end fallbacks (it can't name a glyph), and the bounded matcher
+                // passes still run. The 500 ms budget also drops for these targets.
+                let icon_target = !icon_templates.is_empty();
                 let opts = locator::orchestrator::LocateOptions {
                     role: step
                         .target_role
@@ -234,12 +238,13 @@ fn execute_step(
                     ai_bbox,
                     bbox_decisive,
                     avoid_bbox,
-                    a11y_timeout_ms: 500,
+                    a11y_timeout_ms: if icon_target { 300 } else { 500 },
                     min_confidence: 0.5,
                     target_hwnd,
                     debug_ocr_image_path: debug_ocr_path,
                     icon_templates,
                     icon_region,
+                    icon_target,
                 };
                 let text_owned = text.clone();
                 let pre = pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r));
@@ -2086,6 +2091,7 @@ async fn locate_a11y(
             debug_ocr_image_path: None,
             icon_templates: Vec::new(),
             icon_region: None,
+            icon_target: false,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::a11y::find_element(&text, &opts))
@@ -2126,6 +2132,7 @@ async fn locate_element(
             debug_ocr_image_path: None,
             icon_templates: Vec::new(),
             icon_region: None,
+            icon_target: false,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts, None))

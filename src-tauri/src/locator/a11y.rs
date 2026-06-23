@@ -767,8 +767,10 @@ pub fn find_element(
                     deadline,
                 ));
                 // Fallback: deeply-nested items the depth-12 walk misses (e.g. VLC's Qt menu
-                // items far down the tree) — the cached native deep find reaches them.
-                if candidates.is_empty() {
+                // items far down the tree) — the cached native deep find reaches them. Skipped
+                // for known icon-only targets (a pack icon exists): a glyph has no accessible
+                // name for this find to match, so it's wasted work — template matching is the path.
+                if candidates.is_empty() && !opts.icon_target {
                     let mut n = 0;
                     candidates.extend(deep_role_match(
                         &automation,
@@ -806,7 +808,9 @@ pub fn find_element(
     // when every pass above returned zero candidates, so normal apps never pay
     // for it; skipped on Chromium (its raw tree is huge and its controls are
     // properly typed, so the walk would cost seconds and find nothing new).
-    if candidates.is_empty() && !is_chrome {
+    // Skipped for known icon-only targets: a 2.5 s raw-view walk can't find a nameless glyph,
+    // and template matching covers it — this is the bulk of the A11y-shorten win on sparse apps.
+    if candidates.is_empty() && !is_chrome && !opts.icon_target {
         for root in &search_roots {
             let mut n = 0;
             candidates.extend(pane_fallback_match(&automation, root, &name_re, &mut n));
