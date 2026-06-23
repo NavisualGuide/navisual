@@ -17,7 +17,7 @@
 
 use anyhow::{Context, Result};
 use image::{imageops::FilterType, GrayImage};
-use imageproc::template_matching::{find_extremes, match_template, MatchTemplateMethod};
+use imageproc::template_matching::{find_extremes, match_template_parallel, MatchTemplateMethod};
 
 /// DPI-derived scale sweep applied to the template before matching. Each scale is a full
 /// correlation pass, so this is deliberately short and ordered most-likely-first (native
@@ -69,7 +69,7 @@ pub fn match_icon(
             scaled = image::imageops::resize(template, tw, th, FilterType::Lanczos3);
             &scaled
         };
-        let result = match_template(
+        let result = match_template_parallel(
             haystack,
             needle,
             MatchTemplateMethod::CrossCorrelationNormalized,
