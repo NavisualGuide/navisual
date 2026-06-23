@@ -356,16 +356,24 @@ pub fn locate(
         .unwrap_or(false);
     let near_ai_bbox = near_ai_bbox_raw && opts.bbox_decisive;
 
-    // UIA role is authoritative when it has an opinion. Interactive → accept. Content
-    // (Document/Text/terminal) is a hard negative: the SOFT corroborators (anchor/bbox)
-    // must NOT override it (a nearby word can coincide with a content match) — only a
-    // genuinely isolated label still rescues it. Unknown (cold tree / non-UIA surface) →
-    // fall to all corroborators.
-    let accept = match &role {
-        RoleHit::Interactive(_) => true,
-        RoleHit::Content(_) => isolation_ok,
-        RoleHit::Unknown => isolation_ok || near_anchor || near_ai_bbox,
+    // A fuzzy (approximate) OCR match is a guess about WHICH word — so it must NOT win on
+    // isolation alone; it needs spatial agreement (the nearby-text anchor or a trusted AI
+    // bbox). Without this, "Move"→"Mode" (75%) wins on an isolated label far from where the
+    // model grounded the target (live-observed in Blender), preempting template matching.
+    // Exact/substring matches are exact-text and keep the isolation path.
+    let is_fuzzy = ocr_trace
+        .strategy_used
+        .as_deref()
+        .map(|s| s.contains("fuzzy"))
+        .unwrap_or(false);
+    let spatially_corroborated = near_anchor || near_ai_bbox;
+
+    let role_kind = match &role {
+        RoleHit::Interactive(_) => RoleKind::Interactive,
+        RoleHit::Content(_) => RoleKind::Content,
+        RoleHit::Unknown => RoleKind::Unknown,
     };
+    let accept = corroboration_accept(role_kind, is_fuzzy, isolation_ok, spatially_corroborated);
     ocr_trace.corroboration = Some(Corroboration {
         uia_control_type,
         uia_interactive,
@@ -399,7 +407,7 @@ pub fn locate(
         }
         trace.final_decision = FinalDecision::RejectedUncorroborated {
             detail: format!(
-                "uia={role_label} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox}"
+                "uia={role_label} fuzzy={is_fuzzy} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox}"
             ),
         };
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
@@ -432,6 +440,44 @@ pub fn locate(
     trace.final_bbox = Some(pointer_bbox);
     trace.elapsed_ms = started.elapsed().as_millis() as u32;
     Ok((Some(result), trace))
+}
+
+/// UIA role family under the OCR match, for the corroboration decision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RoleKind {
+    Interactive,
+    Content,
+    Unknown,
+}
+
+/// Decide whether an OCR text match is trustworthy enough to point at, given the UIA role under
+/// it and the available corroborators. The key precision rule: a **fuzzy** (approximate) match
+/// is a guess about *which* word, so on any non-interactive surface it requires **spatial**
+/// corroboration (the nearby-text anchor or a trusted AI bbox) — it never wins on label
+/// isolation alone. Exact/substring matches keep the isolation path. ("No pointer beats wrong
+/// pointer".)
+fn corroboration_accept(
+    role: RoleKind,
+    is_fuzzy: bool,
+    isolation_ok: bool,
+    spatially_corroborated: bool,
+) -> bool {
+    match role {
+        // UIA confirms a real interactive control under the point — authoritative.
+        RoleKind::Interactive => true,
+        // Content (Document/Text/terminal): an isolated label only; a fuzzy guess there is
+        // almost certainly content text unless it also agrees spatially.
+        RoleKind::Content => isolation_ok && (!is_fuzzy || spatially_corroborated),
+        // Unknown (cold tree / non-UIA surface like an OpenGL app): exact/substring can pass on
+        // isolation; a fuzzy guess must agree spatially.
+        RoleKind::Unknown => {
+            if is_fuzzy {
+                spatially_corroborated
+            } else {
+                isolation_ok || spatially_corroborated
+            }
+        }
+    }
 }
 
 /// Pass 3 — match the active nav-pack's candidate icon crops against the capture by NCC.
@@ -571,6 +617,26 @@ mod tests {
         // Whole-column height (a list/tree pane) → reject.
         let too_tall = r(280, 0, 120, 800);
         assert!(!uia_snap_plausible(&too_tall, &ocr, &crop));
+    }
+
+    #[test]
+    fn fuzzy_match_needs_spatial_corroboration() {
+        use super::{corroboration_accept, RoleKind};
+        // The live Blender regression: target "Move" fuzzy-matched "Mode" (isolated label) on a
+        // non-UIA (Unknown) surface, far from the AI bbox and with no anchor → must REJECT so
+        // template matching gets a turn.
+        assert!(!corroboration_accept(RoleKind::Unknown, true, true, false));
+        // A fuzzy match that DOES agree spatially is accepted.
+        assert!(corroboration_accept(RoleKind::Unknown, true, true, true));
+        // Exact/substring (not fuzzy) still passes on isolation alone — no regression.
+        assert!(corroboration_accept(RoleKind::Unknown, false, true, false));
+        // Content surface: a fuzzy guess without spatial agreement is rejected even if isolated.
+        assert!(!corroboration_accept(RoleKind::Content, true, true, false));
+        assert!(corroboration_accept(RoleKind::Content, true, true, true));
+        // Interactive UIA hit is authoritative regardless.
+        assert!(corroboration_accept(RoleKind::Interactive, true, false, false));
+        // Nothing corroborates a non-fuzzy Unknown match with no isolation → reject.
+        assert!(!corroboration_accept(RoleKind::Unknown, false, false, false));
     }
 
     #[test]
