@@ -308,9 +308,24 @@ mod tests {
     fn match_icon_live() {
         let hay = load_gray_from_bytes(&std::fs::read(std::env::var("HAYSTACK").unwrap()).unwrap())
             .unwrap();
-        let tmpl =
+        let mut tmpl =
             load_gray_from_bytes(&std::fs::read(std::env::var("TEMPLATE").unwrap()).unwrap())
                 .unwrap();
+        let mut hay = hay;
+        // CAP="WxH" simulates matching on the downscaled image we send the AI: fit the haystack
+        // within W×H and shrink the template by the SAME factor (i.e. templates cropped at AI
+        // scale), so a hit lands at sweep-scale ~1.0.
+        if let Ok(cap) = std::env::var("CAP") {
+            let dims: Vec<u32> = cap.split('x').filter_map(|s| s.trim().parse().ok()).collect();
+            if let [cw, ch] = dims[..] {
+                let f = (cw as f32 / hay.width() as f32)
+                    .min(ch as f32 / hay.height() as f32)
+                    .min(1.0);
+                hay = image::imageops::resize(&hay, (hay.width() as f32 * f) as u32, (hay.height() as f32 * f) as u32, FilterType::Lanczos3);
+                tmpl = image::imageops::resize(&tmpl, (tmpl.width() as f32 * f).round() as u32, (tmpl.height() as f32 * f).round() as u32, FilterType::Lanczos3);
+                eprintln!("CAP {cw}x{ch}: downscale factor {f:.3}");
+            }
+        }
         eprintln!("haystack {}x{}, template {}x{}, {} scales", hay.width(), hay.height(), tmpl.width(), tmpl.height(), DEFAULT_SCALES.len());
         let t = std::time::Instant::now();
         let res = match_icon(&hay, &tmpl, DEFAULT_SCALES, -1.0);
