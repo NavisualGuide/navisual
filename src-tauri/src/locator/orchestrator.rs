@@ -272,7 +272,7 @@ pub fn locate(
         // Pass 3 — icon template matching (nav-pack icons), the last resort for icon-only
         // controls A11y + OCR can't name. No-op when the pack supplied no candidates.
         let (tmpl_hit, tmpl_trace) =
-            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, &opts.icon_templates);
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, ai_bbox_img, &opts.icon_templates);
         trace.template = tmpl_trace;
         if let Some(result) = tmpl_hit {
             trace.final_decision = FinalDecision::HitTemplate;
@@ -395,7 +395,7 @@ pub fn locate(
     // No-op when the active pack supplied no icon candidates (the common case).
     if is_fuzzy || !accept {
         let (tmpl_hit, tmpl_trace) =
-            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, &opts.icon_templates);
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, ai_bbox_img, &opts.icon_templates);
         trace.template = tmpl_trace;
         if let Some(result) = tmpl_hit {
             trace.ocr = ocr_trace;
@@ -489,25 +489,54 @@ fn corroboration_accept(
 }
 
 /// Pass 3 — match the active nav-pack's candidate icon crops against the capture by NCC.
-/// `haystack_png` is the same native-res capture OCR ran on; matches are mapped from image
-/// pixels back to virtual-desktop coords with the same scale+origin transform as OCR hits.
-/// Returns `(accepted hit, trace)`; `(None, None)` when there were no candidates so the trace
-/// stays absent. Accepts only above `template::DEFAULT_MIN_SCORE` — "no pointer beats wrong
-/// pointer". The per-template `match_icon` floor is set to `-1.0` so the trace records the
-/// best raw score even on a reject (useful for tuning).
+///
+/// Search is **restricted to a window around the AI `ai_bbox`** (the model's grounding),
+/// expanded by a generous margin so a somewhat mis-grounded bbox still contains the icon.
+/// This is the key cost lever: full-frame NCC over a ~2-MP capture × several scales is
+/// multi-second even optimized, whereas a ~400-px window is tens of ms. With no bbox the
+/// search can't be bounded affordably, so template matching is skipped (`(None, None)`).
+///
+/// Matches are mapped region-local → image px (add the window origin) → virtual-desktop coords
+/// (the same scale+origin transform as OCR hits). Accepts only above `DEFAULT_MIN_SCORE` —
+/// "no pointer beats wrong pointer"; the per-template floor is `-1.0` so the trace records the
+/// best raw score even on a reject.
 fn try_template_pass(
     haystack_png: &[u8],
     crop_rect: &Rect,
     img_w: u32,
     img_h: u32,
+    ai_bbox_img: Option<(i32, i32, u32, u32)>,
     templates: &[(String, Vec<u8>)],
 ) -> (Option<LocateResult>, Option<TemplateTrace>) {
     if templates.is_empty() {
         return (None, None);
     }
-    let Ok(haystack) = template::load_gray_from_bytes(haystack_png) else {
+    // No bbox → no affordable search window → skip (don't risk a full-frame stall).
+    let Some((bx, by, bw, bh)) = ai_bbox_img else {
+        return (None, None);
+    };
+    let Ok(full) = template::load_gray_from_bytes(haystack_png) else {
         return (None, Some(TemplateTrace::default()));
     };
+    // Window = bbox centre ± a margin large enough to tolerate a loosely-grounded bbox,
+    // clamped to the image and capped so cost stays bounded regardless of bbox size.
+    let cx = bx + bw as i32 / 2;
+    let cy = by + bh as i32 / 2;
+    let half = (2 * bw.max(bh) as i32).clamp(220, 360);
+    let (rx0, ry0) = ((cx - half).max(0), (cy - half).max(0));
+    let (rx1, ry1) = ((cx + half).min(img_w as i32), (cy + half).min(img_h as i32));
+    if rx1 <= rx0 || ry1 <= ry0 {
+        return (None, Some(TemplateTrace::default()));
+    }
+    let region = image::imageops::crop_imm(
+        &full,
+        rx0 as u32,
+        ry0 as u32,
+        (rx1 - rx0) as u32,
+        (ry1 - ry0) as u32,
+    )
+    .to_image();
+
     let mut tr = TemplateTrace {
         best_score: -1.0,
         ..Default::default()
@@ -519,7 +548,7 @@ fn try_template_pass(
         };
         tr.templates_tried += 1;
         // min_score -1.0 → return the raw best so we can record it even when rejected.
-        if let Some(m) = template::match_icon(&haystack, &needle, template::DEFAULT_SCALES, -1.0) {
+        if let Some(m) = template::match_icon(&region, &needle, template::DEFAULT_SCALES, -1.0) {
             if m.score > tr.best_score {
                 tr.best_score = m.score;
                 tr.best_scale = m.scale;
@@ -545,9 +574,12 @@ fn try_template_pass(
     } else {
         (1.0, 1.0)
     };
+    // region-local → full-image px (add the window origin) → virtual-desktop.
+    let img_x = m.x + rx0;
+    let img_y = m.y + ry0;
     let bbox = Rect {
-        x: (m.x as f32 * sx).round() as i32 + crop_rect.x,
-        y: (m.y as f32 * sy).round() as i32 + crop_rect.y,
+        x: (img_x as f32 * sx).round() as i32 + crop_rect.x,
+        y: (img_y as f32 * sy).round() as i32 + crop_rect.y,
         width: (m.width as f32 * sx).round() as u32,
         height: (m.height as f32 * sy).round() as u32,
     };

@@ -19,10 +19,12 @@ use anyhow::{Context, Result};
 use image::{imageops::FilterType, GrayImage};
 use imageproc::template_matching::{find_extremes, match_template, MatchTemplateMethod};
 
-/// DPI-derived scale sweep applied to the template before matching. Covers the common ratios
-/// between a pack crop's authored DPI and the live screen's scaling (100/125/150/175/200 %),
-/// in both directions. Kept small — each scale is a full correlation pass.
-pub const DEFAULT_SCALES: &[f32] = &[1.0, 1.25, 1.5, 0.8, 2.0, 0.67];
+/// DPI-derived scale sweep applied to the template before matching. Each scale is a full
+/// correlation pass, so this is deliberately short and ordered most-likely-first (native
+/// scale, then ±25 %, then 1.5×/0.67×) — covers the common pack-author-vs-screen DPI ratios
+/// without the cost of a wide sweep. Matching is region-restricted to the AI bbox, so even a
+/// few scales stay cheap.
+pub const DEFAULT_SCALES: &[f32] = &[1.0, 1.25, 0.8, 1.5, 0.67];
 
 /// Minimum NCC score to accept a match. NCC is in [-1, 1]; UI icons match near 1.0 when the
 /// theme/DPI line up, so a high floor rejects the near-misses that would place a wrong pointer.

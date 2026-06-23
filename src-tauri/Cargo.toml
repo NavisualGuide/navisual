@@ -94,4 +94,8 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package."image"]
 opt-level = 2
+# Template matching's NCC inner loop is hot — must be optimized even in dev or a
+# locate that reaches Pass 3 stalls for minutes on an unoptimized build.
+[profile.dev.package."imageproc"]
+opt-level = 3
 
