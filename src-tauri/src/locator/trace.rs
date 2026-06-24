@@ -131,6 +131,10 @@ pub struct OcrTrace {
     pub candidates: Vec<OcrCandidate>,
     /// Corroboration outcome for the winner (only when A11y was empty and OCR matched).
     pub corroboration: Option<Corroboration>,
+    /// E2: the region-cropped upscaled re-OCR rescue was attempted (full-frame OCR missed and a
+    /// trusted AI bbox was present). When it rescued a hit, `final_decision` is `HitOcr` and the
+    /// result's role is `OcrRegion`.
+    pub region_ocr_attempted: bool,
     pub elapsed_ms: u32,
 }
 

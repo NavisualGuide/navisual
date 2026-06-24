@@ -278,6 +278,28 @@ pub fn locate(
     // fix is a better engine (ocrs spike) or letting the vision AI read it (v0.7),
     // not upscaling. The `ocr_scale_sweep` harness is kept for that evaluation.
     let Some(hit) = outcome.winner.cloned() else {
+        // E2 — region-cropped upscaled re-OCR to rescue compact text the full-frame OCR mangled.
+        // Skipped for icon targets (a glyph has no text — template is their path) and when there's
+        // no AI bbox to crop to. A rescued hit sits in the bbox region, so it's corroborated.
+        if !opts.icon_target {
+            ocr_trace.region_ocr_attempted = ai_bbox_img.is_some();
+            if let Some(result) = try_region_ocr(
+                &ocr_bytes,
+                target_text,
+                ai_bbox_img,
+                &crop_rect,
+                img_w,
+                img_h,
+                opts.role.as_deref(),
+                opts.nearby_text.as_deref(),
+            ) {
+                trace.ocr = ocr_trace;
+                trace.final_decision = FinalDecision::HitOcr;
+                trace.final_bbox = Some(result.bbox);
+                trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                return Ok((Some(result), trace));
+            }
+        }
         trace.ocr = ocr_trace;
         // Pass 3 — icon template matching (nav-pack icons), the last resort for icon-only
         // controls A11y + OCR can't name. No-op when the pack supplied no candidates.
@@ -498,6 +520,86 @@ fn corroboration_accept(
     }
 }
 
+/// E2 — region-cropped OCR rescue. Full-frame OCR missed: compact text below the engine's
+/// ~30 px floor gets mangled (Photoshop options bar ~11 px, VS Code at a reduced font). When the
+/// model gave a bbox, crop to it (+ a generous margin), **upscale ~3×**, and re-OCR just that
+/// small region so the text clears the floor. Bounded cost (~tens of ms on a ~few-hundred-px
+/// crop, vs the reverted whole-image upscale's ~837 ms / pathological 12 s under GPU load — you
+/// only upscale the crop). A hit is corroborated by sitting in the AI bbox (the model said the
+/// target is here *and* upscaled OCR reads it there). Returns the result in VD coords.
+#[allow(clippy::too_many_arguments)]
+fn try_region_ocr(
+    haystack_png: &[u8],
+    target_text: &str,
+    ai_bbox_img: Option<(i32, i32, u32, u32)>,
+    crop_rect: &Rect,
+    img_w: u32,
+    img_h: u32,
+    role: Option<&str>,
+    nearby_text: Option<&str>,
+) -> Option<LocateResult> {
+    const UP: u32 = 3;
+    let (bx, by, bw, bh) = ai_bbox_img?;
+    let full = image::load_from_memory(haystack_png).ok()?.to_rgba8();
+    // Window = a margin around the bbox centre, **capped** so a loosely-grounded (large) bbox
+    // can't balloon the upscaled OCR cost — half-extents are bbox-half + slack, clamped to a max,
+    // then clamped to the image. Keeps the worst case ~3 MP at 3× (~2 s); a tight word/line bbox
+    // stays ~0.2-0.8 MP (~150-400 ms).
+    let (cx, cy) = (bx + bw as i32 / 2, by + bh as i32 / 2);
+    let halfw = (bw as i32 / 2 + 100).min(350);
+    let halfh = (bh as i32 / 2 + 70).min(250);
+    let rx0 = (cx - halfw).max(0);
+    let ry0 = (cy - halfh).max(0);
+    let rx1 = (cx + halfw).min(img_w as i32);
+    let ry1 = (cy + halfh).min(img_h as i32);
+    if rx1 <= rx0 || ry1 <= ry0 {
+        return None;
+    }
+    let (rw, rh) = ((rx1 - rx0) as u32, (ry1 - ry0) as u32);
+    let region = image::imageops::crop_imm(&full, rx0 as u32, ry0 as u32, rw, rh).to_image();
+    let up = image::imageops::resize(&region, rw * UP, rh * UP, image::imageops::FilterType::Lanczos3);
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(up)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .ok()?;
+    let results = ocr::run_ocr(png.get_ref()).ok()?;
+    // The whole window is the AI-bbox area, so no overlap filter is needed here.
+    let find_opts = ocr::FindOptions {
+        role,
+        nearby_text,
+        screen_width: rw * UP,
+        screen_height: rh * UP,
+        ai_bbox: None,
+        avoid_bbox: None,
+        min_confidence: 0.5,
+    };
+    let outcome = ocr::find_text(target_text, &results, &find_opts);
+    let hit = outcome.winner?;
+    // upscaled-window-local → image px (÷UP + window origin) → virtual-desktop.
+    let (sx, sy) = if img_w > 0 && img_h > 0 && crop_rect.width > 0 && crop_rect.height > 0 {
+        (
+            crop_rect.width as f32 / img_w as f32,
+            crop_rect.height as f32 / img_h as f32,
+        )
+    } else {
+        (1.0, 1.0)
+    };
+    let ix = rx0 as f32 + hit.bbox.0 as f32 / UP as f32;
+    let iy = ry0 as f32 + hit.bbox.1 as f32 / UP as f32;
+    let bbox = Rect {
+        x: (ix * sx).round() as i32 + crop_rect.x,
+        y: (iy * sy).round() as i32 + crop_rect.y,
+        width: (hit.bbox.2 as f32 / UP as f32 * sx).round() as u32,
+        height: (hit.bbox.3 as f32 / UP as f32 * sy).round() as u32,
+    };
+    Some(LocateResult {
+        bbox,
+        name: hit.text.clone(),
+        role: "OcrRegion".to_string(),
+        confidence: hit.confidence,
+    })
+}
+
 /// Disambiguate when full-screen matching found **more than one** instance of an icon (similar
 /// or repeated glyphs). The spatial priors only **break ties**, never restrict the search, so a
 /// stale/wrong prior can't cause a miss. In order: (1) region containment — keep matches whose
@@ -667,6 +769,34 @@ mod tests {
             y,
             width: w,
             height: h,
+        }
+    }
+
+    // Live: drive the E2 region-OCR rescue (try_region_ocr) against a real capture with a
+    // synthetic AI bbox, to confirm it reads compact text + maps coords. With the whole image as
+    // the crop_rect (origin 0, sx=1) the result bbox is in image px, so it should sit inside the
+    // given BBOX region. IN=capture.png; BBOX=x,y,w,h (around the target text); TARGET=word.
+    //   $env:IN="vscode_cap.png"; $env:BBOX="450,180,200,150"; $env:TARGET="user";
+    //   cargo test --lib region_ocr_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn region_ocr_live() {
+        let bytes = std::fs::read(std::env::var("IN").unwrap()).unwrap();
+        let (w, h) = image::load_from_memory(&bytes).map(|i| (i.width(), i.height())).unwrap();
+        let p: Vec<i32> = std::env::var("BBOX")
+            .unwrap()
+            .split(',')
+            .map(|s| s.trim().parse().unwrap())
+            .collect();
+        let bbox = (p[0], p[1], p[2] as u32, p[3] as u32);
+        let target = std::env::var("TARGET").unwrap();
+        let crop = Rect { x: 0, y: 0, width: w, height: h };
+        let t = std::time::Instant::now();
+        let res = try_region_ocr(&bytes, &target, Some(bbox), &crop, w, h, None, None);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        match res {
+            Some(r) => eprintln!("FOUND '{}' role={} at {:?} in {ms:.0}ms (bbox region {:?})", r.name, r.role, r.bbox, bbox),
+            None => eprintln!("not found in {ms:.0}ms (bbox region {:?})", bbox),
         }
     }
 

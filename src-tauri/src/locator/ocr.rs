@@ -777,6 +777,58 @@ fn sequence_ratio(a: &str, b: &str) -> f32 {
 mod tests {
     use super::*;
 
+    // E2 spike (measurement only — no production change): OCR a capture at several scales,
+    // full-image or a cropped REGION, to see whether upscaling rescues compact text the native
+    // pass misses, and at what cost. IN=capture.png; optional REGION=x,y,w,h; UPS="1,2,3".
+    //   $env:IN="vscode_cap.png"; $env:UPS="1,2,3"; (optional $env:REGION="x,y,w,h")
+    //   cargo test --lib ocr_spike -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn ocr_spike() {
+        let img = image::open(std::env::var("IN").expect("set IN")).expect("open").to_rgba8();
+        let sub = if let Ok(r) = std::env::var("REGION") {
+            let p: Vec<u32> = r.split(',').map(|s| s.trim().parse().unwrap()).collect();
+            image::imageops::crop_imm(&img, p[0], p[1], p[2], p[3]).to_image()
+        } else {
+            img
+        };
+        let ups: Vec<u32> = std::env::var("UPS")
+            .unwrap_or_else(|_| "1,2,3".into())
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        eprintln!("base region {}x{}", sub.width(), sub.height());
+        for up in ups {
+            let scaled = if up == 1 {
+                sub.clone()
+            } else {
+                image::imageops::resize(&sub, sub.width() * up, sub.height() * up, image::imageops::FilterType::Lanczos3)
+            };
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(scaled.clone())
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            let t = std::time::Instant::now();
+            let res = run_ocr(png.get_ref()).expect("ocr");
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            let words = res.iter().filter(|r| r.confidence < 1.0).count();
+            let lines = res.iter().filter(|r| r.confidence >= 1.0).count();
+            let text: String = res
+                .iter()
+                .filter(|r| r.confidence >= 1.0)
+                .map(|r| r.text.clone())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let sample: String = text.chars().take(220).collect();
+            eprintln!(
+                "up={up} {}x{}: {lines} lines / {words} words in {ms:.0} ms",
+                scaled.width(),
+                scaled.height()
+            );
+            eprintln!("   text: {sample}");
+        }
+    }
+
     fn word(text: &str, bbox: (i32, i32, u32, u32)) -> OcrResult {
         OcrResult {
             text: text.to_string(),
