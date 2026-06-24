@@ -843,8 +843,11 @@ pub fn find_element(
         // per-model bbox trust — not as the safety mechanism (the verification is), but to avoid
         // probing a known-unreliable bbox (free-tier Nemotron) that could land on a coincidental
         // small control. The outcome is recorded either way so the debug drawer shows it.
+        // Skipped for icon targets: we have a template for the glyph, and the probe found "no
+        // interactive control" on icon-only surfaces anyway — so it's wasted A11y time (part of
+        // the scoped A11y shorten).
         if let Some(ai) = opts.ai_bbox {
-            if opts.bbox_decisive {
+            if opts.bbox_decisive && !opts.icon_target {
                 let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
                 trace.bbox_probe = Some(probe);
                 if let Some(hit) = probe_hit {

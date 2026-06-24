@@ -226,8 +226,8 @@ fn execute_step(
                 let (icon_templates, icon_region) =
                     pack_locate_hints(packs, target_hwnd, text);
                 // A pack icon for this target ⇒ a known icon-only element → A11y skips its
-                // expensive dead-end fallbacks (it can't name a glyph), and the bounded matcher
-                // passes still run. The 500 ms budget also drops for these targets.
+                // expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
+                // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms.
                 let icon_target = !icon_templates.is_empty();
                 let opts = locator::orchestrator::LocateOptions {
                     role: step
@@ -238,7 +238,7 @@ fn execute_step(
                     ai_bbox,
                     bbox_decisive,
                     avoid_bbox,
-                    a11y_timeout_ms: if icon_target { 300 } else { 500 },
+                    a11y_timeout_ms: if icon_target { 150 } else { 500 },
                     min_confidence: 0.5,
                     target_hwnd,
                     debug_ocr_image_path: debug_ocr_path,
