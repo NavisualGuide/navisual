@@ -75,8 +75,14 @@ struct AppState {
     last_overlay: parking_lot::Mutex<Option<LastOverlay>>,
     /// Resolved path to the .env settings file — always writable (app data dir).
     env_path: PathBuf,
-    /// Path to the Supabase session JSON file (managed provider only).
+    /// Path to the Supabase session JSON file.
     supabase_session_path: PathBuf,
+    /// Provider-independent Supabase session for account management (sign in,
+    /// sign out, get_account_info, etc.). Lives here — not inside the AI
+    /// client — so account commands work regardless of which `API_PROVIDER`
+    /// is active.  The `ManagedClient`'s own session is kept in sync for
+    /// relay requests.
+    supabase_session: Mutex<Option<server::SupabaseSession>>,
     /// Previous aHash for Autopilot on-demand screen-change polling.
     screen_hash: parking_lot::Mutex<Option<u64>>,
     /// Most-recent AI-image JPEG bytes (the one sent to the AI on the latest
@@ -2499,9 +2505,11 @@ struct SessionStatus {
 /// before each AI call.
 #[tauri::command]
 async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, String> {
+    // Already have a session (from disk or a prior call)? Don't mint another.
     {
-        let router = state.ai_router.lock().await;
-        if router.has_managed_session() {
+        let sess = state.supabase_session.lock().await;
+        if sess.is_some() {
+            let router = state.ai_router.lock().await;
             return Ok(SessionStatus {
                 signed_in: true,
                 free_remaining: router.get_managed_free_remaining(),
@@ -2529,11 +2537,7 @@ async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, Strin
         .map_err(|e| e.to_string())?;
 
     server::save_session(&state.supabase_session_path, &new_session);
-
-    {
-        let mut router = state.ai_router.lock().await;
-        router.set_managed_session(new_session);
-    }
+    save_app_session(&state, new_session.clone()).await;
 
     Ok(SessionStatus {
         signed_in: true,
@@ -2545,21 +2549,8 @@ async fn sign_in_anon(state: State<'_, AppState>) -> Result<SessionStatus, Strin
 #[tauri::command]
 async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceResponse, String> {
     let (supabase_url, access_token) = {
-        let mut router = state.ai_router.lock().await;
-        router
-            .ensure_managed_token()
-            .await
-            .map_err(|e| format!("Session refresh failed: {e}"))?;
-        let url = router
-            .config
-            .supabase_url
-            .clone()
-            .ok_or("SUPABASE_URL not configured")?;
-        // Try to get the access token from the managed client's session.
-        let token = match &router.client_access_token() {
-            Some(t) => t.clone(),
-            None => return Err("Not signed in to managed provider".to_string()),
-        };
+        let (url, _key) = managed_url_key(&state).await?;
+        let token = acct_session_token(&state).await?;
         (url, token)
     };
     server::get_balance(&supabase_url, &access_token)
@@ -2603,16 +2594,8 @@ async fn start_google_oauth(
         .map_err(|e| e.to_string())?;
 
     // A Bearer token for the current session is required to link in place. With no
-    // managed session yet, there's nothing to preserve → go straight to replace.
-    let access_token = {
-        let mut router = state.ai_router.lock().await;
-        if router.has_managed_session() {
-            let _ = router.ensure_managed_token().await;
-            router.client_access_token()
-        } else {
-            None
-        }
-    };
+    // session yet, there's nothing to preserve → go straight to replace.
+    let access_token = acct_session_token(&state).await.ok();
     let Some(access_token) = access_token else {
         return google_oauth_replace(&state, &app, &supabase_url, &anon_key, &listener).await;
     };
@@ -2650,10 +2633,7 @@ async fn start_google_oauth(
                     .await
                     .map_err(|e| e.to_string())?;
             server::save_session(&state.supabase_session_path, &session);
-            {
-                let mut router = state.ai_router.lock().await;
-                router.set_managed_session(session);
-            }
+            save_app_session(&state, session).await;
             let _ = app
                 .get_webview_window("panel")
                 .map(|w| w.emit("oauth_complete", ()));
@@ -2710,10 +2690,7 @@ async fn google_oauth_replace(
         .map_err(|e| e.to_string())?;
 
     server::save_session(&state.supabase_session_path, &new_session);
-    {
-        let mut router = state.ai_router.lock().await;
-        router.set_managed_session(new_session);
-    }
+    save_app_session(state, new_session).await;
     let _ = app
         .get_webview_window("panel")
         .map(|w| w.emit("oauth_complete", ()));
@@ -2752,19 +2729,8 @@ async fn create_checkout(
     amount_usd: f64,
 ) -> Result<String, String> {
     let (supabase_url, access_token) = {
-        let mut router = state.ai_router.lock().await;
-        router
-            .ensure_managed_token()
-            .await
-            .map_err(|e| format!("Session refresh failed: {e}"))?;
-        let url = router
-            .config
-            .supabase_url
-            .clone()
-            .ok_or("SUPABASE_URL not configured")?;
-        let token = router
-            .client_access_token()
-            .ok_or("Not signed in to managed provider")?;
+        let (url, _key) = managed_url_key(&state).await?;
+        let token = acct_session_token(&state).await?;
         (url, token)
     };
 
@@ -2794,31 +2760,60 @@ async fn managed_url_key(state: &State<'_, AppState>) -> Result<(String, String)
     Ok((url, key))
 }
 
-/// (supabase_url, anon_key, access_token) with the managed token refreshed first.
-/// Errors if there is no managed session — account actions are a Managed-provider
-/// feature (anonymous sign-in runs on launch when the provider is `managed`).
+/// Store a Supabase session in the provider-independent AppState slot AND sync
+/// it to the router's ManagedClient (if present) so relay requests use it too.
+async fn save_app_session(state: &State<'_, AppState>, session: server::SupabaseSession) {
+    *state.supabase_session.lock().await = Some(session.clone());
+    let mut router = state.ai_router.lock().await;
+    router.set_managed_session(session);
+}
+
+/// (supabase_url, anon_key, access_token) — provider-independent.
+/// Uses the AppState session (not the router's ManagedClient) so account
+/// commands work regardless of which `API_PROVIDER` is active.
 async fn managed_auth_ctx(
     state: &State<'_, AppState>,
 ) -> Result<(String, String, String), String> {
-    let mut router = state.ai_router.lock().await;
-    router
-        .ensure_managed_token()
-        .await
-        .map_err(|e| format!("Session refresh failed: {e}"))?;
-    let url = router
-        .config
-        .supabase_url
-        .clone()
-        .ok_or("SUPABASE_URL not configured")?;
-    let key = router
-        .config
-        .supabase_anon_key
-        .clone()
-        .ok_or("SUPABASE_ANON_KEY not configured")?;
-    let token = router
-        .client_access_token()
-        .ok_or("Not signed in to managed provider")?;
+    let (url, key) = managed_url_key(state).await?;
+    let token = acct_session_token(state).await?;
     Ok((url, key, token))
+}
+
+/// Get the current Supabase access token from the AppState session, refreshing
+/// it first if expired. This is provider-independent — works whether the active
+/// AI provider is `managed`, `gemini`, `anthropic`, etc.
+async fn acct_session_token(
+    state: &State<'_, AppState>,
+) -> Result<String, String> {
+    let mut sess_guard = state.supabase_session.lock().await;
+    match sess_guard.as_ref() {
+        Some(s) if !s.is_expired() => Ok(s.access_token.clone()),
+        Some(s) => {
+            // Expired — try refreshing.
+            let refresh_token = s.refresh_token.clone();
+            let (url, key) = {
+                let router = state.ai_router.lock().await;
+                let url = router.config.supabase_url.clone()
+                    .ok_or("SUPABASE_URL not configured")?;
+                let key = router.config.supabase_anon_key.clone()
+                    .ok_or("SUPABASE_ANON_KEY not configured")?;
+                (url, key)
+            };
+            let refreshed = server::refresh_session(&url, &key, &refresh_token)
+                .await
+                .map_err(|e| format!("Session refresh failed: {e}"))?;
+            server::save_session(&state.supabase_session_path, &refreshed);
+            let token = refreshed.access_token.clone();
+            // Sync to ManagedClient if active so relay requests use the fresh token.
+            {
+                let mut router = state.ai_router.lock().await;
+                router.set_managed_session(refreshed.clone());
+            }
+            *sess_guard = Some(refreshed);
+            Ok(token)
+        }
+        None => Err("Not signed in".to_string()),
+    }
 }
 
 /// Replace the on-disk + in-memory session with a fresh anonymous one (used after
@@ -2840,13 +2835,14 @@ async fn reset_to_anonymous(
         let mut r = state.ai_router.lock().await;
         r.clear_managed_session();
     }
+    *state.supabase_session.lock().await = None;
     let _ = std::fs::remove_file(&state.supabase_session_path);
     let new_session = server::sign_in_anonymously(url, key)
         .await
         .map_err(|e| e.to_string())?;
     server::save_session(&state.supabase_session_path, &new_session);
-    let mut r = state.ai_router.lock().await;
-    r.set_managed_session(new_session);
+    save_app_session(state, new_session).await;
+    let r = state.ai_router.lock().await;
     Ok(r.get_managed_free_remaining())
 }
 
@@ -2904,10 +2900,7 @@ async fn verify_email_otp(
         match server::verify_email_otp(&url, &key, email, token, otp_type).await {
             Ok(session) => {
                 server::save_session(&state.supabase_session_path, &session);
-                {
-                    let mut r = state.ai_router.lock().await;
-                    r.set_managed_session(session);
-                }
+                save_app_session(&state, session).await;
                 emit_account_changed(&app);
                 return Ok(());
             }
@@ -2934,10 +2927,7 @@ async fn sign_in_email(
         .await
         .map_err(|e| e.to_string())?;
     server::save_session(&state.supabase_session_path, &session);
-    {
-        let mut r = state.ai_router.lock().await;
-        r.set_managed_session(session);
-    }
+    save_app_session(&state, session).await;
     emit_account_changed(&app);
     Ok(())
 }
@@ -2987,10 +2977,7 @@ async fn verify_password_reset(
         .await
         .map_err(|e| e.to_string())?;
     server::save_session(&state.supabase_session_path, &session);
-    {
-        let mut r = state.ai_router.lock().await;
-        r.set_managed_session(session);
-    }
+    save_app_session(&state, session).await;
     emit_account_changed(&app);
     Ok(())
 }
@@ -3045,12 +3032,12 @@ fn exit_for_update(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-/// Return whether the app currently has a managed-provider session.
+/// Return whether the app currently has a Supabase session.
 #[tauri::command]
 async fn get_session_status(state: State<'_, AppState>) -> Result<SessionStatus, String> {
     let router = state.ai_router.lock().await;
     let free_remaining = router.get_managed_free_remaining();
-    let signed_in = router.has_managed_session();
+    let signed_in = state.supabase_session.lock().await.is_some();
     Ok(SessionStatus {
         signed_in,
         free_remaining,
@@ -3085,18 +3072,8 @@ async fn submit_feedback(
     payload: FeedbackPayload,
 ) -> Result<(), String> {
     let (supabase_url, anon_key, token) = {
-        let router = state.ai_router.lock().await;
-        let url = router
-            .config
-            .supabase_url
-            .clone()
-            .ok_or("SUPABASE_URL not configured")?;
-        let key = router
-            .config
-            .supabase_anon_key
-            .clone()
-            .ok_or("SUPABASE_ANON_KEY not configured")?;
-        let token = router.client_access_token();
+        let (url, key) = managed_url_key(&state).await?;
+        let token = acct_session_token(&state).await.ok();
         (url, key, token)
     };
     let row = serde_json::to_value(&payload).map_err(|e| e.to_string())?;
@@ -3185,6 +3162,10 @@ pub fn run() {
             let session_manager = SessionManager::new(app_data_dir.join("sessions"));
             let supabase_session_path = app_data_dir.join("supabase_session.json");
 
+            // Load the Supabase session from disk so account identity survives
+            // restarts — regardless of which AI provider is active.
+            let initial_session = server::load_session(&supabase_session_path);
+
             let router = AiRouter::new(
                 config,
                 cost_tracker,
@@ -3214,6 +3195,7 @@ pub fn run() {
                 last_overlay: parking_lot::Mutex::new(None),
                 env_path,
                 supabase_session_path,
+                supabase_session: tokio::sync::Mutex::new(initial_session),
                 screen_hash: parking_lot::Mutex::new(None),
                 chat_full_jpeg: parking_lot::Mutex::new(None),
                 packs,

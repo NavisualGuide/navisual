@@ -143,34 +143,10 @@ impl AiRouter {
         }
     }
 
-    /// Returns the current access token if the managed client has a valid session.
-    pub fn client_access_token(&self) -> Option<String> {
-        if let Some(ApiClient::Managed(ref c)) = self.client {
-            c.session.as_ref().map(|s| s.access_token.clone())
-        } else {
-            None
-        }
-    }
-
-    /// Refresh the managed access token if expired. Call before any direct
-    /// Supabase request (get_balance, create_checkout) so a stale token doesn't
-    /// get rejected by the gateway with "Invalid JWT". No-op for other providers.
-    pub async fn ensure_managed_token(&mut self) -> anyhow::Result<()> {
-        if let Some(ApiClient::Managed(ref mut c)) = self.client {
-            c.ensure_token().await
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Returns true if the managed client has a session (even if expired — ensure_token refreshes it).
-    pub fn has_managed_session(&self) -> bool {
-        if let Some(ApiClient::Managed(ref c)) = self.client {
-            c.session.is_some()
-        } else {
-            false
-        }
-    }
+    // NOTE: `client_access_token`, `ensure_managed_token`, and `has_managed_session`
+    // were removed — account management now uses the provider-independent
+    // `AppState::supabase_session` (via `acct_session_token` in lib.rs) so it works
+    // regardless of which `API_PROVIDER` is active.
 
     fn init_client(&mut self) {
         let provider = self.config.api_provider.as_str();
