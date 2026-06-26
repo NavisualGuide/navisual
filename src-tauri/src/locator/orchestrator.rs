@@ -277,7 +277,18 @@ pub fn locate(
     // the input shared by all OCR engines (ocr-improvements-plan.md) — the real
     // fix is a better engine (ocrs spike) or letting the vision AI read it (v0.7),
     // not upscaling. The `ocr_scale_sweep` harness is kept for that evaluation.
-    let Some(hit) = outcome.winner.cloned() else {
+    // For a known pack-icon target the icon template is the authority. A11y is already shortened
+    // (a glyph has no accessible name) and an OCR *text* match is coincidental for an icon — a
+    // stray "Rotate" inside Blender's "Rotate View" status hint (or a menu label / our own caption)
+    // must NOT preempt the icon. So ignore the OCR winner for icon targets and fall straight to the
+    // template pass; if the glyph isn't on screen the result is a clean Miss (no pointer beats wrong
+    // pointer), not a stray text hit.
+    let ocr_winner = if opts.icon_target {
+        None
+    } else {
+        outcome.winner.cloned()
+    };
+    let Some(hit) = ocr_winner else {
         // E2 — region-cropped upscaled re-OCR to rescue compact text the full-frame OCR mangled.
         // Skipped for icon targets (a glyph has no text — template is their path) and when there's
         // no AI bbox to crop to. A rescued hit sits in the bbox region, so it's corroborated.
