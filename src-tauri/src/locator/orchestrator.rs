@@ -277,18 +277,35 @@ pub fn locate(
     // the input shared by all OCR engines (ocr-improvements-plan.md) — the real
     // fix is a better engine (ocrs spike) or letting the vision AI read it (v0.7),
     // not upscaling. The `ocr_scale_sweep` harness is kept for that evaluation.
-    // For a known pack-icon target the icon template is the authority. A11y is already shortened
-    // (a glyph has no accessible name) and an OCR *text* match is coincidental for an icon — a
-    // stray "Rotate" inside Blender's "Rotate View" status hint (or a menu label / our own caption)
-    // must NOT preempt the icon. So ignore the OCR winner for icon targets and fall straight to the
-    // template pass; if the glyph isn't on screen the result is a clean Miss (no pointer beats wrong
-    // pointer), not a stray text hit.
-    let ocr_winner = if opts.icon_target {
-        None
-    } else {
-        outcome.winner.cloned()
-    };
-    let Some(hit) = ocr_winner else {
+    // For a known pack-icon target the icon template is the PREFERRED locator — it beats even an
+    // exact-corroborated OCR text match, because A11y can't name a glyph and OCR text on an icon is
+    // usually coincidental (a stray "Rotate" inside Blender's "Rotate View" status hint, a menu
+    // label, or our own caption). So try the template FIRST for icon targets; only if the glyph
+    // isn't on screen do we fall through to the OCR winner below — so OCR still rescues a template
+    // miss. Non-icon targets keep the designed order (exact OCR → template → fuzzy OCR). The flag
+    // stops the later template passes from running it twice.
+    let mut template_done = false;
+    if opts.icon_target && !opts.icon_templates.is_empty() {
+        let (tmpl_hit, tmpl_trace) = try_template_pass(
+            &ocr_bytes,
+            &crop_rect,
+            img_w,
+            img_h,
+            opts.icon_region,
+            ai_bbox_img,
+            &opts.icon_templates,
+        );
+        trace.template = tmpl_trace;
+        template_done = true;
+        if let Some(result) = tmpl_hit {
+            trace.ocr = ocr_trace;
+            trace.final_decision = FinalDecision::HitTemplate;
+            trace.final_bbox = Some(result.bbox);
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((Some(result), trace));
+        }
+    }
+    let Some(hit) = outcome.winner.cloned() else {
         // E2 — region-cropped upscaled re-OCR to rescue compact text the full-frame OCR mangled.
         // Skipped for icon targets (a glyph has no text — template is their path) and when there's
         // no AI bbox to crop to. A rescued hit sits in the bbox region, so it's corroborated.
@@ -313,15 +330,18 @@ pub fn locate(
         }
         trace.ocr = ocr_trace;
         // Pass 3 — icon template matching (nav-pack icons), the last resort for icon-only
-        // controls A11y + OCR can't name. No-op when the pack supplied no candidates.
-        let (tmpl_hit, tmpl_trace) =
-            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates);
-        trace.template = tmpl_trace;
-        if let Some(result) = tmpl_hit {
-            trace.final_decision = FinalDecision::HitTemplate;
-            trace.final_bbox = Some(result.bbox);
-            trace.elapsed_ms = started.elapsed().as_millis() as u32;
-            return Ok((Some(result), trace));
+        // controls A11y + OCR can't name. No-op when the pack supplied no candidates. Skipped
+        // when an icon target already ran it template-first above.
+        if !template_done {
+            let (tmpl_hit, tmpl_trace) =
+                try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates);
+            trace.template = tmpl_trace;
+            if let Some(result) = tmpl_hit {
+                trace.final_decision = FinalDecision::HitTemplate;
+                trace.final_bbox = Some(result.bbox);
+                trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                return Ok((Some(result), trace));
+            }
         }
         trace.final_decision = FinalDecision::Miss;
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
@@ -435,8 +455,9 @@ pub fn locate(
     // (live-observed: "Move"→"Mode" 75% beating the real Move icon). So whenever the OCR winner
     // is fuzzy OR uncorroborated, try the pack's icon templates first and prefer a hit. An
     // exact/substring match that passed corroboration is authoritative text and skips this.
-    // No-op when the active pack supplied no icon candidates (the common case).
-    if is_fuzzy || !accept {
+    // No-op when the active pack supplied no icon candidates (the common case), or when an icon
+    // target already ran the template template-first above (which beat even this exact match).
+    if (is_fuzzy || !accept) && !template_done {
         let (tmpl_hit, tmpl_trace) =
             try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates);
         trace.template = tmpl_trace;
