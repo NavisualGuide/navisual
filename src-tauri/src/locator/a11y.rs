@@ -729,9 +729,14 @@ pub fn find_element(
                     ));
                     trace.element_count = Some(trace.element_count.unwrap_or(0).max(n2));
                 }
-            } else {
+            } else if !opts.icon_target {
                 // Eager-tree frameworks (WPF/WinForms/WinUI/Win32): the standard matcher + manual
-                // walk are fast and proven here.
+                // walk are fast and proven here. SKIPPED entirely for icon targets — a glyph has no
+                // accessible name on an eager (non-Chrome) surface, and the UIA matcher is a
+                // synchronous COM walk that overruns the budget (~1 s on Blender; COM-bound, so a
+                // release build won't help), making it pure waste — the pack icon template locates
+                // these. Chrome icon targets keep the matcher (their icons often do have names).
+                // (lever c of the scoped A11y shorten)
                 // Pass 1
                 candidates.extend(match_in_subtree_all(
                     &automation,
