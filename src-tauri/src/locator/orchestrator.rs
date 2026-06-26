@@ -669,6 +669,19 @@ fn pick_match(
             }
         }
     }
+    // Reduce to score-comparable peaks before consulting the AI bbox. A near-perfect NCC score
+    // means "this IS the icon"; a peak well below the best is a look-alike (a confusable sibling
+    // like rotate↔transform on a low-contrast theme). The AI bbox is a *weak* prior — a model's
+    // rough pixel guess, wrong often enough on weak models — so it may only break a tie among
+    // comparable peaks, never promote a look-alike over a clear winner. (Live: gpt-5.4-mini's
+    // rotate bbox sat on the transform glyph and a 0.91 transform peak beat the 0.9999 rotate peak
+    // on the Print Friendly theme.) The known-region containment above is an author-supplied prior
+    // and stays authoritative; only the per-request bbox is score-gated.
+    const SCORE_TIE_MARGIN: f32 = 0.05;
+    if cands.len() > 1 {
+        let top = cands.iter().map(|(m, _)| m.score).fold(f32::MIN, f32::max);
+        cands.retain(|(m, _)| m.score >= top - SCORE_TIE_MARGIN);
+    }
     if cands.len() > 1 {
         if let Some((bx, by, bw, bh)) = ai_bbox_img {
             let (acx, acy) = (bx as f32 + bw as f32 / 2.0, by as f32 + bh as f32 / 2.0);
@@ -892,15 +905,27 @@ mod tests {
             800,
         );
         assert_eq!(m.x, 40);
-        // No region, bbox near the right one → pick nearest the bbox centre.
+        // No region, two COMPARABLE peaks (within SCORE_TIE_MARGIN), bbox near the right one →
+        // the bbox breaks the tie.
         let (m, _) = pick_match(
-            vec![tm(40, 100, 0.99), tm(800, 110, 0.92)],
+            vec![tm(40, 100, 0.97), tm(800, 110, 0.95)],
             None,
             Some((790, 100, 20, 20)),
             1000,
             800,
         );
         assert_eq!(m.x, 800);
+        // A clearly-better peak is NOT overridden by a bbox sitting on a lower-scored look-alike
+        // (the Print Friendly rotate↔transform regression: a 0.9999 must beat a 0.91 at the bbox,
+        // even though both peaks are in the same "left" region).
+        let (m, _) = pick_match(
+            vec![tm(40, 224, 0.9999), tm(40, 294, 0.9128)],
+            Some([0.0, 0.0, 0.2, 1.0]),
+            Some((40, 294, 20, 20)),
+            1000,
+            800,
+        );
+        assert_eq!((m.x, m.y), (40, 224));
         // No priors → highest score.
         let (m, _) = pick_match(vec![tm(40, 100, 0.92), tm(800, 100, 0.99)], None, None, 1000, 800);
         assert_eq!(m.x, 800);
