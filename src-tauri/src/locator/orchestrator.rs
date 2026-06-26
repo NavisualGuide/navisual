@@ -712,10 +712,17 @@ fn try_template_pass(
     let Ok(full) = template::load_gray_from_bytes(haystack_png) else {
         return (None, Some(TemplateTrace::default()));
     };
+    // Theme-robust matching: match on Sobel edge magnitude, not raw intensity, so an icon cropped
+    // from one theme still matches under a dark↔light/grey/custom flip (shape survives, colour
+    // doesn't). Edge the haystack ONCE here (not per-icon inside the matcher) and each icon once;
+    // the matcher itself stays preprocessing-agnostic.
+    let full = template::to_edges(&full);
     let needles: Vec<(String, image::GrayImage)> = templates
         .iter()
         .filter_map(|(name, bytes)| {
-            template::load_gray_from_bytes(bytes).ok().map(|g| (name.clone(), g))
+            template::load_gray_from_bytes(bytes)
+                .ok()
+                .map(|g| (name.clone(), template::to_edges(&g)))
         })
         .collect();
 

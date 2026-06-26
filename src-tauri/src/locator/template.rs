@@ -241,6 +241,51 @@ pub fn load_gray_from_bytes(bytes: &[u8]) -> Result<GrayImage> {
         .to_luma8())
 }
 
+/// Sobel gradient-magnitude edge map, normalized to 0–255. **Theme-robust matching preprocessing:**
+/// `|∇|` is identical whether a glyph is dark-on-light or light-on-dark, so an icon cropped from one
+/// theme still matches under a dark↔light (or grey/custom) flip — the icon's *shape* survives while
+/// only its colour changes. Measured (Blender dark icons vs a captured White theme): raw-intensity
+/// NCC collapses to 0.82–0.88 (below the 0.9 accept threshold → every icon misses), while edge NCC
+/// holds at 0.94–1.00 and lands on the correct toolbar positions, with the same-theme baseline
+/// ≥0.995 (no regression). The matcher (`match_icon` / `match_icon_pyramid`) is preprocessing-
+/// agnostic — `try_template_pass` feeds it the edge maps (haystack edged once, each icon once).
+pub fn to_edges(g: &GrayImage) -> GrayImage {
+    let grad = imageproc::gradients::sobel_gradients(g);
+    let max = grad.pixels().map(|p| p.0[0]).max().unwrap_or(1).max(1) as u32;
+    let mut norm = GrayImage::new(grad.width(), grad.height());
+    for (x, y, p) in grad.enumerate_pixels() {
+        norm.put_pixel(x, y, image::Luma([(p.0[0] as u32 * 255 / max) as u8]));
+    }
+    // Thicken edges with a 3×3 dilation. A raw Sobel edge is ~1 px thin; the coarse pass downscales
+    // the icon to ~12 px, where a 1 px line resamples to sub-pixel and disappears — so thin-edged
+    // glyphs (move, add-cube) lose their signature and the coarse pass mis-localizes. Dilating to
+    // ~3 px keeps the edge structure alive through the downscale.
+    dilate3x3(&norm)
+}
+
+/// 3×3 max filter (grayscale dilation). Used to thicken edge maps so they survive the coarse-pass
+/// downscale. O(9·N), a few tens of ms on a full screen — done once per locate on the haystack.
+fn dilate3x3(img: &GrayImage) -> GrayImage {
+    let (w, h) = img.dimensions();
+    let mut out = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let mut m = 0u8;
+            for dy in 0..3i32 {
+                for dx in 0..3i32 {
+                    let nx = x as i32 + dx - 1;
+                    let ny = y as i32 + dy - 1;
+                    if nx >= 0 && ny >= 0 && (nx as u32) < w && (ny as u32) < h {
+                        m = m.max(img.get_pixel(nx as u32, ny as u32).0[0]);
+                    }
+                }
+            }
+            out.put_pixel(x, y, image::Luma([m]));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,6 +526,13 @@ mod tests {
                 eprintln!("CAP {cw}x{ch}: downscale factor {f:.3}");
             }
         }
+        // EDGES=1 → Sobel-edge preprocess both (the theme-robust production path that
+        // `try_template_pass` uses); else raw intensity.
+        if std::env::var("EDGES").is_ok() {
+            hay = to_edges(&hay);
+            tmpl = to_edges(&tmpl);
+            eprintln!("EDGES: matching on Sobel gradient magnitude");
+        }
         eprintln!("haystack {}x{}, template {}x{}, {} scales", hay.width(), hay.height(), tmpl.width(), tmpl.height(), DEFAULT_SCALES.len());
         // PYRAMID=1 → full-screen coarse-to-fine top-K (the production path); else single full match.
         if std::env::var("PYRAMID").is_ok() {
@@ -503,18 +555,6 @@ mod tests {
             ),
             None => eprintln!("no match | match_icon took {ms:.1} ms"),
         }
-    }
-
-    // Sobel gradient-magnitude edge map, normalized to 0-255. Theme-invariant: |∇| is identical
-    // whether a glyph is dark-on-light or light-on-dark, so matching on edges survives a theme flip.
-    fn to_edges(g: &GrayImage) -> GrayImage {
-        let grad = imageproc::gradients::sobel_gradients(g);
-        let max = grad.pixels().map(|p| p.0[0]).max().unwrap_or(1).max(1) as u32;
-        let mut out = GrayImage::new(grad.width(), grad.height());
-        for (x, y, p) in grad.enumerate_pixels() {
-            out.put_pixel(x, y, image::Luma([(p.0[0] as u32 * 255 / max) as u8]));
-        }
-        out
     }
 
     // Capture a SPECIFIC app window by title (not the deduped picker list) — for grabbing the main
