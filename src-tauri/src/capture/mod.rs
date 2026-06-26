@@ -369,6 +369,11 @@ pub fn get_window_info_for_hwnd(_hwnd_raw: usize) -> Option<()> {
 #[cfg(windows)]
 pub use win::TargetWindowInfo;
 
+/// Diagnostic/nav-pack-authoring helper: find a specific app window by title substring.
+#[cfg(windows)]
+#[allow(unused_imports)] // used by the nav-pack-authoring `#[ignore]` test harnesses
+pub use win::find_window_by_title;
+
 /// Item 1: enumerate all candidate windows for the target-picker dropdown.
 #[cfg(windows)]
 pub fn list_target_windows() -> Vec<win::TargetWindowInfo> {

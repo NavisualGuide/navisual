@@ -505,6 +505,86 @@ mod tests {
         }
     }
 
+    // Sobel gradient-magnitude edge map, normalized to 0-255. Theme-invariant: |∇| is identical
+    // whether a glyph is dark-on-light or light-on-dark, so matching on edges survives a theme flip.
+    fn to_edges(g: &GrayImage) -> GrayImage {
+        let grad = imageproc::gradients::sobel_gradients(g);
+        let max = grad.pixels().map(|p| p.0[0]).max().unwrap_or(1).max(1) as u32;
+        let mut out = GrayImage::new(grad.width(), grad.height());
+        for (x, y, p) in grad.enumerate_pixels() {
+            out.put_pixel(x, y, image::Luma([(p.0[0] as u32 * 255 / max) as u8]));
+        }
+        out
+    }
+
+    // Capture a SPECIFIC app window by title (not the deduped picker list) — for grabbing the main
+    // Blender window while its Preferences dialog is also open.
+    //   $env:TITLE="blender"; $env:EXCLUDE="preferences"; $env:OUT="c:/Users/fujin/blender_light.png";
+    //   cargo test --lib capture_main_window -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn capture_main_window() {
+        let title = std::env::var("TITLE").unwrap_or_else(|_| "blender".into());
+        let exclude = std::env::var("EXCLUDE").unwrap_or_default();
+        let out = std::env::var("OUT").expect("set OUT");
+        let hwnd = crate::capture::find_window_by_title(&title, &exclude).expect("no window found");
+        let (img, rect) = crate::capture::recapture_window_raw(hwnd, &[]).expect("capture failed");
+        let png = crate::capture::encode_png_for_ocr(&img).expect("encode failed");
+        std::fs::write(&out, &png).expect("write failed");
+        eprintln!(
+            "captured '{title}' hwnd={hwnd} {}x{} rect={:?} -> {out}",
+            img.width(),
+            img.height(),
+            rect
+        );
+    }
+
+    // Theme-robustness eval: for each icon template, the best NCC against HAYSTACK using three
+    // preprocessings — intensity (current), Sobel edges (proposed, theme-invariant), inverted
+    // template (cheap dark↔light interim). Run with a same-theme capture (baseline, all should be
+    // ~1.0) and a flipped-theme capture (where intensity collapses but edges should hold).
+    //   $env:HAYSTACK="c:/Users/fujin/blender_light.png"; $env:ICONS="src-tauri/packs/blender/icons";
+    //   cargo test --lib theme_match_eval -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn theme_match_eval() {
+        let hay =
+            load_gray_from_bytes(&std::fs::read(std::env::var("HAYSTACK").unwrap()).unwrap()).unwrap();
+        let hay_edge = to_edges(&hay);
+        let dir = std::env::var("ICONS").unwrap_or_else(|_| "src-tauri/packs/blender/icons".into());
+        let score = |h: &GrayImage, t: &GrayImage| {
+            match_icon(h, t, DEFAULT_SCALES, -1.0)
+                .map(|m| m.score)
+                .unwrap_or(f32::NAN)
+        };
+        eprintln!("haystack {}x{} | icons {dir}", hay.width(), hay.height());
+        eprintln!("{:<12}{:>9} {:>9}  {:<13}{:>9}", "icon", "intens", "edge", "edge@(x,y)", "invert");
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "png"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            let tmpl = load_gray_from_bytes(&std::fs::read(&p).unwrap()).unwrap();
+            let s_int = score(&hay, &tmpl);
+            let m_edge = match_icon(&hay_edge, &to_edges(&tmpl), DEFAULT_SCALES, -1.0);
+            let (s_edge, ex, ey) = m_edge.map(|m| (m.score, m.x, m.y)).unwrap_or((f32::NAN, -1, -1));
+            let mut inv = tmpl.clone();
+            image::imageops::invert(&mut inv);
+            let s_inv = score(&hay, &inv);
+            eprintln!(
+                "{:<12}{:>9.4} {:>9.4}  ({:>4},{:>4}){:>9.4}",
+                p.file_stem().unwrap().to_string_lossy(),
+                s_int,
+                s_edge,
+                ex,
+                ey,
+                s_inv
+            );
+        }
+    }
+
     #[test]
     fn load_gray_from_png_bytes_roundtrips() {
         let mut rgba = RgbaImage::new(8, 8);

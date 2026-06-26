@@ -426,6 +426,47 @@ pub fn window_screen_rect(hwnd: HWND) -> Option<Rect> {
     frame_rect_of(hwnd)
 }
 
+/// Find the top-most visible candidate window whose title contains `needle` (case-insensitive)
+/// and does NOT contain `exclude` (when non-empty). Returns its HWND as `usize`. Diagnostic /
+/// nav-pack-authoring helper for capturing a *specific* app window (e.g. the main Blender window,
+/// not its "Blender Preferences" dialog). EnumWindows walks top→bottom z-order, so the first
+/// match is the front-most.
+#[allow(dead_code)] // used by the nav-pack-authoring `#[ignore]` test harnesses
+pub fn find_window_by_title(needle: &str, exclude: &str) -> Option<usize> {
+    struct State {
+        our_pid: u32,
+        needle: String,
+        exclude: String,
+        found: Option<usize>,
+    }
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        if state.found.is_some() || !is_target_candidate(hwnd, state.our_pid) {
+            return TRUE;
+        }
+        let mut buf = [0u16; 256];
+        let len = GetWindowTextW(hwnd, &mut buf) as usize;
+        let title = String::from_utf16_lossy(&buf[..len]).to_lowercase();
+        if title.contains(&state.needle)
+            && (state.exclude.is_empty() || !title.contains(&state.exclude))
+        {
+            state.found = Some(hwnd.0 as usize);
+            return FALSE; // stop — first (front-most) match
+        }
+        TRUE
+    }
+    let mut state = State {
+        our_pid: std::process::id(),
+        needle: needle.to_lowercase(),
+        exclude: exclude.to_lowercase(),
+        found: None,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+    state.found
+}
+
 /// Enumerate every connected monitor and return its rect in virtual-desktop
 /// coordinates. Replaces ad-hoc `xcap::Monitor::all()` enumeration elsewhere
 /// in the crate — we already have a per-monitor pipeline for capture, so
