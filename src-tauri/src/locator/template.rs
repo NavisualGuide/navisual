@@ -707,16 +707,29 @@ mod tests {
     // Hover an icon centre and OCR its tooltip (3× upscaled) → the text lines (line 1 = name,
     // a `Shortcut:` line = the key). Caller saves/restores the cursor around a sweep.
     fn harvest_tooltip(cx: i32, cy: i32) -> Vec<String> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+        static N: AtomicUsize = AtomicUsize::new(0);
         unsafe {
             let _ = SetCursorPos(cx, cy);
         }
         std::thread::sleep(std::time::Duration::from_millis(1200));
         let rect = crate::capture::Rect { x: cx + 8, y: cy - 20, width: 480, height: 160 };
-        crate::capture::capture_region_raw(rect, &[])
+        let Ok(raw) = crate::capture::capture_region_raw(rect, &[]) else {
+            return Vec::new();
+        };
+        // Upscale 6×: tooltip text is small + dim. 3× reads the brighter Object-mode tips but
+        // loses the name/first line of denser Edit/Sculpt tooltips (Loop Cut's "Loop Cut" only
+        // appears ≥~6×). `TIP_DIR=…` saves each crop for inspection (NOT `OUT_DIR` — cargo reserves
+        // that for build scripts, so it gets clobbered to the build `out/` dir).
+        let up = image::imageops::resize(&raw, raw.width() * 6, raw.height() * 6, FilterType::Lanczos3);
+        if let Ok(dir) = std::env::var("TIP_DIR") {
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = up.save(std::path::Path::new(&dir).join(format!("tip_{n:03}_y{cy}.png")));
+        }
+        crate::capture::encode_png_for_ocr(&up)
             .ok()
-            .map(|raw| image::imageops::resize(&raw, raw.width() * 3, raw.height() * 3, FilterType::Lanczos3))
-            .and_then(|up| crate::capture::encode_png_for_ocr(&up).ok())
             .and_then(|png| crate::locator::ocr::run_ocr(&png).ok())
             .map(|res| {
                 res.iter()
@@ -897,6 +910,26 @@ mod tests {
             .filter(|r| r.confidence >= 1.0) // each tab is its own line-level result; x-centre below
             .map(|r| (r.text.clone(), region.x + (r.bbox.0 + r.bbox.2 as i32 / 2) / up))
             .collect()
+    }
+
+    // Dump raw OCR results (order, bbox, confidence) for a saved image — to debug tooltip parsing.
+    //   $env:IN="…/tip_020_y565.png"; cargo test --lib ocr_dump -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn ocr_dump() {
+        let bytes = std::fs::read(std::env::var("IN").unwrap()).unwrap();
+        let up: u32 = std::env::var("UP").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let png = if up > 1 {
+            let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            let big = image::imageops::resize(&img, img.width() * up, img.height() * up, FilterType::Lanczos3);
+            crate::capture::encode_png_for_ocr(&big).unwrap()
+        } else {
+            bytes
+        };
+        eprintln!("UP={up}:");
+        for r in crate::locator::ocr::run_ocr(&png).unwrap_or_default().iter().filter(|r| r.confidence >= 1.0) {
+            eprintln!("  y={:>3} '{}'", r.bbox.1, r.text);
+        }
     }
 
     // Iterate the tab OCR on a saved capture (no live click). IN=capture.png; UP=upscale.
