@@ -727,6 +727,67 @@ mod tests {
             .unwrap_or_default()
     }
 
+    // Detect icon rows in a vertical toolbar (x0..x1, y0..y1) by edge-content banding: rows that
+    // carry glyph edges are icon rows, flat gaps between icons carry none. Returns each icon's
+    // (y_centre, height) top→bottom — so a sweep no longer needs hardcoded rows. Theme-independent
+    // (edges, not colour).
+    fn detect_toolbar_icons(cap: &image::RgbaImage, x0: u32, x1: u32, y0: u32, y1: u32) -> Vec<(u32, u32)> {
+        let gray = image::DynamicImage::ImageRgba8(
+            image::imageops::crop_imm(cap, x0, y0, x1 - x0, y1 - y0).to_image(),
+        )
+        .to_luma8();
+        let edges = imageproc::gradients::sobel_gradients(&gray);
+        let h = edges.height();
+        let mut row = vec![0u32; h as usize];
+        for (_, yy, p) in edges.enumerate_pixels() {
+            row[yy as usize] += p.0[0] as u32;
+        }
+        let maxr = *row.iter().max().unwrap_or(&1);
+        let thr = (maxr / 6).max(1); // a row is "content" above ~1/6 of the busiest row
+        let mut bands: Vec<(u32, u32)> = Vec::new();
+        let (mut start, mut gap) = (None::<u32>, 0u32);
+        for yy in 0..h {
+            if row[yy as usize] >= thr {
+                if start.is_none() {
+                    start = Some(yy);
+                }
+                gap = 0;
+            } else if let Some(s) = start {
+                gap += 1;
+                if gap > 2 {
+                    // bridge ≤2 px dips inside a glyph; a bigger gap ends the icon (keeps adjacent
+                    // icons — esp. the active highlighted tool + its neighbour — from merging)
+                    bands.push((s, yy - gap));
+                    start = None;
+                }
+            }
+        }
+        if let Some(s) = start {
+            bands.push((s, h - 1));
+        }
+        bands
+            .into_iter()
+            .filter(|(a, b)| {
+                let hh = b - a;
+                (12..=44).contains(&hh) // an icon glyph, not noise or a merged run
+            })
+            .map(|(a, b)| (y0 + (a + b) / 2, b - a))
+            .collect()
+    }
+
+    // Test the toolbar icon detector against a capture; prints detected centres for tuning.
+    //   $env:IN="c:/Users/fujin/blender_current.png"; cargo test --lib detect_toolbar_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn detect_toolbar_live() {
+        let cap = image::open(std::env::var("IN").unwrap()).unwrap().to_rgba8();
+        let icons = detect_toolbar_icons(&cap, 4, 44, 100, 480);
+        eprintln!("detected {} toolbar icons:", icons.len());
+        for (yc, hh) in &icons {
+            eprintln!("  y_centre={yc}  height={hh}");
+        }
+    }
+
     // P2 emit round-trip: sweep Blender's Object-Mode toolbar, autocrop each glyph, and write a
     // real generated pack (`OUT/pack.json` + `OUT/icons/<slug>.png`) from the harvested names +
     // shortcuts. MOVES THE MOUSE. Output goes to a separate dir so it can be compared to the
@@ -802,6 +863,112 @@ mod tests {
         for (n, s) in &entries {
             eprintln!("  {n:<12} shortcut={s}");
         }
+    }
+
+    // Synthesized left click at a screen point — for the multi-state authoring sweep (clicking
+    // workspace tabs). Authoring-only; the shipped app never actuates the UI.
+    #[allow(deprecated)]
+    fn click_at(x: i32, y: i32) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+        unsafe {
+            let _ = SetCursorPos(x, y);
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        }
+    }
+
+    // OCR the workspace-tab strip (top of the window) → each tab's text + screen x-centre, so the
+    // sweep can click them. Upscaled 3× (small tab font).
+    fn find_workspace_tabs() -> Vec<(String, i32)> {
+        let region = crate::capture::Rect { x: 0, y: 26, width: 1180, height: 22 };
+        let up = 4i32; // the inactive tabs are dim grey — 4× reads them, 3× misses
+        crate::capture::capture_region_raw(region, &[])
+            .ok()
+            .map(|raw| image::imageops::resize(&raw, raw.width() * up as u32, raw.height() * up as u32, FilterType::Lanczos3))
+            .and_then(|u| crate::capture::encode_png_for_ocr(&u).ok())
+            .and_then(|png| crate::locator::ocr::run_ocr(&png).ok())
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.confidence >= 1.0) // each tab is its own line-level result; x-centre below
+            .map(|r| (r.text.clone(), region.x + (r.bbox.0 + r.bbox.2 as i32 / 2) / up))
+            .collect()
+    }
+
+    // Iterate the tab OCR on a saved capture (no live click). IN=capture.png; UP=upscale.
+    //   $env:IN="c:/Users/fujin/blender_current.png"; $env:UP="5"; cargo test --lib find_tabs_eval -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn find_tabs_eval() {
+        let img = image::open(std::env::var("IN").unwrap()).unwrap().to_rgba8();
+        let up: u32 = std::env::var("UP").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+        let sub = image::imageops::crop_imm(&img, 0, 26, 1180, 22).to_image();
+        let big = image::imageops::resize(&sub, sub.width() * up, sub.height() * up, FilterType::Lanczos3);
+        let png = crate::capture::encode_png_for_ocr(&big).unwrap();
+        let res = crate::locator::ocr::run_ocr(&png).unwrap_or_default();
+        eprintln!("UP={up} — {} results:", res.len());
+        for r in &res {
+            eprintln!("  '{}'  x≈{}  conf={:.2}", r.text, r.bbox.0 / up as i32, r.confidence);
+        }
+    }
+
+    // P2 multi-state: autonomously walk Blender's workspace tabs and harvest each toolbar — proves
+    // the tool can navigate the app itself (OCR tabs → click → detect icons → hover/OCR tooltips).
+    // MOVES + CLICKS THE MOUSE (authoring-only). Keep hands off ~1–2 min.
+    //   cargo test --lib walk_workspaces_blender -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn walk_workspaces_blender() {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+        let mut orig = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut orig);
+        }
+        let tabs = find_workspace_tabs();
+        eprintln!(
+            "workspace tabs: {}",
+            tabs.iter().map(|(t, x)| format!("{t}@{x}")).collect::<Vec<_>>().join("  ")
+        );
+        for want in ["Layout", "Modeling", "Sculpting"] {
+            let Some((_, tx)) = tabs.iter().find(|(t, _)| t.eq_ignore_ascii_case(want)) else {
+                eprintln!("[{want}] tab not found — skipped");
+                continue;
+            };
+            click_at(*tx, 37);
+            std::thread::sleep(std::time::Duration::from_millis(700)); // workspace switch
+            unsafe {
+                let _ = SetCursorPos(960, 540); // park off the toolbar
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let icons = crate::capture::capture_region_raw(crate::capture::Rect { x: 0, y: 0, width: 64, height: 760 }, &[])
+                .ok()
+                .map(|c| detect_toolbar_icons(&c, 4, 44, 100, 740))
+                .unwrap_or_default();
+            eprintln!("[{want}] detected {} toolbar icons:", icons.len());
+            for (yc, _h) in &icons {
+                let lines = harvest_tooltip(28, *yc as i32);
+                let name = lines.first().cloned().unwrap_or_default();
+                let sc = lines
+                    .iter()
+                    .find(|l| l.contains("Shortcut"))
+                    .and_then(|l| l.rsplit(',').next())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                eprintln!("    {name:<24} [{sc}]");
+            }
+        }
+        if let Some((_, tx)) = tabs.iter().find(|(t, _)| t.eq_ignore_ascii_case("Layout")) {
+            click_at(*tx, 37); // restore to Layout
+        }
+        unsafe {
+            let _ = SetCursorPos(orig.x, orig.y);
+        }
+        eprintln!("(restored to Layout + cursor {},{})", orig.x, orig.y);
     }
 
     #[test]

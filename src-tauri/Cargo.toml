@@ -79,6 +79,8 @@ windows = { version = "0.62", features = [
   # PrintWindow — capture window directly, works on any monitor (incl. left secondary)
   "Win32_Storage_Xps",
   "Win32_System_Threading",
+  # mouse_event — synthesized clicks for the nav-pack auto-gen authoring sweep (test-only)
+  "Win32_UI_Input_KeyboardAndMouse",
 ] }
 uiautomation = { version = "0.24.4", features = ["process", "event", "pattern"] }
 
