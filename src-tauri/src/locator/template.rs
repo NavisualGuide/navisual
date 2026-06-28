@@ -1150,6 +1150,116 @@ mod tests {
         eprintln!("manifest + icons -> {}", out.display());
     }
 
+    // Re-crop saved icons in place to drop Blender's tool-group corner BADGE — a small bright blob
+    // in the bottom-right, gapped from the glyph, that inflated the crop. Connected-components on
+    // the bright mask; drop a small (<25% of the largest) component whose centre is bottom-right;
+    // re-bbox the rest + 1px pad. Idempotent for icons without a badge.
+    //   $env:DIR="c:/Users/fujin/blender_pack/icons"; cargo test --lib recrop_icons -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn recrop_icons() {
+        let dir = std::env::var("DIR").unwrap();
+        for p in std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())) {
+            if p.extension().is_none_or(|x| x != "png") {
+                continue;
+            }
+            let img = image::open(&p).unwrap().to_rgba8();
+            let (w, h) = img.dimensions();
+            let gray = image::DynamicImage::ImageRgba8(img.clone()).to_luma8();
+            let mut lumas: Vec<u8> = gray.pixels().map(|px| px.0[0]).collect();
+            lumas.sort_unstable();
+            let thr = lumas[lumas.len() / 2] as u16 + 30; // median bg + delta
+            let bright: Vec<bool> = gray.pixels().map(|px| px.0[0] as u16 > thr).collect();
+            // Flood-fill 8-connected components → (area, x0,y0,x1,y1).
+            let mut label = vec![0u32; (w * h) as usize];
+            let mut comps: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+            for s in 0..(w * h) as usize {
+                if !bright[s] || label[s] != 0 {
+                    continue;
+                }
+                let id = comps.len() as u32 + 1;
+                let (mut a, mut x0, mut y0, mut x1, mut y1) = (0u32, w, h, 0u32, 0u32);
+                let mut stack = vec![s];
+                label[s] = id;
+                while let Some(i) = stack.pop() {
+                    let (x, y) = (i as u32 % w, i as u32 / w);
+                    a += 1;
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                    for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                                continue;
+                            }
+                            let ni = (ny as u32 * w + nx as u32) as usize;
+                            if bright[ni] && label[ni] == 0 {
+                                label[ni] = id;
+                                stack.push(ni);
+                            }
+                        }
+                    }
+                }
+                comps.push((a, x0, y0, x1, y1));
+            }
+            if comps.is_empty() {
+                continue;
+            }
+            let max_a = comps.iter().map(|c| c.0).max().unwrap();
+            let keep: Vec<&(u32, u32, u32, u32, u32)> = comps
+                .iter()
+                .filter(|(a, x0, y0, x1, y1)| {
+                    let small = (*a as f32) < 0.25 * max_a as f32;
+                    let (cx, cy) = ((x0 + x1) / 2, (y0 + y1) / 2);
+                    let bottom_right = cx > w / 2 && cy > h / 2;
+                    !(small && bottom_right) // drop the badge
+                })
+                .collect();
+            let (mut bx0, mut by0, mut bx1, mut by1) = (w, h, 0u32, 0u32);
+            for (_, x0, y0, x1, y1) in &keep {
+                bx0 = bx0.min(*x0);
+                by0 = by0.min(*y0);
+                bx1 = bx1.max(*x1);
+                by1 = by1.max(*y1);
+            }
+            let (nx0, ny0) = (bx0.saturating_sub(1), by0.saturating_sub(1));
+            let (nx1, ny1) = ((bx1 + 2).min(w), (by1 + 2).min(h));
+            if nx1 <= nx0 || ny1 <= ny0 {
+                continue;
+            }
+            let (nw, nh) = (nx1 - nx0, ny1 - ny0);
+            if nw == w && nh == h {
+                continue; // no change
+            }
+            let crop = image::imageops::crop_imm(&img, nx0, ny0, nw, nh).to_image();
+            let _ = crop.save(&p);
+            eprintln!("{:<28} {w}x{h} -> {nw}x{nh}", p.file_name().unwrap().to_string_lossy());
+        }
+    }
+
+    // Print icon dimensions (smallest→largest) to spot oversized crops (a corner badge + gap).
+    //   $env:DIR="c:/Users/fujin/blender_pack/icons"; cargo test --lib icon_sizes -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn icon_sizes() {
+        let dir = std::env::var("DIR").unwrap();
+        let mut v: Vec<(String, u32, u32)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "png"))
+            .map(|p| {
+                let (w, h) = image::image_dimensions(&p).unwrap_or((0, 0));
+                (p.file_name().unwrap().to_string_lossy().into_owned(), w, h)
+            })
+            .collect();
+        v.sort_by_key(|(_, w, h)| w * h);
+        for (n, w, h) in &v {
+            eprintln!("{w:>3} x {h:<3}  ({:>4}px)  {n}", w * h);
+        }
+    }
+
     // Assemble the final pack.json from a captured manifest.tsv — clean names/shortcuts, dedup by
     // slug, drop garbage rows, rename known OCR errors. Decoupled from capture so it's re-runnable.
     //   $env:OUT="c:/Users/fujin/blender_pack"; cargo test --lib emit_pack_from_manifest -- --ignored --nocapture
