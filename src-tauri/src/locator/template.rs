@@ -878,6 +878,49 @@ mod tests {
         }
     }
 
+    // Synthesized wheel scroll at a point (clicks>0 = up, <0 = down). For reaching toolbar icons
+    // below the fold (e.g. the Sculpt toolbar). Authoring-only.
+    #[allow(deprecated)]
+    fn scroll_at(x: i32, y: i32, clicks: i32) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{mouse_event, MOUSEEVENTF_WHEEL};
+        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+        unsafe {
+            let _ = SetCursorPos(x, y);
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            mouse_event(MOUSEEVENTF_WHEEL, 0, 0, clicks * 120, 0); // WHEEL_DELTA = 120/click
+        }
+    }
+
+    fn slugify(name: &str) -> String {
+        name.to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("_")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect()
+    }
+
+    // Normalized cross-correlation of two glyph crops (b resized to a's size). Used to dedup an
+    // already-captured icon across scrolls WITHOUT re-harvesting its tooltip (the slow part).
+    fn ncc_eq(a: &image::GrayImage, b: &image::GrayImage) -> f32 {
+        let b = image::imageops::resize(b, a.width().max(1), a.height().max(1), FilterType::Triangle);
+        let n = (a.width() * a.height()) as f32;
+        if n < 1.0 {
+            return 0.0;
+        }
+        let ma = a.pixels().map(|p| p.0[0] as f32).sum::<f32>() / n;
+        let mb = b.pixels().map(|p| p.0[0] as f32).sum::<f32>() / n;
+        let (mut num, mut da, mut db) = (0.0f32, 0.0f32, 0.0f32);
+        for (pa, pb) in a.pixels().zip(b.pixels()) {
+            let (va, vb) = (pa.0[0] as f32 - ma, pb.0[0] as f32 - mb);
+            num += va * vb;
+            da += va * va;
+            db += vb * vb;
+        }
+        num / (da.sqrt() * db.sqrt() + 1e-6)
+    }
+
     // Synthesized left click at a screen point — for the multi-state authoring sweep (clicking
     // workspace tabs). Authoring-only; the shipped app never actuates the UI.
     #[allow(deprecated)]
@@ -1002,6 +1045,172 @@ mod tests {
             let _ = SetCursorPos(orig.x, orig.y);
         }
         eprintln!("(restored to Layout + cursor {},{})", orig.x, orig.y);
+    }
+
+    // The "real" generator: walk Blender's workspaces, SCROLL each toolbar to the bottom, autocrop
+    // every glyph, save each tooltip crop (TIP_DIR) for me to read, and emit one combined pack.json
+    // + icons/. Dedup by name (across scrolls + workspaces). 6× OCR drives detection/dedup; the
+    // authoritative names come from me reading the saved crops afterward. MOVES + CLICKS + SCROLLS
+    // the mouse (authoring-only). Keep hands off a few minutes.
+    //   $env:OUT="c:/Users/fujin/blender_pack"; $env:TIP_DIR="c:/Users/fujin/blender_pack/tips";
+    //   cargo test --lib capture_blender_pack -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn capture_blender_pack() {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+        let out = std::path::PathBuf::from(std::env::var("OUT").unwrap_or_else(|_| "c:/Users/fujin/blender_pack".into()));
+        let _ = std::fs::create_dir_all(out.join("icons"));
+        let mut orig = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut orig);
+        }
+        let tabs = find_workspace_tabs();
+        // (idx, workspace, ocr_name, shortcut, slug) — idx matches the TIP_DIR crop order.
+        let mut manifest: Vec<(usize, String, String, String, String)> = Vec::new();
+        let mut idx = 0usize;
+        for ws in ["Layout", "Modeling", "Sculpting"] {
+            let Some((_, tx)) = tabs.iter().find(|(t, _)| t.eq_ignore_ascii_case(ws)) else {
+                continue;
+            };
+            click_at(*tx, 37);
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            scroll_at(28, 300, 10); // toolbar → top
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let mut seen_glyphs: Vec<image::GrayImage> = Vec::new(); // per-workspace dedup
+            let mut empty = 0;
+            for _scroll in 0..14 {
+                unsafe {
+                    let _ = SetCursorPos(960, 540); // park off the toolbar for a clean capture
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let Ok(cap) = crate::capture::capture_region_raw(crate::capture::Rect { x: 0, y: 0, width: 64, height: 900 }, &[]) else {
+                    break;
+                };
+                let icons = detect_toolbar_icons(&cap, 4, 44, 100, 880);
+                let mut new_here = 0;
+                for (yc, hh) in &icons {
+                    let region = (4i64, *yc as i64 - *hh as i64 / 2 - 4, 40i64, *hh as i64 + 8);
+                    let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, 2, 45) else {
+                        continue;
+                    };
+                    let rgba = image::imageops::crop_imm(&cap, ax, ay, aw, ah).to_image();
+                    let g = image::DynamicImage::ImageRgba8(rgba.clone()).to_luma8();
+                    if seen_glyphs.iter().any(|s| ncc_eq(&g, s) > 0.9) {
+                        continue; // already captured this glyph (a prior scroll) — don't re-harvest
+                    }
+                    let lines = harvest_tooltip(28, *yc as i32);
+                    let name = lines.first().cloned().unwrap_or_default();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let sc = lines
+                        .iter()
+                        .find(|l| l.contains("Shortcut"))
+                        .and_then(|l| l.rsplit(',').next())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    seen_glyphs.push(g);
+                    new_here += 1;
+                    let slug = slugify(&name);
+                    let _ = rgba.save(out.join("icons").join(format!("{slug}.png")));
+                    manifest.push((idx, ws.to_string(), name, sc, slug));
+                    idx += 1;
+                }
+                eprintln!("[{ws}] scroll {_scroll}: {new_here} new (seen {})", seen_glyphs.len());
+                if new_here == 0 {
+                    empty += 1;
+                    if empty >= 2 {
+                        break;
+                    }
+                } else {
+                    empty = 0;
+                }
+                scroll_at(28, 300, -3); // scroll down
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+        if let Some((_, tx)) = tabs.iter().find(|(t, _)| t.eq_ignore_ascii_case("Layout")) {
+            click_at(*tx, 37);
+        }
+        unsafe {
+            let _ = SetCursorPos(orig.x, orig.y);
+        }
+        // Manifest (idx ↔ saved tooltip crop) + a first-pass pack from the OCR names.
+        let man: String = manifest
+            .iter()
+            .map(|(i, ws, n, sc, slug)| format!("tip_{i:03}\t{ws}\t{n}\t[{sc}]\t{slug}.png"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(out.join("manifest.tsv"), &man);
+        eprintln!("\n=== {} unique tools across workspaces ===", manifest.len());
+        for (i, ws, n, sc, _) in &manifest {
+            eprintln!("  tip_{i:03} [{ws:<10}] {n:<24} [{sc}]");
+        }
+        eprintln!("manifest + icons -> {}", out.display());
+    }
+
+    // Assemble the final pack.json from a captured manifest.tsv — clean names/shortcuts, dedup by
+    // slug, drop garbage rows, rename known OCR errors. Decoupled from capture so it's re-runnable.
+    //   $env:OUT="c:/Users/fujin/blender_pack"; cargo test --lib emit_pack_from_manifest -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn emit_pack_from_manifest() {
+        use std::collections::HashSet;
+        let out = std::path::PathBuf::from(std::env::var("OUT").unwrap_or_else(|_| "c:/Users/fujin/blender_pack".into()));
+        let man = std::fs::read_to_string(out.join("manifest.tsv")).expect("manifest.tsv");
+        let drop_names = ["result.", "User Perspective"];
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut tools: Vec<(String, String)> = Vec::new(); // (name, shortcut) — slug = slugify(name)
+        for line in man.lines() {
+            let c: Vec<&str> = line.split('\t').collect();
+            if c.len() < 5 {
+                continue;
+            }
+            let mut name = c[2].to_string();
+            // Known OCR-error fix (verified by reading the crop: a Sculpt tool, shortcut G = Grab).
+            if name == "erab" {
+                name = "Grab".into();
+                let _ = std::fs::rename(out.join("icons/erab.png"), out.join("icons/grab.png"));
+            }
+            // Strip non-ASCII noise (e.g. the • in "Multi•plane Scrape").
+            name = name.chars().filter(|ch| ch.is_ascii_graphic() || *ch == ' ').collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+            if name.is_empty() || drop_names.contains(&name.as_str()) {
+                let _ = std::fs::remove_file(out.join("icons").join(c[4].trim()));
+                continue;
+            }
+            let sc = c[3]
+                .trim_matches(|ch| ch == '[' || ch == ']')
+                .trim()
+                .trim_start_matches("Shortcut:")
+                .trim()
+                .to_string();
+            let slug = slugify(&name);
+            if seen.contains(&slug) {
+                continue;
+            }
+            seen.insert(slug);
+            tools.push((name, sc));
+        }
+        let shortcuts = tools
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(n, s)| format!("    {:?}: {:?}", n, s))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let hints = tools
+            .iter()
+            .map(|(n, _)| format!("    {{ \"name\": {:?}, \"region\": \"left\", \"role\": \"button\" }}", n))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let pack = format!(
+            "{{\n  \"id\": \"blender\",\n  \"name\": \"Blender Nav-Pack (auto-generated)\",\n  \"version\": \"1.0.0\",\n  \"min_app_version\": \"0.6.0\",\n  \"target_app\": \"Blender\",\n  \"window_title_pattern\": \"(?i)blender\",\n  \"system_prompt_injection\": \"The user is in Blender. The left Toolbar holds the active tools (Object/Edit/Sculpt sets differ by workspace tab). Prefer the keyboard shortcut when one exists.\",\n  \"shortcuts\": {{\n{shortcuts}\n  }},\n  \"element_hints\": [\n{hints}\n  ]\n}}\n"
+        );
+        std::fs::write(out.join("pack.json"), &pack).expect("write pack.json");
+        eprintln!("emitted pack.json with {} tools -> {}", tools.len(), out.display());
+        for (n, s) in &tools {
+            eprintln!("  {n:<28} {s}");
+        }
     }
 
     #[test]
