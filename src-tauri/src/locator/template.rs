@@ -655,44 +655,153 @@ mod tests {
         eprintln!("hovering toolbar; OCR of the tooltip box beside each icon:");
         for (name, y) in icons {
             let (cx, cy) = (28i32, y + 12);
-            unsafe {
-                let _ = SetCursorPos(cx, cy);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1200)); // tooltip dwell
-            let rect = crate::capture::Rect {
-                x: cx + 8,
-                y: cy - 20,
-                width: 480,
-                height: 160,
-            };
-            let lines = crate::capture::capture_region_raw(rect, &[])
-                .ok()
-                // E2-style: upscale the small-font tooltip 3× before OCR so the description text
-                // clears the ~30 px floor (name + shortcut read fine at 1×, the body garbles).
-                .map(|raw| {
-                    image::imageops::resize(
-                        &raw,
-                        raw.width() * 3,
-                        raw.height() * 3,
-                        FilterType::Lanczos3,
-                    )
-                })
-                .and_then(|up| crate::capture::encode_png_for_ocr(&up).ok())
-                .and_then(|png| crate::locator::ocr::run_ocr(&png).ok())
-                .map(|res| {
-                    res.iter()
-                        .filter(|r| r.confidence >= 1.0) // line-level results only
-                        .map(|r| r.text.clone())
-                        .collect::<Vec<_>>()
-                        .join("  ⏎  ")
-                })
-                .unwrap_or_default();
+            let lines = harvest_tooltip(cx, cy).join("  ⏎  ");
             eprintln!("  [{name:>9} @ {cx},{cy}]  {lines}");
         }
         unsafe {
             let _ = SetCursorPos(orig.x, orig.y);
         }
         eprintln!("(cursor restored to {},{})", orig.x, orig.y);
+    }
+
+    // Snap-to-glyph: given a rough icon cell (rx,ry,rw,rh), find the bright glyph's tight bbox
+    // (pixels > median-background + thresh) in absolute image coords. The callable core of
+    // `autocrop_icon`, reused by the pack generator. `None` if too few bright pixels.
+    fn autocrop_glyph(
+        img: &image::RgbaImage,
+        region: (i64, i64, i64, i64),
+        pad: i64,
+        thresh: u16,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let (rx, ry, rw, rh) = region;
+        let sub = image::imageops::crop_imm(img, rx as u32, ry as u32, rw as u32, rh as u32).to_image();
+        let gray = image::DynamicImage::ImageRgba8(sub).to_luma8();
+        let mut lumas: Vec<u8> = gray.pixels().map(|p| p.0[0]).collect();
+        if lumas.is_empty() {
+            return None;
+        }
+        lumas.sort_unstable();
+        let bg = lumas[lumas.len() / 2] as u16;
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        let mut bright = 0u32;
+        for (px, py, p) in gray.enumerate_pixels() {
+            if p.0[0] as u16 > bg + thresh {
+                bright += 1;
+                x0 = x0.min(px as i64);
+                y0 = y0.min(py as i64);
+                x1 = x1.max(px as i64);
+                y1 = y1.max(py as i64);
+            }
+        }
+        if bright < 8 {
+            return None;
+        }
+        let (iw, ih) = (img.width() as i64, img.height() as i64);
+        let ax0 = (rx + x0 - pad).clamp(0, iw - 1);
+        let ay0 = (ry + y0 - pad).clamp(0, ih - 1);
+        let ax1 = (rx + x1 + pad + 1).clamp(ax0 + 1, iw);
+        let ay1 = (ry + y1 + pad + 1).clamp(ay0 + 1, ih);
+        Some((ax0 as u32, ay0 as u32, (ax1 - ax0) as u32, (ay1 - ay0) as u32))
+    }
+
+    // Hover an icon centre and OCR its tooltip (3× upscaled) → the text lines (line 1 = name,
+    // a `Shortcut:` line = the key). Caller saves/restores the cursor around a sweep.
+    fn harvest_tooltip(cx: i32, cy: i32) -> Vec<String> {
+        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+        unsafe {
+            let _ = SetCursorPos(cx, cy);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let rect = crate::capture::Rect { x: cx + 8, y: cy - 20, width: 480, height: 160 };
+        crate::capture::capture_region_raw(rect, &[])
+            .ok()
+            .map(|raw| image::imageops::resize(&raw, raw.width() * 3, raw.height() * 3, FilterType::Lanczos3))
+            .and_then(|up| crate::capture::encode_png_for_ocr(&up).ok())
+            .and_then(|png| crate::locator::ocr::run_ocr(&png).ok())
+            .map(|res| {
+                res.iter()
+                    .filter(|r| r.confidence >= 1.0)
+                    .map(|r| r.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // P2 emit round-trip: sweep Blender's Object-Mode toolbar, autocrop each glyph, and write a
+    // real generated pack (`OUT/pack.json` + `OUT/icons/<slug>.png`) from the harvested names +
+    // shortcuts. MOVES THE MOUSE. Output goes to a separate dir so it can be compared to the
+    // hand-made pack + run through the eval; nothing in the repo is overwritten.
+    //   $env:OUT="c:/Users/fujin/blender_autogen"; cargo test --lib generate_blender_pack -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn generate_blender_pack() {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+        let out = std::path::PathBuf::from(
+            std::env::var("OUT").unwrap_or_else(|_| "c:/Users/fujin/blender_autogen".into()),
+        );
+        std::fs::create_dir_all(out.join("icons")).expect("mkdir");
+        // Park the cursor off the toolbar + capture a clean toolbar column (no hover highlight).
+        let mut orig = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut orig);
+            let _ = SetCursorPos(960, 540);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let cap = crate::capture::capture_region_raw(
+            crate::capture::Rect { x: 0, y: 0, width: 64, height: 520 },
+            &[],
+        )
+        .expect("capture toolbar");
+        // Object-Mode rows (y centres from the locator eval). Each cell ≈ x4..44.
+        let rows = [147, 188, 224, 260, 293, 333, 367, 406];
+        let mut entries: Vec<(String, String)> = Vec::new(); // (name, shortcut)
+        for y in rows {
+            let lines = harvest_tooltip(28, y + 12);
+            let name = lines.first().cloned().unwrap_or_default();
+            let shortcut = lines
+                .iter()
+                .find(|l| l.contains("Shortcut"))
+                .and_then(|l| l.rsplit(',').next())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let slug: String = name
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join("_");
+            if let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, (4, (y - 4) as i64, 40, 36), 2, 45) {
+                let crop = image::imageops::crop_imm(&cap, ax, ay, aw, ah).to_image();
+                let _ = crop.save(out.join("icons").join(format!("{slug}.png")));
+            }
+            entries.push((name, shortcut));
+        }
+        unsafe {
+            let _ = SetCursorPos(orig.x, orig.y);
+        }
+        // Emit pack.json (matches the hand-made schema).
+        let shortcuts = entries
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(n, s)| format!("    \"{n}\": \"{s}\""))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let hints = entries
+            .iter()
+            .map(|(n, _)| format!("    {{ \"name\": \"{n}\", \"region\": \"left\", \"role\": \"button\" }}"))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let pack = format!(
+            "{{\n  \"id\": \"blender_autogen\",\n  \"name\": \"Blender Nav-Pack (auto-generated)\",\n  \"version\": \"1.0.0\",\n  \"min_app_version\": \"0.6.0\",\n  \"target_app\": \"Blender\",\n  \"window_title_pattern\": \"(?i)blender\",\n  \"system_prompt_injection\": \"The user is in Blender. Prefer keyboard shortcuts; the left Toolbar holds the active tools.\",\n  \"shortcuts\": {{\n{shortcuts}\n  }},\n  \"element_hints\": [\n{hints}\n  ]\n}}\n"
+        );
+        std::fs::write(out.join("pack.json"), &pack).expect("write pack.json");
+        eprintln!("generated pack -> {}", out.display());
+        for (n, s) in &entries {
+            eprintln!("  {n:<12} shortcut={s}");
+        }
     }
 
     #[test]
