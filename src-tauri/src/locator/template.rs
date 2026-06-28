@@ -625,6 +625,66 @@ mod tests {
         }
     }
 
+    // P1 of the nav-pack auto-generation plan: hover each Object-Mode toolbar icon, OCR the tooltip
+    // box beside it, and recover the name + shortcut. Proves the Path-B (hover + OCR) harvest on the
+    // hardest case (Blender = pure OpenGL, no a11y). MOVES THE MOUSE — keep hands off ~15 s. Blender
+    // should be in the **Layout** workspace / **Object Mode** (Object-Mode toolbar); other modes just
+    // read whichever tools sit at those rows.
+    //   cargo test --lib tooltip_sweep_blender -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn tooltip_sweep_blender() {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+        let mut orig = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut orig);
+        }
+        // Toolbar icon centres (screen px; the Blender window sits at 0,0). x≈28 = column centre;
+        // y from the locator eval (glyph top + ~12).
+        let icons = [
+            ("cursor", 147),
+            ("move", 188),
+            ("rotate", 224),
+            ("scale", 260),
+            ("transform", 293),
+            ("annotate", 333),
+            ("measure", 367),
+            ("add_cube", 406),
+        ];
+        eprintln!("hovering toolbar; OCR of the tooltip box beside each icon:");
+        for (name, y) in icons {
+            let (cx, cy) = (28i32, y + 12);
+            unsafe {
+                let _ = SetCursorPos(cx, cy);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1200)); // tooltip dwell
+            let rect = crate::capture::Rect {
+                x: cx + 8,
+                y: cy - 20,
+                width: 480,
+                height: 160,
+            };
+            let lines = crate::capture::capture_region_raw(rect, &[])
+                .ok()
+                .and_then(|raw| crate::capture::encode_png_for_ocr(&raw).ok())
+                .and_then(|png| crate::locator::ocr::run_ocr(&png).ok())
+                .map(|res| {
+                    res.iter()
+                        .filter(|r| r.confidence >= 1.0) // line-level results only
+                        .map(|r| r.text.clone())
+                        .collect::<Vec<_>>()
+                        .join("  ⏎  ")
+                })
+                .unwrap_or_default();
+            eprintln!("  [{name:>9} @ {cx},{cy}]  {lines}");
+        }
+        unsafe {
+            let _ = SetCursorPos(orig.x, orig.y);
+        }
+        eprintln!("(cursor restored to {},{})", orig.x, orig.y);
+    }
+
     #[test]
     fn load_gray_from_png_bytes_roundtrips() {
         let mut rgba = RgbaImage::new(8, 8);
