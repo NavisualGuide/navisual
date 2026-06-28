@@ -667,7 +667,17 @@ mod tests {
             };
             let lines = crate::capture::capture_region_raw(rect, &[])
                 .ok()
-                .and_then(|raw| crate::capture::encode_png_for_ocr(&raw).ok())
+                // E2-style: upscale the small-font tooltip 3× before OCR so the description text
+                // clears the ~30 px floor (name + shortcut read fine at 1×, the body garbles).
+                .map(|raw| {
+                    image::imageops::resize(
+                        &raw,
+                        raw.width() * 3,
+                        raw.height() * 3,
+                        FilterType::Lanczos3,
+                    )
+                })
+                .and_then(|up| crate::capture::encode_png_for_ocr(&up).ok())
                 .and_then(|png| crate::locator::ocr::run_ocr(&png).ok())
                 .map(|res| {
                     res.iter()
