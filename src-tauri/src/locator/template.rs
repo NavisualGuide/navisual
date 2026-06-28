@@ -409,6 +409,24 @@ mod tests {
         );
     }
 
+    // Capture a screen REGION via capture_region_raw (BitBlt) — the path that works on OpenGL apps
+    // like Blender (PrintWindow returns blank grey there). Produces a proper matching haystack.
+    //   $env:OUT="cap.png"; $env:REGION="0,0,1920,1032"; cargo test --lib capture_screen_png -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn capture_screen_png() {
+        let parts: Vec<i32> = std::env::var("REGION")
+            .unwrap_or_else(|_| "0,0,1920,1032".into())
+            .split(',')
+            .map(|s| s.trim().parse().expect("REGION ints"))
+            .collect();
+        let rect = crate::capture::Rect { x: parts[0], y: parts[1], width: parts[2] as u32, height: parts[3] as u32 };
+        let raw = crate::capture::capture_region_raw(rect, &[]).expect("capture failed");
+        let png = crate::capture::encode_png_for_ocr(&raw).expect("encode failed");
+        std::fs::write(std::env::var("OUT").expect("set OUT"), &png).expect("write failed");
+        eprintln!("captured {}x{} (BitBlt) -> {}", raw.width(), raw.height(), std::env::var("OUT").unwrap());
+    }
+
     // Live helper: crop IN by CROP="x,y,w,h", optionally upscale by SCALE (integer, nearest —
     // for eyeballing tiny icons), write OUT. Used to extract an icon template from a capture.
     //   $env:IN="cap.png"; $env:CROP="0,58,26,170"; $env:SCALE="5"; $env:OUT="strip.png";
@@ -1066,6 +1084,17 @@ mod tests {
             let _ = GetCursorPos(&mut orig);
         }
         let tabs = find_workspace_tabs();
+        // Fail fast if we're not actually looking at Blender. The sweep reads FIXED primary-monitor
+        // regions, so Blender must be maximized + foreground there; otherwise another window (even one
+        // whose title contains "blender", e.g. a File Explorer folder) is captured → 0 tools, silently.
+        if !tabs.iter().any(|(t, _)| ["Layout", "Modeling", "Sculpting"].iter().any(|e| t.eq_ignore_ascii_case(e))) {
+            eprintln!(
+                "ABORT: no Blender workspace tabs found (read: {:?}). Maximize Blender on the PRIMARY \
+                 monitor (toolbar at the left edge, Layout/Modeling/Sculpting tabs along the top) and re-run.",
+                tabs.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>()
+            );
+            return;
+        }
         // (idx, workspace, ocr_name, shortcut, slug) — idx matches the TIP_DIR crop order.
         let mut manifest: Vec<(usize, String, String, String, String)> = Vec::new();
         let mut idx = 0usize;
@@ -1113,6 +1142,9 @@ mod tests {
                     seen_glyphs.push(g);
                     new_here += 1;
                     let slug = slugify(&name);
+                    // Tight glyph crop (icon-only) — the bright-pixel bbox, no neighbours, no cell
+                    // padding. Clean + robust to toolbar rearrangement; the matcher is scale-invariant
+                    // so the slightly-varying size is fine. (A uniform 39px cell baked in neighbours.)
                     let _ = rgba.save(out.join("icons").join(format!("{slug}.png")));
                     manifest.push((idx, ws.to_string(), name, sc, slug));
                     idx += 1;
