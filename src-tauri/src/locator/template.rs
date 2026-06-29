@@ -427,6 +427,34 @@ mod tests {
         eprintln!("captured {}x{} (BitBlt) -> {}", raw.width(), raw.height(), std::env::var("OUT").unwrap());
     }
 
+    // Diagnostic: click a workspace tab, park the cursor, BitBlt the screen. For inspecting one
+    // workspace's toolbar (e.g. why a captured icon looks wrong).
+    //   $env:WS="Modeling"; $env:OUT="modeling.png"; cargo test --lib diag_capture_workspace -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diag_capture_workspace() {
+        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+        let ws = std::env::var("WS").unwrap();
+        let out = std::env::var("OUT").unwrap();
+        if let Some((_, tx)) = find_workspace_tabs().iter().find(|(t, _)| t.eq_ignore_ascii_case(&ws)) {
+            click_at(*tx, 37);
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        }
+        if let Some(n) = std::env::var("SCROLL").ok().and_then(|s| s.parse::<i32>().ok()) {
+            if n != 0 {
+                scroll_at(28, 300, -n); // negative = scroll the toolbar down toward its lower tools
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+        unsafe {
+            let _ = SetCursorPos(960, 540);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let raw = crate::capture::capture_region_raw(crate::capture::Rect { x: 0, y: 0, width: 1920, height: 1032 }, &[]).unwrap();
+        std::fs::write(&out, crate::capture::encode_png_for_ocr(&raw).unwrap()).unwrap();
+        eprintln!("captured {ws} -> {out}");
+    }
+
     // Live helper: crop IN by CROP="x,y,w,h", optionally upscale by SCALE (integer, nearest —
     // for eyeballing tiny icons), write OUT. Used to extract an icon template from a capture.
     //   $env:IN="cap.png"; $env:CROP="0,58,26,170"; $env:SCALE="5"; $env:OUT="strip.png";
@@ -1225,14 +1253,22 @@ mod tests {
                     }
                     // Clamp the crop to this icon's half-slot (midpoints to the neighbours above/below)
                     // so the autocrop can't grab a sliver of an adjacent toolbar icon.
-                    let top_lim = if i > 0 { (*yc as i64 + icons[i - 1].0 as i64) / 2 + 1 } else { 0 };
+                    // Clamp to just past the neighbour's *actual edge* (its bottom / its top), not
+                    // merely the midpoint, so a tall adjacent glyph can't leave a sliver in the crop.
+                    let top_lim = if i > 0 {
+                        let p = &icons[i - 1];
+                        ((*yc as i64 + p.0 as i64) / 2 + 1).max(p.0 as i64 + p.1 as i64 / 2 + 2)
+                    } else {
+                        0
+                    };
                     let bot_lim = if i + 1 < icons.len() {
-                        (*yc as i64 + icons[i + 1].0 as i64) / 2 - 1
+                        let n = &icons[i + 1];
+                        ((*yc as i64 + n.0 as i64) / 2 - 1).min(n.0 as i64 - n.1 as i64 / 2 - 2)
                     } else {
                         cap.height() as i64
                     };
-                    let r_top = (*yc as i64 - *hh as i64 / 2 - 4).max(top_lim);
-                    let r_bot = (*yc as i64 + *hh as i64 / 2 + 4).min(bot_lim);
+                    let r_top = (*yc as i64 - *hh as i64 / 2 - 3).max(top_lim);
+                    let r_bot = (*yc as i64 + *hh as i64 / 2 + 3).min(bot_lim);
                     let region = (4i64, r_top, 40i64, (r_bot - r_top).max(1));
                     let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, 2, 45) else {
                         continue;
