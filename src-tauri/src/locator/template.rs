@@ -806,6 +806,88 @@ mod tests {
             .collect()
     }
 
+    // Detect the BUTTON BOX bounds (not the glyph). Blender's left-toolbar buttons are filled
+    // rounded-rects slightly brighter than the dark gaps between them; band the rows where the box
+    // fill spans >half the strip width. Returns (y_centre, box_height, box_left, box_right). The box
+    // is uniform-sized and gapped, so cropping to it gives clean uniform squares (unlike the glyph
+    // bbox, which varies and can touch a neighbour).
+    fn detect_toolbar_boxes(cap: &image::RgbaImage, x0: u32, x1: u32, y0: u32, y1: u32) -> Vec<(u32, u32, u32, u32)> {
+        let gray = image::DynamicImage::ImageRgba8(
+            image::imageops::crop_imm(cap, x0, y0, x1 - x0, y1 - y0).to_image(),
+        )
+        .to_luma8();
+        let (w, h) = (gray.width(), gray.height());
+        let mut sorted: Vec<u8> = gray.pixels().map(|p| p.0[0]).collect();
+        sorted.sort_unstable();
+        let bg = sorted[sorted.len() / 10] as u16; // toolbar gap (the darkest 10%)
+        let thr = bg + 10; // box fill + glyph exceed the gap by this
+        let mut row_fill = vec![0u32; h as usize];
+        for (_, yy, p) in gray.enumerate_pixels() {
+            if p.0[0] as u16 > thr {
+                row_fill[yy as usize] += 1;
+            }
+        }
+        let rowthr = w / 2; // a box row fills more than half the strip width
+        let mut bands: Vec<(u32, u32)> = Vec::new();
+        let (mut start, mut gap) = (None::<u32>, 0u32);
+        for yy in 0..h {
+            if row_fill[yy as usize] >= rowthr {
+                if start.is_none() {
+                    start = Some(yy);
+                }
+                gap = 0;
+            } else if let Some(s) = start {
+                gap += 1;
+                if gap > 1 {
+                    bands.push((s, yy - gap));
+                    start = None;
+                }
+            }
+        }
+        if let Some(s) = start {
+            bands.push((s, h - 1));
+        }
+        bands
+            .into_iter()
+            .filter(|(a, b)| (18..=46).contains(&(b - a)))
+            .map(|(a, b)| {
+                // box left/right: the column span where this band's rows are box-bg-or-brighter
+                let (mut cmin, mut cmax) = (w, 0u32);
+                for yy in a..=b {
+                    for xx in 0..w {
+                        if gray.get_pixel(xx, yy).0[0] as u16 > thr {
+                            cmin = cmin.min(xx);
+                            cmax = cmax.max(xx);
+                        }
+                    }
+                }
+                (y0 + (a + b) / 2, b - a, x0 + cmin, x0 + cmax)
+            })
+            .collect()
+    }
+
+    // Measure the button boxes on a capture: prints each box + the derived uniform size and spacing.
+    //   $env:IN="c:/Users/fujin/blender_bitblt.png"; cargo test --lib measure_toolbar_boxes -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn measure_toolbar_boxes() {
+        let cap = image::open(std::env::var("IN").unwrap()).unwrap().to_rgba8();
+        // Luma deciles of the strip — to see the gap/box-bg/glyph clusters.
+        let strip = image::DynamicImage::ImageRgba8(image::imageops::crop_imm(&cap, 0, 100, 54, 780).to_image()).to_luma8();
+        let mut ls: Vec<u8> = strip.pixels().map(|p| p.0[0]).collect();
+        ls.sort_unstable();
+        let dec: Vec<u8> = (0..=10).map(|i| ls[(ls.len() - 1) * i / 10]).collect();
+        eprintln!("luma deciles: {dec:?}");
+        let boxes = detect_toolbar_boxes(&cap, 0, 54, 100, 880);
+        eprintln!("{} boxes:", boxes.len());
+        let mut prev = 0u32;
+        for (yc, hh, l, r) in &boxes {
+            let sp = if prev == 0 { 0 } else { yc - prev };
+            eprintln!("  y={yc:>3} h={hh:>2} w={:>2} (x {l}-{r})  spacing={sp}", r - l);
+            prev = *yc;
+        }
+    }
+
     // Test the toolbar icon detector against a capture; prints detected centres for tuning.
     //   $env:IN="c:/Users/fujin/blender_current.png"; cargo test --lib detect_toolbar_live -- --ignored --nocapture
     #[test]
@@ -953,6 +1035,23 @@ mod tests {
             mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
             std::thread::sleep(std::time::Duration::from_millis(40));
             mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        }
+    }
+
+    // Root window class at a screen point. Blender is "GHOST_WindowClass"; a File Explorer that's
+    // overlapping the toolbar is "CabinetWClass". Lets the sweep skip rows covered by a foreign window.
+    fn window_class_at(x: i32, y: i32) -> String {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetClassNameW, WindowFromPoint, GA_ROOT};
+        unsafe {
+            let hwnd = WindowFromPoint(POINT { x, y });
+            if hwnd.0.is_null() {
+                return String::new();
+            }
+            let root = GetAncestor(hwnd, GA_ROOT);
+            let mut buf = [0u16; 256];
+            let n = GetClassNameW(root, &mut buf);
+            String::from_utf16_lossy(&buf[..n as usize])
         }
     }
 
@@ -1118,8 +1217,23 @@ mod tests {
                 };
                 let icons = detect_toolbar_icons(&cap, 4, 44, 100, 880);
                 let mut new_here = 0;
-                for (yc, hh) in &icons {
-                    let region = (4i64, *yc as i64 - *hh as i64 / 2 - 4, 40i64, *hh as i64 + 8);
+                for (i, (yc, hh)) in icons.iter().enumerate() {
+                    // Skip any row covered by a non-Blender window (e.g. a File Explorer sidebar
+                    // overlapping the toolbar) — its glyphs would otherwise be harvested as "tools".
+                    if !window_class_at(28, *yc as i32).contains("GHOST") {
+                        continue;
+                    }
+                    // Clamp the crop to this icon's half-slot (midpoints to the neighbours above/below)
+                    // so the autocrop can't grab a sliver of an adjacent toolbar icon.
+                    let top_lim = if i > 0 { (*yc as i64 + icons[i - 1].0 as i64) / 2 + 1 } else { 0 };
+                    let bot_lim = if i + 1 < icons.len() {
+                        (*yc as i64 + icons[i + 1].0 as i64) / 2 - 1
+                    } else {
+                        cap.height() as i64
+                    };
+                    let r_top = (*yc as i64 - *hh as i64 / 2 - 4).max(top_lim);
+                    let r_bot = (*yc as i64 + *hh as i64 / 2 + 4).min(bot_lim);
+                    let region = (4i64, r_top, 40i64, (r_bot - r_top).max(1));
                     let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, 2, 45) else {
                         continue;
                     };
@@ -1142,10 +1256,17 @@ mod tests {
                     seen_glyphs.push(g);
                     new_here += 1;
                     let slug = slugify(&name);
-                    // Tight glyph crop (icon-only) — the bright-pixel bbox, no neighbours, no cell
-                    // padding. Clean + robust to toolbar rearrangement; the matcher is scale-invariant
-                    // so the slightly-varying size is fine. (A uniform 39px cell baked in neighbours.)
-                    let _ = rgba.save(out.join("icons").join(format!("{slug}.png")));
+                    // Clean glyph (clamped, no neighbours) centred on a UNIFORM square, padded with
+                    // the local toolbar background — every icon the same size, glyph-on-bg matching the
+                    // live look. (The button fill is only subtly distinct from the bg, so this reads as
+                    // the icon in its slot; the clamp keeps a neighbour from being baked in.)
+                    let s = 34u32;
+                    let bgpx = *cap.get_pixel(ax.saturating_sub(3).max(1), (ay + ah / 2).min(cap.height() - 1));
+                    let mut canvas = image::RgbaImage::from_pixel(s, s, bgpx);
+                    let ox = (s.saturating_sub(aw) / 2) as i64;
+                    let oy = (s.saturating_sub(ah) / 2) as i64;
+                    image::imageops::overlay(&mut canvas, &rgba, ox, oy);
+                    let _ = canvas.save(out.join("icons").join(format!("{slug}.png")));
                     manifest.push((idx, ws.to_string(), name, sc, slug));
                     idx += 1;
                 }
@@ -1301,7 +1422,10 @@ mod tests {
         use std::collections::HashSet;
         let out = std::path::PathBuf::from(std::env::var("OUT").unwrap_or_else(|_| "c:/Users/fujin/blender_pack".into()));
         let man = std::fs::read_to_string(out.join("manifest.tsv")).expect("manifest.tsv");
-        let drop_names = ["result.", "User Perspective"];
+        // Non-tool captures to drop: viewport orientation label ("User Perspective"/"User Pers"),
+        // OCR fragments. (Foreign-window contamination — e.g. a File Explorer sidebar overlapping the
+        // toolbar — is prevented at capture time by the GHOST_WindowClass guard in the sweep.)
+        let drop_names = ["result.", "User Perspective", "User Pers"];
         let mut seen: HashSet<String> = HashSet::new();
         let mut tools: Vec<(String, String)> = Vec::new(); // (name, shortcut) — slug = slugify(name)
         for line in man.lines() {
