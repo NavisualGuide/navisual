@@ -455,6 +455,34 @@ mod tests {
         eprintln!("captured {ws} -> {out}");
     }
 
+    // Diagnostic: hover a specific toolbar Y in a workspace, print its tooltip, save a wide crop of
+    // that slot — to check whether a captured icon's glyph matches its tooltip name + is centred.
+    //   $env:WS="Modeling"; $env:Y="688"; $env:OUT="probe.png"; cargo test --lib diag_hover_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diag_hover_probe() {
+        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+        let ws = std::env::var("WS").unwrap();
+        let y: i32 = std::env::var("Y").unwrap().parse().unwrap();
+        if let Some((_, tx)) = find_workspace_tabs().iter().find(|(t, _)| t.eq_ignore_ascii_case(&ws)) {
+            click_at(*tx, 37);
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        }
+        let lines = harvest_tooltip(28, y);
+        eprintln!("Y={y} tooltip: {lines:?}");
+        unsafe {
+            let _ = SetCursorPos(960, 540);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if let Ok(cap) = crate::capture::capture_region_raw(crate::capture::Rect { x: 0, y: 0, width: 64, height: 900 }, &[]) {
+            let c = image::imageops::crop_imm(&cap, 0, (y - 24).max(0) as u32, 54, 48).to_image();
+            if let Ok(o) = std::env::var("OUT") {
+                let big = image::imageops::resize(&c, 54 * 6, 48 * 6, FilterType::Nearest);
+                let _ = big.save(o);
+            }
+        }
+    }
+
     // Live helper: crop IN by CROP="x,y,w,h", optionally upscale by SCALE (integer, nearest —
     // for eyeballing tiny icons), write OUT. Used to extract an icon template from a capture.
     //   $env:IN="cap.png"; $env:CROP="0,58,26,170"; $env:SCALE="5"; $env:OUT="strip.png";
@@ -1243,7 +1271,9 @@ mod tests {
                 let Ok(cap) = crate::capture::capture_region_raw(crate::capture::Rect { x: 0, y: 0, width: 64, height: 900 }, &[]) else {
                     break;
                 };
-                let icons = detect_toolbar_icons(&cap, 4, 44, 100, 880);
+                // x 10..47 = the toolbar interior. Outside it (the window margins) the 3D viewport
+                // shows through, and its green axis-line is bright enough to wreck the autocrop bbox.
+                let icons = detect_toolbar_icons(&cap, 10, 47, 100, 880);
                 let mut new_here = 0;
                 for (i, (yc, hh)) in icons.iter().enumerate() {
                     // Skip any row covered by a non-Blender window (e.g. a File Explorer sidebar
@@ -1269,7 +1299,7 @@ mod tests {
                     };
                     let r_top = (*yc as i64 - *hh as i64 / 2 - 3).max(top_lim);
                     let r_bot = (*yc as i64 + *hh as i64 / 2 + 3).min(bot_lim);
-                    let region = (4i64, r_top, 40i64, (r_bot - r_top).max(1));
+                    let region = (10i64, r_top, 37i64, (r_bot - r_top).max(1)); // toolbar interior (skip green margins)
                     let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, 2, 45) else {
                         continue;
                     };
@@ -1297,7 +1327,7 @@ mod tests {
                     // live look. (The button fill is only subtly distinct from the bg, so this reads as
                     // the icon in its slot; the clamp keeps a neighbour from being baked in.)
                     let s = 34u32;
-                    let bgpx = *cap.get_pixel(ax.saturating_sub(3).max(1), (ay + ah / 2).min(cap.height() - 1));
+                    let bgpx = *cap.get_pixel(11, (ay + ah / 2).min(cap.height() - 1)); // toolbar bg, past the green margin
                     let mut canvas = image::RgbaImage::from_pixel(s, s, bgpx);
                     let ox = (s.saturating_sub(aw) / 2) as i64;
                     let oy = (s.saturating_sub(ah) / 2) as i64;
