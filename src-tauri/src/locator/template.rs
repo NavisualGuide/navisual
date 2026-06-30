@@ -1434,6 +1434,16 @@ mod tests {
         let (x0, y0, x1, y1) = (p[0], p[1], p[2], p[3]);
         let vert = std::env::var("ORIENT").map(|s| s != "h").unwrap_or(true);
         let size: u32 = std::env::var("SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(34);
+        // Semi-manual override for dense/mixed regions: POSITIONS = comma-separated centres along the
+        // sweep axis (skip detection); NAMES = comma-separated names in order (skip the tooltip hover).
+        let positions: Vec<i32> = std::env::var("POSITIONS")
+            .ok()
+            .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+            .unwrap_or_default();
+        let names: Vec<String> = std::env::var("NAMES")
+            .ok()
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+            .unwrap_or_default();
         unsafe {
             let _ = SetCursorPos(960, 540);
         }
@@ -1444,31 +1454,53 @@ mod tests {
             return;
         };
         let (rw, rh) = (cap.width(), cap.height());
-        let icons = detect_region_icons(&cap, vert);
+        let icons: Vec<(u32, u32)> = if positions.is_empty() {
+            detect_region_icons(&cap, vert)
+        } else {
+            positions.iter().map(|&p| (p as u32, 18u32)).collect()
+        };
         eprintln!("detected {} icons ({}): {:?}", icons.len(), if vert { "v" } else { "h" }, icons);
         let mut manifest: Vec<(usize, String, String, String)> = Vec::new();
         let mut idx = 0usize;
-        for (c, sz) in &icons {
-            let (sx, sy) = if vert {
-                (x0 + rw as i32 / 2, y0 + *c as i32)
+        for (i, (c, sz)) in icons.iter().enumerate() {
+            let name = if names.is_empty() {
+                let (sx, sy) = if vert {
+                    (x0 + rw as i32 / 2, y0 + *c as i32)
+                } else {
+                    (x0 + *c as i32, y0 + rh as i32 / 2)
+                };
+                harvest_tooltip(sx, sy).first().cloned().unwrap_or_default()
             } else {
-                (x0 + *c as i32, y0 + rh as i32 / 2)
+                names.get(i).cloned().unwrap_or_default()
             };
-            let name = harvest_tooltip(sx, sy).first().cloned().unwrap_or_default();
             if name.is_empty() {
-                eprintln!("  ({sx},{sy}) no tooltip");
                 continue;
             }
-            // Autocrop the glyph from the resting capture (taken before any hover).
-            let region = if vert {
-                (2i64, *c as i64 - *sz as i64 / 2 - 2, rw as i64 - 4, *sz as i64 + 4)
+            // Autocrop the glyph from the resting capture (taken before any hover), clamped to the
+            // half-gap to the neighbours so touching buttons/tabs can't leak a sliver into the crop.
+            let lo = if i > 0 { (icons[i - 1].0 + *c) / 2 + 1 } else { 0 };
+            let hi = if i + 1 < icons.len() {
+                (*c + icons[i + 1].0) / 2 - 1
+            } else if vert {
+                rh
             } else {
-                (*c as i64 - *sz as i64 / 2 - 2, 2i64, *sz as i64 + 4, rh as i64 - 4)
+                rw
             };
-            let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, 2, 40) else {
-                eprintln!("  {name}: autocrop miss");
-                continue;
+            let a = (*c as i64 - *sz as i64 / 2 - 2).max(lo as i64);
+            let b = (*c as i64 + *sz as i64 / 2 + 2).min(hi as i64);
+            let region = if vert {
+                (2i64, a, rw as i64 - 4, (b - a).max(1))
+            } else {
+                (a, 2i64, (b - a).max(1), rh as i64 - 4)
             };
+            // On an autocrop miss (e.g. a glyph that fills its button, defeating the median-bg
+            // estimate), fall back to the clamped region itself.
+            let (ax, ay, aw, ah) = autocrop_glyph(&cap, region, 2, 40).unwrap_or((
+                region.0.max(0) as u32,
+                region.1.max(0) as u32,
+                region.2.max(1) as u32,
+                region.3.max(1) as u32,
+            ));
             let rgba = image::imageops::crop_imm(&cap, ax, ay, aw, ah).to_image();
             let bgpx = *cap.get_pixel(1.min(rw - 1), (ay + ah / 2).min(rh - 1));
             let mut canvas = image::RgbaImage::from_pixel(size, size, bgpx);
