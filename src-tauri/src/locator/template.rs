@@ -862,6 +862,52 @@ mod tests {
             .collect()
     }
 
+    // Brightness-based icon detection for panel regions (tab columns / header rows), either
+    // orientation. Unlike the edge-based left-toolbar detector, this catches FILLED coloured icons
+    // (orange Object tab, blue Modifiers, red World) whose edges are weak: it bands the lines (rows
+    // if vert, columns if horiz) that hold several glyph-bright pixels. cap IS the region; returns
+    // (centre, size) in cap coords.
+    fn detect_region_icons(cap: &image::RgbaImage, vert: bool) -> Vec<(u32, u32)> {
+        let gray = image::DynamicImage::ImageRgba8(cap.clone()).to_luma8();
+        let (w, h) = (gray.width(), gray.height());
+        let mut sorted: Vec<u8> = gray.pixels().map(|p| p.0[0]).collect();
+        sorted.sort_unstable();
+        let bg = sorted[sorted.len() / 3] as u16; // panel background
+        let thr = bg + 22; // glyph pixels (white line-art OR a filled colour) exceed this
+        let (n, cross) = if vert { (h, w) } else { (w, h) };
+        let mut line = vec![0u32; n as usize];
+        for (xx, yy, p) in gray.enumerate_pixels() {
+            if p.0[0] as u16 > thr {
+                line[(if vert { yy } else { xx }) as usize] += 1;
+            }
+        }
+        let linethr = (cross / 5).max(1); // a line with >~20% glyph pixels is icon content
+        let mut bands: Vec<(u32, u32)> = Vec::new();
+        let (mut start, mut gap) = (None::<u32>, 0u32);
+        for i in 0..n {
+            if line[i as usize] >= linethr {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                gap = 0;
+            } else if let Some(s) = start {
+                gap += 1;
+                if gap > 2 {
+                    bands.push((s, i - gap));
+                    start = None;
+                }
+            }
+        }
+        if let Some(s) = start {
+            bands.push((s, n - 1));
+        }
+        bands
+            .into_iter()
+            .filter(|(a, b)| (8..=40).contains(&(b - a)))
+            .map(|(a, b)| ((a + b) / 2, b - a))
+            .collect()
+    }
+
     // Detect the BUTTON BOX bounds (not the glyph). Blender's left-toolbar buttons are filled
     // rounded-rects slightly brighter than the dark gaps between them; band the rows where the box
     // fill spans >half the strip width. Returns (y_centre, box_height, box_left, box_right). The box
@@ -1367,6 +1413,81 @@ mod tests {
             eprintln!("  tip_{i:03} [{ws:<10}] {n:<24} [{sc}]");
         }
         eprintln!("manifest + icons -> {}", out.display());
+    }
+
+    // Generic region sweep (for the top header + right Properties tabs, not the left toolbar):
+    // detect an icon row/column in REGION, hover each for its tooltip name, autocrop + pad to a
+    // uniform SIZE square. ORIENT=v (vertical column, default) or h (horizontal row).
+    //   $env:OUT="c:/Users/fujin/blender_right"; $env:REGION="1600,392,1624,720"; $env:ORIENT="v";
+    //   $env:SIZE="26"; cargo test --lib capture_region_icons -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn capture_region_icons() {
+        use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+        let out = std::path::PathBuf::from(std::env::var("OUT").expect("set OUT"));
+        let _ = std::fs::create_dir_all(out.join("icons"));
+        let p: Vec<i32> = std::env::var("REGION")
+            .expect("set REGION=x0,y0,x1,y1")
+            .split(',')
+            .map(|s| s.trim().parse().expect("REGION ints"))
+            .collect();
+        let (x0, y0, x1, y1) = (p[0], p[1], p[2], p[3]);
+        let vert = std::env::var("ORIENT").map(|s| s != "h").unwrap_or(true);
+        let size: u32 = std::env::var("SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(34);
+        unsafe {
+            let _ = SetCursorPos(960, 540);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let rect = crate::capture::Rect { x: x0, y: y0, width: (x1 - x0) as u32, height: (y1 - y0) as u32 };
+        let Ok(cap) = crate::capture::capture_region_raw(rect, &[]) else {
+            eprintln!("capture failed");
+            return;
+        };
+        let (rw, rh) = (cap.width(), cap.height());
+        let icons = detect_region_icons(&cap, vert);
+        eprintln!("detected {} icons ({}): {:?}", icons.len(), if vert { "v" } else { "h" }, icons);
+        let mut manifest: Vec<(usize, String, String, String)> = Vec::new();
+        let mut idx = 0usize;
+        for (c, sz) in &icons {
+            let (sx, sy) = if vert {
+                (x0 + rw as i32 / 2, y0 + *c as i32)
+            } else {
+                (x0 + *c as i32, y0 + rh as i32 / 2)
+            };
+            let name = harvest_tooltip(sx, sy).first().cloned().unwrap_or_default();
+            if name.is_empty() {
+                eprintln!("  ({sx},{sy}) no tooltip");
+                continue;
+            }
+            // Autocrop the glyph from the resting capture (taken before any hover).
+            let region = if vert {
+                (2i64, *c as i64 - *sz as i64 / 2 - 2, rw as i64 - 4, *sz as i64 + 4)
+            } else {
+                (*c as i64 - *sz as i64 / 2 - 2, 2i64, *sz as i64 + 4, rh as i64 - 4)
+            };
+            let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, 2, 40) else {
+                eprintln!("  {name}: autocrop miss");
+                continue;
+            };
+            let rgba = image::imageops::crop_imm(&cap, ax, ay, aw, ah).to_image();
+            let bgpx = *cap.get_pixel(1.min(rw - 1), (ay + ah / 2).min(rh - 1));
+            let mut canvas = image::RgbaImage::from_pixel(size, size, bgpx);
+            let ox = (size.saturating_sub(aw) / 2) as i64;
+            let oy = (size.saturating_sub(ah) / 2) as i64;
+            image::imageops::overlay(&mut canvas, &rgba, ox, oy);
+            let slug = slugify(&name);
+            let _ = canvas.save(out.join("icons").join(format!("{slug}.png")));
+            eprintln!("  {name:<28} {aw}x{ah}");
+            manifest.push((idx, name, String::new(), slug));
+            idx += 1;
+        }
+        let m: String = manifest
+            .iter()
+            .map(|(i, n, s, sl)| format!("tip_{i:03}\tRegion\t{n}\t[{s}]\t{sl}.png"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(out.join("manifest.tsv"), m);
+        eprintln!("=== {} icons saved -> {} ===", manifest.len(), out.display());
     }
 
     // Re-crop saved icons in place to drop Blender's tool-group corner BADGE — a small bright blob
