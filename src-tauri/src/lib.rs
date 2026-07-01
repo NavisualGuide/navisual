@@ -3177,11 +3177,15 @@ pub fn run() {
             // Nav-Packs: user packs (writable app-data dir) shadow bundled packs (Tauri
             // resource). Both dirs are optional — a missing dir just yields fewer packs.
             let user_packs_dir = app_data_dir.join("packs");
-            let bundled_packs_dir = app
-                .path()
-                .resource_dir()
-                .ok()
-                .map(|r| r.join("packs"));
+            // Bundled packs live in the Tauri resource dir for a release build. In debug
+            // (`tauri dev`) read them straight from the source tree instead: Tauri only re-copies
+            // resources on a rebuild, so a pack-data-only edit wouldn't otherwise appear until the
+            // next Rust rebuild. `CARGO_MANIFEST_DIR` is `src-tauri/`, baked at compile time.
+            let bundled_packs_dir = if cfg!(debug_assertions) {
+                Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packs"))
+            } else {
+                app.path().resource_dir().ok().map(|r| r.join("packs"))
+            };
             let packs = packs::PackRegistry::load(
                 Some(user_packs_dir.as_path()),
                 bundled_packs_dir.as_deref(),
