@@ -3075,6 +3075,7 @@ See the LICENSE file in the root of this repository for complete details.
           </div>
 
           <p class="about-license">Licensed under FSL-1.1-Apache-2.0 — converts to Apache 2.0 two years after each release.</p>
+          <p class="about-license">The bundled Blender Nav-Pack references Blender's own icon designs (© Blender Foundation) for on-screen guidance only. Blender is a registered trademark of the Blender Foundation. Navisual is not affiliated with or endorsed by the Blender Foundation.</p>
         </div>
         {:else}
         <!-- Usage tab — Navisual account (coins/free) kept separate from your-own-key token usage -->
