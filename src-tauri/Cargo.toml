@@ -1,6 +1,6 @@
 [package]
 name = "navisual-backend"
-version = "0.6.1"
+version = "0.6.2"
 description = "Navisual — Rust/Tauri backend"
 authors = ["Navisual"]
 license = "FSL-1.1-Apache-2.0"
@@ -81,6 +81,8 @@ windows = { version = "0.62", features = [
   "Win32_System_Threading",
   # mouse_event — synthesized clicks for the nav-pack auto-gen authoring sweep (test-only)
   "Win32_UI_Input_KeyboardAndMouse",
+  # GetDpiForMonitor — physical per-monitor DPI for the template-matching DPI prior
+  "Win32_UI_HiDpi",
 ] }
 uiautomation = { version = "0.24.4", features = ["process", "event", "pattern"] }
 
