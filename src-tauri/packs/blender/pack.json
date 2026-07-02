@@ -5,6 +5,7 @@
   "min_app_version": "0.6.0",
   "target_app": "Blender",
   "window_title_pattern": "(?i)blender",
+  "authoring_scale": 1.0,
   "system_prompt_injection": "The user is in Blender. The left Toolbar holds the active tools (Object/Edit/Sculpt sets differ by workspace tab); the right Properties editor has a vertical tab column (Render/Output/Object/Modifiers/Material...); the 3D-viewport header along the top has the shading modes (Wireframe/Solid/Material Preview/Rendered) and Overlays/X-Ray/Gizmos toggles. Prefer the keyboard shortcut when one exists.",
   "shortcuts": {
     "Cursor": "Spacebar",

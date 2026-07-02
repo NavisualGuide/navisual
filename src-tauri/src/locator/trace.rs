@@ -56,6 +56,9 @@ pub struct TemplateTrace {
     pub best_score: f32,
     /// Template scale factor that produced the best match.
     pub best_scale: f32,
+    /// DPI prior applied to the scale sweep (target-monitor-scale ÷ pack-authoring-scale). 1.0 =
+    /// no prior / matching authoring DPI. Surfaced so a cross-DPI miss is diagnosable.
+    pub scale_prior: f32,
     /// The best match cleared the acceptance threshold and was used as the located target.
     pub accepted: bool,
 }

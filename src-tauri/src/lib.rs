@@ -229,7 +229,7 @@ fn execute_step(
         if let Some(text) = step.target_text.as_ref().filter(|t| !t.trim().is_empty()) {
             #[cfg(windows)]
             {
-                let (icon_templates, icon_region) =
+                let (icon_templates, icon_region, icon_authoring_scale) =
                     pack_locate_hints(packs, target_hwnd, text);
                 // A pack icon for this target ⇒ a known icon-only element → A11y skips its
                 // expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
@@ -251,6 +251,7 @@ fn execute_step(
                     icon_templates,
                     icon_region,
                     icon_target,
+                    icon_authoring_scale,
                 };
                 let text_owned = text.clone();
                 let pre = pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r));
@@ -539,23 +540,23 @@ fn pack_locate_hints(
     registry: &packs::PackRegistry,
     hwnd: Option<usize>,
     target_text: &str,
-) -> (IconTemplates, Option<[f32; 4]>) {
+) -> (IconTemplates, Option<[f32; 4]>, f32) {
     let Some(hwnd) = hwnd.filter(|h| *h != 0) else {
-        return (Vec::new(), None);
+        return (Vec::new(), None, 1.0);
     };
     if registry.is_empty() {
-        return (Vec::new(), None);
+        return (Vec::new(), None, 1.0);
     }
     let title = capture::get_window_title(hwnd);
     let Some(pack) = registry.get_active_pack(&title) else {
-        return (Vec::new(), None);
+        return (Vec::new(), None, 1.0);
     };
     let icons = pack
         .candidate_icons(target_text)
         .into_iter()
         .filter_map(|a| std::fs::read(&a.path).ok().map(|bytes| (a.stem.clone(), bytes)))
         .collect();
-    (icons, pack.region_hint_for(target_text))
+    (icons, pack.region_hint_for(target_text), pack.authoring_scale())
 }
 
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
@@ -2098,6 +2099,7 @@ async fn locate_a11y(
             icon_templates: Vec::new(),
             icon_region: None,
             icon_target: false,
+            icon_authoring_scale: 1.0,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::a11y::find_element(&text, &opts))
@@ -2139,6 +2141,7 @@ async fn locate_element(
             icon_templates: Vec::new(),
             icon_region: None,
             icon_target: false,
+            icon_authoring_scale: 1.0,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts, None))

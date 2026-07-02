@@ -55,6 +55,17 @@ pub struct PackManifest {
     /// lever for icon matching on sparse-A11y apps. See [`region_to_fractional_rect`].
     #[serde(default)]
     pub element_hints: Vec<ElementHint>,
+    /// Windows display scale the pack's icon crops were captured at (1.0 = 100 %, 1.5 = 150 %).
+    /// The template-matching DPI prior centres its scale sweep on `target_monitor_scale ÷
+    /// authoring_scale`, so a pack authored at 100 % still matches for a user at 150 %/200 %.
+    /// Defaults to 1.0 (author at 100 % — the guidance in nav-packs.md §6.1).
+    #[serde(default = "default_authoring_scale")]
+    pub authoring_scale: f32,
+}
+
+/// Default `authoring_scale` when a pack omits it — 100 % (the documented authoring scale).
+fn default_authoring_scale() -> f32 {
+    1.0
 }
 
 /// A named UI element's coarse location (and role) within the app window.
@@ -108,6 +119,18 @@ impl Pack {
             .filter(|a| icon_stem_matches_target(&a.stem, target_text))
             .take(8)
             .collect()
+    }
+
+    /// Display scale the pack's icon crops were authored at, clamped to a sane range so a
+    /// malformed manifest value can't yield a zero/negative or absurd DPI prior. See
+    /// [`PackManifest::authoring_scale`].
+    pub fn authoring_scale(&self) -> f32 {
+        let s = self.manifest.authoring_scale;
+        if s.is_finite() && s > 0.0 {
+            s.clamp(0.5, 4.0)
+        } else {
+            1.0
+        }
     }
 
     /// Coarse search region for `target_text` from the pack's `element_hints` (matched by name,
@@ -511,6 +534,28 @@ mod tests {
         assert_eq!(pack.region_hint_for("Move tool"), Some([0.00, 0.00, 0.18, 1.00]));
         assert_eq!(pack.region_hint_for("Render"), Some([0.00, 0.00, 1.00, 0.18]));
         assert_eq!(pack.region_hint_for("Scale"), None); // no hint for Scale
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn authoring_scale_defaults_reads_and_clamps() {
+        let root = tmp();
+        let write = |id: &str, body: &str| {
+            let d = root.join(id);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("pack.json"), body).unwrap();
+        };
+        // Omitted → default 1.0; explicit 1.5 → read back; bogus 0 / negative → accessor clamps to 1.0.
+        write("a", r#"{"id":"a","window_title_pattern":"aaa"}"#);
+        write("b", r#"{"id":"b","window_title_pattern":"bbb","authoring_scale":1.5}"#);
+        write("c", r#"{"id":"c","window_title_pattern":"ccc","authoring_scale":0}"#);
+        write("d", r#"{"id":"d","window_title_pattern":"ddd","authoring_scale":-2.0}"#);
+
+        let reg = PackRegistry::load(Some(&root), None);
+        assert_eq!(reg.get_active_pack("aaa win").unwrap().authoring_scale(), 1.0);
+        assert_eq!(reg.get_active_pack("bbb win").unwrap().authoring_scale(), 1.5);
+        assert_eq!(reg.get_active_pack("ccc win").unwrap().authoring_scale(), 1.0);
+        assert_eq!(reg.get_active_pack("ddd win").unwrap().authoring_scale(), 1.0);
         fs::remove_dir_all(&root).ok();
     }
 

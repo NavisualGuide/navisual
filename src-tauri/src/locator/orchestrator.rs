@@ -67,6 +67,10 @@ pub struct LocateOptions {
     /// icon-only glyph has no accessible name to find; the bounded matcher passes still run, and
     /// template matching is the real path. Halves the locate time on sparse-A11y apps (Blender).
     pub icon_target: bool,
+    /// Display scale the active pack's icon crops were authored at (from the pack manifest,
+    /// default 1.0). Combined with the target monitor's physical scale, it centres the
+    /// template-matching DPI prior so a 100 %-authored pack still matches at 150 %/200 %.
+    pub icon_authoring_scale: f32,
 }
 
 pub fn locate(
@@ -294,6 +298,7 @@ pub fn locate(
             opts.icon_region,
             ai_bbox_img,
             &opts.icon_templates,
+            opts.icon_authoring_scale,
         );
         trace.template = tmpl_trace;
         template_done = true;
@@ -334,7 +339,7 @@ pub fn locate(
         // when an icon target already ran it template-first above.
         if !template_done {
             let (tmpl_hit, tmpl_trace) =
-                try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates);
+                try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates, opts.icon_authoring_scale);
             trace.template = tmpl_trace;
             if let Some(result) = tmpl_hit {
                 trace.final_decision = FinalDecision::HitTemplate;
@@ -459,7 +464,7 @@ pub fn locate(
     // target already ran the template template-first above (which beat even this exact match).
     if (is_fuzzy || !accept) && !template_done {
         let (tmpl_hit, tmpl_trace) =
-            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates);
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates, opts.icon_authoring_scale);
         trace.template = tmpl_trace;
         if let Some(result) = tmpl_hit {
             trace.ocr = ocr_trace;
@@ -710,6 +715,7 @@ fn pick_match(
 /// only **break the tie** ([`pick_match`]). Accepts only above `DEFAULT_MIN_SCORE` — "no pointer
 /// beats wrong pointer"; the pyramid returns raw scores so the trace records the best even on a
 /// reject. Matches are mapped image px → virtual-desktop (the same transform as OCR hits).
+#[allow(clippy::too_many_arguments)]
 fn try_template_pass(
     haystack_png: &[u8],
     crop_rect: &Rect,
@@ -718,12 +724,28 @@ fn try_template_pass(
     icon_region: Option<[f32; 4]>,
     ai_bbox_img: Option<(i32, i32, u32, u32)>,
     templates: &[(String, Vec<u8>)],
+    authoring_scale: f32,
 ) -> (Option<LocateResult>, Option<TemplateTrace>) {
     if templates.is_empty() {
         return (None, None);
     }
+    // DPI prior: the pack's crops were authored at `authoring_scale`; the target window sits on a
+    // monitor whose physical scale we read from the capture rect. Centre the matcher's scale sweep
+    // on their ratio so a 100 %-authored pack still matches at 150 %/200 % (and per-locate, so a
+    // mixed-DPI multi-monitor setup follows whichever monitor the window is on). 1.0 when scales
+    // match or the DPI can't be read → identical to the pre-prior sweep.
+    let monitor_scale = capture::monitor_scale_for_rect(crop_rect);
+    let authoring = if authoring_scale.is_finite() && authoring_scale > 0.0 {
+        authoring_scale
+    } else {
+        1.0
+    };
+    let scale_prior = (monitor_scale / authoring).clamp(0.25, 4.0);
     let Ok(full) = template::load_gray_from_bytes(haystack_png) else {
-        return (None, Some(TemplateTrace::default()));
+        return (None, Some(TemplateTrace {
+            scale_prior,
+            ..Default::default()
+        }));
     };
     // Theme-robust matching: match on Sobel edge magnitude, not raw intensity, so an icon cropped
     // from one theme still matches under a dark↔light/grey/custom flip (shape survives, colour
@@ -742,13 +764,15 @@ fn try_template_pass(
     let mut tr = TemplateTrace {
         templates_tried: needles.len(),
         best_score: -1.0,
+        scale_prior,
         ..Default::default()
     };
     // Full-screen top-K per icon (min_score -1.0 → raw, so the trace's best_score is recorded
-    // even on a reject), pooled across icons.
+    // even on a reject), pooled across icons. `scale_prior` centres the scale sweep on the
+    // expected DPI ratio (see above).
     let mut cands: Vec<(template::TemplateMatch, String)> = Vec::new();
     for (name, needle) in &needles {
-        for m in template::match_icon_pyramid(&full, needle, -1.0) {
+        for m in template::match_icon_pyramid(&full, needle, -1.0, scale_prior) {
             if m.score > tr.best_score {
                 tr.best_score = m.score;
                 tr.best_scale = m.scale;

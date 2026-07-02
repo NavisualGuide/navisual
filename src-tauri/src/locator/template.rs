@@ -173,13 +173,33 @@ fn topk_peaks(map: &NccMap, tw: u32, th: u32, k: usize) -> Vec<(u32, u32, f32)> 
 /// in a small window around each peak for pixel-precise, ~1.0-score hits. Returns matches in
 /// **native (full-image) coords** with fine score ≥ `min_score`, sorted by score desc and
 /// de-duplicated. Full-screen but ~0.3–0.5 s vs ~5.6 s for a naive native scan.
-pub fn match_icon_pyramid(haystack: &GrayImage, template: &GrayImage, min_score: f32) -> Vec<TemplateMatch> {
+///
+/// `scale_prior` centres the coarse+fine scale sweeps on an expected DPI ratio (target monitor
+/// scale ÷ authoring scale); pass 1.0 when no DPI prior is known.
+pub fn match_icon_pyramid(
+    haystack: &GrayImage,
+    template: &GrayImage,
+    min_score: f32,
+    scale_prior: f32,
+) -> Vec<TemplateMatch> {
+    // DPI prior: the pack's crops are authored at one display scale; the live monitor may render
+    // the app's icons larger/smaller. `scale_prior` = target-monitor-scale ÷ authoring-scale
+    // *centres* the scale sweep on the expected ratio (e.g. a 200 %/100 % user → 2.0), so the
+    // fixed ±range still brackets the true on-screen size without a wide, false-positive-prone
+    // sweep. 1.0 (default / no DPI info) reproduces the pre-prior behaviour exactly.
+    let prior = if scale_prior.is_finite() && scale_prior > 0.0 {
+        scale_prior
+    } else {
+        1.0
+    };
+    let dscales: Vec<f32> = DEFAULT_SCALES.iter().map(|s| s * prior).collect();
+    let cscales: Vec<f32> = COARSE_SCALES.iter().map(|s| s * prior).collect();
     let (hw, hh) = haystack.dimensions();
     let (tw, th) = template.dimensions();
     let cf = (COARSE_ICON_PX / tw.max(th) as f32).clamp(0.1, 1.0);
     // Template already small → a direct full match (pyramid wouldn't save anything).
     if cf >= 0.9 {
-        return match_icon(haystack, template, DEFAULT_SCALES, min_score)
+        return match_icon(haystack, template, &dscales, min_score)
             .into_iter()
             .collect();
     }
@@ -189,17 +209,19 @@ pub fn match_icon_pyramid(haystack: &GrayImage, template: &GrayImage, min_score:
         ((th as f32) * cf).round().max(4.0) as u32,
     );
     if ctw >= chw || cth >= chh {
-        return match_icon(haystack, template, DEFAULT_SCALES, min_score)
+        return match_icon(haystack, template, &dscales, min_score)
             .into_iter()
             .collect();
     }
     let chay = image::imageops::resize(haystack, chw, chh, FilterType::Lanczos3);
     let ctmpl = image::imageops::resize(template, ctw, cth, FilterType::Lanczos3);
-    let Some((cmw, cmh, cmap)) = best_scale_map(&chay, &ctmpl, COARSE_SCALES) else {
+    let Some((cmw, cmh, cmap)) = best_scale_map(&chay, &ctmpl, &cscales) else {
         return Vec::new();
     };
-    let mw = (tw as f32 * 1.5 + 24.0) as i32;
-    let mh = (th as f32 * 1.5 + 24.0) as i32;
+    // Widen the fine-refine window by the prior so a larger-than-authored on-screen icon still
+    // fits comfortably around the coarse peak centre.
+    let mw = (tw as f32 * prior * 1.5 + 24.0) as i32;
+    let mh = (th as f32 * prior * 1.5 + 24.0) as i32;
     let mut out: Vec<TemplateMatch> = Vec::new();
     for (px, py, _cv) in topk_peaks(&cmap, cmw, cmh, MAX_PEAKS) {
         // coarse peak centre → native centre.
@@ -214,7 +236,7 @@ pub fn match_icon_pyramid(haystack: &GrayImage, template: &GrayImage, min_score:
         }
         let fwin = image::imageops::crop_imm(haystack, x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
             .to_image();
-        if let Some(fine) = match_icon(&fwin, template, DEFAULT_SCALES, min_score) {
+        if let Some(fine) = match_icon(&fwin, template, &dscales, min_score) {
             let m = TemplateMatch {
                 x: fine.x + x0,
                 y: fine.y + y0,
@@ -364,11 +386,51 @@ mod tests {
         // should return it at native precision near (50,40) with a high score.
         let hay = structured(400, 320);
         let tmpl = crop(&hay, 50, 40, 40, 30);
-        let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE);
+        let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 1.0);
         assert!(!hits.is_empty(), "pyramid should find the crop");
         let m = hits[0];
         assert!((m.x - 50).abs() <= 4 && (m.y - 40).abs() <= 4, "near true location: {m:?}");
         assert!(m.score >= DEFAULT_MIN_SCORE, "fine score should clear threshold: {}", m.score);
+    }
+
+    #[test]
+    fn dpi_prior_rescues_upscaled_icon_via_2x_scale() {
+        // Simulate a 200 %-DPI user: the on-screen icon is 2× the authored template. Crop the
+        // template across the bright block *edge* (like the other tests) so NCC has real structure
+        // — a crop fully inside the flat block would match flat-on-flat everywhere. Render the
+        // "live screen" at 2× so the 48×40 feature at (50,40) becomes ~96×80 at ~(100,80).
+        let base = structured(300, 240);
+        let tmpl = crop(&base, 50, 40, 48, 40); // straddles the block edge → locally unique
+        let hay = image::imageops::resize(&base, 600, 480, FilterType::Lanczos3);
+
+        // Prior 1.0: the sweep tops out at 1.5×, so it physically cannot produce a ~2× match —
+        // whatever it does (or doesn't) find, no hit can reach the enlarged scale.
+        let no_prior = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 1.0);
+        assert!(
+            no_prior.iter().all(|m| m.scale < 1.8),
+            "1.0 prior sweep (max 1.5×) can't reach 2×, got {no_prior:?}"
+        );
+
+        // Prior 2.0: the sweep centres on 2×, so it locates the enlarged feature at the doubled
+        // position, at ≈2× scale, covering the ~96 px footprint — none of which the 1.0 sweep can.
+        let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 2.0);
+        assert!(!hits.is_empty(), "2.0 prior should rescue the 2×-scaled icon");
+        let m = hits[0];
+        assert!(m.scale >= 1.8, "winning scale should be ≈2×, got {}", m.scale);
+        assert!((m.x - 100).abs() <= 12 && (m.y - 80).abs() <= 12, "near 2× location: {m:?}");
+        assert!(m.width >= 80, "match should cover the enlarged ~96 px footprint, got {}", m.width);
+    }
+
+    #[test]
+    fn non_finite_or_zero_prior_falls_back_to_1x() {
+        // A bad prior (0, NaN, negative) must not break matching — it should behave as 1.0.
+        let hay = structured(400, 320);
+        let tmpl = crop(&hay, 50, 40, 40, 30);
+        for bad in [0.0_f32, f32::NAN, -3.0, f32::INFINITY] {
+            let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, bad);
+            assert!(!hits.is_empty(), "prior {bad} should fall back to 1.0 and still match");
+            assert!((hits[0].x - 50).abs() <= 4 && (hits[0].y - 40).abs() <= 4);
+        }
     }
 
     #[test]
@@ -610,8 +672,10 @@ mod tests {
         eprintln!("haystack {}x{}, template {}x{}, {} scales", hay.width(), hay.height(), tmpl.width(), tmpl.height(), DEFAULT_SCALES.len());
         // PYRAMID=1 → full-screen coarse-to-fine top-K (the production path); else single full match.
         if std::env::var("PYRAMID").is_ok() {
+            // PRIOR=<f32> exercises the DPI prior by hand (e.g. PRIOR=2.0 for a 200 % monitor).
+            let prior: f32 = std::env::var("PRIOR").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
             let t = std::time::Instant::now();
-            let hits = match_icon_pyramid(&hay, &tmpl, -1.0);
+            let hits = match_icon_pyramid(&hay, &tmpl, -1.0, prior);
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             eprintln!("pyramid full-screen: {} match(es) in {:.1} ms", hits.len(), ms);
             for m in &hits {

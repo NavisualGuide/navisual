@@ -65,6 +65,20 @@ pub fn monitor_rect(index: usize) -> Option<Rect> {
     })
 }
 
+/// Physical DPI scale (1.0 = 100 %, 2.0 = 200 %) of the monitor the `rect`'s centre sits on —
+/// the template-matching DPI prior (see `win::monitor_scale_for_rect`). Non-Windows → 1.0.
+pub fn monitor_scale_for_rect(rect: &Rect) -> f32 {
+    #[cfg(windows)]
+    {
+        win::monitor_scale_for_rect(rect)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = rect;
+        1.0
+    }
+}
+
 /// Capture the primary monitor and encode as JPEG. The primary monitor is, by
 /// Windows convention, the monitor whose top-left is at (0, 0) in virtual-
 /// desktop coordinates.

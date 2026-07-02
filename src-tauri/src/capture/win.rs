@@ -25,6 +25,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
@@ -835,6 +836,33 @@ fn monitor_rect_containing(x: i32, y: i32) -> Option<Rect> {
             width: (r.right - r.left).max(0) as u32,
             height: (r.bottom - r.top).max(0) as u32,
         })
+    }
+}
+
+/// Physical DPI scale (1.0 = 100 %, 1.25 = 125 %, 1.5 = 150 %, 2.0 = 200 %) of the monitor the
+/// given rect's **centre** sits on — the DPI prior for template matching.
+///
+/// Uses the display **monitor's** effective DPI (`GetDpiForMonitor` / `MDT_EFFECTIVE_DPI`), *not*
+/// `GetDpiForWindow`. Capture is composited-screen BitBlt (`CreateDCW("DISPLAY")`), so an
+/// on-screen icon's pixel size tracks the physical monitor scale — even for a DPI-*unaware* target
+/// app, which DWM bitmap-stretches up to the monitor scale before compositing (`GetDpiForWindow`
+/// would report 96 for that app and mislead the prior). Because it keys off the rect location, a
+/// mixed-DPI multi-monitor setup (e.g. 4K@200 % beside FHD@100 %) is handled per-locate: the scale
+/// follows whichever monitor the captured window currently occupies. Falls back to 1.0 on any
+/// failure (no prior → the sweep behaves exactly as before).
+pub fn monitor_scale_for_rect(rect: &Rect) -> f32 {
+    unsafe {
+        let cx = rect.x + rect.width as i32 / 2;
+        let cy = rect.y + rect.height as i32 / 2;
+        let hmon = MonitorFromPoint(POINT { x: cx, y: cy }, MONITOR_DEFAULTTONEAREST);
+        if hmon.0.is_null() {
+            return 1.0;
+        }
+        let (mut dpix, mut dpiy) = (0u32, 0u32);
+        match GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpix, &mut dpiy) {
+            Ok(()) if dpix > 0 => (dpix as f32 / 96.0).clamp(0.5, 4.0),
+            _ => 1.0,
+        }
     }
 }
 
