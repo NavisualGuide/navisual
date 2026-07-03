@@ -867,9 +867,17 @@ pub fn find_element(
                     return Ok((Some(hit), trace));
                 }
             } else {
+                // Two distinct skip reasons share this branch — say which one it was (an icon
+                // target skipping the probe was mis-reported as a distrusted model, which sent
+                // a live debugging session chasing the trust list).
+                let detail = if opts.icon_target {
+                    "skipped — icon target (template is the path; the probe can't help a glyph)"
+                } else {
+                    "skipped — model bbox not trusted (BBOX_DISTRUST_MODELS)"
+                };
                 trace.bbox_probe = Some(BboxProbe {
                     attempted: false,
-                    detail: "skipped — model bbox not trusted (BBOX_DISTRUST_MODELS)".to_string(),
+                    detail: detail.to_string(),
                     ..Default::default()
                 });
             }

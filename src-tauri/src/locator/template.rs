@@ -44,15 +44,26 @@ pub struct TemplateMatch {
     pub scale: f32,
 }
 
+/// Per-scale needle preprocessing applied AFTER the resize (e.g. [`to_edges`]). Order is
+/// load-bearing for cross-DPI matching: resizing an already-edged template stretches its
+/// dilated ~3 px edge bands to ~6 px at a 2× scale, while the live 2×-rendered icon in the
+/// (natively-edged) haystack keeps ~3 px bands — the width mismatch caps NCC at ~0.86, under
+/// the 0.9 accept threshold (measured, Blender at 200 % DPI). Resizing the *grayscale* icon
+/// first and edging at the target scale keeps both sides' edge widths comparable.
+pub type NeedlePrep = Option<fn(&GrayImage) -> GrayImage>;
+
 /// Slide `template` over `haystack` at each scale in `scales`, returning the single best match
 /// whose NCC score ≥ `min_score`, or `None`. Scales that would make the template ≥ the
 /// haystack (or smaller than 4 px) are skipped — `imageproc::match_template` panics if the
 /// template isn't strictly smaller, so the guard is load-bearing, not just an optimization.
+/// With `prep` set, `template` must be the RAW grayscale icon; the prep runs after each
+/// resize (see [`NeedlePrep`]). `None` matches `template` as given (raw-intensity tests).
 pub fn match_icon(
     haystack: &GrayImage,
     template: &GrayImage,
     scales: &[f32],
     min_score: f32,
+    prep: NeedlePrep,
 ) -> Option<TemplateMatch> {
     let (hw, hh) = haystack.dimensions();
     let mut best: Option<TemplateMatch> = None;
@@ -63,11 +74,19 @@ pub fn match_icon(
             continue;
         }
         let scaled;
-        let needle: &GrayImage = if (s - 1.0).abs() < f32::EPSILON {
+        let resized: &GrayImage = if (s - 1.0).abs() < f32::EPSILON {
             template
         } else {
             scaled = image::imageops::resize(template, tw, th, FilterType::Lanczos3);
             &scaled
+        };
+        let prepped;
+        let needle: &GrayImage = match prep {
+            Some(p) => {
+                prepped = p(resized);
+                &prepped
+            }
+            None => resized,
         };
         let result = match_template_parallel(
             haystack,
@@ -110,30 +129,8 @@ const COARSE_SCALES: &[f32] = &[0.67, 1.0, 1.5];
 /// NCC result surface from `match_template` (one f32 score per candidate position).
 type NccMap = image::ImageBuffer<image::Luma<f32>, Vec<f32>>;
 
-/// For the best-scoring scale, return (scaled template w, h, the NCC result map). Used by the
-/// pyramid coarse pass so we can extract multiple peaks, not just the single global best.
-fn best_scale_map(haystack: &GrayImage, template: &GrayImage, scales: &[f32]) -> Option<(u32, u32, NccMap)> {
-    let (hw, hh) = haystack.dimensions();
-    let mut best: Option<(f32, u32, u32, NccMap)> = None;
-    for &s in scales {
-        let tw = ((template.width() as f32) * s).round() as u32;
-        let th = ((template.height() as f32) * s).round() as u32;
-        if tw < 4 || th < 4 || tw >= hw || th >= hh {
-            continue;
-        }
-        let scaled = if (s - 1.0).abs() < f32::EPSILON {
-            template.clone()
-        } else {
-            image::imageops::resize(template, tw, th, FilterType::Lanczos3)
-        };
-        let map = match_template_parallel(haystack, &scaled, MatchTemplateMethod::CrossCorrelationNormalized);
-        let max = find_extremes(&map).max_value;
-        if best.as_ref().map(|(b, ..)| max > *b).unwrap_or(true) {
-            best = Some((max, tw, th, map));
-        }
-    }
-    best.map(|(_, tw, th, map)| (tw, th, map))
-}
+// (`best_scale_map` — the single-best-scale coarse map — was removed when the coarse pass
+// switched to pooling top-K peaks from EVERY scale's map; see `match_icon_pyramid`.)
 
 /// Up to `k` well-separated peaks (x, y, score) in an NCC map via greedy non-max suppression
 /// (suppress a ±(tw,th) window around each found peak so the next is a *different* location).
@@ -175,12 +172,16 @@ fn topk_peaks(map: &NccMap, tw: u32, th: u32, k: usize) -> Vec<(u32, u32, f32)> 
 /// de-duplicated. Full-screen but ~0.3–0.5 s vs ~5.6 s for a naive native scan.
 ///
 /// `scale_prior` centres the coarse+fine scale sweeps on an expected DPI ratio (target monitor
-/// scale ÷ authoring scale); pass 1.0 when no DPI prior is known.
+/// scale ÷ authoring scale); pass 1.0 when no DPI prior is known. With `prep` set, `template`
+/// must be the RAW grayscale icon: the coarse pass edges it once at native scale (both coarse
+/// sides then shrink identically), while each fine-pass scale resizes the grayscale first and
+/// edges at the target scale (see [`NeedlePrep`] — the cross-DPI fix).
 pub fn match_icon_pyramid(
     haystack: &GrayImage,
     template: &GrayImage,
     min_score: f32,
     scale_prior: f32,
+    prep: NeedlePrep,
 ) -> Vec<TemplateMatch> {
     // DPI prior: the pack's crops are authored at one display scale; the live monitor may render
     // the app's icons larger/smaller. `scale_prior` = target-monitor-scale ÷ authoring-scale
@@ -196,10 +197,14 @@ pub fn match_icon_pyramid(
     let cscales: Vec<f32> = COARSE_SCALES.iter().map(|s| s * prior).collect();
     let (hw, hh) = haystack.dimensions();
     let (tw, th) = template.dimensions();
+    // The factor is template-based, NOT divided by the prior: a prior-aware `cf` was tried and
+    // reverted — it shrinks the coarse TEMPLATE to ~6 px where the dilated edges vanish (thin
+    // glyphs like move's arrows lost their coarse signature entirely). The on-screen icon lands
+    // at ~COARSE_ICON_PX·prior in the coarse image instead; the cscales (×prior) bridge the gap.
     let cf = (COARSE_ICON_PX / tw.max(th) as f32).clamp(0.1, 1.0);
     // Template already small → a direct full match (pyramid wouldn't save anything).
     if cf >= 0.9 {
-        return match_icon(haystack, template, &dscales, min_score)
+        return match_icon(haystack, template, &dscales, min_score, prep)
             .into_iter()
             .collect();
     }
@@ -209,24 +214,72 @@ pub fn match_icon_pyramid(
         ((th as f32) * cf).round().max(4.0) as u32,
     );
     if ctw >= chw || cth >= chh {
-        return match_icon(haystack, template, &dscales, min_score)
+        return match_icon(haystack, template, &dscales, min_score, prep)
             .into_iter()
             .collect();
     }
-    let chay = image::imageops::resize(haystack, chw, chh, FilterType::Lanczos3);
-    let ctmpl = image::imageops::resize(template, ctw, cth, FilterType::Lanczos3);
-    let Some((cmw, cmh, cmap)) = best_scale_map(&chay, &ctmpl, &cscales) else {
-        return Vec::new();
+    // Coarse localizes on the SAME representation as the haystack (edged at native scale when
+    // prep is set) so both sides' edges shrink identically through the cf downscale — the
+    // dilation keeps them alive (see to_edges). Only the fine pass needs resize-then-prep.
+    let tmpl_native;
+    let coarse_src: &GrayImage = match prep {
+        Some(p) => {
+            tmpl_native = p(template);
+            &tmpl_native
+        }
+        None => template,
     };
+    let chay = image::imageops::resize(haystack, chw, chh, FilterType::Lanczos3);
+    let ctmpl = image::imageops::resize(coarse_src, ctw, cth, FilterType::Lanczos3);
+    // Pool top-K peaks from EVERY coarse scale's map — not just the single best-scoring map
+    // (`best_scale_map`'s contract). With the DPI prior widening the swept range (1.34–3.0 at
+    // prior 2), a spurious off-scale peak anywhere on screen can win the global max, and the
+    // true icon's scale map would then never be peak-scanned at all (measured: Blender "scale"
+    // at 200 % — the real toolbar icon was absent from the top-K while 1.34× look-alikes filled
+    // it). The fine refine re-scores every pooled window at native res, so the extra coarse
+    // candidates only cost a few small-window NCCs.
+    let (chw2, chh2) = chay.dimensions();
+    let mut coarse_centres: Vec<(f32, f32)> = Vec::new(); // native-res centres
+    for &cs in &cscales {
+        let stw = ((ctmpl.width() as f32) * cs).round() as u32;
+        let sth = ((ctmpl.height() as f32) * cs).round() as u32;
+        if stw < 4 || sth < 4 || stw >= chw2 || sth >= chh2 {
+            continue;
+        }
+        let scaled = image::imageops::resize(&ctmpl, stw, sth, FilterType::Lanczos3);
+        let map = match_template_parallel(
+            &chay,
+            &scaled,
+            MatchTemplateMethod::CrossCorrelationNormalized,
+        );
+        for (px, py, _cv) in topk_peaks(&map, stw, sth, MAX_PEAKS) {
+            coarse_centres.push((
+                (px as f32 + stw as f32 / 2.0) / cf,
+                (py as f32 + sth as f32 / 2.0) / cf,
+            ));
+        }
+    }
+    if coarse_centres.is_empty() {
+        return Vec::new();
+    }
+    // The same location usually peaks in several scale maps — dedupe near-identical centres
+    // BEFORE the fine refine (each refine is a multi-scale small-window NCC, the cost driver).
+    let (ddx, ddy) = (tw as f32 * prior / 2.0, th as f32 * prior / 2.0);
+    let mut centres: Vec<(f32, f32)> = Vec::new();
+    for (nx, ny) in coarse_centres {
+        if !centres
+            .iter()
+            .any(|&(ex, ey)| (ex - nx).abs() < ddx && (ey - ny).abs() < ddy)
+        {
+            centres.push((nx, ny));
+        }
+    }
     // Widen the fine-refine window by the prior so a larger-than-authored on-screen icon still
     // fits comfortably around the coarse peak centre.
     let mw = (tw as f32 * prior * 1.5 + 24.0) as i32;
     let mh = (th as f32 * prior * 1.5 + 24.0) as i32;
     let mut out: Vec<TemplateMatch> = Vec::new();
-    for (px, py, _cv) in topk_peaks(&cmap, cmw, cmh, MAX_PEAKS) {
-        // coarse peak centre → native centre.
-        let nx = (px as f32 + cmw as f32 / 2.0) / cf;
-        let ny = (py as f32 + cmh as f32 / 2.0) / cf;
+    for (nx, ny) in centres {
         let x0 = (nx as i32 - mw).max(0);
         let y0 = (ny as i32 - mh).max(0);
         let x1 = (nx as i32 + mw).min(hw as i32);
@@ -236,7 +289,7 @@ pub fn match_icon_pyramid(
         }
         let fwin = image::imageops::crop_imm(haystack, x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
             .to_image();
-        if let Some(fine) = match_icon(&fwin, template, &dscales, min_score) {
+        if let Some(fine) = match_icon(&fwin, template, &dscales, min_score, prep) {
             let m = TemplateMatch {
                 x: fine.x + x0,
                 y: fine.y + y0,
@@ -345,7 +398,7 @@ mod tests {
     fn finds_exact_crop_at_its_location() {
         let hay = structured(200, 160);
         let tmpl = crop(&hay, 50, 40, 48, 40); // covers the bright block — locally unique
-        let m = match_icon(&hay, &tmpl, &[1.0], 0.99).expect("exact crop should match");
+        let m = match_icon(&hay, &tmpl, &[1.0], 0.99, None).expect("exact crop should match");
         assert_eq!((m.x, m.y), (50, 40));
         assert_eq!((m.width, m.height), (48, 40));
         assert!(m.score > 0.99, "exact crop should score ~1.0, got {}", m.score);
@@ -360,9 +413,9 @@ mod tests {
         // threshold mechanism, not an absolute-rejection assumption, is what we verify.
         let hay = structured(200, 160);
         let tmpl = crop(&hay, 50, 40, 48, 40);
-        assert!(match_icon(&hay, &tmpl, &[1.0], 1.01).is_none());
+        assert!(match_icon(&hay, &tmpl, &[1.0], 1.01, None).is_none());
         // Sanity: the same crop is accepted under a sane floor (mirrors the exact-match test).
-        assert!(match_icon(&hay, &tmpl, &[1.0], DEFAULT_MIN_SCORE).is_some());
+        assert!(match_icon(&hay, &tmpl, &[1.0], DEFAULT_MIN_SCORE, None).is_some());
     }
 
     #[test]
@@ -371,7 +424,7 @@ mod tests {
         let tmpl = crop(&hay, 50, 40, 48, 40);
         // Author the template at 1.25× so only the 0.8 scale brings it back to native size.
         let bigger = image::imageops::resize(&tmpl, 60, 50, FilterType::Lanczos3);
-        let m = match_icon(&hay, &bigger, DEFAULT_SCALES, 0.9).expect("scaled crop should match");
+        let m = match_icon(&hay, &bigger, DEFAULT_SCALES, 0.9, None).expect("scaled crop should match");
         // The contract is "a down-scaling pass rescues an oversized template near the true
         // location" — the exact winning scale (≈0.8) is an implementation detail, so assert the
         // robust properties: the sweep had to shrink the 1.25×-authored crop (<1.0), and it
@@ -386,7 +439,7 @@ mod tests {
         // should return it at native precision near (50,40) with a high score.
         let hay = structured(400, 320);
         let tmpl = crop(&hay, 50, 40, 40, 30);
-        let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 1.0);
+        let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 1.0, None);
         assert!(!hits.is_empty(), "pyramid should find the crop");
         let m = hits[0];
         assert!((m.x - 50).abs() <= 4 && (m.y - 40).abs() <= 4, "near true location: {m:?}");
@@ -405,7 +458,7 @@ mod tests {
 
         // Prior 1.0: the sweep tops out at 1.5×, so it physically cannot produce a ~2× match —
         // whatever it does (or doesn't) find, no hit can reach the enlarged scale.
-        let no_prior = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 1.0);
+        let no_prior = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 1.0, None);
         assert!(
             no_prior.iter().all(|m| m.scale < 1.8),
             "1.0 prior sweep (max 1.5×) can't reach 2×, got {no_prior:?}"
@@ -413,7 +466,7 @@ mod tests {
 
         // Prior 2.0: the sweep centres on 2×, so it locates the enlarged feature at the doubled
         // position, at ≈2× scale, covering the ~96 px footprint — none of which the 1.0 sweep can.
-        let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 2.0);
+        let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, 2.0, None);
         assert!(!hits.is_empty(), "2.0 prior should rescue the 2×-scaled icon");
         let m = hits[0];
         assert!(m.scale >= 1.8, "winning scale should be ≈2×, got {}", m.scale);
@@ -427,7 +480,7 @@ mod tests {
         let hay = structured(400, 320);
         let tmpl = crop(&hay, 50, 40, 40, 30);
         for bad in [0.0_f32, f32::NAN, -3.0, f32::INFINITY] {
-            let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, bad);
+            let hits = match_icon_pyramid(&hay, &tmpl, DEFAULT_MIN_SCORE, bad, None);
             assert!(!hits.is_empty(), "prior {bad} should fall back to 1.0 and still match");
             assert!((hits[0].x - 50).abs() <= 4 && (hits[0].y - 40).abs() <= 4);
         }
@@ -438,7 +491,7 @@ mod tests {
         let hay = structured(60, 60);
         let tmpl = structured(100, 100); // larger than haystack on every scale
         // Must not panic (match_template panics on a non-smaller template) — just no match.
-        assert!(match_icon(&hay, &tmpl, DEFAULT_SCALES, 0.5).is_none());
+        assert!(match_icon(&hay, &tmpl, DEFAULT_SCALES, 0.5, None).is_none());
     }
 
     // Live helper for building icon packs: capture a window through Navisual's OWN capture
@@ -662,20 +715,23 @@ mod tests {
                 eprintln!("CAP {cw}x{ch}: downscale factor {f:.3}");
             }
         }
-        // EDGES=1 → Sobel-edge preprocess both (the theme-robust production path that
-        // `try_template_pass` uses); else raw intensity.
-        if std::env::var("EDGES").is_ok() {
+        // EDGES=1 → the theme-robust production path `try_template_pass` uses: haystack edged
+        // once at native scale, template kept RAW and edged per-scale AFTER the resize
+        // (NeedlePrep — the cross-DPI fix). Else raw intensity on both.
+        let prep: NeedlePrep = if std::env::var("EDGES").is_ok() {
             hay = to_edges(&hay);
-            tmpl = to_edges(&tmpl);
-            eprintln!("EDGES: matching on Sobel gradient magnitude");
-        }
+            eprintln!("EDGES: matching on Sobel gradient magnitude (needle edged after resize)");
+            Some(to_edges)
+        } else {
+            None
+        };
         eprintln!("haystack {}x{}, template {}x{}, {} scales", hay.width(), hay.height(), tmpl.width(), tmpl.height(), DEFAULT_SCALES.len());
         // PYRAMID=1 → full-screen coarse-to-fine top-K (the production path); else single full match.
         if std::env::var("PYRAMID").is_ok() {
             // PRIOR=<f32> exercises the DPI prior by hand (e.g. PRIOR=2.0 for a 200 % monitor).
             let prior: f32 = std::env::var("PRIOR").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
             let t = std::time::Instant::now();
-            let hits = match_icon_pyramid(&hay, &tmpl, -1.0, prior);
+            let hits = match_icon_pyramid(&hay, &tmpl, -1.0, prior, prep);
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             eprintln!("pyramid full-screen: {} match(es) in {:.1} ms", hits.len(), ms);
             for m in &hits {
@@ -684,7 +740,7 @@ mod tests {
             return;
         }
         let t = std::time::Instant::now();
-        let res = match_icon(&hay, &tmpl, DEFAULT_SCALES, -1.0);
+        let res = match_icon(&hay, &tmpl, DEFAULT_SCALES, -1.0, prep);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         match res {
             Some(m) => eprintln!(
@@ -731,7 +787,7 @@ mod tests {
         let hay_edge = to_edges(&hay);
         let dir = std::env::var("ICONS").unwrap_or_else(|_| "src-tauri/packs/blender/icons".into());
         let score = |h: &GrayImage, t: &GrayImage| {
-            match_icon(h, t, DEFAULT_SCALES, -1.0)
+            match_icon(h, t, DEFAULT_SCALES, -1.0, None)
                 .map(|m| m.score)
                 .unwrap_or(f32::NAN)
         };
@@ -746,7 +802,8 @@ mod tests {
         for p in paths {
             let tmpl = load_gray_from_bytes(&std::fs::read(&p).unwrap()).unwrap();
             let s_int = score(&hay, &tmpl);
-            let m_edge = match_icon(&hay_edge, &to_edges(&tmpl), DEFAULT_SCALES, -1.0);
+            // Production edge path: raw template + prep-after-resize.
+            let m_edge = match_icon(&hay_edge, &tmpl, DEFAULT_SCALES, -1.0, Some(to_edges));
             let (s_edge, ex, ey) = m_edge.map(|m| (m.score, m.x, m.y)).unwrap_or((f32::NAN, -1, -1));
             let mut inv = tmpl.clone();
             image::imageops::invert(&mut inv);

@@ -749,15 +749,17 @@ fn try_template_pass(
     };
     // Theme-robust matching: match on Sobel edge magnitude, not raw intensity, so an icon cropped
     // from one theme still matches under a dark↔light/grey/custom flip (shape survives, colour
-    // doesn't). Edge the haystack ONCE here (not per-icon inside the matcher) and each icon once;
-    // the matcher itself stays preprocessing-agnostic.
+    // doesn't). Edge the haystack ONCE here; the icons stay RAW grayscale — the matcher edges the
+    // needle per-scale AFTER resizing (`NeedlePrep`), so a DPI-prior-scaled template keeps edge
+    // widths comparable to the natively-edged haystack (resizing an edged template stretched the
+    // dilated bands and capped cross-DPI NCC at ~0.86 — measured, Blender at 200 %).
     let full = template::to_edges(&full);
     let needles: Vec<(String, image::GrayImage)> = templates
         .iter()
         .filter_map(|(name, bytes)| {
             template::load_gray_from_bytes(bytes)
                 .ok()
-                .map(|g| (name.clone(), template::to_edges(&g)))
+                .map(|g| (name.clone(), g))
         })
         .collect();
 
@@ -769,13 +771,14 @@ fn try_template_pass(
     };
     // Full-screen top-K per icon (min_score -1.0 → raw, so the trace's best_score is recorded
     // even on a reject), pooled across icons. `scale_prior` centres the scale sweep on the
-    // expected DPI ratio (see above).
+    // expected DPI ratio (see above); needles are edged after each resize (`to_edges` prep).
     let mut cands: Vec<(template::TemplateMatch, String)> = Vec::new();
     for (name, needle) in &needles {
-        for m in template::match_icon_pyramid(&full, needle, -1.0, scale_prior) {
+        for m in template::match_icon_pyramid(&full, needle, -1.0, scale_prior, Some(template::to_edges)) {
             if m.score > tr.best_score {
                 tr.best_score = m.score;
                 tr.best_scale = m.scale;
+                tr.best_pos = Some((m.x, m.y));
                 tr.best_icon = Some(name.clone());
             }
             cands.push((m, name.clone()));
