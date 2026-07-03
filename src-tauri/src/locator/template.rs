@@ -112,10 +112,22 @@ pub struct TemplateMatch {
 /// first and edging at the target scale keeps both sides' edge widths comparable.
 pub type NeedlePrep = Option<fn(&GrayImage) -> GrayImage>;
 
+/// Minimum needle dimension for the fine/direct match. Small edge maps are degenerate — a
+/// downscaled two-circle or line-box glyph NCC-matches empty viewport grid at ≥0.98 (measured
+/// at FHD: an 11 px "gizmos" needle scored 0.9902 and a 16 px "collection" needle 0.9893 on
+/// bare grid lines — above every acceptance bar). Scales that would shrink the needle under
+/// this floor are skipped; a small icon on a low-DPI screen then falls back to OCR / AI-bbox
+/// instead of gambling on a degenerate match ("no pointer beats wrong pointer"). 14 px keeps
+/// FHD's 16 px true matches alive (modifiers scored 0.9996 there) while cutting the hopeless
+/// 11–13 px range; the faint-structure impostors that DO clear this floor (grid at 16–20 px)
+/// are killed by the absolute-contrast gate ([`contrast_plausible`]), not the size floor.
+/// (The coarse pass keeps its own 4 px floor — it only localizes, the fine pass re-scores.)
+const MIN_NEEDLE_PX: u32 = 14;
+
 /// Slide `template` over `haystack` at each scale in `scales`, returning the single best match
 /// whose NCC score ≥ `min_score`, or `None`. Scales that would make the template ≥ the
-/// haystack (or smaller than 4 px) are skipped — `imageproc::match_template` panics if the
-/// template isn't strictly smaller, so the guard is load-bearing, not just an optimization.
+/// haystack (or smaller than [`MIN_NEEDLE_PX`]) are skipped — `imageproc::match_template`
+/// panics if the template isn't strictly smaller, so the upper guard is load-bearing.
 /// With `prep` set, `template` must be the RAW grayscale icon; the prep runs after each
 /// resize (see [`NeedlePrep`]). `None` matches `template` as given (raw-intensity tests).
 pub fn match_icon(
@@ -130,7 +142,7 @@ pub fn match_icon(
     for &s in scales {
         let tw = ((template.width() as f32) * s).round() as u32;
         let th = ((template.height() as f32) * s).round() as u32;
-        if tw < 4 || th < 4 || tw >= hw || th >= hh {
+        if tw < MIN_NEEDLE_PX || th < MIN_NEEDLE_PX || tw >= hw || th >= hh {
             continue;
         }
         let scaled;
@@ -376,6 +388,43 @@ pub fn load_gray_from_bytes(bytes: &[u8]) -> Result<GrayImage> {
         .to_luma8())
 }
 
+/// Mean Sobel gradient magnitude of a grayscale image, UN-normalized — the absolute edge
+/// energy. [`to_edges`] normalizes each image to its own max, which is what makes matching
+/// theme-robust but also amplifies faint structure: Blender's grey-on-grey viewport grid edges
+/// (≈15–40 grey levels) normalize to full range and NCC-match simple box/circle glyphs at
+/// ≥0.97 (measured at FHD). The raw energy tells them apart: a real icon's strokes carry
+/// ~5–10× the gradient energy of grid lines, on any theme (both sides are measured on the
+/// actual images, so no absolute threshold is baked in).
+pub fn mean_gradient(g: &GrayImage) -> f32 {
+    let grad = imageproc::gradients::sobel_gradients(g);
+    let n = (grad.width() * grad.height()).max(1) as f32;
+    grad.pixels().map(|p| p.0[0] as f32).sum::<f32>() / n
+}
+
+/// Whether a fine match's window has plausible ABSOLUTE contrast for the icon it claims to be:
+/// the raw (un-normalized) edge energy of the matched haystack window must be at least
+/// `CONTRAST_MIN_RATIO` of the template's own energy at that scale. Rejects the degenerate
+/// faint-structure matches (viewport grid ≈0.1–0.2×) while keeping true matches on any theme
+/// (≈0.6–1.5×).
+pub const CONTRAST_MIN_RATIO: f32 = 0.35;
+pub fn contrast_plausible(hay_raw: &GrayImage, m: &TemplateMatch, needle_raw: &GrayImage) -> bool {
+    let (hw, hh) = hay_raw.dimensions();
+    if m.x < 0 || m.y < 0 || m.width == 0 || m.height == 0 {
+        return true; // degenerate geometry — leave the decision to the score gates
+    }
+    let (x, y) = (m.x as u32, m.y as u32);
+    if x + m.width > hw || y + m.height > hh {
+        return true;
+    }
+    let win = image::imageops::crop_imm(hay_raw, x, y, m.width, m.height).to_image();
+    let scaled = image::imageops::resize(needle_raw, m.width.max(1), m.height.max(1), FilterType::Lanczos3);
+    let te = mean_gradient(&scaled);
+    if te <= f32::EPSILON {
+        return true;
+    }
+    mean_gradient(&win) >= te * CONTRAST_MIN_RATIO
+}
+
 /// Sobel gradient-magnitude edge map, normalized to 0–255. **Theme-robust matching preprocessing:**
 /// `|∇|` is identical whether a glyph is dark-on-light or light-on-dark, so an icon cropped from one
 /// theme still matches under a dark↔light (or grey/custom) flip — the icon's *shape* survives while
@@ -535,6 +584,34 @@ mod tests {
     }
 
     #[test]
+    fn contrast_gate_rejects_faint_structure() {
+        // A faint (low-contrast) copy of a glyph NCC-matches in NORMALIZED edge space — that is
+        // exactly the measured viewport-grid failure. The absolute-contrast gate must reject the
+        // faint window while accepting the true-contrast one.
+        let mut tmpl = GrayImage::new(30, 30);
+        for y in 8..22 {
+            for x in 8..22 {
+                // bright hollow box on dark bg (strong strokes)
+                let edge = x == 8 || x == 21 || y == 8 || y == 21;
+                tmpl.put_pixel(x, y, Luma([if edge { 230 } else { 40 }]));
+            }
+        }
+        let mut hay = GrayImage::from_pixel(200, 80, Luma([40]));
+        // True-contrast instance at (10,10); faint instance (strokes ~12 levels) at (120,10).
+        for y in 8..22 {
+            for x in 8..22 {
+                let edge = x == 8 || x == 21 || y == 8 || y == 21;
+                hay.put_pixel(x + 2, y + 2, Luma([if edge { 230 } else { 40 }]));
+                hay.put_pixel(x + 112, y + 2, Luma([if edge { 52 } else { 40 }]));
+            }
+        }
+        let strong = TemplateMatch { x: 2, y: 2, width: 30, height: 30, score: 1.0, scale: 1.0 };
+        let faint = TemplateMatch { x: 112, y: 2, width: 30, height: 30, score: 1.0, scale: 1.0 };
+        assert!(contrast_plausible(&hay, &strong, &tmpl), "true-contrast window must pass");
+        assert!(!contrast_plausible(&hay, &faint, &tmpl), "faint window must be rejected");
+    }
+
+    #[test]
     fn non_finite_or_zero_prior_falls_back_to_1x() {
         // A bad prior (0, NaN, negative) must not break matching — it should behave as 1.0.
         let hay = structured(400, 320);
@@ -611,13 +688,14 @@ mod tests {
         use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
         let ws = std::env::var("WS").unwrap();
         let out = std::env::var("OUT").unwrap();
-        if let Some((_, tx)) = find_workspace_tabs().iter().find(|(t, _)| t.eq_ignore_ascii_case(&ws)) {
-            click_at(*tx, 37);
+        if let Some((_, tx, ty)) = find_workspace_tabs().iter().find(|(t, _, _)| t.eq_ignore_ascii_case(&ws)) {
+            click_at(*tx, *ty);
             std::thread::sleep(std::time::Duration::from_millis(800));
         }
         if let Some(n) = std::env::var("SCROLL").ok().and_then(|s| s.parse::<i32>().ok()) {
             if n != 0 {
-                scroll_at(28, 300, -n); // negative = scroll the toolbar down toward its lower tools
+                let us = ui_scale();
+                scroll_at((28.0 * us) as i32, (300.0 * us) as i32, -n); // negative = toward lower tools
                 std::thread::sleep(std::time::Duration::from_millis(400));
             }
         }
@@ -639,11 +717,11 @@ mod tests {
         use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
         let ws = std::env::var("WS").unwrap();
         let y: i32 = std::env::var("Y").unwrap().parse().unwrap();
-        if let Some((_, tx)) = find_workspace_tabs().iter().find(|(t, _)| t.eq_ignore_ascii_case(&ws)) {
-            click_at(*tx, 37);
+        if let Some((_, tx, ty)) = find_workspace_tabs().iter().find(|(t, _, _)| t.eq_ignore_ascii_case(&ws)) {
+            click_at(*tx, *ty);
             std::thread::sleep(std::time::Duration::from_millis(800));
         }
-        let lines = harvest_tooltip(28, y);
+        let lines = harvest_tooltip((28.0 * ui_scale()) as i32, y);
         eprintln!("Y={y} tooltip: {lines:?}");
         unsafe {
             let _ = SetCursorPos(960, 540);
@@ -778,6 +856,8 @@ mod tests {
         // EDGES=1 → the theme-robust production path `try_template_pass` uses: haystack edged
         // once at native scale, template kept RAW and edged per-scale AFTER the resize
         // (NeedlePrep — the cross-DPI fix). Else raw intensity on both.
+        let hay_raw = hay.clone();
+        let tmpl_raw = tmpl.clone();
         let prep: NeedlePrep = if std::env::var("EDGES").is_ok() {
             hay = to_edges(&hay);
             eprintln!("EDGES: matching on Sobel gradient magnitude (needle edged after resize)");
@@ -795,9 +875,10 @@ mod tests {
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             eprintln!("pyramid full-screen: {} match(es) in {:.1} ms", hits.len(), ms);
             for m in &hits {
-                // Production acceptance (scale-gated; no bbox rescue / region hint in the harness).
-                let acc = template_match_accept(m.score, m.scale, prior, false, true);
-                eprintln!("  pos=({},{}) {}x{} score={:.4} scale={} accepted={}", m.x, m.y, m.width, m.height, m.score, m.scale, acc);
+                // Production acceptance (scale-gated + contrast; no bbox rescue / region hint here).
+                let contrast = contrast_plausible(&hay_raw, m, &tmpl_raw);
+                let acc = template_match_accept(m.score, m.scale, prior, false, true) && contrast;
+                eprintln!("  pos=({},{}) {}x{} score={:.4} scale={} contrast={} accepted={}", m.x, m.y, m.width, m.height, m.score, m.scale, contrast, acc);
             }
             return;
         }
@@ -961,6 +1042,14 @@ mod tests {
         Some((ax0 as u32, ay0 as u32, (ax1 - ax0) as u32, (ay1 - ay0) as u32))
     }
 
+    // Authoring-time UI scale (UI_SCALE env, default 1.0): the app under authoring may render at
+    // 2× (a 200 % display, or Blender's Resolution Scale = 2.0 used to author high-fidelity
+    // templates on a 100 % monitor — see nav-packs.md §6.1). Scales every layout constant in the
+    // sweep helpers; 1.0 keeps the original 1× behaviour byte-identical.
+    fn ui_scale() -> f32 {
+        std::env::var("UI_SCALE").ok().and_then(|v| v.parse().ok()).filter(|s: &f32| s.is_finite() && *s > 0.0).unwrap_or(1.0)
+    }
+
     // Hover an icon centre and OCR its tooltip (3× upscaled) → the text lines (line 1 = name,
     // a `Shortcut:` line = the key). Caller saves/restores the cursor around a sweep.
     fn harvest_tooltip(cx: i32, cy: i32) -> Vec<String> {
@@ -971,7 +1060,13 @@ mod tests {
             let _ = SetCursorPos(cx, cy);
         }
         std::thread::sleep(std::time::Duration::from_millis(1200));
-        let rect = crate::capture::Rect { x: cx + 8, y: cy - 20, width: 480, height: 160 };
+        let us = ui_scale();
+        let rect = crate::capture::Rect {
+            x: cx + (8.0 * us) as i32,
+            y: cy - (20.0 * us) as i32,
+            width: (480.0 * us) as u32,
+            height: (160.0 * us) as u32,
+        };
         let Ok(raw) = crate::capture::capture_region_raw(rect, &[]) else {
             return Vec::new();
         };
@@ -979,7 +1074,9 @@ mod tests {
         // loses the name/first line of denser Edit/Sculpt tooltips (Loop Cut's "Loop Cut" only
         // appears ≥~6×). `TIP_DIR=…` saves each crop for inspection (NOT `OUT_DIR` — cargo reserves
         // that for build scripts, so it gets clobbered to the build `out/` dir).
-        let up = image::imageops::resize(&raw, raw.width() * 6, raw.height() * 6, FilterType::Lanczos3);
+        // Text is already `us`× bigger at a higher UI scale — divide the upscale accordingly.
+        let upf = ((6.0 / ui_scale()).ceil() as u32).max(2);
+        let up = image::imageops::resize(&raw, raw.width() * upf, raw.height() * upf, FilterType::Lanczos3);
         if let Ok(dir) = std::env::var("TIP_DIR") {
             let n = N.fetch_add(1, Ordering::SeqCst);
             let _ = std::fs::create_dir_all(&dir);
@@ -1013,7 +1110,7 @@ mod tests {
             row[yy as usize] += p.0[0] as u32;
         }
         let maxr = *row.iter().max().unwrap_or(&1);
-        let thr = (maxr / 6).max(1); // a row is "content" above ~1/6 of the busiest row
+        let thr = (maxr / 12).max(1); // a row is "content" above ~1/12 of the busiest row (thin glyphs at 2× sit well under /6; the gaps are truly flat so low is safe)
         let mut bands: Vec<(u32, u32)> = Vec::new();
         let (mut start, mut gap) = (None::<u32>, 0u32);
         for yy in 0..h {
@@ -1024,9 +1121,9 @@ mod tests {
                 gap = 0;
             } else if let Some(s) = start {
                 gap += 1;
-                if gap > 2 {
-                    // bridge ≤2 px dips inside a glyph; a bigger gap ends the icon (keeps adjacent
-                    // icons — esp. the active highlighted tool + its neighbour — from merging)
+                if gap > (2.0 * ui_scale()).round() as u32 {
+                    // bridge ≤~2·scale px dips inside a glyph; a bigger gap ends the icon (keeps
+                    // adjacent icons — esp. the active highlighted tool + its neighbour — from merging)
                     bands.push((s, yy - gap));
                     start = None;
                 }
@@ -1039,7 +1136,9 @@ mod tests {
             .into_iter()
             .filter(|(a, b)| {
                 let hh = b - a;
-                (12..=44).contains(&hh) // an icon glyph, not noise or a merged run
+                let us = ui_scale();
+                let (lo, hi) = ((12.0 * us) as u32, (44.0 * us) as u32);
+                (lo..=hi).contains(&hh) // an icon glyph, not noise or a merged run
             })
             .map(|(a, b)| (y0 + (a + b) / 2, b - a))
             .collect()
@@ -1342,9 +1441,19 @@ mod tests {
 
     // OCR the workspace-tab strip (top of the window) → each tab's text + screen x-centre, so the
     // sweep can click them. Upscaled 3× (small tab font).
-    fn find_workspace_tabs() -> Vec<(String, i32)> {
-        let region = crate::capture::Rect { x: 0, y: 26, width: 1180, height: 22 };
-        let up = 4i32; // the inactive tabs are dim grey — 4× reads them, 3× misses
+    fn find_workspace_tabs() -> Vec<(String, i32, i32)> {
+        let us = ui_scale();
+        // The ~24 px title row above the tab strip is OS-drawn and does NOT scale with the app's
+        // ui_scale, so the strip's y can't be scaled linearly — scan a strip tall enough to hold
+        // the tab row at any supported scale and return each tab's OCR-measured centre (x AND y),
+        // so the caller clicks exactly what was read.
+        let region = crate::capture::Rect {
+            x: 0,
+            y: 20,
+            width: ((1180.0 * us) as u32).min(1920),
+            height: (30.0 * us) as u32 + 20,
+        };
+        let up = ((4.0 / us).ceil() as i32).max(2); // the inactive tabs are dim grey — 4× reads them at 1×
         crate::capture::capture_region_raw(region, &[])
             .ok()
             .map(|raw| image::imageops::resize(&raw, raw.width() * up as u32, raw.height() * up as u32, FilterType::Lanczos3))
@@ -1352,8 +1461,14 @@ mod tests {
             .and_then(|png| crate::locator::ocr::run_ocr(&png).ok())
             .unwrap_or_default()
             .iter()
-            .filter(|r| r.confidence >= 1.0) // each tab is its own line-level result; x-centre below
-            .map(|r| (r.text.clone(), region.x + (r.bbox.0 + r.bbox.2 as i32 / 2) / up))
+            .filter(|r| r.confidence >= 1.0) // each tab is its own line-level result; centres below
+            .map(|r| {
+                (
+                    r.text.clone(),
+                    region.x + (r.bbox.0 + r.bbox.2 as i32 / 2) / up,
+                    region.y + (r.bbox.1 + r.bbox.3 as i32 / 2) / up,
+                )
+            })
             .collect()
     }
 
@@ -1410,14 +1525,14 @@ mod tests {
         let tabs = find_workspace_tabs();
         eprintln!(
             "workspace tabs: {}",
-            tabs.iter().map(|(t, x)| format!("{t}@{x}")).collect::<Vec<_>>().join("  ")
+            tabs.iter().map(|(t, x, y)| format!("{t}@{x},{y}")).collect::<Vec<_>>().join("  ")
         );
         for want in ["Layout", "Modeling", "Sculpting"] {
-            let Some((_, tx)) = tabs.iter().find(|(t, _)| t.eq_ignore_ascii_case(want)) else {
+            let Some((_, tx, ty)) = tabs.iter().find(|(t, _, _)| t.eq_ignore_ascii_case(want)) else {
                 eprintln!("[{want}] tab not found — skipped");
                 continue;
             };
-            click_at(*tx, 37);
+            click_at(*tx, *ty);
             std::thread::sleep(std::time::Duration::from_millis(700)); // workspace switch
             unsafe {
                 let _ = SetCursorPos(960, 540); // park off the toolbar
@@ -1440,8 +1555,8 @@ mod tests {
                 eprintln!("    {name:<24} [{sc}]");
             }
         }
-        if let Some((_, tx)) = tabs.iter().find(|(t, _)| t.eq_ignore_ascii_case("Layout")) {
-            click_at(*tx, 37); // restore to Layout
+        if let Some((_, tx, ty)) = tabs.iter().find(|(t, _, _)| t.eq_ignore_ascii_case("Layout")) {
+            click_at(*tx, *ty); // restore to Layout
         }
         unsafe {
             let _ = SetCursorPos(orig.x, orig.y);
@@ -1467,15 +1582,20 @@ mod tests {
         unsafe {
             let _ = GetCursorPos(&mut orig);
         }
+        // UI_SCALE (default 1): all layout constants below are authored at 1× and multiplied up —
+        // authoring at 2× (Blender Resolution Scale 2.0) yields high-fidelity templates whose
+        // downscale to 1× is information-preserving (measured; nav-packs.md §6.1).
+        let us = ui_scale();
+        let sc = |v: f32| (v * us).round() as i32;
         let tabs = find_workspace_tabs();
         // Fail fast if we're not actually looking at Blender. The sweep reads FIXED primary-monitor
         // regions, so Blender must be maximized + foreground there; otherwise another window (even one
         // whose title contains "blender", e.g. a File Explorer folder) is captured → 0 tools, silently.
-        if !tabs.iter().any(|(t, _)| ["Layout", "Modeling", "Sculpting"].iter().any(|e| t.eq_ignore_ascii_case(e))) {
+        if !tabs.iter().any(|(t, _, _)| ["Layout", "Modeling", "Sculpting"].iter().any(|e| t.eq_ignore_ascii_case(e))) {
             eprintln!(
                 "ABORT: no Blender workspace tabs found (read: {:?}). Maximize Blender on the PRIMARY \
                  monitor (toolbar at the left edge, Layout/Modeling/Sculpting tabs along the top) and re-run.",
-                tabs.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>()
+                tabs.iter().map(|(t, _, _)| t.as_str()).collect::<Vec<_>>()
             );
             return;
         }
@@ -1483,12 +1603,12 @@ mod tests {
         let mut manifest: Vec<(usize, String, String, String, String)> = Vec::new();
         let mut idx = 0usize;
         for ws in ["Layout", "Modeling", "Sculpting"] {
-            let Some((_, tx)) = tabs.iter().find(|(t, _)| t.eq_ignore_ascii_case(ws)) else {
+            let Some((_, tx, ty)) = tabs.iter().find(|(t, _, _)| t.eq_ignore_ascii_case(ws)) else {
                 continue;
             };
-            click_at(*tx, 37);
+            click_at(*tx, *ty);
             std::thread::sleep(std::time::Duration::from_millis(700));
-            scroll_at(28, 300, 10); // toolbar → top
+            scroll_at(sc(28.0), sc(300.0), 10); // toolbar → top
             std::thread::sleep(std::time::Duration::from_millis(300));
             let mut seen_glyphs: Vec<image::GrayImage> = Vec::new(); // per-workspace dedup
             let mut empty = 0;
@@ -1497,17 +1617,18 @@ mod tests {
                     let _ = SetCursorPos(960, 540); // park off the toolbar for a clean capture
                 }
                 std::thread::sleep(std::time::Duration::from_millis(150));
-                let Ok(cap) = crate::capture::capture_region_raw(crate::capture::Rect { x: 0, y: 0, width: 64, height: 900 }, &[]) else {
+                let cap_h = ((900.0 * us) as u32).min(1044);
+                let Ok(cap) = crate::capture::capture_region_raw(crate::capture::Rect { x: 0, y: 0, width: (64.0 * us) as u32, height: cap_h }, &[]) else {
                     break;
                 };
-                // x 10..47 = the toolbar interior. Outside it (the window margins) the 3D viewport
-                // shows through, and its green axis-line is bright enough to wreck the autocrop bbox.
-                let icons = detect_toolbar_icons(&cap, 10, 47, 100, 880);
+                // x 10..47 (× scale) = the toolbar interior. Outside it (the window margins) the 3D
+                // viewport shows through; its green axis-line is bright enough to wreck the autocrop bbox.
+                let icons = detect_toolbar_icons(&cap, sc(10.0) as u32, sc(47.0) as u32, sc(100.0) as u32, cap_h.saturating_sub(sc(60.0) as u32));
                 let mut new_here = 0;
                 for (i, (yc, hh)) in icons.iter().enumerate() {
                     // Skip any row covered by a non-Blender window (e.g. a File Explorer sidebar
                     // overlapping the toolbar) — its glyphs would otherwise be harvested as "tools".
-                    if !window_class_at(28, *yc as i32).contains("GHOST") {
+                    if !window_class_at(sc(28.0), *yc as i32).contains("GHOST") {
                         continue;
                     }
                     // Clamp the crop to this icon's half-slot (midpoints to the neighbours above/below)
@@ -1526,10 +1647,10 @@ mod tests {
                     } else {
                         cap.height() as i64
                     };
-                    let r_top = (*yc as i64 - *hh as i64 / 2 - 3).max(top_lim);
-                    let r_bot = (*yc as i64 + *hh as i64 / 2 + 3).min(bot_lim);
-                    let region = (10i64, r_top, 37i64, (r_bot - r_top).max(1)); // toolbar interior (skip green margins)
-                    let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, 2, 45) else {
+                    let r_top = (*yc as i64 - *hh as i64 / 2 - sc(3.0) as i64).max(top_lim);
+                    let r_bot = (*yc as i64 + *hh as i64 / 2 + sc(3.0) as i64).min(bot_lim);
+                    let region = (sc(10.0) as i64, r_top, sc(37.0) as i64, (r_bot - r_top).max(1)); // toolbar interior (skip green margins)
+                    let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, sc(2.0).max(2) as i64, 45) else {
                         continue;
                     };
                     let rgba = image::imageops::crop_imm(&cap, ax, ay, aw, ah).to_image();
@@ -1537,12 +1658,12 @@ mod tests {
                     if seen_glyphs.iter().any(|s| ncc_eq(&g, s) > 0.9) {
                         continue; // already captured this glyph (a prior scroll) — don't re-harvest
                     }
-                    let lines = harvest_tooltip(28, *yc as i32);
+                    let lines = harvest_tooltip(sc(28.0), *yc as i32);
                     let name = lines.first().cloned().unwrap_or_default();
                     if name.is_empty() {
                         continue;
                     }
-                    let sc = lines
+                    let shortcut = lines
                         .iter()
                         .find(|l| l.contains("Shortcut"))
                         .and_then(|l| l.rsplit(',').next())
@@ -1555,14 +1676,14 @@ mod tests {
                     // the local toolbar background — every icon the same size, glyph-on-bg matching the
                     // live look. (The button fill is only subtly distinct from the bg, so this reads as
                     // the icon in its slot; the clamp keeps a neighbour from being baked in.)
-                    let s = 34u32;
-                    let bgpx = *cap.get_pixel(11, (ay + ah / 2).min(cap.height() - 1)); // toolbar bg, past the green margin
-                    let mut canvas = image::RgbaImage::from_pixel(s, s, bgpx);
-                    let ox = (s.saturating_sub(aw) / 2) as i64;
-                    let oy = (s.saturating_sub(ah) / 2) as i64;
+                    let sq = sc(34.0) as u32;
+                    let bgpx = *cap.get_pixel(sc(11.0) as u32, (ay + ah / 2).min(cap.height() - 1)); // toolbar bg, past the green margin
+                    let mut canvas = image::RgbaImage::from_pixel(sq, sq, bgpx);
+                    let ox = (sq.saturating_sub(aw) / 2) as i64;
+                    let oy = (sq.saturating_sub(ah) / 2) as i64;
                     image::imageops::overlay(&mut canvas, &rgba, ox, oy);
                     let _ = canvas.save(out.join("icons").join(format!("{slug}.png")));
-                    manifest.push((idx, ws.to_string(), name, sc, slug));
+                    manifest.push((idx, ws.to_string(), name, shortcut, slug));
                     idx += 1;
                 }
                 eprintln!("[{ws}] scroll {_scroll}: {new_here} new (seen {})", seen_glyphs.len());
@@ -1574,12 +1695,12 @@ mod tests {
                 } else {
                     empty = 0;
                 }
-                scroll_at(28, 300, -3); // scroll down
+                scroll_at(sc(28.0), sc(300.0), -3); // scroll down
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
         }
-        if let Some((_, tx)) = tabs.iter().find(|(t, _)| t.eq_ignore_ascii_case("Layout")) {
-            click_at(*tx, 37);
+        if let Some((_, tx, ty)) = tabs.iter().find(|(t, _, _)| t.eq_ignore_ascii_case("Layout")) {
+            click_at(*tx, *ty);
         }
         unsafe {
             let _ = SetCursorPos(orig.x, orig.y);
@@ -1596,6 +1717,154 @@ mod tests {
             eprintln!("  tip_{i:03} [{ws:<10}] {n:<24} [{sc}]");
         }
         eprintln!("manifest + icons -> {}", out.display());
+    }
+
+    // OFFLINE pack extraction from saved workspace captures: detect toolbar icon bands, clamp to
+    // the half-gap, autocrop, pad to a uniform square — and NAME each crop by intensity-NCC
+    // against a REFERENCE pack's icons (glyph designs are stable across Blender versions, so the
+    // old pack names the new crops; cross-scale handled by resizing). No live app, no tooltips —
+    // deterministic and re-runnable, unlike the hover-timing-sensitive live sweep (which produced
+    // garbled OCR names at UI_SCALE=2). Unmatched crops save as unknown_N.png for visual naming.
+    //   $env:INS="ws1.png;ws2.png"; $env:REF="…/packs/blender/icons"; $env:OUT="out";
+    //   $env:UI_SCALE="2"; cargo test --lib extract_pack_offline -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn extract_pack_offline() {
+        let us = ui_scale();
+        let sc = |v: f32| (v * us).round() as i64;
+        let out = std::path::PathBuf::from(std::env::var("OUT").expect("set OUT"));
+        let _ = std::fs::create_dir_all(out.join("icons"));
+        let mut seen: Vec<image::GrayImage> = Vec::new();
+        let mut unknown = 0usize;
+        for cap_path in std::env::var("INS").expect("set INS").split(';').filter(|s| !s.is_empty()) {
+            let cap = image::open(cap_path).expect("capture").to_rgba8();
+            let cap_h = cap.height();
+            let icons = detect_toolbar_icons(
+                &cap,
+                sc(10.0) as u32,
+                sc(47.0) as u32,
+                sc(100.0) as u32,
+                // Bottom bound is SCREEN-anchored: the timeline row sits right below the toolbar
+                // on a fixed-height screen, so scaling 880 linearly would reach into it at 2×.
+                cap_h.saturating_sub(sc(60.0) as u32),
+            );
+            eprintln!("{} → {} bands {:?}", cap_path, icons.len(), icons);
+            for (i, (yc, hh)) in icons.iter().enumerate() {
+                let top_lim = if i > 0 {
+                    let p = &icons[i - 1];
+                    ((*yc as i64 + p.0 as i64) / 2 + 1).max(p.0 as i64 + p.1 as i64 / 2 + 2)
+                } else {
+                    0
+                };
+                let bot_lim = if i + 1 < icons.len() {
+                    let n = &icons[i + 1];
+                    ((*yc as i64 + n.0 as i64) / 2 - 1).min(n.0 as i64 - n.1 as i64 / 2 - 2)
+                } else {
+                    cap_h as i64
+                };
+                let r_top = (*yc as i64 - *hh as i64 / 2 - sc(3.0)).max(top_lim);
+                let r_bot = (*yc as i64 + *hh as i64 / 2 + sc(3.0)).min(bot_lim);
+                let region = (sc(10.0), r_top, sc(37.0), (r_bot - r_top).max(1));
+                let Some((ax, ay, aw, ah)) = autocrop_glyph(&cap, region, sc(2.0).max(2), 45) else {
+                    continue;
+                };
+                let rgba = image::imageops::crop_imm(&cap, ax, ay, aw, ah).to_image();
+                let g = image::DynamicImage::ImageRgba8(rgba.clone()).to_luma8();
+                if seen.iter().any(|s| ncc_eq(&g, s) > 0.9) {
+                    continue;
+                }
+                seen.push(g);
+                // Pad to the uniform square first (same framing as the reference icons), then name.
+                let sq = sc(34.0) as u32;
+                let bgpx = *cap.get_pixel(sc(11.0) as u32, (ay + ah / 2).min(cap_h - 1));
+                let mut canvas = image::RgbaImage::from_pixel(sq, sq, bgpx);
+                image::imageops::overlay(&mut canvas, &rgba, (sq.saturating_sub(aw) / 2) as i64, (sq.saturating_sub(ah) / 2) as i64);
+                unknown += 1;
+                let fname = format!("crop_{unknown:03}.png");
+                eprintln!("  y={yc:<4} {aw}x{ah} → {fname}");
+                let _ = canvas.save(out.join("icons").join(fname));
+            }
+        }
+        eprintln!("{} unique crops → {}", seen.len(), out.join("icons").display());
+    }
+
+    // Name a directory of icon crops by GREEDY-UNIQUE intensity-NCC against a reference pack:
+    // score every (crop, ref) pair, assign the best pair first, remove both, repeat — so two
+    // look-alike crops (rotate vs transform, both circular) can't claim the same name; the true
+    // best keeps it and the runner-up falls to its next candidate. Crops from MULTIPLE input dirs
+    // are cross-deduped (ncc > 0.9). Below MIN (default 0.5) → unknown_N.png for visual naming.
+    //   $env:INS="dirA;dirB"; $env:REF="…/packs/blender/icons"; $env:OUT="named";
+    //   cargo test --lib rename_crops_by_ref -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn rename_crops_by_ref() {
+        let out = std::path::PathBuf::from(std::env::var("OUT").expect("set OUT"));
+        let _ = std::fs::create_dir_all(&out);
+        let min: f32 = std::env::var("MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);
+        let refs: Vec<(String, image::GrayImage)> = std::fs::read_dir(std::env::var("REF").expect("set REF"))
+            .expect("REF dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "png"))
+            .map(|p| (p.file_stem().unwrap().to_string_lossy().to_string(), image::open(&p).expect("ref").to_luma8()))
+            .collect();
+        // Load + cross-dedup the crops (multiple sources may hold the same glyph).
+        let mut crops: Vec<(String, image::RgbaImage, image::GrayImage)> = Vec::new();
+        for dir in std::env::var("INS").expect("set INS").split(';').filter(|s| !s.is_empty()) {
+            let mut paths: Vec<_> = std::fs::read_dir(dir)
+                .expect("INS dir")
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "png"))
+                .collect();
+            paths.sort();
+            for p in paths {
+                let rgba = image::open(&p).expect("crop").to_rgba8();
+                let g = image::DynamicImage::ImageRgba8(rgba.clone()).to_luma8();
+                if crops.iter().any(|(_, _, e)| ncc_eq(&g, e) > 0.9) {
+                    continue;
+                }
+                crops.push((p.file_name().unwrap().to_string_lossy().to_string(), rgba, g));
+            }
+        }
+        // Score matrix → greedy unique assignment.
+        let mut pairs: Vec<(usize, usize, f32)> = Vec::new();
+        for (ci, (_, _, g)) in crops.iter().enumerate() {
+            for (ri, (_, r)) in refs.iter().enumerate() {
+                pairs.push((ci, ri, ncc_eq(r, g)));
+            }
+        }
+        pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let mut crop_taken = vec![false; crops.len()];
+        let mut ref_taken = vec![false; refs.len()];
+        let mut named: Vec<(usize, String, f32)> = Vec::new();
+        for (ci, ri, v) in pairs {
+            if v < min || crop_taken[ci] || ref_taken[ri] {
+                continue;
+            }
+            crop_taken[ci] = true;
+            ref_taken[ri] = true;
+            named.push((ci, refs[ri].0.clone(), v));
+        }
+        let mut unknown = 0usize;
+        for (ci, (src, rgba, _)) in crops.iter().enumerate() {
+            let (name, score) = named
+                .iter()
+                .find(|(i, _, _)| *i == ci)
+                .map(|(_, n, v)| (n.clone(), *v))
+                .unwrap_or_else(|| {
+                    unknown += 1;
+                    (format!("unknown_{unknown}"), -1.0)
+                });
+            eprintln!("  {src:<28} → {name:<24} ({score:.3})");
+            let _ = rgba.save(out.join(format!("{name}.png")));
+        }
+        let missing: Vec<&str> = refs
+            .iter()
+            .enumerate()
+            .filter(|(ri, _)| !ref_taken[*ri])
+            .map(|(_, (n, _))| n.as_str())
+            .collect();
+        eprintln!("
+{} crops named, {} unknown; reference names NOT matched ({}): {:?}", named.len(), unknown, missing.len(), missing);
     }
 
     // Generic region sweep (for the top header + right Properties tabs, not the left toolbar):

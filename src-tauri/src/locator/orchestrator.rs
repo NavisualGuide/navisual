@@ -768,6 +768,7 @@ fn try_template_pass(
     // needle per-scale AFTER resizing (`NeedlePrep`), so a DPI-prior-scaled template keeps edge
     // widths comparable to the natively-edged haystack (resizing an edged template stretched the
     // dilated bands and capped cross-DPI NCC at ~0.86 — measured, Blender at 200 %).
+    let full_raw = full.clone(); // un-normalized gray — the contrast gate measures raw edge energy
     let full = template::to_edges(&full);
     let needles: Vec<(String, image::GrayImage)> = templates
         .iter()
@@ -807,7 +808,7 @@ fn try_template_pass(
     // can't restrict the (full-screen) search, but a match where the pack says the element
     // isn't needs a higher score — and off-scale + out-of-region together is never accepted.
     let bbox_trusted = bbox_decisive;
-    cands.retain(|(m, _)| {
+    cands.retain(|(m, name)| {
         let near_bbox = bbox_trusted
             && ai_bbox_img.is_some_and(|ab| {
                 let mcx = m.x as f32 + m.width as f32 / 2.0;
@@ -825,7 +826,16 @@ fn try_template_pass(
             let cy = (m.y as f32 + m.height as f32 / 2.0) / img_h as f32;
             cx >= fx0 && cx <= fx1 && cy >= fy0 && cy <= fy1
         });
-        template::template_match_accept(m.score, m.scale, scale_prior, near_bbox, region_ok)
+        if !template::template_match_accept(m.score, m.scale, scale_prior, near_bbox, region_ok) {
+            return false;
+        }
+        // Absolute-contrast gate: normalized edge NCC can't tell a faint viewport-grid pattern
+        // from a real glyph (both normalize to full range); raw edge energy can. Checked last —
+        // it costs a small-window Sobel per surviving candidate.
+        needles
+            .iter()
+            .find(|(n, _)| n == name)
+            .is_none_or(|(_, raw)| template::contrast_plausible(&full_raw, m, raw))
     });
     if cands.is_empty() {
         return (None, Some(tr));

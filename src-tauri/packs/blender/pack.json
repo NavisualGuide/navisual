@@ -1,12 +1,12 @@
 {
   "id": "blender",
-  "name": "Blender Nav-Pack (auto-generated)",
-  "version": "1.0.0",
+  "name": "Blender Nav-Pack",
+  "version": "2.0.0",
   "min_app_version": "0.6.0",
   "target_app": "Blender",
   "window_title_pattern": "(?i)blender",
-  "authoring_scale": 1.0,
-  "system_prompt_injection": "The user is in Blender. The left Toolbar holds the active tools (Object/Edit/Sculpt sets differ by workspace tab); the right Properties editor has a vertical tab column (Render/Output/Object/Modifiers/Material...); the 3D-viewport header along the top has the shading modes (Wireframe/Solid/Material Preview/Rendered) and Overlays/X-Ray/Gizmos toggles. Prefer the keyboard shortcut when one exists.",
+  "authoring_scale": 2.0,
+  "system_prompt_injection": "The user is in Blender. The left Toolbar holds the active tools (Object/Edit/Sculpt sets differ by workspace tab); the right Properties editor has a vertical tab column (Render/Output/View Layer/Scene/World/Collection/Object/Modifiers/Particles/Physics...); the 3D-viewport header along the top has the shading modes (Wireframe/Solid/Material Preview/Rendered) and Overlays/X-Ray/Gizmos toggles. Prefer the keyboard shortcut when one exists.",
   "shortcuts": {
     "Cursor": "Spacebar",
     "Rotate": "R",
@@ -15,7 +15,6 @@
     "Annotate": "D",
     "Measure": "M",
     "Add Cube": "9",
-    "HardOps": "Shift 4",
     "Move": "G",
     "Extrude Region": "E",
     "Inset Faces": "I",
@@ -59,71 +58,340 @@
     "Mask by Color": "Alt 4"
   },
   "element_hints": [
-    { "name": "Cursor", "region": "left", "role": "button" },
-    { "name": "Rotate", "region": "left", "role": "button" },
-    { "name": "Scale", "region": "left", "role": "button" },
-    { "name": "Transform", "region": "left", "role": "button" },
-    { "name": "Annotate", "region": "left", "role": "button" },
-    { "name": "Measure", "region": "left", "role": "button" },
-    { "name": "Add Cube", "region": "left", "role": "button" },
-    { "name": "HardOps", "region": "left", "role": "button" },
-    { "name": "Move", "region": "left", "role": "button" },
-    { "name": "Extrude Region", "region": "left", "role": "button" },
-    { "name": "Inset Faces", "region": "left", "role": "button" },
-    { "name": "Bevel", "region": "left", "role": "button" },
-    { "name": "Loop Cut", "region": "left", "role": "button" },
-    { "name": "Knife", "region": "left", "role": "button" },
-    { "name": "Poly Build", "region": "left", "role": "button" },
-    { "name": "Spin", "region": "left", "role": "button" },
-    { "name": "Smooth", "region": "left", "role": "button" },
-    { "name": "Edge Slide", "region": "left", "role": "button" },
-    { "name": "Shrink/Fatten", "region": "left", "role": "button" },
-    { "name": "Shear", "region": "left", "role": "button" },
-    { "name": "Rip Region", "region": "left", "role": "button" },
-    { "name": "Scrape", "region": "left", "role": "button" },
-    { "name": "Multiplane Scrape", "region": "left", "role": "button" },
-    { "name": "Pinch", "region": "left", "role": "button" },
-    { "name": "Grab", "region": "left", "role": "button" },
-    { "name": "Elastic Deform", "region": "left", "role": "button" },
-    { "name": "Snake Hook", "region": "left", "role": "button" },
-    { "name": "Thumb", "region": "left", "role": "button" },
-    { "name": "Pose", "region": "left", "role": "button" },
-    { "name": "Nudge", "region": "left", "role": "button" },
-    { "name": "Slide Relax", "region": "left", "role": "button" },
-    { "name": "Boundary", "region": "left", "role": "button" },
-    { "name": "Cloth", "region": "left", "role": "button" },
-    { "name": "Simplify", "region": "left", "role": "button" },
-    { "name": "Mask", "region": "left", "role": "button" },
-    { "name": "Draw Face Sets", "region": "left", "role": "button" },
-    { "name": "Multires Displacement Eraser", "region": "left", "role": "button" },
-    { "name": "Multires Displacement Smear", "region": "left", "role": "button" },
-    { "name": "Paint", "region": "left", "role": "button" },
-    { "name": "Smear", "region": "left", "role": "button" },
-    { "name": "Box Mask", "region": "left", "role": "button" },
-    { "name": "Box Hide", "region": "left", "role": "button" },
-    { "name": "Box Face Set", "region": "left", "role": "button" },
-    { "name": "Box Trim", "region": "left", "role": "button" },
-    { "name": "Line Project", "region": "left", "role": "button" },
-    { "name": "Mesh Filter", "region": "left", "role": "button" },
-    { "name": "Cloth Filter", "region": "left", "role": "button" },
-    { "name": "Color Filter", "region": "left", "role": "button" },
-    { "name": "Mask by Color", "region": "left", "role": "button" },
-    { "name": "Active Tool", "region": "right", "role": "button" },
-    { "name": "Render", "region": "right", "role": "button" },
-    { "name": "Output", "region": "right", "role": "button" },
-    { "name": "View Layer", "region": "right", "role": "button" },
-    { "name": "Scene", "region": "right", "role": "button" },
-    { "name": "World", "region": "right", "role": "button" },
-    { "name": "Object", "region": "right", "role": "button" },
-    { "name": "Modifiers", "region": "right", "role": "button" },
-    { "name": "Particles", "region": "right", "role": "button" },
-    { "name": "Physics", "region": "right", "role": "button" },
-    { "name": "Gizmos", "region": "top", "role": "button" },
-    { "name": "Overlays", "region": "top", "role": "button" },
-    { "name": "X-Ray", "region": "top", "role": "button" },
-    { "name": "Wireframe", "region": "top", "role": "button" },
-    { "name": "Solid", "region": "top", "role": "button" },
-    { "name": "Material Preview", "region": "top", "role": "button" },
-    { "name": "Rendered", "region": "top", "role": "button" }
+    {
+      "name": "Select Box",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Cursor",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Rotate",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Scale",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Transform",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Annotate",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Measure",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Add Cube",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Move",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Extrude Region",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Inset Faces",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Bevel",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Loop Cut",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Knife",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Poly Build",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Spin",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Smooth",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Edge Slide",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Shrink/Fatten",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Shear",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Rip Region",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Scrape",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Multiplane Scrape",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Pinch",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Grab",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Elastic Deform",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Snake Hook",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Thumb",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Pose",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Nudge",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Slide Relax",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Boundary",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Cloth",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Simplify",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Mask",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Draw Face Sets",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Multires Displacement Eraser",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Multires Displacement Smear",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Paint",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Smear",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Box Mask",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Box Hide",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Box Face Set",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Box Trim",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Line Project",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Mesh Filter",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Cloth Filter",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Color Filter",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Mask by Color",
+      "region": "left",
+      "role": "button"
+    },
+    {
+      "name": "Active Tool",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "Render",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "Output",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "View Layer",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "Scene",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "World",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "Object",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "Modifiers",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "Particles",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "Physics",
+      "region": "right",
+      "role": "button"
+    },
+    {
+      "name": "Gizmos",
+      "region": "top",
+      "role": "button"
+    },
+    {
+      "name": "Overlays",
+      "region": "top",
+      "role": "button"
+    },
+    {
+      "name": "X-Ray",
+      "region": "top",
+      "role": "button"
+    },
+    {
+      "name": "Wireframe",
+      "region": "top",
+      "role": "button"
+    },
+    {
+      "name": "Solid",
+      "region": "top",
+      "role": "button"
+    },
+    {
+      "name": "Material Preview",
+      "region": "top",
+      "role": "button"
+    },
+    {
+      "name": "Rendered",
+      "region": "top",
+      "role": "button"
+    },
+    {
+      "name": "Collection Properties",
+      "region": "right",
+      "role": "tab"
+    }
   ]
 }
