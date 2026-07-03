@@ -53,23 +53,40 @@ pub fn scale_near_prior(scale: f32, prior: f32) -> bool {
     (0.75..=1.34).contains(&r)
 }
 
-/// Template-match acceptance: score threshold conditioned on physical scale plausibility, with
+/// Template-match acceptance: score threshold conditioned on how well the match agrees with
+/// the *independent* evidence — physical scale plausibility and the pack's region hint — with
 /// a trusted-bbox rescue for borderline true icons.
 ///
-/// - **Expected scale** ([`scale_near_prior`]): the normal [`DEFAULT_MIN_SCORE`] floor.
-/// - **Off scale**: [`OFF_SCALE_MIN_SCORE`].
-/// - **Borderline rescue**: ≥ [`RESCUE_MIN_SCORE`] at the expected scale, sitting tightly under
-///   a *trusted* AI bbox — the same philosophy as the OCR corroboration gate (a trusted bbox
-///   may rescue a borderline match, never replace the search). Live case: Blender 5.1's rotate
-///   icon scored 0.898 (icon drift vs the 3.6-authored pack) with the match centre 4 px from
-///   the bbox centre — a true icon failing the threshold by 0.002. Off-scale matches are never
-///   rescued: "off-scale but under the bbox" is the signature of the AI grounding a similar
-///   smaller glyph.
-pub fn template_match_accept(score: f32, scale: f32, prior: f32, near_trusted_bbox: bool) -> bool {
-    if scale_near_prior(scale, prior) {
-        score >= DEFAULT_MIN_SCORE || (near_trusted_bbox && score >= RESCUE_MIN_SCORE)
-    } else {
-        score >= OFF_SCALE_MIN_SCORE
+/// | scale ([`scale_near_prior`]) | region (hint) | requirement |
+/// |---|---|---|
+/// | expected | in / no hint | ≥ [`DEFAULT_MIN_SCORE`], or ≥ [`RESCUE_MIN_SCORE`] under a tight trusted bbox |
+/// | expected | out          | ≥ [`OFF_SCALE_MIN_SCORE`] (a moved panel is possible, but demand near-certainty) |
+/// | off      | in / no hint | ≥ [`OFF_SCALE_MIN_SCORE`] (odd crop canvas / app-internal UI scale) |
+/// | off      | out          | **never** — two independent disagreements is a look-alike, full stop |
+///
+/// Live cases that pin each row: Blender 5.1 rotate 0.898 @ expected scale, in the `left`
+/// region, 4 px from the bbox → rescued (icon drift near-miss). "Show Overlays" 0.90 on a
+/// right-panel tab (expected scale, out of `top`) → rejected. Gizmos 0.9836 @ 0.67 on a 100 %
+/// screen (off scale, in `top`) → passes the high bar. The overlays glyph's 13-px circle
+/// look-alikes on a 1× screen (0.96, off scale, mid-screen) → rejected outright — degenerate
+/// small glyphs (a pair of circles) score high against any small round thing, so matching
+/// alone can't separate them; the stacked independent evidence can. The rescue also requires
+/// the region to agree: a borderline score at a location the pack says is wrong stays
+/// rejected even under the bbox (weak models ground look-alikes — that combination is exactly
+/// the false-positive signature).
+pub fn template_match_accept(
+    score: f32,
+    scale: f32,
+    prior: f32,
+    near_trusted_bbox: bool,
+    region_ok: bool,
+) -> bool {
+    match (scale_near_prior(scale, prior), region_ok) {
+        (true, true) => {
+            score >= DEFAULT_MIN_SCORE || (near_trusted_bbox && score >= RESCUE_MIN_SCORE)
+        }
+        (true, false) | (false, true) => score >= OFF_SCALE_MIN_SCORE,
+        (false, false) => false,
     }
 }
 
@@ -778,8 +795,8 @@ mod tests {
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             eprintln!("pyramid full-screen: {} match(es) in {:.1} ms", hits.len(), ms);
             for m in &hits {
-                // Production acceptance (scale-gated; no bbox rescue in the harness).
-                let acc = template_match_accept(m.score, m.scale, prior, false);
+                // Production acceptance (scale-gated; no bbox rescue / region hint in the harness).
+                let acc = template_match_accept(m.score, m.scale, prior, false, true);
                 eprintln!("  pos=({},{}) {}x{} score={:.4} scale={} accepted={}", m.x, m.y, m.width, m.height, m.score, m.scale, acc);
             }
             return;

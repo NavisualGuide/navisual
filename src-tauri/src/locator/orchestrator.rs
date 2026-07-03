@@ -799,10 +799,13 @@ fn try_template_pass(
             cands.push((m, name.clone()));
         }
     }
-    // Acceptance: score floor conditioned on physical-scale plausibility, plus the
-    // trusted-bbox rescue for borderline true icons (see `template_match_accept`). The tight
-    // proximity here (centre within ~1.5× the match's own size) is deliberately much stricter
-    // than the OCR gate's 20 %-of-diagonal — rescue demands the model grounded THIS icon.
+    // Acceptance: score floor conditioned on physical-scale plausibility AND agreement with
+    // the pack's region hint, plus the trusted-bbox rescue for borderline true icons (see
+    // `template_match_accept`). The bbox proximity here (centre within ~1.5× the match's own
+    // size) is deliberately much stricter than the OCR gate's 20 %-of-diagonal — rescue
+    // demands the model grounded THIS icon. Region containment is per-candidate: the hint
+    // can't restrict the (full-screen) search, but a match where the pack says the element
+    // isn't needs a higher score — and off-scale + out-of-region together is never accepted.
     let bbox_trusted = bbox_decisive;
     cands.retain(|(m, _)| {
         let near_bbox = bbox_trusted
@@ -814,7 +817,15 @@ fn try_template_pass(
                 let lim = (m.width.max(m.height) as f32) * 1.5;
                 ((acx - mcx).powi(2) + (acy - mcy).powi(2)).sqrt() <= lim
             });
-        template::template_match_accept(m.score, m.scale, scale_prior, near_bbox)
+        let region_ok = icon_region.is_none_or(|[fx0, fy0, fx1, fy1]| {
+            if img_w == 0 || img_h == 0 {
+                return true;
+            }
+            let cx = (m.x as f32 + m.width as f32 / 2.0) / img_w as f32;
+            let cy = (m.y as f32 + m.height as f32 / 2.0) / img_h as f32;
+            cx >= fx0 && cx <= fx1 && cy >= fy0 && cy <= fy1
+        });
+        template::template_match_accept(m.score, m.scale, scale_prior, near_bbox, region_ok)
     });
     if cands.is_empty() {
         return (None, Some(tr));
@@ -1038,27 +1049,39 @@ mod tests {
     }
 
     #[test]
-    fn template_accept_gates_by_scale_and_rescues_by_bbox() {
+    fn template_accept_gates_by_scale_region_and_rescues_by_bbox() {
         use super::template::template_match_accept;
         // Live (v0.6.3 laptop, 200 %): "overlays" accepted a 0.925 look-alike at scale 1.34 on a
         // prior-2.0 monitor — physically a glyph at two-thirds size → off-scale needs 0.95.
-        assert!(!template_match_accept(0.925, 1.34, 2.0, false));
-        assert!(!template_match_accept(0.925, 1.34, 2.0, true)); // bbox can't rescue off-scale
-        // Off-scale at near-certainty still passes (gizmos matches at 0.67 on a 100 % screen at
-        // 0.9836 — a hand-cropped template whose canvas is larger than the on-screen glyph).
-        assert!(template_match_accept(0.9836, 0.67, 1.0, false));
-        // Expected scale, clears the normal floor → accepted (measure at 2×: 0.954 @ 2.0).
-        assert!(template_match_accept(0.954, 2.0, 2.0, false));
-        // Borderline true icon at the expected scale, tightly under a trusted bbox → rescued
-        // (live: Blender 5.1's rotate icon, 0.898 @ 2.0, match centre 4 px from the bbox).
-        assert!(template_match_accept(0.898, 2.0, 2.0, true));
-        // Same score without the bbox agreement stays rejected (spurious peaks at the expected
-        // scale measured ≤ 0.81, but the floor is the contract).
-        assert!(!template_match_accept(0.898, 2.0, 2.0, false));
+        assert!(!template_match_accept(0.925, 1.34, 2.0, false, true));
+        assert!(!template_match_accept(0.925, 1.34, 2.0, true, true)); // bbox can't rescue off-scale
+        // Off-scale at near-certainty still passes when the region agrees (gizmos matches at
+        // 0.67 on a 100 % screen at 0.9836 — a crop canvas larger than the on-screen glyph).
+        assert!(template_match_accept(0.9836, 0.67, 1.0, false, true));
+        // Expected scale, in region, clears the normal floor (measure at 2×: 0.954 @ 2.0).
+        assert!(template_match_accept(0.954, 2.0, 2.0, false, true));
+        // Borderline true icon at the expected scale, in region, tightly under a trusted bbox →
+        // rescued (live: Blender 5.1's rotate icon, 0.898 @ 2.0, match centre 4 px from bbox).
+        assert!(template_match_accept(0.898, 2.0, 2.0, true, true));
+        // Same score without the bbox agreement stays rejected.
+        assert!(!template_match_accept(0.898, 2.0, 2.0, false, true));
         // Rescue has its own floor: 0.84 is below RESCUE_MIN_SCORE even with bbox agreement.
-        assert!(!template_match_accept(0.84, 2.0, 2.0, true));
+        assert!(!template_match_accept(0.84, 2.0, 2.0, true, true));
         // Degenerate prior falls back to 1.0 (scale 1.0 is then "expected").
-        assert!(template_match_accept(0.91, 1.0, f32::NAN, false));
+        assert!(template_match_accept(0.91, 1.0, f32::NAN, false, true));
+
+        // Region rows. Live (v0.6.4 laptop): "Show Overlays" hit a right-panel tab at 90 % —
+        // expected scale but outside the pack's `top` hint → needs 0.95 → rejected.
+        assert!(!template_match_accept(0.90, 2.0, 2.0, false, false));
+        // A moved panel is possible: out-of-region at near-certainty still passes.
+        assert!(template_match_accept(0.96, 2.0, 2.0, false, false));
+        // The bbox cannot rescue a borderline out-of-region match (weak models ground
+        // look-alikes — that combination is the false-positive signature).
+        assert!(!template_match_accept(0.90, 2.0, 2.0, true, false));
+        // Off-scale AND out-of-region is never accepted, at any score (measured: the overlays
+        // glyph's 13-px circle look-alikes on a 1× screen scored 0.96+ off-scale mid-screen).
+        assert!(!template_match_accept(0.9674, 0.335, 0.5, false, false));
+        assert!(!template_match_accept(0.999, 1.34, 2.0, true, false));
     }
 
     #[test]

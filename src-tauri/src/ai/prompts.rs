@@ -116,6 +116,12 @@ Rules:
 20. THE INSTRUCTION PANEL IS NEVER A TARGET: The panel showing these instructions is never
     something the user needs to act on. Never tell them to locate it, open it, launch it,
     focus it, find it in the taskbar/system tray, or click on it for any task purpose.
+21. NO PIXEL COORDINATES IN INSTRUCTIONS: instructions are read aloud to a person — never
+    mention pixel positions, x/y values, coordinate ranges, or numeric on-screen
+    measurements in instruction text ("the grey box starts at x ≈ 322" is forbidden).
+    Describe targets by name, appearance, and relative position in plain language ("the
+    ruler icon near the bottom of the left toolbar"). Numeric coordinates belong ONLY in
+    target_bbox.
 
 Use the navigate_step tool for all responses."#;
 
