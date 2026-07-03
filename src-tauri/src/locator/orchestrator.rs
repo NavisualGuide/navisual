@@ -299,6 +299,7 @@ pub fn locate(
             ai_bbox_img,
             &opts.icon_templates,
             opts.icon_authoring_scale,
+            opts.bbox_decisive,
         );
         trace.template = tmpl_trace;
         template_done = true;
@@ -339,7 +340,7 @@ pub fn locate(
         // when an icon target already ran it template-first above.
         if !template_done {
             let (tmpl_hit, tmpl_trace) =
-                try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates, opts.icon_authoring_scale);
+                try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates, opts.icon_authoring_scale, opts.bbox_decisive);
             trace.template = tmpl_trace;
             if let Some(result) = tmpl_hit {
                 trace.final_decision = FinalDecision::HitTemplate;
@@ -441,7 +442,13 @@ pub fn locate(
         RoleHit::Content(_) => RoleKind::Content,
         RoleHit::Unknown => RoleKind::Unknown,
     };
-    let accept = corroboration_accept(role_kind, is_fuzzy, isolation_ok, spatially_corroborated);
+    let accept = corroboration_accept(
+        role_kind,
+        is_fuzzy,
+        isolation_ok,
+        spatially_corroborated,
+        opts.icon_target,
+    );
     ocr_trace.corroboration = Some(Corroboration {
         uia_control_type,
         uia_interactive,
@@ -464,7 +471,7 @@ pub fn locate(
     // target already ran the template template-first above (which beat even this exact match).
     if (is_fuzzy || !accept) && !template_done {
         let (tmpl_hit, tmpl_trace) =
-            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates, opts.icon_authoring_scale);
+            try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates, opts.icon_authoring_scale, opts.bbox_decisive);
         trace.template = tmpl_trace;
         if let Some(result) = tmpl_hit {
             trace.ocr = ocr_trace;
@@ -538,17 +545,24 @@ fn corroboration_accept(
     is_fuzzy: bool,
     isolation_ok: bool,
     spatially_corroborated: bool,
+    icon_target: bool,
 ) -> bool {
+    // Icon targets are GLYPHS — they carry no on-screen text, so ANY OCR text hit is at best
+    // the same word somewhere else (live: target "Rotate" → the status bar's "@Rotate" mouse
+    // legend 1200 px away; target "Scale" → the Transform panel's "Scale" label). Isolation
+    // can't tell those apart; only spatial agreement (anchor / trusted AI bbox) or an
+    // interactive UIA control under the point can. Exact-text confidence doesn't help — the
+    // word IS exact, it's just the wrong instance.
     match role {
         // UIA confirms a real interactive control under the point — authoritative.
         RoleKind::Interactive => true,
         // Content (Document/Text/terminal): an isolated label only; a fuzzy guess there is
         // almost certainly content text unless it also agrees spatially.
-        RoleKind::Content => isolation_ok && (!is_fuzzy || spatially_corroborated),
+        RoleKind::Content => isolation_ok && ((!is_fuzzy && !icon_target) || spatially_corroborated),
         // Unknown (cold tree / non-UIA surface like an OpenGL app): exact/substring can pass on
-        // isolation; a fuzzy guess must agree spatially.
+        // isolation; a fuzzy guess — or any text hit for a glyph target — must agree spatially.
         RoleKind::Unknown => {
-            if is_fuzzy {
+            if is_fuzzy || icon_target {
                 spatially_corroborated
             } else {
                 isolation_ok || spatially_corroborated
@@ -725,6 +739,7 @@ fn try_template_pass(
     ai_bbox_img: Option<(i32, i32, u32, u32)>,
     templates: &[(String, Vec<u8>)],
     authoring_scale: f32,
+    bbox_decisive: bool,
 ) -> (Option<LocateResult>, Option<TemplateTrace>) {
     if templates.is_empty() {
         return (None, None);
@@ -784,7 +799,23 @@ fn try_template_pass(
             cands.push((m, name.clone()));
         }
     }
-    cands.retain(|(m, _)| m.score >= template::DEFAULT_MIN_SCORE);
+    // Acceptance: score floor conditioned on physical-scale plausibility, plus the
+    // trusted-bbox rescue for borderline true icons (see `template_match_accept`). The tight
+    // proximity here (centre within ~1.5× the match's own size) is deliberately much stricter
+    // than the OCR gate's 20 %-of-diagonal — rescue demands the model grounded THIS icon.
+    let bbox_trusted = bbox_decisive;
+    cands.retain(|(m, _)| {
+        let near_bbox = bbox_trusted
+            && ai_bbox_img.is_some_and(|ab| {
+                let mcx = m.x as f32 + m.width as f32 / 2.0;
+                let mcy = m.y as f32 + m.height as f32 / 2.0;
+                let acx = ab.0 as f32 + ab.2 as f32 / 2.0;
+                let acy = ab.1 as f32 + ab.3 as f32 / 2.0;
+                let lim = (m.width.max(m.height) as f32) * 1.5;
+                ((acx - mcx).powi(2) + (acy - mcy).powi(2)).sqrt() <= lim
+            });
+        template::template_match_accept(m.score, m.scale, scale_prior, near_bbox)
+    });
     if cands.is_empty() {
         return (None, Some(tr));
     }
@@ -973,18 +1004,61 @@ mod tests {
         // The live Blender regression: target "Move" fuzzy-matched "Mode" (isolated label) on a
         // non-UIA (Unknown) surface, far from the AI bbox and with no anchor → must REJECT so
         // template matching gets a turn.
-        assert!(!corroboration_accept(RoleKind::Unknown, true, true, false));
+        assert!(!corroboration_accept(RoleKind::Unknown, true, true, false, false));
         // A fuzzy match that DOES agree spatially is accepted.
-        assert!(corroboration_accept(RoleKind::Unknown, true, true, true));
+        assert!(corroboration_accept(RoleKind::Unknown, true, true, true, false));
         // Exact/substring (not fuzzy) still passes on isolation alone — no regression.
-        assert!(corroboration_accept(RoleKind::Unknown, false, true, false));
+        assert!(corroboration_accept(RoleKind::Unknown, false, true, false, false));
         // Content surface: a fuzzy guess without spatial agreement is rejected even if isolated.
-        assert!(!corroboration_accept(RoleKind::Content, true, true, false));
-        assert!(corroboration_accept(RoleKind::Content, true, true, true));
+        assert!(!corroboration_accept(RoleKind::Content, true, true, false, false));
+        assert!(corroboration_accept(RoleKind::Content, true, true, true, false));
         // Interactive UIA hit is authoritative regardless.
-        assert!(corroboration_accept(RoleKind::Interactive, true, false, false));
+        assert!(corroboration_accept(RoleKind::Interactive, true, false, false, false));
         // Nothing corroborates a non-fuzzy Unknown match with no isolation → reject.
-        assert!(!corroboration_accept(RoleKind::Unknown, false, false, false));
+        assert!(!corroboration_accept(RoleKind::Unknown, false, false, false, false));
+    }
+
+    #[test]
+    fn icon_target_ocr_needs_spatial_corroboration() {
+        use super::{corroboration_accept, RoleKind};
+        // Live (v0.6.3 laptop, 200 %): target "Rotate" is a GLYPH; the template near-missed and
+        // OCR exact-matched the status bar's "@Rotate" mouse legend 1200 px from the AI bbox —
+        // Unknown surface, isolated, no anchor, bbox far. For an icon target that must REJECT
+        // (no pointer beats a status-bar pointer).
+        assert!(!corroboration_accept(RoleKind::Unknown, false, true, false, true));
+        // Same shape on a Content surface (v0.6.2 live: "Scale" matched the Transform panel's
+        // label on the right while the AI targeted the left-toolbar tool) → REJECT.
+        assert!(!corroboration_accept(RoleKind::Content, false, true, false, true));
+        // With spatial agreement (anchor or trusted bbox) the text hit is a legitimate rescue.
+        assert!(corroboration_accept(RoleKind::Unknown, false, true, true, true));
+        assert!(corroboration_accept(RoleKind::Content, false, true, true, true));
+        // An interactive UIA control under the point stays authoritative for icon targets too
+        // (a labelled toolbar button is a real hit even when the target was tagged as an icon).
+        assert!(corroboration_accept(RoleKind::Interactive, false, false, false, true));
+    }
+
+    #[test]
+    fn template_accept_gates_by_scale_and_rescues_by_bbox() {
+        use super::template::template_match_accept;
+        // Live (v0.6.3 laptop, 200 %): "overlays" accepted a 0.925 look-alike at scale 1.34 on a
+        // prior-2.0 monitor — physically a glyph at two-thirds size → off-scale needs 0.95.
+        assert!(!template_match_accept(0.925, 1.34, 2.0, false));
+        assert!(!template_match_accept(0.925, 1.34, 2.0, true)); // bbox can't rescue off-scale
+        // Off-scale at near-certainty still passes (gizmos matches at 0.67 on a 100 % screen at
+        // 0.9836 — a hand-cropped template whose canvas is larger than the on-screen glyph).
+        assert!(template_match_accept(0.9836, 0.67, 1.0, false));
+        // Expected scale, clears the normal floor → accepted (measure at 2×: 0.954 @ 2.0).
+        assert!(template_match_accept(0.954, 2.0, 2.0, false));
+        // Borderline true icon at the expected scale, tightly under a trusted bbox → rescued
+        // (live: Blender 5.1's rotate icon, 0.898 @ 2.0, match centre 4 px from the bbox).
+        assert!(template_match_accept(0.898, 2.0, 2.0, true));
+        // Same score without the bbox agreement stays rejected (spurious peaks at the expected
+        // scale measured ≤ 0.81, but the floor is the contract).
+        assert!(!template_match_accept(0.898, 2.0, 2.0, false));
+        // Rescue has its own floor: 0.84 is below RESCUE_MIN_SCORE even with bbox agreement.
+        assert!(!template_match_accept(0.84, 2.0, 2.0, true));
+        // Degenerate prior falls back to 1.0 (scale 1.0 is then "expected").
+        assert!(template_match_accept(0.91, 1.0, f32::NAN, false));
     }
 
     #[test]

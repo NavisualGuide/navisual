@@ -30,6 +30,49 @@ pub const DEFAULT_SCALES: &[f32] = &[1.0, 1.25, 0.8, 1.5, 0.67];
 /// theme/DPI line up, so a high floor rejects the near-misses that would place a wrong pointer.
 pub const DEFAULT_MIN_SCORE: f32 = 0.9;
 
+/// Floor for a match at a physically implausible scale (see [`scale_near_prior`]) — near
+/// certainty required, because a high-scoring look-alike at the wrong physical size is exactly
+/// how a 200 % screen's false positive looked (live: "overlays" accepted a 0.925 gizmos-glyph
+/// hit at scale 1.34 on a prior-2.0 monitor, 150 px from the real icon).
+pub const OFF_SCALE_MIN_SCORE: f32 = 0.95;
+
+/// Floor for the trusted-bbox rescue of a borderline match at the expected scale (see
+/// [`template_match_accept`]). Spurious peaks at the expected scale measured ≤ 0.81; a true
+/// icon under version drift measured 0.898 (Blender 5.1 rotate vs the 3.6-authored pack).
+pub const RESCUE_MIN_SCORE: f32 = 0.85;
+
+/// A match's scale is physically constrained: the OS renders app chrome at the monitor's DPI
+/// scale (DWM stretches DPI-unaware apps to the same size), so a true icon appears at
+/// ~`prior` × its authored size. Ratios inside this window are physically plausible; outside
+/// it, only an app-internal UI scale (Blender's Resolution Scale) or a pack icon whose crop
+/// canvas differs from the on-screen instance can be legitimate — rare, so off-window matches
+/// must clear [`OFF_SCALE_MIN_SCORE`] instead of being rejected outright.
+pub fn scale_near_prior(scale: f32, prior: f32) -> bool {
+    let p = if prior.is_finite() && prior > 0.0 { prior } else { 1.0 };
+    let r = scale / p;
+    (0.75..=1.34).contains(&r)
+}
+
+/// Template-match acceptance: score threshold conditioned on physical scale plausibility, with
+/// a trusted-bbox rescue for borderline true icons.
+///
+/// - **Expected scale** ([`scale_near_prior`]): the normal [`DEFAULT_MIN_SCORE`] floor.
+/// - **Off scale**: [`OFF_SCALE_MIN_SCORE`].
+/// - **Borderline rescue**: ≥ [`RESCUE_MIN_SCORE`] at the expected scale, sitting tightly under
+///   a *trusted* AI bbox — the same philosophy as the OCR corroboration gate (a trusted bbox
+///   may rescue a borderline match, never replace the search). Live case: Blender 5.1's rotate
+///   icon scored 0.898 (icon drift vs the 3.6-authored pack) with the match centre 4 px from
+///   the bbox centre — a true icon failing the threshold by 0.002. Off-scale matches are never
+///   rescued: "off-scale but under the bbox" is the signature of the AI grounding a similar
+///   smaller glyph.
+pub fn template_match_accept(score: f32, scale: f32, prior: f32, near_trusted_bbox: bool) -> bool {
+    if scale_near_prior(scale, prior) {
+        score >= DEFAULT_MIN_SCORE || (near_trusted_bbox && score >= RESCUE_MIN_SCORE)
+    } else {
+        score >= OFF_SCALE_MIN_SCORE
+    }
+}
+
 /// A located template instance, in **haystack pixel coordinates** (the caller maps these back
 /// to virtual-desktop coords the same way the OCR path does).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -735,7 +778,9 @@ mod tests {
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             eprintln!("pyramid full-screen: {} match(es) in {:.1} ms", hits.len(), ms);
             for m in &hits {
-                eprintln!("  pos=({},{}) {}x{} score={:.4} scale={} accepted={}", m.x, m.y, m.width, m.height, m.score, m.scale, m.score >= DEFAULT_MIN_SCORE);
+                // Production acceptance (scale-gated; no bbox rescue in the harness).
+                let acc = template_match_accept(m.score, m.scale, prior, false);
+                eprintln!("  pos=({},{}) {}x{} score={:.4} scale={} accepted={}", m.x, m.y, m.width, m.height, m.score, m.scale, acc);
             }
             return;
         }
