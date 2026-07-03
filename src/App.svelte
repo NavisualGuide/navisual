@@ -149,10 +149,22 @@ See the LICENSE file in the root of this repository for complete details.
     corroboration: Corroboration | null;
     elapsed_ms: number;
   };
+  // Pass 3 — icon template matching (mirrors TemplateTrace in trace.rs).
+  type TemplateTrace = {
+    templates_tried: number;
+    best_icon: string | null;
+    best_score: number;
+    best_scale: number;
+    best_pos: [number, number] | null;
+    scale_prior: number;
+    accepted: boolean;
+  };
   type FinalDecision =
     | { kind: "miss" }
     | { kind: "hit_a11y" }
     | { kind: "hit_ocr" }
+    | { kind: "hit_template" }
+    | { kind: "hit_adapter" }
     | { kind: "rejected_by_hit_test"; leaf_class: string }
     | { kind: "rejected_uncorroborated"; detail: string }
     | { kind: "error"; message: string };
@@ -164,6 +176,7 @@ See the LICENSE file in the root of this repository for complete details.
     ai_bbox: { x: number; y: number; width: number; height: number } | null;
     a11y: A11yTrace;
     ocr: OcrTrace;
+    template: TemplateTrace | null;
     final_decision: FinalDecision;
     final_bbox: { x: number; y: number; width: number; height: number } | null;
     elapsed_ms: number;
@@ -1952,6 +1965,23 @@ See the LICENSE file in the root of this repository for complete details.
                         </ul>
                       </details>
                     {/if}
+                  </div>
+                {/if}
+
+                <!-- Template section (Pass 3 — nav-pack icon matching) -->
+                {#if locateTrace.template}
+                  {@const t = locateTrace.template}
+                  <div class="debug-section">
+                    <div class="debug-section-head">
+                      Template · {t.templates_tried} icon{t.templates_tried === 1 ? "" : "s"}
+                      {#if t.scale_prior !== 1} · dpi prior {t.scale_prior.toFixed(2)}×{/if}
+                    </div>
+                    <div class="debug-cand {t.accepted ? 'cand-selected' : 'cand-rejected'}">
+                      <span class="cand-mark">{t.accepted ? "✔" : "⊘"}</span>
+                      <span class="cand-text">{t.best_icon ? `"${t.best_icon}"` : "no icon decoded"}</span>
+                      <span class="cand-meta">{(t.best_score * 100).toFixed(0)}% · scale {t.best_scale.toFixed(2)}×{t.best_pos ? ` · @(${t.best_pos[0]},${t.best_pos[1]})` : ""}</span>
+                      {#if !t.accepted}<span class="cand-reason">— below 90% threshold</span>{/if}
+                    </div>
                   </div>
                 {/if}
 
