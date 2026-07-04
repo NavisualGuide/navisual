@@ -1277,6 +1277,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   async function newSession() {
+    isOverlayCleared = false;
     cancelRequest();
     // Reset Rust-side session state including target_hwnd so the next Guide me
     // call re-discovers the foreground window instead of reusing a stale target.
@@ -1331,6 +1332,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function guide() {
     if (!task.trim()) return;
+    isOverlayCleared = false;
     const taskText = task.trim();
     task = "";
     // Keep session context when in the middle of a task; start fresh from idle/error.
@@ -1368,6 +1370,7 @@ See the LICENSE file in the root of this repository for complete details.
     // Don't allow next while an AI call is in flight — the hotkey can fire
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
+    isOverlayCleared = false;
     // Pressing Next means the current step worked → implicit success signal.
     if (phase === "guiding") logFeedback("worked", "");
     const nextIdx = stepIndex + 1;
@@ -1424,6 +1427,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   async function correction(category?: string) {
+    isOverlayCleared = false;
     const rawNote = task.trim();
     if (rawNote) task = "";
     // Fold a steering hint for the reason into the note the AI sees, then the
