@@ -619,6 +619,30 @@ fn pack_locate_hints(
     (icons, pack.region_hint_for(target_text), pack.authoring_scale())
 }
 
+/// Workstream P (v0.7) — curated starter tasks from the nav-pack matching `hwnd`'s
+/// window, for the cold-start prefill dropdown. Empty when no pack matches or the
+/// pack has none; the frontend falls back to its generic "Show me around {app}".
+#[tauri::command]
+fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        if hwnd == 0 || state.packs.is_empty() {
+            return Vec::new();
+        }
+        let title = capture::get_window_title(hwnd as usize);
+        state
+            .packs
+            .get_active_pack(&title)
+            .map(|pack| pack.manifest.starter_tasks.iter().take(3).cloned().collect())
+            .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (state, hwnd);
+        Vec::new()
+    }
+}
+
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
@@ -708,6 +732,11 @@ struct GuideResponse {
     /// AI-returned bounding box in screen (virtual desktop) coordinates.
     /// Developer "Show AI bbox" overlay reads this.
     ai_bbox: Option<capture::Rect>,
+    /// Workstream P (v0.7): up to 3 AI-suggested next tasks (already lax-parsed and
+    /// capped). Empty when the model offered none, on local advances/errors, or when
+    /// the `task_suggestions` setting is off. Display-only — the frontend prefills
+    /// the task box (selected) and never auto-submits.
+    suggested_tasks: Vec<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -768,6 +797,10 @@ struct SettingsPayload {
     /// Developer-tab toggle; default off until the S.4 live-verification matrix.
     #[serde(default)]
     structured_context: bool,
+    /// v0.7 Workstream P — prefilled task suggestions (cold-start prefill + AI
+    /// suggested_tasks). Screen Guide toggle; default on (display-only, no risk).
+    #[serde(default = "default_true_setting")]
+    task_suggestions: bool,
     /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
     /// Front-end only — backend always emits ai_bbox in OverlayUpdate; the
     /// overlay renderer reads this flag (from `overlay:theme`) to decide
@@ -779,6 +812,11 @@ struct SettingsPayload {
     /// written by save_settings (it's deserialized but ignored on the way in).
     #[serde(default)]
     developer_mode: bool,
+}
+
+/// Serde default for settings that are ON unless explicitly disabled.
+fn default_true_setting() -> bool {
+    true
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1136,6 +1174,7 @@ async fn guide(
                 chat_thumb_b64: None,
                 locate_trace: None,
                 ai_bbox: None,
+                suggested_tasks: Vec::new(),
             });
         }
     };
@@ -1351,6 +1390,7 @@ async fn guide(
                 chat_thumb_b64: None,
                 locate_trace: None,
                 ai_bbox: None,
+                suggested_tasks: Vec::new(),
             });
         }
     };
@@ -1359,6 +1399,14 @@ async fn guide(
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
     let request_full_screen = response.request_full_screen;
+    // Workstream P: the toggle gates the data at the source — when off, suggestions
+    // never reach the frontend (the static prompt rule stays; making it dynamic
+    // would break Anthropic prompt caching for ~4 lines of text).
+    let suggested_tasks = if router.config.task_suggestions {
+        response.suggested_tasks
+    } else {
+        Vec::new()
+    };
     let provider = router.config.api_provider.clone();
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
@@ -1426,6 +1474,8 @@ async fn guide(
             chat_thumb_b64,
             locate_trace: None,
             ai_bbox: None,
+            // A no-step "looks complete" reply is exactly where suggestions matter.
+            suggested_tasks,
         });
     }
 
@@ -1505,6 +1555,7 @@ async fn guide(
         chat_thumb_b64,
         locate_trace,
         ai_bbox,
+        suggested_tasks,
     })
 }
 
@@ -1606,6 +1657,7 @@ async fn next_step(
         chat_thumb_b64: None,
         locate_trace,
         ai_bbox,
+        suggested_tasks: Vec::new(), // local advance — no AI call, no new guesses
     })
 }
 
@@ -1888,6 +1940,12 @@ async fn send_correction(
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
     let request_full_screen = response.request_full_screen;
+    // Workstream P: same source-gating as guide().
+    let suggested_tasks = if router.config.task_suggestions {
+        response.suggested_tasks
+    } else {
+        Vec::new()
+    };
     let provider = router.config.api_provider.clone();
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
@@ -1946,6 +2004,7 @@ async fn send_correction(
             chat_thumb_b64,
             locate_trace: None,
             ai_bbox: None,
+            suggested_tasks,
         });
     }
 
@@ -2021,6 +2080,7 @@ async fn send_correction(
         chat_thumb_b64,
         locate_trace,
         ai_bbox,
+        suggested_tasks,
     })
 }
 
@@ -2507,6 +2567,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
         structured_context: c.structured_context,
+        task_suggestions: c.task_suggestions,
         debug_show_ai_bbox: c.debug_show_ai_bbox,
         developer_mode: developer_mode_enabled(),
     })
@@ -2592,6 +2653,10 @@ async fn save_settings(
         (
             "STRUCTURED_CONTEXT".into(),
             payload.structured_context.to_string(),
+        ),
+        (
+            "TASK_SUGGESTIONS".into(),
+            payload.task_suggestions.to_string(),
         ),
         (
             "DEBUG_SHOW_AI_BBOX".into(),
@@ -3402,6 +3467,7 @@ pub fn run() {
             clear_overlay,
             restore_overlay,
             get_shared_app_info,
+            get_pack_starters,
             speak,
             get_settings,
             save_settings,

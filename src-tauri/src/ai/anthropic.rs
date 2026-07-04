@@ -104,7 +104,13 @@ impl AnthropicClient {
                         }
                     },
                     "state_summary": {"type": "string"},
-                    "needs_input": {"type": "boolean"}
+                    "needs_input": {"type": "boolean"},
+                    "suggested_tasks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 3,
+                        "description": "Up to 3 short next-task suggestions the user might ask for, ONLY when the current task looks complete or no task is in progress. Each under 80 characters, in the user's language. Omit mid-sequence."
+                    }
                 }
             }
         });

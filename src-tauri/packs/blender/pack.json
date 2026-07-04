@@ -6,6 +6,11 @@
   "target_app": "Blender",
   "window_title_pattern": "(?i)blender",
   "authoring_scale": 2.0,
+  "starter_tasks": [
+    "Show me around Blender",
+    "Help me move an object",
+    "Help me add a cube to the scene"
+  ],
   "system_prompt_injection": "The user is in Blender. The left Toolbar holds the active tools (Object/Edit/Sculpt sets differ by workspace tab); the right Properties editor has a vertical tab column (Render/Output/View Layer/Scene/World/Collection/Object/Modifiers/Particles/Physics...); the 3D-viewport header along the top has the shading modes (Wireframe/Solid/Material Preview/Rendered) and Overlays/X-Ray/Gizmos toggles. Prefer the keyboard shortcut when one exists.",
   "shortcuts": {
     "Cursor": "Spacebar",

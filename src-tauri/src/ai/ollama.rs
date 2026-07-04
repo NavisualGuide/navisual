@@ -41,7 +41,10 @@ Step fields (inside "steps" array only):
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
-- needs_input: true only if you must ask the user a question before continuing"#;
+- needs_input: true only if you must ask the user a question before continuing
+
+Optional top-level field:
+- suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence"#;
 
 pub struct OllamaClient {
     client: Client,
@@ -247,6 +250,7 @@ impl OllamaClient {
             state_summary: "Continuing task...".to_string(),
             needs_input: false,
             request_full_screen: false,
+            suggested_tasks: Vec::new(),
         };
         if emitted_instruction_len == 0 {
             on_chunk(&fallback.steps[0].instruction);
@@ -297,7 +301,12 @@ fn navigate_step_schema() -> Value {
                 }
             },
             "state_summary": { "type": "string", "maxLength": 300 },
-            "needs_input": { "type": "boolean" }
+            "needs_input": { "type": "boolean" },
+            "suggested_tasks": {
+                "type": "array",
+                "maxItems": 3,
+                "items": { "type": "string", "maxLength": 80 }
+            }
         },
         "required": ["steps", "state_summary", "needs_input"]
     })

@@ -40,7 +40,10 @@ Step fields (inside "steps" array only):
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
-- needs_input: true only if you must ask the user a question before continuing"#;
+- needs_input: true only if you must ask the user a question before continuing
+
+Optional top-level field:
+- suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence"#;
 
 pub struct DeepSeekClient {
     client: Client,
@@ -368,6 +371,7 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
         state_summary: "Continuing task...".to_string(),
         needs_input: false,
         request_full_screen: false,
+        suggested_tasks: Vec::new(),
     }
 }
 

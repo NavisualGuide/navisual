@@ -56,6 +56,12 @@ pub struct Config {
     // after the S.4 live-verification matrix (navisual-internal/docs/v0.7-plan.md).
     pub structured_context: bool,
 
+    // v0.7 Workstream P — prefilled task suggestions: surface the AI's suggested_tasks
+    // (piggybacked on navigate_step) + the local cold-start prefill. Display-only UI
+    // sugar with no wrong-pointer risk, so unlike structured_context it defaults ON;
+    // the Settings → Screen Guide toggle turns it off.
+    pub task_suggestions: bool,
+
     // Locator — comma-separated, case-insensitive substrings of model names whose AI
     // `target_bbox` is NOT trusted to corroborate (rescue) a borderline OCR match. Trust
     // is default-ON for every model; only models matching this list are muted. Default is
@@ -127,6 +133,7 @@ impl Default for Config {
             managed_tier: "regular".to_string(),
             api_timeout_sec: 90,
             structured_context: false,
+            task_suggestions: true,
             bbox_distrust_models: "nemotron,gemma,kimi".to_string(),
             overlay_color: "#FF6B35".to_string(),
             overlay_thickness: 4,
@@ -279,6 +286,9 @@ impl Config {
         }
         if let Ok(v) = env::var("STRUCTURED_CONTEXT") {
             config.structured_context = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("TASK_SUGGESTIONS") {
+            config.task_suggestions = v == "true" || v == "1";
         }
         // No is_empty guard: an explicit empty value means "trust every model".
         if let Ok(v) = env::var("BBOX_DISTRUST_MODELS") {

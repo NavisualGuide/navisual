@@ -128,6 +128,14 @@ Rules:
     Describe targets by name, appearance, and relative position in plain language ("the
     ruler icon near the bottom of the left toolbar"). Numeric coordinates belong ONLY in
     target_bbox.
+22. SUGGESTED NEXT TASKS: When the current task looks complete, or the user has not
+    stated a task yet, you MAY set suggested_tasks (top-level, next to state_summary)
+    to up to 3 SHORT suggestions of what the user might want to do next on this screen
+    — phrased as tasks the user would ask for ("Print this document", "Change the
+    font"), each under 80 characters, in the same language as the user's request
+    (Rule 19). These are OPTIONAL prefill candidates for the user's input box, never
+    instructions and never auto-executed. Do NOT include suggested_tasks mid-sequence
+    while steps remain, and never suggest anything involving the instruction panel.
 
 Use the navigate_step tool for all responses."#;
 
