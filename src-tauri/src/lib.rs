@@ -24,6 +24,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
+pub static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
 #[derive(serde::Serialize)]
 struct CaptureResult {
     jpeg_base64: String,
@@ -562,33 +564,60 @@ fn pack_locate_hints(
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
-fn announce_shared_app(app: &AppHandle, hwnd_raw: usize) {
-    let info = match capture::get_window_info_for_hwnd(hwnd_raw) {
-        Some(i) => i,
-        None => return,
-    };
-    let payload = SharedAppInfoPayload {
-        hwnd: info.hwnd as u64,
-        rect: info.rect,
-        app_name: info.app_name.clone(),
-        exe_name: info.exe_name.clone(),
-    };
-    let _ = app.emit("app_changed", &payload);
+fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>) {
+    let info = hwnd_raw.and_then(|h| capture::get_window_info_for_hwnd(h));
+    if let Some(info) = info {
+        let payload = SharedAppInfoPayload {
+            hwnd: info.hwnd as u64,
+            rect: info.rect,
+            app_name: info.app_name.clone(),
+            exe_name: info.exe_name.clone(),
+        };
+        let _ = app.emit("app_changed", Some(&payload));
 
-    // Animated boundary box.
-    if let Ok(update) = overlay::make_update(
-        overlay::OverlayKind::AppBoundary,
-        Some(info.rect),
-        Some(info.app_name),
-    ) {
-        if let Err(e) = overlay::emit_update(app, update) {
-            log::debug!("app_boundary emit failed: {e}");
+        // Animated boundary box.
+        if let Ok(update) = overlay::make_update(
+            overlay::OverlayKind::AppBoundary,
+            Some(info.rect),
+            Some(info.app_name),
+        ) {
+            if let Err(e) = overlay::emit_update(app, update) {
+                log::debug!("app_boundary emit failed: {e}");
+            }
+        }
+    } else {
+        let _ = app.emit("app_changed", Option::<SharedAppInfoPayload>::None);
+        if let Ok(update) = overlay::make_update(
+            overlay::OverlayKind::AppBoundary,
+            None,
+            None,
+        ) {
+            if let Err(e) = overlay::emit_update(app, update) {
+                log::debug!("app_boundary emit failed: {e}");
+            }
         }
     }
 }
 
+#[cfg(windows)]
+pub fn refresh_active_window(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let active_info = capture::get_active_window_info();
+    let announce_hwnd = {
+        let mut g = state.guidance.lock();
+        if g.pinned_hwnd.is_none() {
+            g.target_hwnd = active_info.as_ref().map(|info| info.hwnd);
+        }
+        g.pinned_hwnd.or(g.target_hwnd)
+    };
+    announce_shared_app(app, announce_hwnd);
+}
+
 #[cfg(not(windows))]
-fn announce_shared_app(_app: &AppHandle, _hwnd_raw: usize) {}
+fn announce_shared_app(_app: &AppHandle, _hwnd_raw: Option<usize>) {}
+
+#[cfg(not(windows))]
+pub fn refresh_active_window(_app: &AppHandle) {}
 
 #[derive(serde::Serialize)]
 struct GuideResponse {
@@ -1046,7 +1075,7 @@ async fn guide(
     // Phase 0.2 — flash the shared-app boundary so the user can see what
     // we're capturing. Emits the `app_changed` event for the header chip too.
     if let Some(hwnd_raw) = new_hwnd_opt {
-        announce_shared_app(&app, hwnd_raw);
+        announce_shared_app(&app, Some(hwnd_raw));
     }
 
     let mut router = state.ai_router.lock().await;
@@ -1622,7 +1651,7 @@ async fn send_correction(
 
     // Phase 0.2 — show shared-app boundary on correction too.
     if let Some(hwnd_raw) = new_hwnd {
-        announce_shared_app(&app, hwnd_raw);
+        announce_shared_app(&app, Some(hwnd_raw));
     }
 
     let mut router = state.ai_router.lock().await;
@@ -1944,7 +1973,7 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
         g.full_screen_monitor = None;
     }
     #[cfg(windows)]
-    announce_shared_app(&app, hwnd);
+    announce_shared_app(&app, Some(hwnd));
     #[cfg(not(windows))]
     let _ = app;
 }
@@ -1997,12 +2026,16 @@ fn new_session(state: State<'_, AppState>) {
 
 /// Item 1 — clear the pinned window and return to auto-detection.
 #[tauri::command]
-fn unpin_target_window(state: State<'_, AppState>) {
-    let mut g = state.guidance.lock();
-    g.pinned_hwnd = None;
-    g.full_screen_mode = false; // back to the active-window default
-    g.full_screen_monitor = None;
-    // target_hwnd retains the last auto-discovered window for the current session.
+fn unpin_target_window(app: AppHandle, state: State<'_, AppState>) {
+    {
+        let mut g = state.guidance.lock();
+        g.pinned_hwnd = None;
+        g.full_screen_mode = false; // back to the active-window default
+        g.full_screen_monitor = None;
+        // target_hwnd retains the last auto-discovered window for the current session.
+    }
+    #[cfg(windows)]
+    refresh_active_window(&app);
 }
 
 /// Phase 0.2: structured info about the window being shared with the AI.
@@ -3109,6 +3142,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            let _ = APP_HANDLE.set(app.handle().clone());
             // Show panel after a short delay — the JS onMount also calls show() once
             // it has positioned the window, but this Rust fallback ensures the panel
             // is visible even if the WebView2 JS execution is delayed (production builds).

@@ -1776,24 +1776,24 @@ See the LICENSE file in the root of this repository for complete details.
     <div class="titlebar" role="toolbar" tabindex="-1" data-tauri-drag-region onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
       <span class="header-title">Navisual</span>
-      {#if sharedApp || fullScreenTarget}
-        <button
-          class="header-shared"
-          class:header-shared-pinned={pinnedHwnd !== null || fullScreenTarget}
-          title={fullScreenTarget ? "Sharing your screen — click to switch target" : pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
-          onmousedown={(e) => e.stopPropagation()}
-          onclick={openTargetPicker}
-        >
-          <span class="header-shared-dot"></span>
-          {#if fullScreenTarget}
-            🖥️ {fullScreenMonitorIndex !== null ? `Screen ${fullScreenMonitorIndex + 1}` : "Entire desktop"}
-          {:else if sharedApp}
-            {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
-            {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
-          {/if}
-          <span class="header-shared-caret">▾</span>
-        </button>
-      {/if}
+      <button
+        class="header-shared"
+        class:header-shared-pinned={pinnedHwnd !== null || fullScreenTarget}
+        title={fullScreenTarget ? "Sharing your screen — click to switch target" : pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
+        onmousedown={(e) => e.stopPropagation()}
+        onclick={openTargetPicker}
+      >
+        <span class="header-shared-dot"></span>
+        {#if fullScreenTarget}
+          🖥️ {fullScreenMonitorIndex !== null ? `Screen ${fullScreenMonitorIndex + 1}` : "Entire desktop"}
+        {:else if sharedApp}
+          {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
+          {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
+        {:else}
+          Auto-detect
+        {/if}
+        <span class="header-shared-caret">▾</span>
+      </button>
       {#if settingsForm.api_provider === "managed" && managedTier === "paid" && coinBalance !== null}
         <button class="header-balance" class:header-balance-low={coinBalance < 200_000} onclick={() => openAbout("usage")} title="View coin balance">{Math.floor(coinBalance / 5_000)} 🪙</button>
       {:else if settingsForm.api_provider === "managed" && freeRemaining !== null}

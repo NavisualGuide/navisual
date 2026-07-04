@@ -256,6 +256,9 @@ unsafe extern "system" fn win_event_proc(
     // after. Moves (LOCATIONCHANGE) are continuous and already settle via the live
     // recompute, so they don't need it.
     if event != EVENT_OBJECT_LOCATIONCHANGE {
+        if let Some(app) = crate::APP_HANDLE.get() {
+            crate::refresh_active_window(app);
+        }
         schedule_settle();
     }
 }
@@ -279,6 +282,9 @@ unsafe extern "system" fn settle_timer_proc(_hwnd: HWND, _msg: u32, id: usize, _
     let _ = KillTimer(None, id);
     let _ = SETTLE_TIMER.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
     recompute();
+    if let Some(app) = crate::APP_HANDLE.get() {
+        crate::refresh_active_window(app);
+    }
 }
 
 /// Re-align the overlay and toggle its visibility against the target window. Same
