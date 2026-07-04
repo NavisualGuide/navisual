@@ -1773,7 +1773,7 @@ See the LICENSE file in the root of this repository for complete details.
 {:else}
   <main>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
-    <div class="titlebar" role="toolbar" tabindex="-1" data-tauri-drag-region onmousedown={handleHeaderMousedown}>
+    <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
       <span class="header-title">Navisual</span>
       <button
