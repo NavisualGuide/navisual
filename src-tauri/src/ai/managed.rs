@@ -204,10 +204,16 @@ impl ManagedClient {
                     log::warn!("[managed] navigate_step parse error: {e}\njson: {json_str}");
                     anyhow!("The free model returned an unreadable response. Please try again.")
                 })?,
-                // No tool call at all. Weak free models answer a greeting or a general
-                // question ("hi", "what can you do?") as a plain assistant message
-                // instead of calling navigate_step — surface that text as a
-                // conversational, no-pointer reply rather than an error.
+                // No tool call at all. Two distinct causes share this branch: (a) weak free
+                // models answering a greeting/general question ("hi", "what can you do?") as
+                // plain text, and (b) a capable model (observed 2026-07-04: gemini-3.5-flash on
+                // the paid relay path) answering with a fully-formed navigate_step JSON blob —
+                // just never through the tool-call channel, because the relay forwards the
+                // client's OpenAI-style forced tool_choice unchanged to Gemini's OpenAI-compat
+                // endpoint, which doesn't reliably honour that specific "force this named
+                // function" shape (`navisual-internal/supabase/functions/relay/index.ts`
+                // `callProvider` — only `max_tokens` is translated per-provider, `tool_choice`
+                // is not). Try to recover (b) before falling back to (a)'s raw-text treatment.
                 None => {
                     let content = message["content"].as_str().unwrap_or("").trim();
                     if content.is_empty() {
@@ -219,24 +225,32 @@ impl ManagedClient {
                             "The free model returned an unreadable response. Please try again."
                         ));
                     }
-                    log::info!("[managed] no tool_call; surfacing plain message as a reply");
-                    NavigateStepResponse {
-                        steps: vec![GuidanceStep {
-                            instruction: content.to_string(),
-                            target_text: None,
-                            target_role: None,
-                            target_region: None,
-                            target_nearby_text: None,
-                            overlay_type: OverlayType::None,
-                            clipboard: None,
-                            checkpoint: true,
-                            target_bbox: None,
-                            target_element_id: None,
-                        }],
-                        state_summary: String::new(),
-                        needs_input: true,
-                        request_full_screen: false,
-                        suggested_tasks: Vec::new(),
+                    if let Some(recovered) = try_recover_leaked_json(content) {
+                        log::info!(
+                            "[managed] no tool_call, but content parsed as valid navigate_step JSON ({} step(s)) — recovered",
+                            recovered.steps.len()
+                        );
+                        recovered
+                    } else {
+                        log::info!("[managed] no tool_call; surfacing plain message as a reply");
+                        NavigateStepResponse {
+                            steps: vec![GuidanceStep {
+                                instruction: content.to_string(),
+                                target_text: None,
+                                target_role: None,
+                                target_region: None,
+                                target_nearby_text: None,
+                                overlay_type: OverlayType::None,
+                                clipboard: None,
+                                checkpoint: true,
+                                target_bbox: None,
+                                target_element_id: None,
+                            }],
+                            state_summary: String::new(),
+                            needs_input: true,
+                            request_full_screen: false,
+                            suggested_tasks: Vec::new(),
+                        }
                     }
                 }
             };
@@ -248,6 +262,32 @@ impl ManagedClient {
 
         Ok((nav_response, in_tokens, out_tokens))
     }
+}
+
+/// Recover a `navigate_step` response when the model answered with well-formed JSON as plain
+/// assistant text instead of using the tool-call channel (see the `None =>` arm above for why
+/// this happens). Strips a markdown code fence if the model wrapped it (observed: ` ```json …
+/// ``` `), then attempts a strict parse. Rejects a degenerate parse (empty steps / blank
+/// instruction) as not a real recovery. `None` on any failure — the caller falls through to
+/// treating `content` as a plain conversational reply; this is a strict improvement, never a
+/// new failure mode.
+fn try_recover_leaked_json(content: &str) -> Option<NavigateStepResponse> {
+    let trimmed = content.trim();
+    let unfenced = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+    let unfenced = unfenced
+        .strip_suffix("```")
+        .map(str::trim_end)
+        .unwrap_or(unfenced);
+    let parsed: NavigateStepResponse = serde_json::from_str(unfenced).ok()?;
+    let has_real_instruction = parsed
+        .steps
+        .first()
+        .is_some_and(|s| !s.instruction.trim().is_empty());
+    has_real_instruction.then_some(parsed)
 }
 
 pub fn build_messages(
@@ -353,4 +393,49 @@ fn navigate_step_tool() -> Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::try_recover_leaked_json;
+
+    #[test]
+    fn recovers_fenced_json() {
+        // The live 2026-07-04 case: gemini-3.5-flash answered with a fenced JSON blob
+        // instead of a tool call.
+        let content = "```json\n{ \"needs_input\": false, \"state_summary\": \"tour\", \"steps\": [ { \"checkpoint\": true, \"instruction\": \"Press Ctrl+B to open the sidebar.\", \"overlay_type\": \"none\" } ] }\n```";
+        let recovered = try_recover_leaked_json(content).expect("should recover");
+        assert_eq!(recovered.steps.len(), 1);
+        assert_eq!(recovered.steps[0].instruction, "Press Ctrl+B to open the sidebar.");
+        assert!(!recovered.needs_input);
+    }
+
+    #[test]
+    fn recovers_unfenced_json() {
+        let content = r#"{ "needs_input": false, "state_summary": "x", "steps": [ { "checkpoint": true, "instruction": "Click Save." } ] }"#;
+        let recovered = try_recover_leaked_json(content).expect("should recover");
+        assert_eq!(recovered.steps[0].instruction, "Click Save.");
+    }
+
+    #[test]
+    fn rejects_plain_conversational_text() {
+        // The original (a)-case this branch was written for: a genuine chit-chat reply
+        // must NOT be treated as recoverable JSON — it isn't JSON at all.
+        assert!(try_recover_leaked_json("Hi! I can help you navigate this app.").is_none());
+    }
+
+    #[test]
+    fn rejects_degenerate_parse() {
+        // Valid JSON, valid shape, but no real instruction — not a genuine recovery.
+        let content = r#"{ "needs_input": true, "state_summary": "", "steps": [] }"#;
+        assert!(try_recover_leaked_json(content).is_none());
+        let blank_instruction =
+            r#"{ "needs_input": false, "state_summary": "", "steps": [ { "checkpoint": true, "instruction": "   " } ] }"#;
+        assert!(try_recover_leaked_json(blank_instruction).is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        assert!(try_recover_leaked_json("```json\n{ not valid json\n```").is_none());
+    }
 }
