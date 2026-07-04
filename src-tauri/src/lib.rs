@@ -646,7 +646,7 @@ fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
-fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>) {
+fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>, draw_boundary: bool) {
     let info = hwnd_raw.and_then(capture::get_window_info_for_hwnd);
     if let Some(info) = info {
         let payload = SharedAppInfoPayload {
@@ -657,25 +657,29 @@ fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>) {
         };
         let _ = app.emit("app_changed", Some(&payload));
 
-        // Animated boundary box.
-        if let Ok(update) = overlay::make_update(
-            overlay::OverlayKind::AppBoundary,
-            Some(info.rect),
-            Some(info.app_name),
-        ) {
-            if let Err(e) = overlay::emit_update(app, update) {
-                log::debug!("app_boundary emit failed: {e}");
+        if draw_boundary {
+            // Animated boundary box.
+            if let Ok(update) = overlay::make_update(
+                overlay::OverlayKind::AppBoundary,
+                Some(info.rect),
+                Some(info.app_name),
+            ) {
+                if let Err(e) = overlay::emit_update(app, update) {
+                    log::debug!("app_boundary emit failed: {e}");
+                }
             }
         }
     } else {
         let _ = app.emit("app_changed", Option::<SharedAppInfoPayload>::None);
-        if let Ok(update) = overlay::make_update(
-            overlay::OverlayKind::AppBoundary,
-            None,
-            None,
-        ) {
-            if let Err(e) = overlay::emit_update(app, update) {
-                log::debug!("app_boundary emit failed: {e}");
+        if draw_boundary {
+            if let Ok(update) = overlay::make_update(
+                overlay::OverlayKind::AppBoundary,
+                None,
+                None,
+            ) {
+                if let Err(e) = overlay::emit_update(app, update) {
+                    log::debug!("app_boundary emit failed: {e}");
+                }
             }
         }
     }
@@ -692,11 +696,11 @@ pub fn refresh_active_window(app: &AppHandle) {
         }
         g.pinned_hwnd.or(g.target_hwnd)
     };
-    announce_shared_app(app, announce_hwnd);
+    announce_shared_app(app, announce_hwnd, false);
 }
 
 #[cfg(not(windows))]
-fn announce_shared_app(_app: &AppHandle, _hwnd_raw: Option<usize>) {}
+fn announce_shared_app(_app: &AppHandle, _hwnd_raw: Option<usize>, _draw_boundary: bool) {}
 
 #[cfg(not(windows))]
 pub fn refresh_active_window(_app: &AppHandle) {}
@@ -1182,7 +1186,7 @@ async fn guide(
     // Phase 0.2 — flash the shared-app boundary so the user can see what
     // we're capturing. Emits the `app_changed` event for the header chip too.
     if let Some(hwnd_raw) = new_hwnd_opt {
-        announce_shared_app(&app, Some(hwnd_raw));
+        announce_shared_app(&app, Some(hwnd_raw), true);
     }
 
     // S.1 — Structured-Context enumeration at AI-capture time (v0.7 Workstream S): the
@@ -1804,7 +1808,7 @@ async fn send_correction(
 
     // Phase 0.2 — show shared-app boundary on correction too.
     if let Some(hwnd_raw) = new_hwnd {
-        announce_shared_app(&app, Some(hwnd_raw));
+        announce_shared_app(&app, Some(hwnd_raw), true);
     }
 
     // S.1 — fresh Structured-Context snapshot for the correction capture (the retry
@@ -2154,7 +2158,7 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
         g.full_screen_monitor = None;
     }
     #[cfg(windows)]
-    announce_shared_app(&app, Some(hwnd));
+    announce_shared_app(&app, Some(hwnd), true);
     #[cfg(not(windows))]
     let _ = app;
 }
