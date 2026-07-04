@@ -1277,7 +1277,12 @@ async fn guide(
 
     if let Some(session) = &mut router.session_manager.current_session {
         session.update_state(state_summary.clone());
-        session.add_turn("user", sent_user_prompt, None);
+        let user_turn_text = if task.is_empty() {
+            "Next".to_string()
+        } else {
+            task.clone()
+        };
+        session.add_turn("user", user_turn_text, None);
         let content = steps
             .iter()
             .map(|s| s.instruction.clone())
