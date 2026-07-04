@@ -83,6 +83,10 @@ impl GeminiClient {
                                     "minItems": 4,
                                     "maxItems": 4,
                                     "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax] in your native object-detection coordinate system (normalized 0-1000). The box should tightly wrap the target element. Omit when no target_text."
+                                },
+                                "target_element_id": {
+                                    "type": "integer",
+                                    "description": "Id of the target element from the [Screen Elements] list in the message, when the target appears there. Only ids from the list — never invent one. Omit when the target is not listed or no list is present. Still fill target_text."
                                 }
                             }
                         }
@@ -290,6 +294,7 @@ impl GeminiClient {
                         clipboard: None,
                         checkpoint,
                         target_bbox: None,
+                        target_element_id: None,
                     }],
                     state_summary,
                     needs_input,

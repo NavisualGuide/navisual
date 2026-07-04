@@ -20,6 +20,10 @@ pub struct LocateTrace {
     /// Pass 0 — app-specific locator adapter (Excel cells, …). `None` when no adapter
     /// claimed the focused app + target, so the standard A11y → OCR path ran untouched.
     pub adapter: Option<AdapterTrace>,
+    /// Pass 0.5 — Structured-Context selection (v0.7 Workstream S). `None` when the
+    /// response carried no `target_element_id`, no snapshot was offered, or the
+    /// selection was skipped (icon target with a pack template).
+    pub selection: Option<SelectionTrace>,
     pub a11y: A11yTrace,
     pub ocr: OcrTrace,
     /// Pass 3 — icon template matching (Workstream B). `None` when not reached (A11y/OCR hit,
@@ -41,6 +45,27 @@ pub struct AdapterTrace {
     /// The adapter produced a `LocateResult` (vs. claimed-but-fell-through).
     pub hit: bool,
     /// Human-readable outcome: accepted, or why it fell through to A11y/OCR.
+    pub detail: String,
+}
+
+/// Pass-0.5 Structured-Context selection outcome (v0.7 Workstream S). The AI picked an
+/// id from the enumerated [Screen Elements] list; the pick is resolved into the
+/// capture-time snapshot, text-cross-checked against `target_text`, then verified
+/// against the LIVE tree (`a11y::verify_context_element`). Any failure falls through
+/// to the unchanged four-pass pipeline — recorded here so the drawer shows why.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SelectionTrace {
+    /// The id the model returned.
+    pub id: u32,
+    /// Elements in the snapshot that was offered to the model.
+    pub snapshot_len: usize,
+    /// Accessible name of the snapshot element the id resolved to (`None` = the id
+    /// wasn't in the snapshot — a fabricated/out-of-range pick).
+    pub snapshot_name: Option<String>,
+    /// The live element re-verified at the snapshot point and the pointer used its
+    /// fresh rect (final decision `HitSelection`).
+    pub verified: bool,
+    /// Human-readable outcome: "verified", or why the pick fell through.
     pub detail: String,
 }
 
@@ -192,6 +217,9 @@ pub enum FinalDecision {
     /// Pass 0 — an app-specific adapter (Excel cells, …) resolved the target by
     /// deterministic geometry, no A11y/OCR needed.
     HitAdapter,
+    /// Pass 0.5 — the AI's `target_element_id` resolved into the capture-time element
+    /// snapshot and survived the text cross-check + live verification (v0.7 S.3).
+    HitSelection,
     HitA11y,
     HitOcr,
     /// Pass 3 — a nav-pack icon template matched (A11y + OCR both missed).

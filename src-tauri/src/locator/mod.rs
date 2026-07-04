@@ -48,6 +48,25 @@ pub(crate) fn strip_trailing_ellipsis(target: &str) -> (String, bool) {
     }
 }
 
+/// S.1 (v0.7 Workstream S) — one entry of the Structured-Context element snapshot: an
+/// interactive, named, on-screen UIA element enumerated at AI-capture time. The list is
+/// sent to the AI (id | role | name | center) so it can *select* instead of grounding;
+/// the id is a per-request index into this snapshot, never a UIA RuntimeId (Decision 2).
+/// A returned id is verified against the live tree before use (`a11y::verify_context_element`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ContextElement {
+    /// Per-request index (1-based, assigned in tree order after filtering).
+    pub id: u32,
+    /// Accessible name after paren-suffix + accelerator strip — what the AI sees and
+    /// what the S.3 text cross-check / live verification compare against.
+    pub name: String,
+    /// UIA control type ("Button", "TabItem", …).
+    pub role: String,
+    /// Bounding rect in virtual-desktop physical pixels at capture time. The pointer
+    /// never uses this directly — verification re-reads the live rect.
+    pub rect: crate::capture::Rect,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LocateResult {
     /// Bounding box in physical pixels, virtual-desktop coords.

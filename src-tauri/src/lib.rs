@@ -65,6 +65,44 @@ struct GuidanceState {
     /// only on single-monitor systems; with 2+ monitors the picker requires choosing a
     /// single screen (a stitched multi-monitor capture is downscaled to uselessness).
     full_screen_monitor: Option<capture::Rect>,
+    /// v0.7 Workstream S — the Structured-Context element snapshot enumerated at the
+    /// most recent AI-capture (the [Screen Elements] list the AI saw). Stored beside
+    /// the capture state so `next_step`'s locates resolve `target_element_id` against
+    /// the SAME list; replaced (or cleared) on every guide/correction capture.
+    context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>>,
+}
+
+/// S.1 — enumerate the Structured-Context element snapshot for the captured window.
+/// Runs on a blocking thread right after the AI capture (same freshness contract as
+/// the screenshot); every skip (framework `Other`, over-cap, over-budget, zero
+/// elements) is logged with its reason and yields `None` → no prompt block, no
+/// Pass 0.5 (Decision 4: skip the whole block, never truncate).
+#[cfg(windows)]
+fn enumerate_context_snapshot(hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    let started = std::time::Instant::now();
+    match locator::a11y::enumerate_context_elements(hwnd) {
+        Ok(els) if els.is_empty() => {
+            log::info!("[context] skipped: zero elements");
+            None
+        }
+        Ok(els) => {
+            log::info!(
+                "[context] {} elements enumerated in {} ms",
+                els.len(),
+                started.elapsed().as_millis()
+            );
+            Some(els)
+        }
+        Err(reason) => {
+            log::info!("[context] skipped: {reason}");
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn enumerate_context_snapshot(_hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    None
 }
 
 /// Shared app state.
@@ -216,6 +254,10 @@ fn execute_step(
     // Loaded nav-packs — when the focused window matches a pack with icon crops for this
     // target, those crops feed the locator's Pass-3 template matching (Workstream B).
     packs: &packs::PackRegistry,
+    // v0.7 Workstream S — the Structured-Context snapshot from the most recent AI
+    // capture (the [Screen Elements] list the AI saw). With the step's
+    // target_element_id it drives Pass 0.5; None → byte-identical v0.6 behaviour.
+    context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>>,
 ) -> Result<
     (
         Option<locator::LocateResult>,
@@ -237,6 +279,13 @@ fn execute_step(
                 // expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
                 // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms.
                 let icon_target = !icon_templates.is_empty();
+                // S.4 skip condition: an icon target with a pack template never uses
+                // selection — the template is already the authority for glyphs.
+                let selected_element_id = if icon_target {
+                    None
+                } else {
+                    step.target_element_id
+                };
                 let opts = locator::orchestrator::LocateOptions {
                     role: step
                         .target_role
@@ -254,6 +303,8 @@ fn execute_step(
                     icon_region,
                     icon_target,
                     icon_authoring_scale,
+                    context_elements: context_elements.clone(),
+                    selected_element_id,
                 };
                 let text_owned = text.clone();
                 let pre = pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r));
@@ -267,7 +318,14 @@ fn execute_step(
             }
             #[cfg(not(windows))]
             {
-                let _ = (text, target_hwnd, debug_ocr_path, avoid_bbox, &pre_ocr);
+                let _ = (
+                    text,
+                    target_hwnd,
+                    debug_ocr_path,
+                    avoid_bbox,
+                    &pre_ocr,
+                    &context_elements,
+                );
                 (None, None)
             }
         } else {
@@ -565,7 +623,7 @@ fn pack_locate_hints(
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
 fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>) {
-    let info = hwnd_raw.and_then(|h| capture::get_window_info_for_hwnd(h));
+    let info = hwnd_raw.and_then(capture::get_window_info_for_hwnd);
     if let Some(info) = info {
         let payload = SharedAppInfoPayload {
             hwnd: info.hwnd as u64,
@@ -706,6 +764,10 @@ struct SettingsPayload {
     debug_show_response_info: bool,
     debug_locate_trace_enabled: bool,
     debug_locate_log_file_enabled: bool,
+    /// v0.7 Workstream S — Structured-Context Locator ("select, don't ground").
+    /// Developer-tab toggle; default off until the S.4 live-verification matrix.
+    #[serde(default)]
+    structured_context: bool,
     /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
     /// Front-end only — backend always emits ai_bbox in OverlayUpdate; the
     /// overlay renderer reads this flag (from `overlay:theme`) to decide
@@ -901,7 +963,13 @@ async fn guide(
         }
     };
 
-    let debug_screenshot_enabled = { state.ai_router.lock().await.config.debug_screenshot_enabled };
+    let (debug_screenshot_enabled, structured_context_enabled) = {
+        let router = state.ai_router.lock().await;
+        (
+            router.config.debug_screenshot_enabled,
+            router.config.structured_context,
+        )
+    };
 
     // `is_fs` is the user's sticky "Entire desktop" choice from the target picker
     // (GuidanceState.full_screen_mode). The AI no longer decides this — full-screen
@@ -1078,6 +1146,22 @@ async fn guide(
         announce_shared_app(&app, Some(hwnd_raw));
     }
 
+    // S.1 — Structured-Context enumeration at AI-capture time (v0.7 Workstream S): the
+    // element list the AI can select from, same freshness contract as the screenshot.
+    // Gated on the flag + a single captured window (full-screen mode has no one tree).
+    // A warm tree is ~ms; the 300 ms hard budget bounds the worst case before the
+    // (multi-second) AI call starts.
+    let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
+        match (structured_context_enabled && !is_fs, new_hwnd_opt) {
+            (true, Some(hwnd)) => tokio::task::spawn_blocking(move || {
+                enumerate_context_snapshot(hwnd).map(std::sync::Arc::new)
+            })
+            .await
+            .ok()
+            .flatten(),
+            _ => None,
+        };
+
     let mut router = state.ai_router.lock().await;
 
     let mut window_context = String::new();
@@ -1085,6 +1169,9 @@ async fn guide(
         let info = capture::get_window_info(hwnd);
         window_context = format!("\n[Current Window Info]\n{}", info);
         window_context.push_str(&active_pack_context(&state.packs, hwnd));
+    }
+    if let (Some(els), Some(rect)) = (context_elements.as_deref(), capture_rect_opt) {
+        window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
 
     // Append window context to the prompt (no grid suffix any more — AI returns
@@ -1306,6 +1393,9 @@ async fn guide(
         g.provider = provider.clone();
         g.capture_rect = capture_rect_opt;
         g.target_hwnd = new_hwnd_opt;
+        // Also stored when None — a skipped enumeration must clear the previous
+        // snapshot, or next_step would resolve ids against a stale list.
+        g.context_elements = context_elements.clone();
     }
 
     if steps.is_empty() {
@@ -1386,6 +1476,7 @@ async fn guide(
         capture_rect_opt,
         pre_ocr,
         &state.packs,
+        context_elements,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1423,7 +1514,7 @@ async fn next_step(
     state: State<'_, AppState>,
     step_index: usize,
 ) -> Result<GuideResponse, String> {
-    let (steps, session_id, needs_input, provider, capture_rect) = {
+    let (steps, session_id, needs_input, provider, capture_rect, context_elements) = {
         let g = state.guidance.lock();
         (
             g.steps.clone(),
@@ -1431,6 +1522,9 @@ async fn next_step(
             g.needs_input,
             g.provider.clone(),
             g.capture_rect,
+            // The snapshot from the capture that produced these steps — ids in
+            // steps[1..] resolve against the SAME list the AI saw (v0.7 S.1).
+            g.context_elements.clone(),
         )
     };
 
@@ -1481,6 +1575,7 @@ async fn next_step(
         capture_rect,
         None, // next_step reuses the prior capture; locator re-captures for OCR
         &state.packs,
+        context_elements,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1545,6 +1640,7 @@ async fn send_correction(
 
     let router = state.ai_router.lock().await;
     let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
+    let structured_context_enabled = router.config.structured_context;
     drop(router); // Release lock before blocking capture
 
     let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
@@ -1659,6 +1755,19 @@ async fn send_correction(
         announce_shared_app(&app, Some(hwnd_raw));
     }
 
+    // S.1 — fresh Structured-Context snapshot for the correction capture (the retry
+    // may be looking at a different window/state than the original guide()).
+    let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
+        match (structured_context_enabled && !is_fs, new_hwnd) {
+            (true, Some(hwnd)) => tokio::task::spawn_blocking(move || {
+                enumerate_context_snapshot(hwnd).map(std::sync::Arc::new)
+            })
+            .await
+            .ok()
+            .flatten(),
+            _ => None,
+        };
+
     let mut router = state.ai_router.lock().await;
     let summary = {
         let g = state.guidance.lock();
@@ -1679,6 +1788,9 @@ async fn send_correction(
         let info = capture::get_window_info(hwnd);
         window_context = format!("\n[Current Window Info]\n{}", info);
         window_context.push_str(&active_pack_context(&state.packs, hwnd));
+    }
+    if let (Some(els), Some(rect)) = (context_elements.as_deref(), new_capture_rect) {
+        window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
 
     let final_user_text = if !window_context.is_empty() {
@@ -1803,6 +1915,9 @@ async fn send_correction(
         g.needs_input = needs_input;
         g.capture_rect = new_capture_rect;
         g.target_hwnd = new_hwnd;
+        // Stored even when None — a skipped enumeration must clear the previous
+        // snapshot, or next_step would resolve ids against a stale list.
+        g.context_elements = context_elements.clone();
     }
 
     if steps.is_empty() {
@@ -1878,6 +1993,7 @@ async fn send_correction(
         new_capture_rect,
         pre_ocr,
         &state.packs,
+        context_elements,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -2138,6 +2254,8 @@ async fn locate_a11y(
             icon_region: None,
             icon_target: false,
             icon_authoring_scale: 1.0,
+            context_elements: None,
+            selected_element_id: None,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::a11y::find_element(&text, &opts))
@@ -2180,6 +2298,8 @@ async fn locate_element(
             icon_region: None,
             icon_target: false,
             icon_authoring_scale: 1.0,
+            context_elements: None,
+            selected_element_id: None,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts, None))
@@ -2386,6 +2506,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         debug_show_response_info: c.debug_show_response_info,
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
+        structured_context: c.structured_context,
         debug_show_ai_bbox: c.debug_show_ai_bbox,
         developer_mode: developer_mode_enabled(),
     })
@@ -2467,6 +2588,10 @@ async fn save_settings(
         (
             "DEBUG_LOCATE_LOG_FILE_ENABLED".into(),
             payload.debug_locate_log_file_enabled.to_string(),
+        ),
+        (
+            "STRUCTURED_CONTEXT".into(),
+            payload.structured_context.to_string(),
         ),
         (
             "DEBUG_SHOW_AI_BBOX".into(),

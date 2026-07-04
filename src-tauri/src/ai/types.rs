@@ -138,6 +138,34 @@ pub struct GuidanceStep {
     /// the backend before use.
     #[serde(default, deserialize_with = "lax_bbox")]
     pub target_bbox: Option<[f64; 4]>,
+    /// Structured-Context selection (v0.7 Workstream S): the id of the element the
+    /// model picked from the [Screen Elements] list, when one was present. A
+    /// per-request index into the snapshot in `GuidanceState` — verified against the
+    /// live tree before use; never replaces `target_text` (four-pass fallback).
+    #[serde(default, deserialize_with = "lax_element_id")]
+    pub target_element_id: Option<u32>,
+}
+
+/// Lax element-id deserializer: models emit `12`, `"12"`, or `12.0`; anything else
+/// (null, garbage, negative, fractional) becomes `None` — never a parse failure
+/// (follows the [`lax_bbox`] / [`lax_overlay`] precedent).
+fn lax_element_id<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| {
+                n.as_f64()
+                    .filter(|f| f.fract() == 0.0 && *f >= 0.0)
+                    .map(|f| f as u64)
+            })
+            .and_then(|v| u32::try_from(v).ok()),
+        serde_json::Value::String(s) => s.trim().parse::<u32>().ok(),
+        _ => None,
+    })
 }
 
 fn default_overlay() -> OverlayType {
@@ -247,6 +275,32 @@ mod tests {
             let s = step(bad);
             assert!(s.target_bbox.is_none(), "should be None for: {bad}");
         }
+    }
+
+    #[test]
+    fn element_id_lax_forms() {
+        // Canonical integer.
+        let s = step(r#"{"instruction": "x", "target_element_id": 12}"#);
+        assert_eq!(s.target_element_id, Some(12));
+        // String-wrapped and float-integer forms models emit.
+        let s = step(r#"{"instruction": "x", "target_element_id": "12"}"#);
+        assert_eq!(s.target_element_id, Some(12));
+        let s = step(r#"{"instruction": "x", "target_element_id": 12.0}"#);
+        assert_eq!(s.target_element_id, Some(12));
+        // Garbage never fails the whole response parse.
+        for bad in [
+            r#"{"instruction": "x", "target_element_id": "the save button"}"#,
+            r#"{"instruction": "x", "target_element_id": -3}"#,
+            r#"{"instruction": "x", "target_element_id": 12.7}"#,
+            r#"{"instruction": "x", "target_element_id": null}"#,
+            r#"{"instruction": "x", "target_element_id": [12]}"#,
+        ] {
+            let s = step(bad);
+            assert!(s.target_element_id.is_none(), "should be None for: {bad}");
+        }
+        // Absent → None.
+        let s = step(r#"{"instruction": "x"}"#);
+        assert!(s.target_element_id.is_none());
     }
 
     #[test]

@@ -40,6 +40,12 @@ Rules:
    element tightly — top edge, left edge, bottom edge, right edge. Omit
    target_bbox for steps with no target_text (scroll-only steps, subtitle-only
    steps).
+4b. SCREEN ELEMENTS LIST: The message may include a [Screen Elements] list of
+   interactive elements detected on the current screen (id | role | name |
+   center). If your target element appears in that list, set target_element_id
+   to its integer id — use ONLY ids from the list, never invent one. Still fill
+   target_text (and target_bbox) exactly as normal. If the target is not in the
+   list, or no list is present, omit target_element_id entirely.
 5. If the screen shows the user completed the step, acknowledge and advance. If
    the screen shows something unexpected, describe what you see and suggest how
    to recover.
@@ -178,6 +184,49 @@ are pressed, not pasted), instead of pointing at a button:\n",
     block
 }
 
+/// S.2 (v0.7 Workstream S) — format the Structured-Context element list for the prompt.
+/// `capture_rect` is the virtual-desktop rect the screenshot covers; element centres are
+/// emitted in the same normalized 0–1000 space as `target_bbox` (Decision 3) so the
+/// model can cross-reference the list against what it sees in the screenshot. Names are
+/// truncated for display only — the id resolves into the full snapshot. Empty input or
+/// a degenerate capture rect → empty string (callers append unconditionally).
+pub fn elements_context_block(
+    elements: &[crate::locator::ContextElement],
+    capture_rect: crate::capture::Rect,
+) -> String {
+    if elements.is_empty() || capture_rect.width == 0 || capture_rect.height == 0 {
+        return String::new();
+    }
+    const NAME_DISPLAY_MAX: usize = 60;
+    let mut block = String::from(
+        "\n[Screen Elements] — interactive elements detected on the current screen.\n\
+         If your target is one of these, set target_element_id to its id (and still fill target_text).\n\
+         id | role | name | center x,y (0-1000)\n",
+    );
+    for el in elements {
+        let cx = ((el.rect.x - capture_rect.x) as f64 + el.rect.width as f64 / 2.0)
+            / capture_rect.width as f64
+            * 1000.0;
+        let cy = ((el.rect.y - capture_rect.y) as f64 + el.rect.height as f64 / 2.0)
+            / capture_rect.height as f64
+            * 1000.0;
+        let name: String = if el.name.chars().count() > NAME_DISPLAY_MAX {
+            el.name.chars().take(NAME_DISPLAY_MAX).collect::<String>() + "…"
+        } else {
+            el.name.clone()
+        };
+        block.push_str(&format!(
+            "{} | {} | \"{}\" | {},{}\n",
+            el.id,
+            el.role.to_lowercase(),
+            name,
+            (cx.round() as i64).clamp(0, 1000),
+            (cy.round() as i64).clamp(0, 1000),
+        ));
+    }
+    block
+}
+
 pub fn initial_context_template(task_description: &str) -> String {
     format!(
         "The user wants help with the following task: {}\n\n\
@@ -188,8 +237,77 @@ pub fn initial_context_template(task_description: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::pack_context_block;
+    use super::{elements_context_block, pack_context_block};
     use std::collections::BTreeMap;
+
+    fn ctx_el(id: u32, name: &str, role: &str, x: i32, y: i32, w: u32, h: u32) -> crate::locator::ContextElement {
+        crate::locator::ContextElement {
+            id,
+            name: name.to_string(),
+            role: role.to_string(),
+            rect: crate::capture::Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+        }
+    }
+
+    #[test]
+    fn elements_block_normalizes_centers_to_capture_rect() {
+        // Capture rect origin (100, 50), 2000×1000. An element at VD (1090, 530) 20×40
+        // → centre VD (1100, 550) → relative (1000, 500) → normalized (500, 500).
+        let els = vec![ctx_el(3, "Save As", "Button", 1090, 530, 20, 40)];
+        let rect = crate::capture::Rect {
+            x: 100,
+            y: 50,
+            width: 2000,
+            height: 1000,
+        };
+        let block = elements_context_block(&els, rect);
+        assert!(block.contains("[Screen Elements]"));
+        assert!(block.contains("3 | button | \"Save As\" | 500,500\n"), "{block}");
+        // Centres are clamped, never out of the 0–1000 space.
+        let off = vec![ctx_el(1, "X", "Button", -500, -500, 10, 10)];
+        let block = elements_context_block(&off, rect);
+        assert!(block.contains("| 0,0\n"), "{block}");
+    }
+
+    #[test]
+    fn elements_block_empty_or_degenerate_yields_nothing() {
+        let rect = crate::capture::Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 500,
+        };
+        assert!(elements_context_block(&[], rect).is_empty());
+        let els = vec![ctx_el(1, "Save", "Button", 10, 10, 20, 20)];
+        let degenerate = crate::capture::Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        assert!(elements_context_block(&els, degenerate).is_empty());
+    }
+
+    #[test]
+    fn elements_block_truncates_long_names_for_display() {
+        let long = "Extensions (Ctrl+Shift+X) - 4 require restart and a very long tail here";
+        let els = vec![ctx_el(1, long, "TabItem", 10, 10, 20, 20)];
+        let rect = crate::capture::Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 500,
+        };
+        let block = elements_context_block(&els, rect);
+        assert!(block.contains('…'), "long names are ellipsised: {block}");
+        assert!(!block.contains("very long tail"), "{block}");
+        assert!(block.contains("tabitem"), "roles are lowercased: {block}");
+    }
 
     #[test]
     fn empty_pack_yields_empty_block() {

@@ -37,6 +37,7 @@ Step fields (inside "steps" array only):
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
 - clipboard: text to copy to clipboard (optional)
 - target_bbox: [ymin, xmin, ymax, xmax] as NORMALIZED 0-1000 coordinates (0 = top/left edge, 1000 = bottom/right edge of the image, regardless of pixel size; NOT pixels) (optional, omit when no target_text)
+- target_element_id: integer id from the [Screen Elements] list in the message when your target appears there — only ids from the list, never invented; still fill target_text (optional, omit when the target is not listed or no list is present)
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
@@ -241,6 +242,7 @@ impl OllamaClient {
                 clipboard: None,
                 checkpoint: true,
                 target_bbox: None,
+                target_element_id: None,
             }],
             state_summary: "Continuing task...".to_string(),
             needs_input: false,
@@ -288,6 +290,7 @@ fn navigate_step_schema() -> Value {
                         "overlay_type": { "type": "string", "maxLength": 16 },
                         "clipboard": { "type": "string", "maxLength": 2000 },
                         "target_bbox": { "type": "array", "items": { "type": "number" } },
+                        "target_element_id": { "type": "integer" },
                         "checkpoint": { "type": "boolean" }
                     },
                     "required": ["instruction", "target_text", "checkpoint"]

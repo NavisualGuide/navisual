@@ -50,6 +50,12 @@ pub struct Config {
     // Shared
     pub api_timeout_sec: u64,
 
+    // v0.7 Workstream S — Structured-Context Locator ("select, don't ground"): send an
+    // indexed UIA element list with the screenshot; the AI returns target_element_id,
+    // verified before use. Default OFF in the first build; flipped on for Chrome/Eager
+    // after the S.4 live-verification matrix (navisual-internal/docs/v0.7-plan.md).
+    pub structured_context: bool,
+
     // Locator — comma-separated, case-insensitive substrings of model names whose AI
     // `target_bbox` is NOT trusted to corroborate (rescue) a borderline OCR match. Trust
     // is default-ON for every model; only models matching this list are muted. Default is
@@ -120,6 +126,7 @@ impl Default for Config {
             managed_model: "openrouter/free".to_string(),
             managed_tier: "regular".to_string(),
             api_timeout_sec: 90,
+            structured_context: false,
             bbox_distrust_models: "nemotron,gemma,kimi".to_string(),
             overlay_color: "#FF6B35".to_string(),
             overlay_thickness: 4,
@@ -269,6 +276,9 @@ impl Config {
             if v == "speed" || v == "regular" || v == "smart" {
                 config.managed_tier = v;
             }
+        }
+        if let Ok(v) = env::var("STRUCTURED_CONTEXT") {
+            config.structured_context = v == "true" || v == "1";
         }
         // No is_empty guard: an explicit empty value means "trust every model".
         if let Ok(v) = env::var("BBOX_DISTRUST_MODELS") {

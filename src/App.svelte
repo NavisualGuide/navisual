@@ -87,6 +87,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_show_response_info: boolean;
     debug_locate_trace_enabled: boolean;
     debug_locate_log_file_enabled: boolean;
+    structured_context: boolean;
     debug_show_ai_bbox: boolean;
     developer_mode: boolean;
   };
@@ -159,12 +160,21 @@ See the LICENSE file in the root of this repository for complete details.
     scale_prior: number;
     accepted: boolean;
   };
+  // Pass 0.5 — Structured-Context selection (mirrors SelectionTrace in trace.rs).
+  type SelectionTrace = {
+    id: number;
+    snapshot_len: number;
+    snapshot_name: string | null;
+    verified: boolean;
+    detail: string;
+  };
   type FinalDecision =
     | { kind: "miss" }
     | { kind: "hit_a11y" }
     | { kind: "hit_ocr" }
     | { kind: "hit_template" }
     | { kind: "hit_adapter" }
+    | { kind: "hit_selection" }
     | { kind: "rejected_by_hit_test"; leaf_class: string }
     | { kind: "rejected_uncorroborated"; detail: string }
     | { kind: "error"; message: string };
@@ -174,6 +184,7 @@ See the LICENSE file in the root of this repository for complete details.
     target_role: string | null;
     nearby_text: string | null;
     ai_bbox: { x: number; y: number; width: number; height: number } | null;
+    selection: SelectionTrace | null;
     a11y: A11yTrace;
     ocr: OcrTrace;
     template: TemplateTrace | null;
@@ -448,6 +459,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_show_response_info: false,
     debug_locate_trace_enabled: false,
     debug_locate_log_file_enabled: false,
+    structured_context: false,
     debug_show_ai_bbox: false,
     developer_mode: false,
   };
@@ -1923,6 +1935,21 @@ See the LICENSE file in the root of this repository for complete details.
                   </div>
                 {/if}
 
+                <!-- Selection section (Pass 0.5 — Structured-Context, v0.7 S.3) -->
+                {#if locateTrace.selection}
+                  {@const s = locateTrace.selection}
+                  <div class="debug-section">
+                    <div class="debug-section-head">
+                      Selection · id {s.id} of {s.snapshot_len} element{s.snapshot_len === 1 ? "" : "s"}
+                    </div>
+                    <div class="debug-cand {s.verified ? 'cand-selected' : 'cand-rejected'}">
+                      <span class="cand-mark">{s.verified ? "✔" : "⊘"}</span>
+                      <span class="cand-text">{s.snapshot_name ? `"${s.snapshot_name}"` : "id not in snapshot"}</span>
+                      <span class="cand-reason">— {s.detail}</span>
+                    </div>
+                  </div>
+                {/if}
+
                 <!-- A11y section -->
                 <div class="debug-section">
                   <div class="debug-section-head">
@@ -2986,6 +3013,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <span>Append every locate to locate_log.jsonl</span>
               </label>
               <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\locate_log.jsonl</p>
+            </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">Structured context (v0.7)</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.structured_context} />
+                <span>Send an indexed [Screen Elements] list with each screenshot; the AI selects an element id, verified before use</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">"Select, don't ground" — Chrome/Eager windows only; falls back to the normal locator on any doubt. Default off until the live-verification matrix passes.</p>
             </div>
             <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
               <p class="setting-label">AI bounding box</p>
