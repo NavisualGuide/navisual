@@ -9,6 +9,7 @@ mod capture;
 mod locator;
 mod overlay;
 mod packs;
+mod prompt_log;
 mod server;
 mod track;
 mod tts;
@@ -567,6 +568,40 @@ fn maybe_log_trace(app: &AppHandle, trace: &locator::trace::LocateTrace, log_ena
     }
 }
 
+/// Developer option — append the exact prompt sent to the AI to a single running
+/// `prompt_log.jsonl`, when enabled. Covers every call site (guide/reply/requery/
+/// correction), unlike `debug_screenshot_enabled`'s per-call `prompt_<ts>.txt` dumps
+/// (guide() only). System prompt is static and never logged — see `ai/prompts.rs`.
+#[allow(clippy::too_many_arguments)]
+fn maybe_log_prompt(
+    app: &AppHandle,
+    log_enabled: bool,
+    session_id: &str,
+    call_kind: &str,
+    provider: &str,
+    model: &str,
+    has_screenshot: bool,
+    prompt: &str,
+) {
+    if !log_enabled {
+        return;
+    }
+    let entry = prompt_log::PromptLogEntry::new(
+        session_id,
+        call_kind,
+        provider,
+        model,
+        has_screenshot,
+        prompt,
+    );
+    if let Ok(dir) = app.path().app_local_data_dir() {
+        let path = dir.join("prompt_log.jsonl");
+        if let Err(e) = prompt_log::append_jsonl(&path, &entry) {
+            log::warn!("prompt_log.jsonl write failed: {e}");
+        }
+    }
+}
+
 /// Nav-Pack prompt injection (Workstream C): if a loaded pack's `window_title_pattern`
 /// matches the focused window, return its formatted guidance + shortcut block to append to
 /// the prompt; empty string otherwise. Keeps the lookup out of the two guidance call sites.
@@ -797,6 +832,7 @@ struct SettingsPayload {
     debug_show_response_info: bool,
     debug_locate_trace_enabled: bool,
     debug_locate_log_file_enabled: bool,
+    debug_prompt_log_file_enabled: bool,
     /// v0.7 Workstream S — Structured-Context Locator ("select, don't ground").
     /// Developer-tab toggle; default off until the S.4 live-verification matrix.
     #[serde(default)]
@@ -1348,6 +1384,24 @@ async fn guide(
         .get_managed_routed_model()
         .unwrap_or_else(|| router.active_model());
     let (in_tok, out_tok) = router.get_last_usage();
+    maybe_log_prompt(
+        &app,
+        router.config.debug_prompt_log_file_enabled,
+        &session_id,
+        if is_reply {
+            "reply"
+        } else if is_next_requery {
+            "requery"
+        } else if task.is_empty() {
+            "resume"
+        } else {
+            "task"
+        },
+        &timing_provider,
+        &used_model,
+        true,
+        &sent_user_prompt,
+    );
     log_model_timing(
         &app,
         &timing_provider,
@@ -1912,6 +1966,16 @@ async fn send_correction(
         .get_managed_routed_model()
         .unwrap_or_else(|| router.active_model());
     let (in_tok, out_tok) = router.get_last_usage();
+    maybe_log_prompt(
+        &app,
+        router.config.debug_prompt_log_file_enabled,
+        &session_id,
+        "correction",
+        &timing_provider,
+        &used_model,
+        true,
+        user_text,
+    );
     log_model_timing(
         &app,
         &timing_provider,
@@ -2570,6 +2634,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         debug_show_response_info: c.debug_show_response_info,
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
+        debug_prompt_log_file_enabled: c.debug_prompt_log_file_enabled,
         structured_context: c.structured_context,
         task_suggestions: c.task_suggestions,
         debug_show_ai_bbox: c.debug_show_ai_bbox,
@@ -2653,6 +2718,10 @@ async fn save_settings(
         (
             "DEBUG_LOCATE_LOG_FILE_ENABLED".into(),
             payload.debug_locate_log_file_enabled.to_string(),
+        ),
+        (
+            "DEBUG_PROMPT_LOG_FILE_ENABLED".into(),
+            payload.debug_prompt_log_file_enabled.to_string(),
         ),
         (
             "STRUCTURED_CONTEXT".into(),

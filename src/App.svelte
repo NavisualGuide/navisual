@@ -88,6 +88,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_show_response_info: boolean;
     debug_locate_trace_enabled: boolean;
     debug_locate_log_file_enabled: boolean;
+    debug_prompt_log_file_enabled: boolean;
     structured_context: boolean;
     task_suggestions: boolean;
     debug_show_ai_bbox: boolean;
@@ -525,6 +526,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_show_response_info: false,
     debug_locate_trace_enabled: false,
     debug_locate_log_file_enabled: false,
+    debug_prompt_log_file_enabled: false,
     structured_context: false,
     task_suggestions: true,
     debug_show_ai_bbox: false,
@@ -3121,9 +3123,9 @@ See the LICENSE file in the root of this repository for complete details.
               <p class="setting-label">Debug captures</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
-                <span>Save AI screenshots and OCR inputs to the debug folder</span>
+                <span>Save AI screenshots, OCR inputs, and the exact prompt text sent to the AI to the debug folder</span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.navisual.app\debug\</p>
+              <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.navisual.app\debug\ — one prompt_&lt;timestamp&gt;.txt per request, alongside its screenshot. See "Prompt log" below for a single running history instead.</p>
               <button class="btn-ghost" style="margin-top:8px;font-size:12px;padding:5px 10px"
                 onclick={() => invoke("open_debug_folder").catch(() => {})}>
                 📂 Open debug folder
@@ -3147,6 +3149,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <span>Append every locate to locate_log.jsonl</span>
               </label>
               <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\locate_log.jsonl</p>
+            </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">Prompt log</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.debug_prompt_log_file_enabled} />
+                <span>Append every prompt sent to the AI to prompt_log.jsonl</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\prompt_log.jsonl — a single running history covering every request (task, follow-up, re-query, and ✗ Wrong corrections). The system prompt is static (src-tauri/src/ai/prompts.rs) and never logged, only the per-request dynamic text.</p>
             </div>
             <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
               <p class="setting-label">Structured context (v0.7)</p>

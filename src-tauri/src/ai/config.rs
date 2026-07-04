@@ -100,6 +100,11 @@ pub struct Config {
     pub debug_locate_trace_enabled: bool,
     /// Append every locate trace to %LOCALAPPDATA%\com.navisual.app\locate_log.jsonl.
     pub debug_locate_log_file_enabled: bool,
+    /// Append every prompt sent to the AI (guide/reply/requery/correction) to
+    /// %LOCALAPPDATA%\com.navisual.app\prompt_log.jsonl. Independent of
+    /// `debug_screenshot_enabled`'s per-call prompt_<ts>.txt dumps (which only cover
+    /// guide(), not send_correction()) — this is a single running history instead.
+    pub debug_prompt_log_file_enabled: bool,
     /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
     pub debug_show_ai_bbox: bool,
 }
@@ -152,6 +157,7 @@ impl Default for Config {
             debug_show_response_info: false,
             debug_locate_trace_enabled: false,
             debug_locate_log_file_enabled: false,
+            debug_prompt_log_file_enabled: false,
             debug_show_ai_bbox: false,
         }
     }
@@ -361,6 +367,12 @@ impl Config {
         }
         if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") {
             config.debug_locate_log_file_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DEBUG_PROMPT_LOG_FILE_ENABLED") {
+            config.debug_prompt_log_file_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DEBUG_PROMPT_LOG_FILE_ENABLED") {
+            config.debug_prompt_log_file_enabled = v == "true" || v == "1";
         }
         if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") {
             config.debug_show_ai_bbox = v == "true" || v == "1";
