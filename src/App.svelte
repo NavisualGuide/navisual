@@ -490,6 +490,22 @@ See the LICENSE file in the root of this repository for complete details.
   let showKeyQwen = $state(false);
   let showKeyCustom = $state(false);
   let debugShowInfo = $state(false);
+
+  let customAnthropic = $state(false);
+  let customGemini = $state(false);
+  let customOpenAI = $state(false);
+  let customDeepSeek = $state(false);
+  let customQwen = $state(false);
+  let customOllama = $state(false);
+
+  function syncCustomModelFlags() {
+    customAnthropic = !MODEL_PRESETS_ANTHROPIC.includes(settingsForm.anthropic_model);
+    customGemini = !MODEL_PRESETS_GEMINI.includes(settingsForm.gemini_model);
+    customOpenAI = !MODEL_PRESETS_OPENAI.includes(settingsForm.openai_model);
+    customDeepSeek = !MODEL_PRESETS_DEEPSEEK.includes(settingsForm.deepseek_model);
+    customQwen = !MODEL_PRESETS_QWEN.includes(settingsForm.qwen_model);
+    customOllama = !ollamaModels.includes(settingsForm.ollama_model);
+  }
   let showQuickMenu = $state(false);
   let isMuted = $state(false);
   let isOverlayCleared = $state(false);
@@ -838,9 +854,11 @@ See the LICENSE file in the root of this repository for complete details.
       const models = await invoke<string[]>("list_ollama_models", { baseUrl });
       ollamaModels = models;
       ollamaModelsMsg = models.length ? "" : "No models found — pull one with `ollama pull`.";
+      customOllama = !ollamaModels.includes(settingsForm.ollama_model);
     } catch {
       ollamaModels = [];
       ollamaModelsMsg = "Couldn't reach the Ollama server — type the model name below.";
+      customOllama = true;
     }
   }
 
@@ -1171,6 +1189,7 @@ See the LICENSE file in the root of this repository for complete details.
       // Keep the live auto_advance state — the Pause/Resume button may have
       // changed it since the last disk save, and the button is the source of truth.
       settingsForm = { ...data, auto_advance: autoAdvanceEnabled };
+      syncCustomModelFlags();
       debugShowInfo = data.debug_show_response_info;
       if (data.api_provider === "ollama") refreshOllamaModels();
     } catch (e) {
@@ -1212,6 +1231,7 @@ See the LICENSE file in the root of this repository for complete details.
       qwen_api_key: settingsForm.qwen_api_key,
     };
     settingsForm = { ...SETTINGS_DEFAULTS, ...preserved };
+    syncCustomModelFlags();
     settingsError = null;
     settingsSaved = false;
   }
@@ -1600,6 +1620,7 @@ See the LICENSE file in the root of this repository for complete details.
       isMuted = !init.tts_enabled;
       if (init.api_provider) provider = init.api_provider;
       settingsForm = { ...SETTINGS_DEFAULTS, ...init, auto_advance: false };
+      syncCustomModelFlags();
       initHotkeys = init;
     } catch (_) {}
 
@@ -2653,14 +2674,14 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="setting-group">
                 <label class="setting-label" for="anthropic-model">Model</label>
                 <select id="anthropic-model" class="setting-select"
-                  value={MODEL_PRESETS_ANTHROPIC.includes(settingsForm.anthropic_model) ? settingsForm.anthropic_model : "__custom__"}
-                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.anthropic_model = v; else settingsForm.anthropic_model = ""; }}>
+                  value={customAnthropic ? "__custom__" : settingsForm.anthropic_model}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customAnthropic = false; settingsForm.anthropic_model = v; } else { customAnthropic = true; settingsForm.anthropic_model = ""; } }}>
                   <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fast)</option>
                   <option value="claude-sonnet-4-6">claude-sonnet-4-6 (recommended)</option>
                   <option value="claude-opus-4-7">claude-opus-4-7 (best quality)</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
-                {#if !MODEL_PRESETS_ANTHROPIC.includes(settingsForm.anthropic_model)}
+                {#if customAnthropic}
                   <input class="setting-input" type="text" bind:value={settingsForm.anthropic_model}
                     placeholder="e.g. claude-sonnet-4-6" spellcheck="false" style="margin-top:6px" />
                 {/if}
@@ -2687,15 +2708,15 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="setting-group">
                 <label class="setting-label" for="gemini-model">Model</label>
                 <select id="gemini-model" class="setting-select"
-                  value={MODEL_PRESETS_GEMINI.includes(settingsForm.gemini_model) ? settingsForm.gemini_model : "__custom__"}
-                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.gemini_model = v; else settingsForm.gemini_model = ""; }}>
+                  value={customGemini ? "__custom__" : settingsForm.gemini_model}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customGemini = false; settingsForm.gemini_model = v; } else { customGemini = true; settingsForm.gemini_model = ""; } }}>
                   <option value="gemini-2.5-flash">gemini-2.5-flash (recommended)</option>
                   <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (fast)</option>
                   <option value="gemini-3.5-flash">gemini-3.5-flash</option>
                   <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
-                {#if !MODEL_PRESETS_GEMINI.includes(settingsForm.gemini_model)}
+                {#if customGemini}
                   <input class="setting-input" type="text" bind:value={settingsForm.gemini_model}
                     placeholder="e.g. gemini-2.5-pro" spellcheck="false" style="margin-top:6px" />
                 {/if}
@@ -2711,14 +2732,14 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="setting-group">
                 <label class="setting-label" for="ollama-model">Model</label>
                 <select id="ollama-model" class="setting-select"
-                  value={ollamaModels.includes(settingsForm.ollama_model) ? settingsForm.ollama_model : "__custom__"}
-                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.ollama_model = v; else settingsForm.ollama_model = ""; }}>
+                  value={customOllama ? "__custom__" : settingsForm.ollama_model}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customOllama = false; settingsForm.ollama_model = v; } else { customOllama = true; settingsForm.ollama_model = ""; } }}>
                   {#each ollamaModels as m}
                     <option value={m}>{m}</option>
                   {/each}
                   <option value="__custom__">Custom / not listed…</option>
                 </select>
-                {#if !ollamaModels.includes(settingsForm.ollama_model)}
+                {#if customOllama}
                   <input class="setting-input" type="text" bind:value={settingsForm.ollama_model}
                     placeholder="e.g. gemma4:e4b" spellcheck="false" style="margin-top:6px" />
                 {/if}
@@ -2751,13 +2772,13 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="setting-group">
                 <label class="setting-label" for="openai-model">Model</label>
                 <select id="openai-model" class="setting-select"
-                  value={MODEL_PRESETS_OPENAI.includes(settingsForm.openai_model) ? settingsForm.openai_model : "__custom__"}
-                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.openai_model = v; else settingsForm.openai_model = ""; }}>
+                  value={customOpenAI ? "__custom__" : settingsForm.openai_model}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customOpenAI = false; settingsForm.openai_model = v; } else { customOpenAI = true; settingsForm.openai_model = ""; } }}>
                   <option value="gpt-5.5">gpt-5.5 (recommended)</option>
                   <option value="gpt-5.4-mini">gpt-5.4-mini (fast)</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
-                {#if !MODEL_PRESETS_OPENAI.includes(settingsForm.openai_model)}
+                {#if customOpenAI}
                   <input class="setting-input" type="text" bind:value={settingsForm.openai_model}
                     placeholder="e.g. gpt-4o" spellcheck="false" style="margin-top:6px" />
                 {/if}
@@ -2784,13 +2805,13 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="setting-group">
                 <label class="setting-label" for="deepseek-model">Model</label>
                 <select id="deepseek-model" class="setting-select"
-                  value={MODEL_PRESETS_DEEPSEEK.includes(settingsForm.deepseek_model) ? settingsForm.deepseek_model : "__custom__"}
-                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.deepseek_model = v; else settingsForm.deepseek_model = ""; }}>
+                  value={customDeepSeek ? "__custom__" : settingsForm.deepseek_model}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customDeepSeek = false; settingsForm.deepseek_model = v; } else { customDeepSeek = true; settingsForm.deepseek_model = ""; } }}>
                   <option value="deepseek-v4-flash">deepseek-v4-flash (recommended)</option>
                   <option value="deepseek-v4-pro">deepseek-v4-pro (best quality)</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
-                {#if !MODEL_PRESETS_DEEPSEEK.includes(settingsForm.deepseek_model)}
+                {#if customDeepSeek}
                   <input class="setting-input" type="text" bind:value={settingsForm.deepseek_model}
                     placeholder="e.g. deepseek-v4-flash" spellcheck="false" style="margin-top:6px" />
                 {/if}
@@ -2817,13 +2838,13 @@ See the LICENSE file in the root of this repository for complete details.
               <div class="setting-group">
                 <label class="setting-label" for="qwen-model">Model</label>
                 <select id="qwen-model" class="setting-select"
-                  value={MODEL_PRESETS_QWEN.includes(settingsForm.qwen_model) ? settingsForm.qwen_model : "__custom__"}
-                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") settingsForm.qwen_model = v; else settingsForm.qwen_model = ""; }}>
+                  value={customQwen ? "__custom__" : settingsForm.qwen_model}
+                  onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customQwen = false; settingsForm.qwen_model = v; } else { customQwen = true; settingsForm.qwen_model = ""; } }}>
                   <option value="qwen3.6-plus">qwen3.6-plus (recommended)</option>
                   <option value="qwen3.5-omni-plus">qwen3.5-omni-plus (multimodal)</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
-                {#if !MODEL_PRESETS_QWEN.includes(settingsForm.qwen_model)}
+                {#if customQwen}
                   <input class="setting-input" type="text" bind:value={settingsForm.qwen_model}
                     placeholder="e.g. qwen3.6-plus" spellcheck="false" style="margin-top:6px" />
                 {/if}
