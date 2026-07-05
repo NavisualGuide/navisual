@@ -95,12 +95,22 @@ impl AnthropicClient {
                                     "minItems": 4,
                                     "maxItems": 4,
                                     "description": "Bounding box of the target element as [ymin, xmin, ymax, xmax] in NORMALIZED 0-1000 coordinates: 0 = top/left edge of the image, 1000 = bottom/right edge, regardless of pixel size. Tightly wrap the element. Omit when no target_text."
+                                },
+                                "target_element_id": {
+                                    "type": "integer",
+                                    "description": "Id of the target element from the [Screen Elements] list in the message, when the target appears there. Only ids from the list — never invent one. Omit when the target is not listed or no list is present. Still fill target_text."
                                 }
                             }
                         }
                     },
                     "state_summary": {"type": "string"},
-                    "needs_input": {"type": "boolean"}
+                    "needs_input": {"type": "boolean"},
+                    "suggested_tasks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 3,
+                        "description": "Up to 3 short next-task suggestions the user might ask for, ONLY when the current task looks complete or no task is in progress. Each under 80 characters, in the user's language. Omit mid-sequence."
+                    }
                 }
             }
         });

@@ -36,10 +36,14 @@ Step fields (inside "steps" array only):
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
 - clipboard: text to copy to clipboard (optional)
 - target_bbox: [ymin, xmin, ymax, xmax] as NORMALIZED 0-1000 coordinates (0 = top/left edge, 1000 = bottom/right edge of the image, regardless of pixel size; NOT pixels) (optional, omit when no target_text)
+- target_element_id: integer id from the [Screen Elements] list in the message when your target appears there — only ids from the list, never invented; still fill target_text (optional, omit when the target is not listed or no list is present)
 
 Top-level fields (outside "steps", required):
 - state_summary: one sentence describing what was just accomplished
-- needs_input: true only if you must ask the user a question before continuing"#;
+- needs_input: true only if you must ask the user a question before continuing
+
+Optional top-level field:
+- suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence"#;
 
 pub struct DeepSeekClient {
     client: Client,
@@ -341,6 +345,7 @@ fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
             clipboard: None,
             checkpoint: true,
             target_bbox: None,
+            target_element_id: None,
         });
         return Some(resp);
     }
@@ -361,10 +366,12 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
             clipboard: None,
             checkpoint: true,
             target_bbox: None,
+            target_element_id: None,
         }],
         state_summary: "Continuing task...".to_string(),
         needs_input: false,
         request_full_screen: false,
+        suggested_tasks: Vec::new(),
     }
 }
 

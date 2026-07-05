@@ -61,6 +61,12 @@ pub struct PackManifest {
     /// Defaults to 1.0 (author at 100 % — the guidance in nav-packs.md §6.1).
     #[serde(default = "default_authoring_scale")]
     pub authoring_scale: f32,
+    /// Workstream P (v0.7): curated starter tasks for the cold-start prefill dropdown —
+    /// short, user-phrased tasks a first-time user of this app might ask for ("Help me
+    /// move an object"). Purely additive; packs without it fall back to the frontend's
+    /// generic "Show me around {app}" template.
+    #[serde(default)]
+    pub starter_tasks: Vec<String>,
 }
 
 /// Default `authoring_scale` when a pack omits it — 100 % (the documented authoring scale).

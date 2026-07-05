@@ -12,8 +12,11 @@
 
 use super::adapters;
 use super::hit_test::{self, HitTestOutcome, RoleHit};
-use super::trace::{AdapterTrace, Corroboration, FinalDecision, LocateTrace, OcrTrace, TemplateTrace};
-use super::{a11y, ocr, template, LocateResult};
+use super::trace::{
+    AdapterTrace, Corroboration, FinalDecision, LocateTrace, OcrTrace, SelectionTrace,
+    TemplateTrace,
+};
+use super::{a11y, ocr, template, ContextElement, LocateResult};
 use crate::capture::{self, Rect};
 use anyhow::Result;
 use std::time::Instant;
@@ -71,6 +74,13 @@ pub struct LocateOptions {
     /// default 1.0). Combined with the target monitor's physical scale, it centres the
     /// template-matching DPI prior so a 100 %-authored pack still matches at 150 %/200 %.
     pub icon_authoring_scale: f32,
+    /// Pass 0.5 (v0.7 Workstream S) — the Structured-Context element snapshot enumerated
+    /// at AI-capture time (the list the AI saw). `None` = the feature is off / the
+    /// enumeration was skipped, so Pass 0.5 never runs.
+    pub context_elements: Option<std::sync::Arc<Vec<ContextElement>>>,
+    /// The `target_element_id` the AI returned for this step, if any. Only meaningful
+    /// alongside `context_elements`; verified before use, never trusted blindly.
+    pub selected_element_id: Option<u32>,
 }
 
 pub fn locate(
@@ -102,6 +112,23 @@ pub fn locate(
         }
         // Adapter claimed the target but couldn't resolve it (e.g. a scrolled-out cell);
         // the trace records why, and we fall through to the untouched A11y → OCR path.
+    }
+
+    // Pass 0.5 — Structured-Context selection (v0.7 Workstream S): the AI selected one
+    // of the elements we enumerated at capture time, so the pick carries an exact rect
+    // we already hold. Verified against the LIVE tree before use; on any doubt the
+    // four-pass pipeline below runs unchanged with target_text (Decision 1 — selection
+    // augments, never replaces).
+    if let (Some(snapshot), Some(id)) = (opts.context_elements.as_ref(), opts.selected_element_id)
+    {
+        let (sel_hit, sel_trace) = try_selection_pass(target_text, snapshot, id);
+        trace.selection = Some(sel_trace);
+        if let Some(result) = sel_hit {
+            trace.final_decision = FinalDecision::HitSelection;
+            trace.final_bbox = Some(result.bbox);
+            trace.elapsed_ms = started.elapsed().as_millis() as u32;
+            return Ok((Some(result), trace));
+        }
     }
 
     // Pass 1 — A11y.
@@ -524,6 +551,69 @@ pub fn locate(
     trace.final_bbox = Some(pointer_bbox);
     trace.elapsed_ms = started.elapsed().as_millis() as u32;
     Ok((Some(result), trace))
+}
+
+/// Pass 0.5 — resolve + verify a Structured-Context selection (v0.7 S.3). Three layers,
+/// each falling through to the normal pipeline with a trace reason:
+///  1. the id must resolve into the snapshot (a fabricated/out-of-range id dies here);
+///  2. cheap text cross-check — the AI's `target_text` must share ≥1 token with the
+///     snapshot name (a weak model copying a wrong id dies here, no COM spent);
+///  3. live verification (`a11y::verify_context_element`, the `ai_bbox_probe` pattern) —
+///     the element at the snapshot point must still be role/name-compatible, and the
+///     pointer uses its **fresh** rect (a scrolled/moved control fails the name check).
+fn try_selection_pass(
+    target_text: &str,
+    snapshot: &[ContextElement],
+    id: u32,
+) -> (Option<LocateResult>, SelectionTrace) {
+    let mut tr = SelectionTrace {
+        id,
+        snapshot_len: snapshot.len(),
+        ..Default::default()
+    };
+    let Some(snap) = snapshot.iter().find(|e| e.id == id) else {
+        tr.detail = format!("id {id} not in snapshot ({} elements)", snapshot.len());
+        return (None, tr);
+    };
+    tr.snapshot_name = Some(snap.name.clone());
+    if !shares_token(target_text, &snap.name) {
+        tr.detail = format!(
+            "text cross-check failed: target {target_text:?} shares no token with {:?}",
+            snap.name
+        );
+        return (None, tr);
+    }
+    let (live_rect, detail) = a11y::verify_context_element(snap);
+    tr.detail = detail;
+    let Some(bbox) = live_rect else {
+        return (None, tr);
+    };
+    tr.verified = true;
+    (
+        Some(LocateResult {
+            bbox,
+            name: snap.name.clone(),
+            role: snap.role.clone(),
+            confidence: 1.0,
+        }),
+        tr,
+    )
+}
+
+/// ≥1 shared alphanumeric token (case-insensitive) between two labels — the S.3 text
+/// cross-check. Deliberately loose (truncation, badges, partial copies still pass);
+/// the live verification is the strong gate. Both sides empty-tokenised → false.
+fn shares_token(a: &str, b: &str) -> bool {
+    let tokens = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let ta = tokens(a);
+    let tb = tokens(b);
+    ta.iter().any(|t| tb.contains(t))
 }
 
 /// UIA role family under the OCR match, for the corroboration decision.
@@ -1017,6 +1107,57 @@ mod tests {
             800,
         );
         assert_eq!(m.x, 800);
+    }
+
+    #[test]
+    fn selection_rejects_before_touching_uia() {
+        // The two deterministic S.3 layers — an unresolvable id and a failed text
+        // cross-check both fall through with a reason, WITHOUT reaching the live
+        // verification (so a garbage id from a weak model costs nothing).
+        let snapshot = vec![
+            ContextElement {
+                id: 1,
+                name: "Save As".to_string(),
+                role: "Button".to_string(),
+                rect: bbox_stub(),
+            },
+            ContextElement {
+                id: 2,
+                name: "Performance".to_string(),
+                role: "TabItem".to_string(),
+                rect: bbox_stub(),
+            },
+        ];
+        // Fabricated id → not in snapshot.
+        let (hit, tr) = try_selection_pass("Save As", &snapshot, 99);
+        assert!(hit.is_none());
+        assert!(tr.snapshot_name.is_none());
+        assert!(tr.detail.contains("not in snapshot"));
+        // Wrong id copied (target says Performance, id points at Save As) → the
+        // token cross-check kills it cheaply.
+        let (hit, tr) = try_selection_pass("Performance", &snapshot, 1);
+        assert!(hit.is_none());
+        assert_eq!(tr.snapshot_name.as_deref(), Some("Save As"));
+        assert!(tr.detail.contains("cross-check failed"));
+        assert!(!tr.verified);
+    }
+
+    fn bbox_stub() -> Rect {
+        r(10, 10, 40, 20)
+    }
+
+    #[test]
+    fn shares_token_is_loose_but_not_empty() {
+        use super::shares_token;
+        // Truncated / partial copies still pass (the live verification is the gate).
+        assert!(shares_token("Save", "Save As…"));
+        assert!(shares_token("Close tab", "Close"));
+        assert!(shares_token("EXTENSIONS", "Extensions (Ctrl+Shift+X) - 4 require restart"));
+        // Punctuation-only differences tokenize away.
+        assert!(shares_token("+0.17", "Exposure + 0 . 17"));
+        // No shared token → reject (the weak-model copied-wrong-id case).
+        assert!(!shares_token("Performance", "Save As"));
+        assert!(!shares_token("", "Save As"));
     }
 
     #[test]

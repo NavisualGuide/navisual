@@ -9,6 +9,7 @@ mod capture;
 mod locator;
 mod overlay;
 mod packs;
+mod prompt_log;
 mod server;
 mod track;
 mod tts;
@@ -65,6 +66,44 @@ struct GuidanceState {
     /// only on single-monitor systems; with 2+ monitors the picker requires choosing a
     /// single screen (a stitched multi-monitor capture is downscaled to uselessness).
     full_screen_monitor: Option<capture::Rect>,
+    /// v0.7 Workstream S — the Structured-Context element snapshot enumerated at the
+    /// most recent AI-capture (the [Screen Elements] list the AI saw). Stored beside
+    /// the capture state so `next_step`'s locates resolve `target_element_id` against
+    /// the SAME list; replaced (or cleared) on every guide/correction capture.
+    context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>>,
+}
+
+/// S.1 — enumerate the Structured-Context element snapshot for the captured window.
+/// Runs on a blocking thread right after the AI capture (same freshness contract as
+/// the screenshot); every skip (framework `Other`, over-cap, over-budget, zero
+/// elements) is logged with its reason and yields `None` → no prompt block, no
+/// Pass 0.5 (Decision 4: skip the whole block, never truncate).
+#[cfg(windows)]
+fn enumerate_context_snapshot(hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    let started = std::time::Instant::now();
+    match locator::a11y::enumerate_context_elements(hwnd) {
+        Ok(els) if els.is_empty() => {
+            log::info!("[context] skipped: zero elements");
+            None
+        }
+        Ok(els) => {
+            log::info!(
+                "[context] {} elements enumerated in {} ms",
+                els.len(),
+                started.elapsed().as_millis()
+            );
+            Some(els)
+        }
+        Err(reason) => {
+            log::info!("[context] skipped: {reason}");
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn enumerate_context_snapshot(_hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    None
 }
 
 /// Shared app state.
@@ -216,6 +255,10 @@ fn execute_step(
     // Loaded nav-packs — when the focused window matches a pack with icon crops for this
     // target, those crops feed the locator's Pass-3 template matching (Workstream B).
     packs: &packs::PackRegistry,
+    // v0.7 Workstream S — the Structured-Context snapshot from the most recent AI
+    // capture (the [Screen Elements] list the AI saw). With the step's
+    // target_element_id it drives Pass 0.5; None → byte-identical v0.6 behaviour.
+    context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>>,
 ) -> Result<
     (
         Option<locator::LocateResult>,
@@ -237,6 +280,13 @@ fn execute_step(
                 // expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
                 // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms.
                 let icon_target = !icon_templates.is_empty();
+                // S.4 skip condition: an icon target with a pack template never uses
+                // selection — the template is already the authority for glyphs.
+                let selected_element_id = if icon_target {
+                    None
+                } else {
+                    step.target_element_id
+                };
                 let opts = locator::orchestrator::LocateOptions {
                     role: step
                         .target_role
@@ -254,6 +304,8 @@ fn execute_step(
                     icon_region,
                     icon_target,
                     icon_authoring_scale,
+                    context_elements: context_elements.clone(),
+                    selected_element_id,
                 };
                 let text_owned = text.clone();
                 let pre = pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r));
@@ -267,7 +319,14 @@ fn execute_step(
             }
             #[cfg(not(windows))]
             {
-                let _ = (text, target_hwnd, debug_ocr_path, avoid_bbox, &pre_ocr);
+                let _ = (
+                    text,
+                    target_hwnd,
+                    debug_ocr_path,
+                    avoid_bbox,
+                    &pre_ocr,
+                    &context_elements,
+                );
                 (None, None)
             }
         } else {
@@ -509,6 +568,40 @@ fn maybe_log_trace(app: &AppHandle, trace: &locator::trace::LocateTrace, log_ena
     }
 }
 
+/// Developer option — append the exact prompt sent to the AI to a single running
+/// `prompt_log.jsonl`, when enabled. Covers every call site (guide/reply/requery/
+/// correction), unlike `debug_screenshot_enabled`'s per-call `prompt_<ts>.txt` dumps
+/// (guide() only). System prompt is static and never logged — see `ai/prompts.rs`.
+#[allow(clippy::too_many_arguments)]
+fn maybe_log_prompt(
+    app: &AppHandle,
+    log_enabled: bool,
+    session_id: &str,
+    call_kind: &str,
+    provider: &str,
+    model: &str,
+    has_screenshot: bool,
+    prompt: &str,
+) {
+    if !log_enabled {
+        return;
+    }
+    let entry = prompt_log::PromptLogEntry::new(
+        session_id,
+        call_kind,
+        provider,
+        model,
+        has_screenshot,
+        prompt,
+    );
+    if let Ok(dir) = app.path().app_local_data_dir() {
+        let path = dir.join("prompt_log.jsonl");
+        if let Err(e) = prompt_log::append_jsonl(&path, &entry) {
+            log::warn!("prompt_log.jsonl write failed: {e}");
+        }
+    }
+}
+
 /// Nav-Pack prompt injection (Workstream C): if a loaded pack's `window_title_pattern`
 /// matches the focused window, return its formatted guidance + shortcut block to append to
 /// the prompt; empty string otherwise. Keeps the lookup out of the two guidance call sites.
@@ -561,10 +654,34 @@ fn pack_locate_hints(
     (icons, pack.region_hint_for(target_text), pack.authoring_scale())
 }
 
+/// Workstream P (v0.7) — curated starter tasks from the nav-pack matching `hwnd`'s
+/// window, for the cold-start prefill dropdown. Empty when no pack matches or the
+/// pack has none; the frontend falls back to its generic "Show me around {app}".
+#[tauri::command]
+fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        if hwnd == 0 || state.packs.is_empty() {
+            return Vec::new();
+        }
+        let title = capture::get_window_title(hwnd as usize);
+        state
+            .packs
+            .get_active_pack(&title)
+            .map(|pack| pack.manifest.starter_tasks.iter().take(3).cloned().collect())
+            .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (state, hwnd);
+        Vec::new()
+    }
+}
+
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
-fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>) {
+fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>, draw_boundary: bool) {
     let info = hwnd_raw.and_then(capture::get_window_info_for_hwnd);
     if let Some(info) = info {
         let payload = SharedAppInfoPayload {
@@ -575,25 +692,29 @@ fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>) {
         };
         let _ = app.emit("app_changed", Some(&payload));
 
-        // Animated boundary box.
-        if let Ok(update) = overlay::make_update(
-            overlay::OverlayKind::AppBoundary,
-            Some(info.rect),
-            Some(info.app_name),
-        ) {
-            if let Err(e) = overlay::emit_update(app, update) {
-                log::debug!("app_boundary emit failed: {e}");
+        if draw_boundary {
+            // Animated boundary box.
+            if let Ok(update) = overlay::make_update(
+                overlay::OverlayKind::AppBoundary,
+                Some(info.rect),
+                Some(info.app_name),
+            ) {
+                if let Err(e) = overlay::emit_update(app, update) {
+                    log::debug!("app_boundary emit failed: {e}");
+                }
             }
         }
     } else {
         let _ = app.emit("app_changed", Option::<SharedAppInfoPayload>::None);
-        if let Ok(update) = overlay::make_update(
-            overlay::OverlayKind::AppBoundary,
-            None,
-            None,
-        ) {
-            if let Err(e) = overlay::emit_update(app, update) {
-                log::debug!("app_boundary emit failed: {e}");
+        if draw_boundary {
+            if let Ok(update) = overlay::make_update(
+                overlay::OverlayKind::AppBoundary,
+                None,
+                None,
+            ) {
+                if let Err(e) = overlay::emit_update(app, update) {
+                    log::debug!("app_boundary emit failed: {e}");
+                }
             }
         }
     }
@@ -610,11 +731,11 @@ pub fn refresh_active_window(app: &AppHandle) {
         }
         g.pinned_hwnd.or(g.target_hwnd)
     };
-    announce_shared_app(app, announce_hwnd);
+    announce_shared_app(app, announce_hwnd, false);
 }
 
 #[cfg(not(windows))]
-fn announce_shared_app(_app: &AppHandle, _hwnd_raw: Option<usize>) {}
+fn announce_shared_app(_app: &AppHandle, _hwnd_raw: Option<usize>, _draw_boundary: bool) {}
 
 #[cfg(not(windows))]
 pub fn refresh_active_window(_app: &AppHandle) {}
@@ -650,6 +771,11 @@ struct GuideResponse {
     /// AI-returned bounding box in screen (virtual desktop) coordinates.
     /// Developer "Show AI bbox" overlay reads this.
     ai_bbox: Option<capture::Rect>,
+    /// Workstream P (v0.7): up to 3 AI-suggested next tasks (already lax-parsed and
+    /// capped). Empty when the model offered none, on local advances/errors, or when
+    /// the `task_suggestions` setting is off. Display-only — the frontend prefills
+    /// the task box (selected) and never auto-submits.
+    suggested_tasks: Vec<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -706,6 +832,15 @@ struct SettingsPayload {
     debug_show_response_info: bool,
     debug_locate_trace_enabled: bool,
     debug_locate_log_file_enabled: bool,
+    debug_prompt_log_file_enabled: bool,
+    /// v0.7 Workstream S — Structured-Context Locator ("select, don't ground").
+    /// Developer-tab toggle; default off until the S.4 live-verification matrix.
+    #[serde(default)]
+    structured_context: bool,
+    /// v0.7 Workstream P — prefilled task suggestions (cold-start prefill + AI
+    /// suggested_tasks). Screen Guide toggle; default on (display-only, no risk).
+    #[serde(default = "default_true_setting")]
+    task_suggestions: bool,
     /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
     /// Front-end only — backend always emits ai_bbox in OverlayUpdate; the
     /// overlay renderer reads this flag (from `overlay:theme`) to decide
@@ -717,6 +852,11 @@ struct SettingsPayload {
     /// written by save_settings (it's deserialized but ignored on the way in).
     #[serde(default)]
     developer_mode: bool,
+}
+
+/// Serde default for settings that are ON unless explicitly disabled.
+fn default_true_setting() -> bool {
+    true
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -901,7 +1041,13 @@ async fn guide(
         }
     };
 
-    let debug_screenshot_enabled = { state.ai_router.lock().await.config.debug_screenshot_enabled };
+    let (debug_screenshot_enabled, structured_context_enabled) = {
+        let router = state.ai_router.lock().await;
+        (
+            router.config.debug_screenshot_enabled,
+            router.config.structured_context,
+        )
+    };
 
     // `is_fs` is the user's sticky "Entire desktop" choice from the target picker
     // (GuidanceState.full_screen_mode). The AI no longer decides this — full-screen
@@ -1068,6 +1214,7 @@ async fn guide(
                 chat_thumb_b64: None,
                 locate_trace: None,
                 ai_bbox: None,
+                suggested_tasks: Vec::new(),
             });
         }
     };
@@ -1075,8 +1222,24 @@ async fn guide(
     // Phase 0.2 — flash the shared-app boundary so the user can see what
     // we're capturing. Emits the `app_changed` event for the header chip too.
     if let Some(hwnd_raw) = new_hwnd_opt {
-        announce_shared_app(&app, Some(hwnd_raw));
+        announce_shared_app(&app, Some(hwnd_raw), true);
     }
+
+    // S.1 — Structured-Context enumeration at AI-capture time (v0.7 Workstream S): the
+    // element list the AI can select from, same freshness contract as the screenshot.
+    // Gated on the flag + a single captured window (full-screen mode has no one tree).
+    // A warm tree is ~ms; the 300 ms hard budget bounds the worst case before the
+    // (multi-second) AI call starts.
+    let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
+        match (structured_context_enabled && !is_fs, new_hwnd_opt) {
+            (true, Some(hwnd)) => tokio::task::spawn_blocking(move || {
+                enumerate_context_snapshot(hwnd).map(std::sync::Arc::new)
+            })
+            .await
+            .ok()
+            .flatten(),
+            _ => None,
+        };
 
     let mut router = state.ai_router.lock().await;
 
@@ -1085,6 +1248,9 @@ async fn guide(
         let info = capture::get_window_info(hwnd);
         window_context = format!("\n[Current Window Info]\n{}", info);
         window_context.push_str(&active_pack_context(&state.packs, hwnd));
+    }
+    if let (Some(els), Some(rect)) = (context_elements.as_deref(), capture_rect_opt) {
+        window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
 
     // Append window context to the prompt (no grid suffix any more — AI returns
@@ -1218,6 +1384,24 @@ async fn guide(
         .get_managed_routed_model()
         .unwrap_or_else(|| router.active_model());
     let (in_tok, out_tok) = router.get_last_usage();
+    maybe_log_prompt(
+        &app,
+        router.config.debug_prompt_log_file_enabled,
+        &session_id,
+        if is_reply {
+            "reply"
+        } else if is_next_requery {
+            "requery"
+        } else if task.is_empty() {
+            "resume"
+        } else {
+            "task"
+        },
+        &timing_provider,
+        &used_model,
+        true,
+        &sent_user_prompt,
+    );
     log_model_timing(
         &app,
         &timing_provider,
@@ -1264,6 +1448,7 @@ async fn guide(
                 chat_thumb_b64: None,
                 locate_trace: None,
                 ai_bbox: None,
+                suggested_tasks: Vec::new(),
             });
         }
     };
@@ -1272,6 +1457,14 @@ async fn guide(
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
     let request_full_screen = response.request_full_screen;
+    // Workstream P: the toggle gates the data at the source — when off, suggestions
+    // never reach the frontend (the static prompt rule stays; making it dynamic
+    // would break Anthropic prompt caching for ~4 lines of text).
+    let suggested_tasks = if router.config.task_suggestions {
+        response.suggested_tasks
+    } else {
+        Vec::new()
+    };
     let provider = router.config.api_provider.clone();
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
@@ -1306,6 +1499,9 @@ async fn guide(
         g.provider = provider.clone();
         g.capture_rect = capture_rect_opt;
         g.target_hwnd = new_hwnd_opt;
+        // Also stored when None — a skipped enumeration must clear the previous
+        // snapshot, or next_step would resolve ids against a stale list.
+        g.context_elements = context_elements.clone();
     }
 
     if steps.is_empty() {
@@ -1336,6 +1532,8 @@ async fn guide(
             chat_thumb_b64,
             locate_trace: None,
             ai_bbox: None,
+            // A no-step "looks complete" reply is exactly where suggestions matter.
+            suggested_tasks,
         });
     }
 
@@ -1386,6 +1584,7 @@ async fn guide(
         capture_rect_opt,
         pre_ocr,
         &state.packs,
+        context_elements,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1414,6 +1613,7 @@ async fn guide(
         chat_thumb_b64,
         locate_trace,
         ai_bbox,
+        suggested_tasks,
     })
 }
 
@@ -1423,7 +1623,7 @@ async fn next_step(
     state: State<'_, AppState>,
     step_index: usize,
 ) -> Result<GuideResponse, String> {
-    let (steps, session_id, needs_input, provider, capture_rect) = {
+    let (steps, session_id, needs_input, provider, capture_rect, context_elements) = {
         let g = state.guidance.lock();
         (
             g.steps.clone(),
@@ -1431,6 +1631,9 @@ async fn next_step(
             g.needs_input,
             g.provider.clone(),
             g.capture_rect,
+            // The snapshot from the capture that produced these steps — ids in
+            // steps[1..] resolve against the SAME list the AI saw (v0.7 S.1).
+            g.context_elements.clone(),
         )
     };
 
@@ -1481,6 +1684,7 @@ async fn next_step(
         capture_rect,
         None, // next_step reuses the prior capture; locator re-captures for OCR
         &state.packs,
+        context_elements,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1511,6 +1715,7 @@ async fn next_step(
         chat_thumb_b64: None,
         locate_trace,
         ai_bbox,
+        suggested_tasks: Vec::new(), // local advance — no AI call, no new guesses
     })
 }
 
@@ -1545,6 +1750,7 @@ async fn send_correction(
 
     let router = state.ai_router.lock().await;
     let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
+    let structured_context_enabled = router.config.structured_context;
     drop(router); // Release lock before blocking capture
 
     let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
@@ -1656,8 +1862,21 @@ async fn send_correction(
 
     // Phase 0.2 — show shared-app boundary on correction too.
     if let Some(hwnd_raw) = new_hwnd {
-        announce_shared_app(&app, Some(hwnd_raw));
+        announce_shared_app(&app, Some(hwnd_raw), true);
     }
+
+    // S.1 — fresh Structured-Context snapshot for the correction capture (the retry
+    // may be looking at a different window/state than the original guide()).
+    let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
+        match (structured_context_enabled && !is_fs, new_hwnd) {
+            (true, Some(hwnd)) => tokio::task::spawn_blocking(move || {
+                enumerate_context_snapshot(hwnd).map(std::sync::Arc::new)
+            })
+            .await
+            .ok()
+            .flatten(),
+            _ => None,
+        };
 
     let mut router = state.ai_router.lock().await;
     let summary = {
@@ -1679,6 +1898,9 @@ async fn send_correction(
         let info = capture::get_window_info(hwnd);
         window_context = format!("\n[Current Window Info]\n{}", info);
         window_context.push_str(&active_pack_context(&state.packs, hwnd));
+    }
+    if let (Some(els), Some(rect)) = (context_elements.as_deref(), new_capture_rect) {
+        window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
 
     let final_user_text = if !window_context.is_empty() {
@@ -1744,6 +1966,16 @@ async fn send_correction(
         .get_managed_routed_model()
         .unwrap_or_else(|| router.active_model());
     let (in_tok, out_tok) = router.get_last_usage();
+    maybe_log_prompt(
+        &app,
+        router.config.debug_prompt_log_file_enabled,
+        &session_id,
+        "correction",
+        &timing_provider,
+        &used_model,
+        true,
+        user_text,
+    );
     log_model_timing(
         &app,
         &timing_provider,
@@ -1776,6 +2008,12 @@ async fn send_correction(
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
     let request_full_screen = response.request_full_screen;
+    // Workstream P: same source-gating as guide().
+    let suggested_tasks = if router.config.task_suggestions {
+        response.suggested_tasks
+    } else {
+        Vec::new()
+    };
     let provider = router.config.api_provider.clone();
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
@@ -1803,6 +2041,9 @@ async fn send_correction(
         g.needs_input = needs_input;
         g.capture_rect = new_capture_rect;
         g.target_hwnd = new_hwnd;
+        // Stored even when None — a skipped enumeration must clear the previous
+        // snapshot, or next_step would resolve ids against a stale list.
+        g.context_elements = context_elements.clone();
     }
 
     if steps.is_empty() {
@@ -1831,6 +2072,7 @@ async fn send_correction(
             chat_thumb_b64,
             locate_trace: None,
             ai_bbox: None,
+            suggested_tasks,
         });
     }
 
@@ -1878,6 +2120,7 @@ async fn send_correction(
         new_capture_rect,
         pre_ocr,
         &state.packs,
+        context_elements,
     )
     .unwrap_or((None, None));
     if let Some(ref t) = locate_trace {
@@ -1905,6 +2148,7 @@ async fn send_correction(
         chat_thumb_b64,
         locate_trace,
         ai_bbox,
+        suggested_tasks,
     })
 }
 
@@ -1978,7 +2222,7 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
         g.full_screen_monitor = None;
     }
     #[cfg(windows)]
-    announce_shared_app(&app, Some(hwnd));
+    announce_shared_app(&app, Some(hwnd), true);
     #[cfg(not(windows))]
     let _ = app;
 }
@@ -2138,6 +2382,8 @@ async fn locate_a11y(
             icon_region: None,
             icon_target: false,
             icon_authoring_scale: 1.0,
+            context_elements: None,
+            selected_element_id: None,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::a11y::find_element(&text, &opts))
@@ -2180,6 +2426,8 @@ async fn locate_element(
             icon_region: None,
             icon_target: false,
             icon_authoring_scale: 1.0,
+            context_elements: None,
+            selected_element_id: None,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts, None))
@@ -2386,6 +2634,9 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         debug_show_response_info: c.debug_show_response_info,
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
+        debug_prompt_log_file_enabled: c.debug_prompt_log_file_enabled,
+        structured_context: c.structured_context,
+        task_suggestions: c.task_suggestions,
         debug_show_ai_bbox: c.debug_show_ai_bbox,
         developer_mode: developer_mode_enabled(),
     })
@@ -2467,6 +2718,18 @@ async fn save_settings(
         (
             "DEBUG_LOCATE_LOG_FILE_ENABLED".into(),
             payload.debug_locate_log_file_enabled.to_string(),
+        ),
+        (
+            "DEBUG_PROMPT_LOG_FILE_ENABLED".into(),
+            payload.debug_prompt_log_file_enabled.to_string(),
+        ),
+        (
+            "STRUCTURED_CONTEXT".into(),
+            payload.structured_context.to_string(),
+        ),
+        (
+            "TASK_SUGGESTIONS".into(),
+            payload.task_suggestions.to_string(),
         ),
         (
             "DEBUG_SHOW_AI_BBOX".into(),
@@ -3277,6 +3540,7 @@ pub fn run() {
             clear_overlay,
             restore_overlay,
             get_shared_app_info,
+            get_pack_starters,
             speak,
             get_settings,
             save_settings,

@@ -50,6 +50,18 @@ pub struct Config {
     // Shared
     pub api_timeout_sec: u64,
 
+    // v0.7 Workstream S — Structured-Context Locator ("select, don't ground"): send an
+    // indexed UIA element list with the screenshot; the AI returns target_element_id,
+    // verified before use. Default OFF in the first build; flipped on for Chrome/Eager
+    // after the S.4 live-verification matrix (navisual-internal/docs/v0.7-plan.md).
+    pub structured_context: bool,
+
+    // v0.7 Workstream P — prefilled task suggestions: surface the AI's suggested_tasks
+    // (piggybacked on navigate_step) + the local cold-start prefill. Display-only UI
+    // sugar with no wrong-pointer risk, so unlike structured_context it defaults ON;
+    // the Settings → Screen Guide toggle turns it off.
+    pub task_suggestions: bool,
+
     // Locator — comma-separated, case-insensitive substrings of model names whose AI
     // `target_bbox` is NOT trusted to corroborate (rescue) a borderline OCR match. Trust
     // is default-ON for every model; only models matching this list are muted. Default is
@@ -88,6 +100,11 @@ pub struct Config {
     pub debug_locate_trace_enabled: bool,
     /// Append every locate trace to %LOCALAPPDATA%\com.navisual.app\locate_log.jsonl.
     pub debug_locate_log_file_enabled: bool,
+    /// Append every prompt sent to the AI (guide/reply/requery/correction) to
+    /// %LOCALAPPDATA%\com.navisual.app\prompt_log.jsonl. Independent of
+    /// `debug_screenshot_enabled`'s per-call prompt_<ts>.txt dumps (which only cover
+    /// guide(), not send_correction()) — this is a single running history instead.
+    pub debug_prompt_log_file_enabled: bool,
     /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
     pub debug_show_ai_bbox: bool,
 }
@@ -120,6 +137,8 @@ impl Default for Config {
             managed_model: "openrouter/free".to_string(),
             managed_tier: "regular".to_string(),
             api_timeout_sec: 90,
+            structured_context: false,
+            task_suggestions: true,
             bbox_distrust_models: "nemotron,gemma,kimi".to_string(),
             overlay_color: "#FF6B35".to_string(),
             overlay_thickness: 4,
@@ -138,6 +157,7 @@ impl Default for Config {
             debug_show_response_info: false,
             debug_locate_trace_enabled: false,
             debug_locate_log_file_enabled: false,
+            debug_prompt_log_file_enabled: false,
             debug_show_ai_bbox: false,
         }
     }
@@ -270,6 +290,12 @@ impl Config {
                 config.managed_tier = v;
             }
         }
+        if let Ok(v) = env::var("STRUCTURED_CONTEXT") {
+            config.structured_context = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("TASK_SUGGESTIONS") {
+            config.task_suggestions = v == "true" || v == "1";
+        }
         // No is_empty guard: an explicit empty value means "trust every model".
         if let Ok(v) = env::var("BBOX_DISTRUST_MODELS") {
             config.bbox_distrust_models = v;
@@ -341,6 +367,12 @@ impl Config {
         }
         if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") {
             config.debug_locate_log_file_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DEBUG_PROMPT_LOG_FILE_ENABLED") {
+            config.debug_prompt_log_file_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("DEBUG_PROMPT_LOG_FILE_ENABLED") {
+            config.debug_prompt_log_file_enabled = v == "true" || v == "1";
         }
         if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") {
             config.debug_show_ai_bbox = v == "true" || v == "1";

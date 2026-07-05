@@ -44,6 +44,7 @@ See the LICENSE file in the root of this repository for complete details.
     chat_thumb_b64: string | null;
     locate_trace: LocateTrace | null;
     ai_bbox: Rect | null;
+    suggested_tasks: string[];
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
@@ -87,6 +88,9 @@ See the LICENSE file in the root of this repository for complete details.
     debug_show_response_info: boolean;
     debug_locate_trace_enabled: boolean;
     debug_locate_log_file_enabled: boolean;
+    debug_prompt_log_file_enabled: boolean;
+    structured_context: boolean;
+    task_suggestions: boolean;
     debug_show_ai_bbox: boolean;
     developer_mode: boolean;
   };
@@ -159,12 +163,21 @@ See the LICENSE file in the root of this repository for complete details.
     scale_prior: number;
     accepted: boolean;
   };
+  // Pass 0.5 — Structured-Context selection (mirrors SelectionTrace in trace.rs).
+  type SelectionTrace = {
+    id: number;
+    snapshot_len: number;
+    snapshot_name: string | null;
+    verified: boolean;
+    detail: string;
+  };
   type FinalDecision =
     | { kind: "miss" }
     | { kind: "hit_a11y" }
     | { kind: "hit_ocr" }
     | { kind: "hit_template" }
     | { kind: "hit_adapter" }
+    | { kind: "hit_selection" }
     | { kind: "rejected_by_hit_test"; leaf_class: string }
     | { kind: "rejected_uncorroborated"; detail: string }
     | { kind: "error"; message: string };
@@ -174,6 +187,7 @@ See the LICENSE file in the root of this repository for complete details.
     target_role: string | null;
     nearby_text: string | null;
     ai_bbox: { x: number; y: number; width: number; height: number } | null;
+    selection: SelectionTrace | null;
     a11y: A11yTrace;
     ocr: OcrTrace;
     template: TemplateTrace | null;
@@ -270,6 +284,70 @@ See the LICENSE file in the root of this repository for complete details.
     exe_name: string;
   };
   let sharedApp = $state<SharedAppInfo | null>(null);
+
+  // ---- Workstream P (v0.7): prefilled task suggestions ----
+  // The task box is prefilled with a plausible task, rendered SELECTED so one
+  // keystroke replaces it; a small list under the box offers alternatives when
+  // there is more than one guess. Display-only — nothing is ever auto-submitted.
+  let taskSuggestions = $state<string[]>([]); // current guess list (≤3)
+  let prefillActive = $state(false); // task box holds an untouched prefill
+  let taskInputEl: HTMLTextAreaElement | undefined = $state(undefined);
+
+  /// Prefill the box with `suggestions[0]` + list the rest. Never clobbers
+  /// user-typed text (only an empty box or an untouched previous prefill is
+  /// replaced) and never runs while the AI needs an answer (the box is a reply).
+  function applyPrefill(suggestions: string[]) {
+    if (!settingsForm.task_suggestions || suggestions.length === 0) return;
+    if (phase === "needs_input" || phase === "thinking") return;
+    if (task.trim() && !prefillActive) return;
+    taskSuggestions = suggestions.slice(0, 3);
+    task = taskSuggestions[0];
+    prefillActive = true;
+    // Select so the first keystroke replaces the guess. Only when our own window
+    // already has focus — select() implies focus, and stealing OS focus from the
+    // target app mid-session would corrupt the next capture. When the panel is
+    // background, the select-on-focus handler on the textarea covers it instead.
+    tick().then(() => {
+      if (document.hasFocus() && taskInputEl) {
+        taskInputEl.focus();
+        taskInputEl.select();
+      }
+    });
+  }
+
+  function clearPrefill() {
+    prefillActive = false;
+    taskSuggestions = [];
+  }
+
+  function selectSuggestion(s: string) {
+    task = s;
+    prefillActive = true; // still a prefill — typing replaces, submit sends
+    tick().then(() => {
+      taskInputEl?.focus();
+      taskInputEl?.select();
+    });
+  }
+
+  /// Cold-start prefill (P.1) — purely local, no AI call: pack starter tasks for
+  /// the focused app (if its nav-pack curates any) ahead of a generic
+  /// "Show me around {app}". Runs only while idle with an untouched box.
+  async function coldStartPrefill() {
+    if (!settingsForm.task_suggestions) return;
+    if (phase !== "idle" && phase !== "error") return;
+    if (task.trim() && !prefillActive) return;
+    let starters: string[] = [];
+    if (sharedApp) {
+      try {
+        starters = await invoke<string[]>("get_pack_starters", { hwnd: sharedApp.hwnd });
+      } catch (_) {}
+    }
+    const appName = sharedApp ? (friendlyName(sharedApp.exe_name) || sharedApp.app_name) : "";
+    const generic = appName ? `Show me around ${appName}` : "Explore this app";
+    const list = [...starters];
+    if (!list.some((s) => s.toLowerCase() === generic.toLowerCase())) list.push(generic);
+    applyPrefill(list);
+  }
 
   // Target-window picker (item 1)
   type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; };
@@ -448,6 +526,9 @@ See the LICENSE file in the root of this repository for complete details.
     debug_show_response_info: false,
     debug_locate_trace_enabled: false,
     debug_locate_log_file_enabled: false,
+    debug_prompt_log_file_enabled: false,
+    structured_context: false,
+    task_suggestions: true,
     debug_show_ai_bbox: false,
     developer_mode: false,
   };
@@ -1295,6 +1376,9 @@ See the LICENSE file in the root of this repository for complete details.
       "system",
       "New session started — guidance follows the app you click into next. To lock one app, click its name in the title bar.",
     );
+    // Workstream P: fresh session, fresh cold-start prefill.
+    clearPrefill();
+    coldStartPrefill();
   }
 
   function applyResponse(res: GuideResponse, idx: number, token: number) {
@@ -1328,6 +1412,11 @@ See the LICENSE file in the root of this repository for complete details.
     if (res.debug_screenshot_path) {
       addToHistory("system", `📷 ${res.debug_screenshot_path}`);
     }
+    // Workstream P: the AI offered next-task guesses (task complete / nothing in
+    // progress). applyPrefill enforces the guards (toggle, needs_input, typed text).
+    if (res.suggested_tasks?.length) {
+      applyPrefill(res.suggested_tasks);
+    }
   }
 
   async function guide() {
@@ -1335,6 +1424,7 @@ See the LICENSE file in the root of this repository for complete details.
     isOverlayCleared = false;
     const taskText = task.trim();
     task = "";
+    clearPrefill();
     // Keep session context when in the middle of a task; start fresh from idle/error.
     const isReply = phase === "guiding" || phase === "needs_input";
     const prevPhase = phase;
@@ -1502,8 +1592,15 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   function openWrongPicker() {
-    if (phase === "guiding") wrongPickerOpen = true;
-    else correction();
+    if (phase === "guiding") {
+      // Workstream P: while the picker is open the task box is a free-text
+      // "wrong" note — an untouched prefill must not become one accidentally.
+      if (prefillActive) {
+        task = "";
+        clearPrefill();
+      }
+      wrongPickerOpen = true;
+    } else correction();
   }
 
   // About → Send feedback: open the user's mail client with version + provider
@@ -1535,6 +1632,12 @@ See the LICENSE file in the root of this repository for complete details.
     if (e.key === "Enter" && !e.shiftKey && !isThinking && task.trim()) {
       e.preventDefault();
       submitTask();
+    }
+    // Workstream P: Esc dismisses the prefill entirely (text + dropdown) —
+    // back to the empty box the user had before.
+    if (e.key === "Escape" && prefillActive) {
+      task = "";
+      clearPrefill();
     }
   }
 
@@ -1657,8 +1760,19 @@ See the LICENSE file in the root of this repository for complete details.
     // Phase 0.2: keep the "Shared: <App>" header chip in sync with whatever
     // window the backend is capturing.
     listen<SharedAppInfo>("app_changed", (event) => {
+      const prevExe = sharedApp?.exe_name;
       sharedApp = event.payload;
       maybeShowTargetHint();
+      // Workstream P: a different app means stale guesses — refresh the cold-start
+      // prefill (no-op unless idle with an untouched box; clearPrefill first so an
+      // old app's prefill can't survive the switch).
+      if (event.payload.exe_name !== prevExe) {
+        if (prefillActive) {
+          task = "";
+          clearPrefill();
+        }
+        coldStartPrefill();
+      }
     });
     try {
       const initial = await invokeReady<SharedAppInfo | null>("get_shared_app_info");
@@ -1667,6 +1781,8 @@ See the LICENSE file in the root of this repository for complete details.
         maybeShowTargetHint();
       }
     } catch (_) {}
+    // Workstream P: first cold-start prefill once the shared-app info settled.
+    coldStartPrefill();
 
     // E.3 — Autopilot: on-demand screen-change polling.
     // Functions are defined at module level; start now if already enabled.
@@ -1862,7 +1978,7 @@ See the LICENSE file in the root of this repository for complete details.
         {#if phase === "guiding"}
           <div class="wrong-footer">
             {#if !wrongPickerOpen}
-              <button class="wrong-btn" onclick={() => (wrongPickerOpen = true)} title="This guidance is wrong (Ctrl+E)">✗ This is wrong</button>
+              <button class="wrong-btn" onclick={openWrongPicker} title="This guidance is wrong (Ctrl+E)">✗ This is wrong</button>
             {:else}
               <div class="reason-row">
                 <span class="reason-prompt">What went wrong?</span>
@@ -1920,6 +2036,21 @@ See the LICENSE file in the root of this repository for complete details.
                   <div class="debug-row">
                     <span class="debug-key">ai_bbox</span>
                     <span class="debug-val">{locateTrace.ai_bbox.x}, {locateTrace.ai_bbox.y} · {locateTrace.ai_bbox.width}×{locateTrace.ai_bbox.height}</span>
+                  </div>
+                {/if}
+
+                <!-- Selection section (Pass 0.5 — Structured-Context, v0.7 S.3) -->
+                {#if locateTrace.selection}
+                  {@const s = locateTrace.selection}
+                  <div class="debug-section">
+                    <div class="debug-section-head">
+                      Selection · id {s.id} of {s.snapshot_len} element{s.snapshot_len === 1 ? "" : "s"}
+                    </div>
+                    <div class="debug-cand {s.verified ? 'cand-selected' : 'cand-rejected'}">
+                      <span class="cand-mark">{s.verified ? "✔" : "⊘"}</span>
+                      <span class="cand-text">{s.snapshot_name ? `"${s.snapshot_name}"` : "id not in snapshot"}</span>
+                      <span class="cand-reason">— {s.detail}</span>
+                    </div>
                   </div>
                 {/if}
 
@@ -2084,10 +2215,35 @@ See the LICENSE file in the root of this repository for complete details.
       {/if}
       <textarea
         bind:value={task}
+        bind:this={taskInputEl}
         onkeydown={handleKeydown}
+        oninput={() => {
+          // Real typing replaces the prefill (the selection is typed over) and
+          // protects the user's text from any further prefill.
+          if (prefillActive) clearPrefill();
+        }}
+        onfocus={() => {
+          // Select-on-focus: applyPrefill skips select() while the panel is a
+          // background window (it would steal focus from the target app), so the
+          // "one keystroke replaces" behaviour arms when the user clicks in.
+          if (prefillActive) taskInputEl?.select();
+        }}
         placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
         rows={2}
       ></textarea>
+      {#if prefillActive && taskSuggestions.length > 1}
+        <div class="suggest-menu" role="listbox" aria-label="Suggested tasks">
+          {#each taskSuggestions as s (s)}
+            <button
+              class="suggest-item"
+              class:suggest-active={s === task}
+              role="option"
+              aria-selected={s === task}
+              onclick={() => selectSuggestion(s)}
+            >{s}</button>
+          {/each}
+        </div>
+      {/if}
       {#if isThinking}
         <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
       {:else}
@@ -2904,6 +3060,13 @@ See the LICENSE file in the root of this repository for complete details.
 
           {:else if settingsTab === "screen-guide"}
             <div class="setting-group">
+              <p class="setting-label">Task suggestions</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.task_suggestions} />
+                <span>Prefill the task box with suggested next tasks — you can always type over them</span>
+              </label>
+            </div>
+            <div class="setting-group">
               <label class="setting-label" for="overlay-color">Accent color</label>
               <div class="color-row">
                 <input id="overlay-color" class="color-picker" type="color" bind:value={settingsForm.overlay_color} />
@@ -2960,9 +3123,9 @@ See the LICENSE file in the root of this repository for complete details.
               <p class="setting-label">Debug captures</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
-                <span>Save AI screenshots and OCR inputs to the debug folder</span>
+                <span>Save AI screenshots, OCR inputs, and the exact prompt text sent to the AI to the debug folder</span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.navisual.app\debug\</p>
+              <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.navisual.app\debug\ — one prompt_&lt;timestamp&gt;.txt per request, alongside its screenshot. See "Prompt log" below for a single running history instead.</p>
               <button class="btn-ghost" style="margin-top:8px;font-size:12px;padding:5px 10px"
                 onclick={() => invoke("open_debug_folder").catch(() => {})}>
                 📂 Open debug folder
@@ -2986,6 +3149,22 @@ See the LICENSE file in the root of this repository for complete details.
                 <span>Append every locate to locate_log.jsonl</span>
               </label>
               <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\locate_log.jsonl</p>
+            </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">Prompt log</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.debug_prompt_log_file_enabled} />
+                <span>Append every prompt sent to the AI to prompt_log.jsonl</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\prompt_log.jsonl — a single running history covering every request (task, follow-up, re-query, and ✗ Wrong corrections). The system prompt is static (src-tauri/src/ai/prompts.rs) and never logged, only the per-request dynamic text.</p>
+            </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">Structured context (v0.7)</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.structured_context} />
+                <span>Send an indexed [Screen Elements] list with each screenshot; the AI selects an element id, verified before use</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">"Select, don't ground" — Chrome/Eager windows only; falls back to the normal locator on any doubt. Default off until the live-verification matrix passes.</p>
             </div>
             <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
               <p class="setting-label">AI bounding box</p>
@@ -3894,6 +4073,35 @@ See the LICENSE file in the root of this repository for complete details.
     color: var(--text-tertiary);
     padding: 2px 0;
     font-style: italic;
+  }
+
+  /* Workstream P — suggested-task list under the input (shown when >1 guess) */
+  .suggest-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .suggest-item {
+    text-align: left;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 5px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-secondary);
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .suggest-item:hover {
+    color: var(--text-primary);
+    border-color: var(--text-tertiary);
+  }
+  .suggest-active {
+    color: var(--text-primary);
+    border-color: var(--accent);
   }
 
   textarea {

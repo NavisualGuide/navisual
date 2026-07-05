@@ -138,6 +138,34 @@ pub struct GuidanceStep {
     /// the backend before use.
     #[serde(default, deserialize_with = "lax_bbox")]
     pub target_bbox: Option<[f64; 4]>,
+    /// Structured-Context selection (v0.7 Workstream S): the id of the element the
+    /// model picked from the [Screen Elements] list, when one was present. A
+    /// per-request index into the snapshot in `GuidanceState` — verified against the
+    /// live tree before use; never replaces `target_text` (four-pass fallback).
+    #[serde(default, deserialize_with = "lax_element_id")]
+    pub target_element_id: Option<u32>,
+}
+
+/// Lax element-id deserializer: models emit `12`, `"12"`, or `12.0`; anything else
+/// (null, garbage, negative, fractional) becomes `None` — never a parse failure
+/// (follows the [`lax_bbox`] / [`lax_overlay`] precedent).
+fn lax_element_id<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| {
+                n.as_f64()
+                    .filter(|f| f.fract() == 0.0 && *f >= 0.0)
+                    .map(|f| f as u64)
+            })
+            .and_then(|v| u32::try_from(v).ok()),
+        serde_json::Value::String(s) => s.trim().parse::<u32>().ok(),
+        _ => None,
+    })
 }
 
 fn default_overlay() -> OverlayType {
@@ -168,6 +196,12 @@ pub struct NavigateStepResponse {
     pub state_summary: String,
     #[serde(default)]
     pub needs_input: bool,
+    /// Workstream P (v0.7): up to 3 short next-task suggestions the user might ask
+    /// for, offered only when the current task looks complete or none is in
+    /// progress. Display-only — the frontend prefills the task box (selected) and
+    /// never auto-submits. Absence is the norm mid-task.
+    #[serde(default, deserialize_with = "lax_suggestions")]
+    pub suggested_tasks: Vec<String>,
     /// Inert. The AI no longer drives full-screen capture — it is now a
     /// user-initiated, sticky "Entire desktop" choice in the target picker
     /// (`GuidanceState.full_screen_mode`). The key was removed from every provider
@@ -175,6 +209,40 @@ pub struct NavigateStepResponse {
     /// emits it deserializes cleanly (always false in practice).
     #[serde(default)]
     pub request_full_screen: bool,
+}
+
+/// Lax `suggested_tasks` deserializer (Workstream P): keep only string entries that
+/// are non-empty after trimming and within the length cap (an over-long entry is a
+/// runaway/garbage string, not a task — dropped, not truncated); case-insensitive
+/// dedupe; hard cap 3. A non-array or otherwise malformed value becomes an empty
+/// list — never a parse failure (the [`lax_bbox`]/[`lax_overlay`] precedent).
+fn lax_suggestions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    const MAX_SUGGESTIONS: usize = 3;
+    const MAX_CHARS: usize = 80;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let Some(arr) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<String> = Vec::new();
+    for v in arr {
+        let Some(s) = v.as_str().map(str::trim) else {
+            continue;
+        };
+        if s.is_empty() || s.chars().count() > MAX_CHARS {
+            continue;
+        }
+        if out.iter().any(|e| e.eq_ignore_ascii_case(s)) {
+            continue;
+        }
+        out.push(s.to_string());
+        if out.len() == MAX_SUGGESTIONS {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -250,6 +318,32 @@ mod tests {
     }
 
     #[test]
+    fn element_id_lax_forms() {
+        // Canonical integer.
+        let s = step(r#"{"instruction": "x", "target_element_id": 12}"#);
+        assert_eq!(s.target_element_id, Some(12));
+        // String-wrapped and float-integer forms models emit.
+        let s = step(r#"{"instruction": "x", "target_element_id": "12"}"#);
+        assert_eq!(s.target_element_id, Some(12));
+        let s = step(r#"{"instruction": "x", "target_element_id": 12.0}"#);
+        assert_eq!(s.target_element_id, Some(12));
+        // Garbage never fails the whole response parse.
+        for bad in [
+            r#"{"instruction": "x", "target_element_id": "the save button"}"#,
+            r#"{"instruction": "x", "target_element_id": -3}"#,
+            r#"{"instruction": "x", "target_element_id": 12.7}"#,
+            r#"{"instruction": "x", "target_element_id": null}"#,
+            r#"{"instruction": "x", "target_element_id": [12]}"#,
+        ] {
+            let s = step(bad);
+            assert!(s.target_element_id.is_none(), "should be None for: {bad}");
+        }
+        // Absent → None.
+        let s = step(r#"{"instruction": "x"}"#);
+        assert!(s.target_element_id.is_none());
+    }
+
+    #[test]
     fn response_optional_fields_default() {
         let r: NavigateStepResponse =
             serde_json::from_str(r#"{"steps": [{"instruction": "x"}]}"#).unwrap();
@@ -257,5 +351,39 @@ mod tests {
         assert_eq!(r.state_summary, "");
         assert!(!r.needs_input);
         assert!(!r.request_full_screen);
+        assert!(r.suggested_tasks.is_empty());
+    }
+
+    #[test]
+    fn suggested_tasks_lax_forms() {
+        let resp = |json: &str| -> NavigateStepResponse {
+            serde_json::from_str(json).expect("NavigateStepResponse must deserialize")
+        };
+        // Well-formed list passes through.
+        let r = resp(
+            r#"{"steps": [], "suggested_tasks": ["Print this document", "Change the font"]}"#,
+        );
+        assert_eq!(r.suggested_tasks, vec!["Print this document", "Change the font"]);
+        // Trim + drop empties + case-insensitive dedupe + hard cap 3.
+        let r = resp(
+            r#"{"steps": [], "suggested_tasks": ["  Save the file ", "", "save the FILE", "Print", "Undo", "Redo"]}"#,
+        );
+        assert_eq!(r.suggested_tasks, vec!["Save the file", "Print", "Undo"]);
+        // A runaway string (weak-model failure mode) is dropped, not truncated.
+        let long = "a".repeat(200);
+        let r = resp(&format!(
+            r#"{{"steps": [], "suggested_tasks": ["{long}", "Fine"]}}"#
+        ));
+        assert_eq!(r.suggested_tasks, vec!["Fine"]);
+        // Non-string entries are skipped; non-array values never fail the parse.
+        let r = resp(r#"{"steps": [], "suggested_tasks": [1, {"a": 2}, "Real task"]}"#);
+        assert_eq!(r.suggested_tasks, vec!["Real task"]);
+        for bad in [
+            r#"{"steps": [], "suggested_tasks": "explore the app"}"#,
+            r#"{"steps": [], "suggested_tasks": 42}"#,
+            r#"{"steps": [], "suggested_tasks": null}"#,
+        ] {
+            assert!(resp(bad).suggested_tasks.is_empty(), "should be empty for: {bad}");
+        }
     }
 }

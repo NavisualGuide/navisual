@@ -397,6 +397,283 @@ fn ai_bbox_probe(
     (Some(result), probe)
 }
 
+// ---------------------------------------------------------------------------
+// S.1 / S.3 — Structured-Context Locator (v0.7 Workstream S)
+// ---------------------------------------------------------------------------
+
+/// S.1 cap: more surviving elements than this → the whole block is skipped, never
+/// truncated (Decision 4 — a partial list biases the model toward "the answer must
+/// be in here").
+pub const CONTEXT_ELEMENTS_CAP: usize = 80;
+/// S.1 hard budget; exceeded → skip the block (the AI call proceeds without it).
+const CONTEXT_BUDGET_MS: u128 = 300;
+
+/// Interactive control types enumerated for the Structured-Context list — the
+/// CLICKABLE family from `role_control_type_ids` plus Edit/Slider (inputs a "textbox"/
+/// "slider" target selects). Deliberately excludes bulk Text/Pane — they're what
+/// blows the cap (S.1).
+const CONTEXT_CT_IDS: &[i32] = &[
+    50000, // Button
+    50019, // TabItem
+    50007, // ListItem
+    50011, // MenuItem
+    50005, // Hyperlink
+    50004, // Edit
+    50003, // ComboBox
+    50002, // CheckBox
+    50013, // RadioButton
+    50015, // Slider
+    50031, // SplitButton
+    50024, // TreeItem
+];
+
+/// The control types [`CONTEXT_CT_IDS`] enumerates — the walk-up stop set for the
+/// live verification. `is_interactive_ct` plus Edit/Slider.
+fn is_context_ct(ct: ControlType) -> bool {
+    is_interactive_ct(ct) || matches!(ct, ControlType::Edit | ControlType::Slider)
+}
+
+/// Accessible name as the snapshot stores/compares it: trimmed, paren-suffix +
+/// accelerator stripped (reuses the matcher's normalisers).
+fn context_display_name(raw: &str) -> String {
+    strip_accelerator(&strip_paren_suffix(raw.trim()))
+}
+
+/// S.3 role-family agreement between the live element and the snapshot entry. Exact
+/// control type, or both within the lenient button family (web UIs surface buttons
+/// inconsistently as Button/SplitButton/Hyperlink/MenuItem — mirrors `ct_family_matches`).
+fn context_role_compatible(live: &str, snapshot: &str) -> bool {
+    const BUTTON_FAMILY: &[&str] = &["Button", "SplitButton", "Hyperlink", "MenuItem"];
+    live == snapshot || (BUTTON_FAMILY.contains(&live) && BUTTON_FAMILY.contains(&snapshot))
+}
+
+/// S.1 — enumerate the interactive, named, on-screen elements of `hwnd_raw`'s window
+/// (+ its owned dialogs/popups) for the Structured-Context prompt block. One batched
+/// `find_all_build_cache` per root over [`CONTEXT_CT_IDS`] (Decision 5 — the
+/// `deep_role_match` machinery: native OR-condition, cached Name/ControlType/Rect/
+/// IsOffscreen, zero per-element COM). `Err(reason)` ⇒ the caller skips the whole
+/// block (never truncates): framework `Other` (Lightroom's all-Pane tree, Photoshop's
+/// 1-node tree — exactly where the list would be empty/garbage), over-cap, over-budget,
+/// or no roots. Rects are virtual-desktop physical pixels.
+pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextElement>, String> {
+    let started = Instant::now();
+    if hwnd_raw == 0 {
+        return Err("no target window".to_string());
+    }
+    let automation = UIAutomation::new().map_err(|e| format!("UIAutomation init: {e}"))?;
+    let framework = framework_of(&automation, hwnd_raw);
+    if framework == Framework::Other {
+        return Err("framework Other".to_string());
+    }
+
+    let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+    let mut win_rect = RECT::default();
+    unsafe {
+        GetWindowRect(hwnd, &mut win_rect).map_err(|e| format!("GetWindowRect: {e}"))?;
+    }
+    let win_w = (win_rect.right - win_rect.left).max(1) as i64;
+    let win_h = (win_rect.bottom - win_rect.top).max(1) as i64;
+
+    // Roots: owned dialogs/popups first (the active interaction surface), then the
+    // main window — the same root set `find_element` searches.
+    let mut roots: Vec<UIElement> = Vec::new();
+    unsafe {
+        for popup in collect_owned_popups(hwnd) {
+            if let Ok(el) = automation.element_from_handle(popup.into()) {
+                roots.push(el);
+            }
+        }
+        if IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
+            if let Ok(el) = automation.element_from_handle(hwnd.into()) {
+                roots.push(el);
+            }
+        }
+    }
+    if roots.is_empty() {
+        return Err("no search roots".to_string());
+    }
+
+    let mut cond = None;
+    for &id in CONTEXT_CT_IDS {
+        let c = automation
+            .create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+            .map_err(|e| format!("condition: {e}"))?;
+        cond = Some(match cond.take() {
+            None => c,
+            Some(prev) => automation
+                .create_or_condition(prev, c)
+                .map_err(|e| format!("or-condition: {e}"))?,
+        });
+    }
+    let cond = cond.ok_or_else(|| "empty condition".to_string())?;
+    let cache = automation
+        .create_cache_request()
+        .map_err(|e| format!("cache request: {e}"))?;
+    let _ = cache.add_property(UIProperty::Name);
+    let _ = cache.add_property(UIProperty::ControlType);
+    let _ = cache.add_property(UIProperty::BoundingRectangle);
+    let _ = cache.add_property(UIProperty::IsOffscreen);
+
+    let mut out: Vec<super::ContextElement> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, (i32, i32, u32, u32))> =
+        std::collections::HashSet::new();
+    for root in &roots {
+        if started.elapsed().as_millis() > CONTEXT_BUDGET_MS {
+            return Err(format!(
+                "budget exceeded ({} ms)",
+                started.elapsed().as_millis()
+            ));
+        }
+        let els = match root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
+            Ok(e) => e,
+            Err(_) => continue, // a dead popup root must not kill the main window's list
+        };
+        for el in els {
+            // Non-empty display name (a glyph-only control has nothing to select by).
+            let Ok(raw_name) = el.get_cached_name() else {
+                continue;
+            };
+            let name = context_display_name(&raw_name);
+            if name.is_empty() {
+                continue;
+            }
+            // On-screen: UIA's own flag (scrolled-out list items) + rect ∩ window.
+            if el.is_cached_offscreen().unwrap_or(false) {
+                continue;
+            }
+            let Ok(ct) = el.get_cached_control_type() else {
+                continue;
+            };
+            let Ok(rect) = el.get_cached_bounding_rectangle() else {
+                continue;
+            };
+            let (left, top) = (rect.get_left(), rect.get_top());
+            let (w, h) = (
+                rect.get_width().max(0) as u32,
+                rect.get_height().max(0) as u32,
+            );
+            if w == 0 || h == 0 || !rect_is_onscreen(left, top) {
+                continue;
+            }
+            if left + (w as i32) <= win_rect.left
+                || left >= win_rect.right
+                || top + (h as i32) <= win_rect.top
+                || top >= win_rect.bottom
+            {
+                continue;
+            }
+            // Control-sized: >90% of the window in either axis is a container.
+            if (w as i64) * 10 > win_w * 9 || (h as i64) * 10 > win_h * 9 {
+                continue;
+            }
+            // Dedupe exact (name, rect) repeats (Chrome doubles names).
+            if !seen.insert((name.clone(), (left, top, w, h))) {
+                continue;
+            }
+            if out.len() >= CONTEXT_ELEMENTS_CAP {
+                return Err(format!("over cap (> {CONTEXT_ELEMENTS_CAP})"));
+            }
+            out.push(super::ContextElement {
+                id: out.len() as u32 + 1,
+                name,
+                role: format!("{ct:?}"),
+                rect: Rect {
+                    x: left,
+                    y: top,
+                    width: w,
+                    height: h,
+                },
+            });
+        }
+    }
+    if started.elapsed().as_millis() > CONTEXT_BUDGET_MS {
+        return Err(format!(
+            "budget exceeded ({} ms)",
+            started.elapsed().as_millis()
+        ));
+    }
+    Ok(out)
+}
+
+/// S.3 — live verification of a selected context element (the `ai_bbox_probe` pattern):
+/// `ElementFromPoint` at the snapshot rect's centre must resolve — walking up past text
+/// runs — to a context-type control whose role family and name agree with the snapshot
+/// (name equal, or one contains the other: badge/suffix drift). Returns the element's
+/// **live** rect, so a control that scrolled/moved since capture resolves to something
+/// else, fails the name check, and the caller falls back to the normal pipeline —
+/// a stale snapshot can never place a pointer ("no pointer beats wrong pointer").
+pub fn verify_context_element(snap: &super::ContextElement) -> (Option<Rect>, String) {
+    let Ok(automation) = UIAutomation::new() else {
+        return (None, "UIAutomation init failed".to_string());
+    };
+    let cx = snap.rect.x + snap.rect.width as i32 / 2;
+    let cy = snap.rect.y + snap.rect.height as i32 / 2;
+    let Ok(mut el) = automation.element_from_point(Point::new(cx, cy)) else {
+        return (None, "element_from_point failed".to_string());
+    };
+    let walker = automation.get_control_view_walker().ok();
+    let mut found: Option<(ControlType, String)> = None;
+    for _ in 0..4 {
+        let Ok(ct) = el.get_control_type() else { break };
+        if is_context_ct(ct) {
+            found = Some((ct, el.get_name().unwrap_or_default()));
+            break;
+        }
+        if is_container_role(ct) {
+            break; // reached a window/pane before any context-type ancestor
+        }
+        match walker.as_ref().and_then(|w| w.get_parent(&el).ok()) {
+            Some(parent) => el = parent,
+            None => break,
+        }
+    }
+    let Some((ct, live_raw)) = found else {
+        return (None, "no interactive control at snapshot point".to_string());
+    };
+    let live_role = format!("{ct:?}");
+    if !context_role_compatible(&live_role, &snap.role) {
+        return (
+            None,
+            format!("role mismatch: live {live_role} ≠ snapshot {}", snap.role),
+        );
+    }
+    let live_name = context_display_name(&live_raw).to_lowercase();
+    let snap_name = snap.name.to_lowercase();
+    if live_name.is_empty()
+        || !(live_name == snap_name
+            || live_name.contains(&snap_name)
+            || snap_name.contains(&live_name))
+    {
+        return (
+            None,
+            format!(
+                "name mismatch: live {:?} ≠ snapshot {:?}",
+                live_raw, snap.name
+            ),
+        );
+    }
+    let Ok(rect) = el.get_bounding_rectangle() else {
+        return (None, "live element has no rect".to_string());
+    };
+    let (left, top) = (rect.get_left(), rect.get_top());
+    let (w, h) = (
+        rect.get_width().max(0) as u32,
+        rect.get_height().max(0) as u32,
+    );
+    if w == 0 || h == 0 || !rect_is_onscreen(left, top) {
+        return (None, "live element rect off-screen/empty".to_string());
+    }
+    (
+        Some(Rect {
+            x: left,
+            y: top,
+            width: w,
+            height: h,
+        }),
+        "verified".to_string(),
+    )
+}
+
 /// Our own process ID (for "foreground is us" detection).
 fn own_pid() -> u32 {
     std::process::id()
@@ -1623,6 +1900,51 @@ mod tests {
         let mut raw = 0;
         walk(&walker, &root, 0, &mut raw);
         eprintln!("raw-view 'ext' hits = {raw}");
+    }
+
+    // Live diagnostic for S.1 — dump the Structured-Context element list for a window,
+    // with timing (the p50 < 50 ms warm target) and the skip reason when over cap /
+    // framework Other. Pass the window handle (decimal) in NAVISUAL_TEST_HWND.
+    // Run: $env:NAVISUAL_TEST_HWND=<hwnd>; cargo test --lib context_enumeration_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn context_enumeration_live() {
+        let hwnd_raw: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+        let started = std::time::Instant::now();
+        let result = super::enumerate_context_elements(hwnd_raw);
+        let ms = started.elapsed().as_millis();
+        match result {
+            Ok(els) => {
+                eprintln!("{} elements in {ms} ms", els.len());
+                for e in &els {
+                    eprintln!(
+                        "  {:>3} | {:<12} | {:?} @ ({}, {}) {}x{}",
+                        e.id, e.role, e.name, e.rect.x, e.rect.y, e.rect.width, e.rect.height
+                    );
+                }
+            }
+            Err(reason) => eprintln!("skipped in {ms} ms: {reason}"),
+        }
+    }
+
+    #[test]
+    fn context_role_family_and_name_strip() {
+        use super::{context_display_name, context_role_compatible};
+        // Exact role always agrees; the lenient button family cross-matches.
+        assert!(context_role_compatible("Button", "Button"));
+        assert!(context_role_compatible("Hyperlink", "Button"));
+        assert!(context_role_compatible("SplitButton", "MenuItem"));
+        // Outside the family, roles must match exactly (a textbox pick can't verify
+        // against a live TabItem).
+        assert!(!context_role_compatible("TabItem", "Button"));
+        assert!(!context_role_compatible("Edit", "ComboBox"));
+        // Display name reuses the matcher's paren-suffix + accelerator strips.
+        assert_eq!(context_display_name("Auto (Bridge View)"), "Auto");
+        assert_eq!(context_display_name("Playback Alt+I"), "Playback");
+        assert_eq!(context_display_name("  Save\u{00a0}Ctrl+S "), "Save");
     }
 
     #[test]
