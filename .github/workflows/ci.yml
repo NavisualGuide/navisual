@@ -115,6 +115,60 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # Sign the actual application binary, not just the installer wrapper.
+      # Previously ONLY the NSIS installer got signed — NSIS just embeds
+      # whatever navisual-backend.exe exists on disk into the installer
+      # payload at build time, so the shipped *program* was never itself
+      # signed. A fully-unsigned .exe is exactly what Windows Smart App
+      # Control (a stricter, separate mechanism from SmartScreen — reputation-
+      # based, not purely certificate-based, so this helps a lot but may not
+      # fully resolve it immediately) flagged on a test machine 2026-07-05,
+      # even though the installer that delivered it was already trusted.
+      - name: Sign app binary (Azure Trusted Signing)
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          endpoint: 'https://wus2.codesigning.azure.net/'
+          trusted-signing-account-name: 'navisualsigning'
+          certificate-profile-name: 'NavisualGuideProfile'
+          files-folder: './src-tauri/target/release'
+          files-folder-filter: 'exe'
+
+      # Re-run ONLY the NSIS compiler (not `tauri build`/`cargo build` again) so
+      # the installer embeds the just-signed binary. This project's build.rs
+      # (tauri_build::build()) recompiles navisual-backend.exe on every cargo
+      # invocation even with zero source changes (verified locally,
+      # 2026-07-05 — `cargo build --release` twice in a row with nothing
+      # touched still relinks it), so re-invoking `tauri build`/`cargo build`
+      # here would silently discard the signature just applied. NSIS's
+      # generated script (`target/release/nsis/x64/installer.nsi`) reads the
+      # binary via an ABSOLUTE path (`MAINBINARYSRCPATH`), so re-running
+      # makensis directly against it picks up the signed bytes fresh from
+      # disk with no Rust rebuild at all. Command + NSIS install path
+      # (`%LOCALAPPDATA%\tauri\NSIS\makensis.exe`, downloaded by the earlier
+      # `tauri build --bundles nsis` step) verified locally against a real
+      # build; `nsis-output.exe` is makensis's own output location (declared
+      # in installer.nsi) before Tauri's bundler copies/renames it into
+      # `bundle/nsis` — reproduced manually here since we're bypassing that
+      # bundler step deliberately.
+      - name: Repackage NSIS installer with the signed binary
+        shell: pwsh
+        run: |
+          $nsiScript = "src-tauri/target/release/nsis/x64/installer.nsi"
+          $makensis = "$env:LOCALAPPDATA\tauri\NSIS\makensis.exe"
+          & $makensis -INPUTCHARSET UTF8 -OUTPUTCHARSET UTF8 -V3 $nsiScript
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+
+          $regenerated = "src-tauri/target/release/nsis/x64/nsis-output.exe"
+          # Sort by LastWriteTime, not default (alphabetical) order — a stale
+          # installer from an earlier version can otherwise sort first and
+          # get silently overwritten instead of this run's actual output
+          # (caught locally: an ancient "AI Navigator_0.4.0..." leftover
+          # sorted before "Navisual_0.6.6...", 2026-07-05).
+          $bundleExe = Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          Copy-Item $regenerated $bundleExe.FullName -Force
+          Write-Host "Repackaged $($bundleExe.FullName) with the signed binary"
+
       - name: Sign Tauri installer (Azure Trusted Signing)
         uses: azure/trusted-signing-action@v0.5.0
         with:
