@@ -565,7 +565,7 @@ fn pack_locate_hints(
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
 fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>) {
-    let info = hwnd_raw.and_then(|h| capture::get_window_info_for_hwnd(h));
+    let info = hwnd_raw.and_then(capture::get_window_info_for_hwnd);
     if let Some(info) = info {
         let payload = SharedAppInfoPayload {
             hwnd: info.hwnd as u64,
