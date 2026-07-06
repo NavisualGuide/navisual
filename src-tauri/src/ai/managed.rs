@@ -142,7 +142,10 @@ impl ManagedClient {
         if let Some(dh) = crate::server::device_hash() {
             req = req.header("X-Device-Hash", dh);
         }
-        let resp = req.json(&payload).send().await?;
+        let resp = req.json(&payload).send().await.map_err(|e| {
+            log::warn!("[managed] relay request failed to send: {e}");
+            e
+        })?;
 
         let status = resp.status();
 
