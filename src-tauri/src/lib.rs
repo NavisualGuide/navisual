@@ -55,6 +55,11 @@ struct GuidanceState {
     /// User-explicitly pinned window (via the target-picker dropdown). Survives
     /// new tasks; only cleared by `unpin_target_window` or when the window closes.
     pinned_hwnd: Option<usize>,
+    /// The hwnd most recently announced with a boundary flash, from ANY of the
+    /// four call sites (auto-detect refresh, guide, correction, explicit pin) —
+    /// lets `refresh_active_window` flash only when the auto-followed target
+    /// actually changes, not on every passive z-order/foreground event.
+    last_announced_hwnd: Option<usize>,
     /// User-selected "Entire desktop" target (via the target-picker dropdown).
     /// When true, every capture path (guide / correction) grabs the whole virtual
     /// desktop instead of a single window. A deliberate, sticky user choice —
@@ -678,12 +683,18 @@ fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
     }
 }
 
+/// Must match Overlay.svelte's `APP_BOUNDARY_DURATION_MS` — no constant is
+/// shared across the Rust/Svelte boundary, so keep the two in sync by hand.
+#[cfg(windows)]
+const APP_BOUNDARY_DURATION_MS: u64 = 3_000;
+
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
 fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>, draw_boundary: bool) {
     let info = hwnd_raw.and_then(capture::get_window_info_for_hwnd);
     if let Some(info) = info {
+        let target_hwnd = info.hwnd;
         let payload = SharedAppInfoPayload {
             hwnd: info.hwnd as u64,
             rect: info.rect,
@@ -703,6 +714,11 @@ fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>, draw_boundary: 
                     log::debug!("app_boundary emit failed: {e}");
                 }
             }
+            track::watch_boundary(
+                target_hwnd,
+                app.clone(),
+                Duration::from_millis(APP_BOUNDARY_DURATION_MS),
+            );
         }
     } else {
         let _ = app.emit("app_changed", Option::<SharedAppInfoPayload>::None);
@@ -724,14 +740,21 @@ fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>, draw_boundary: 
 pub fn refresh_active_window(app: &AppHandle) {
     let state = app.state::<AppState>();
     let active_info = capture::get_active_window_info();
-    let announce_hwnd = {
+    let (announce_hwnd, changed) = {
         let mut g = state.guidance.lock();
         if g.pinned_hwnd.is_none() {
             g.target_hwnd = active_info.as_ref().map(|info| info.hwnd);
         }
-        g.pinned_hwnd.or(g.target_hwnd)
+        let hwnd = g.pinned_hwnd.or(g.target_hwnd);
+        let changed = hwnd != g.last_announced_hwnd;
+        g.last_announced_hwnd = hwnd;
+        (hwnd, changed)
     };
-    announce_shared_app(app, announce_hwnd, false);
+    // Flash only when the followed target actually changed (a new app took focus),
+    // not on every passive refresh (z-order shuffle, object update, same app
+    // re-settling) — see commit 1601f40 for why a blanket flash-on-every-refresh
+    // was reverted.
+    announce_shared_app(app, announce_hwnd, changed);
 }
 
 #[cfg(not(windows))]
@@ -1222,6 +1245,7 @@ async fn guide(
     // Phase 0.2 — flash the shared-app boundary so the user can see what
     // we're capturing. Emits the `app_changed` event for the header chip too.
     if let Some(hwnd_raw) = new_hwnd_opt {
+        state.guidance.lock().last_announced_hwnd = Some(hwnd_raw);
         announce_shared_app(&app, Some(hwnd_raw), true);
     }
 
@@ -1862,6 +1886,7 @@ async fn send_correction(
 
     // Phase 0.2 — show shared-app boundary on correction too.
     if let Some(hwnd_raw) = new_hwnd {
+        state.guidance.lock().last_announced_hwnd = Some(hwnd_raw);
         announce_shared_app(&app, Some(hwnd_raw), true);
     }
 
@@ -2220,6 +2245,7 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
         g.target_hwnd = Some(hwnd);
         g.full_screen_mode = false; // a specific window and full-screen are mutually exclusive
         g.full_screen_monitor = None;
+        g.last_announced_hwnd = Some(hwnd);
     }
     #[cfg(windows)]
     announce_shared_app(&app, Some(hwnd), true);

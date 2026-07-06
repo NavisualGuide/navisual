@@ -15,6 +15,7 @@ use crate::capture::Rect;
 use crate::overlay::{self, OverlayKind};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
@@ -24,7 +25,7 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetAncestor, GetMessageW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
-    KillTimer, SetTimer, TranslateMessage, WindowFromPoint, EVENT_OBJECT_HIDE,
+    IsWindow, KillTimer, SetTimer, TranslateMessage, WindowFromPoint, EVENT_OBJECT_HIDE,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
     EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, MSG, WINEVENT_OUTOFCONTEXT,
 };
@@ -51,6 +52,75 @@ static STATE: OnceLock<Arc<Mutex<Option<TrackState>>>> = OnceLock::new();
 
 /// Active one-shot "settle" timer id (0 = none). See `schedule_settle`.
 static SETTLE_TIMER: AtomicUsize = AtomicUsize::new(0);
+
+/// The AppBoundary flash (see `lib.rs::announce_shared_app`) plays out as a
+/// one-shot, client-timed animation with no ongoing backend involvement — so
+/// if its window is minimized or closed mid-flash, the box would otherwise
+/// keep animating over whatever the user switched to. This watch lets the
+/// same event hook that already services the pointer overlay also clear a
+/// live boundary flash early.
+struct BoundaryWatch {
+    hwnd: isize,
+    app: AppHandle,
+    expires_at: Instant,
+}
+
+static BOUNDARY_WATCH: OnceLock<Mutex<Option<BoundaryWatch>>> = OnceLock::new();
+
+/// Arm (or replace) the boundary watch for `hwnd`. Call right after emitting
+/// the AppBoundary draw update. `duration` must match the frontend's
+/// `APP_BOUNDARY_DURATION_MS` (Overlay.svelte) — there's no constant shared
+/// across the Rust/Svelte boundary, so keep the two in sync by hand.
+pub fn watch_boundary(hwnd: usize, app: AppHandle, duration: Duration) {
+    #[cfg(windows)]
+    {
+        let cell = BOUNDARY_WATCH.get_or_init(|| Mutex::new(None));
+        *cell.lock().unwrap() = Some(BoundaryWatch {
+            hwnd: hwnd as isize,
+            app,
+            expires_at: Instant::now() + duration,
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd, app, duration);
+    }
+}
+
+/// Called unconditionally from `win_event_proc` on every qualifying window
+/// event (cheap early-out when nothing is watched or `hwnd` isn't it). If
+/// `hwnd` is the window a boundary flash is currently watching, re-derives
+/// its live state directly — same philosophy as `recompute()` below, rather
+/// than trusting any one event code's semantics — and clears the flash early
+/// if the window was closed (`!IsWindow`) or minimized (`IsIconic`). An
+/// AppBoundary update with a `None` bbox is the existing clear signal; see
+/// `announce_shared_app`'s no-window branch.
+#[cfg(windows)]
+unsafe fn clear_boundary_if_gone(hwnd: HWND) {
+    let Some(cell) = BOUNDARY_WATCH.get() else {
+        return;
+    };
+    let Ok(mut guard) = cell.lock() else {
+        return;
+    };
+    let Some(watch) = guard.as_ref() else {
+        return;
+    };
+    if watch.hwnd != hwnd.0 as isize {
+        return;
+    }
+    if Instant::now() >= watch.expires_at {
+        // Already finished its own client-side animation — nothing to clear.
+        *guard = None;
+        return;
+    }
+    if !IsWindow(Some(hwnd)).as_bool() || IsIconic(hwnd).as_bool() {
+        if let Ok(u) = overlay::make_update(OverlayKind::AppBoundary, None, None) {
+            let _ = overlay::emit_update(&watch.app, u);
+        }
+        *guard = None;
+    }
+}
 
 pub struct WindowTracker {
     state: Arc<Mutex<Option<TrackState>>>,
@@ -239,7 +309,7 @@ unsafe fn run_event_thread() {
 unsafe extern "system" fn win_event_proc(
     _hook: HWINEVENTHOOK,
     event: u32,
-    _hwnd: HWND,
+    hwnd: HWND,
     id_object: i32,
     id_child: i32,
     _thread: u32,
@@ -249,6 +319,7 @@ unsafe extern "system" fn win_event_proc(
     if id_object != 0 || id_child != 0 {
         return;
     }
+    clear_boundary_if_gone(hwnd);
     recompute();
     // Z-order / foreground / show-hide / minimize changes aren't always settled at the
     // instant the event fires (alt-tab to an un-minimizing window, restore animations),

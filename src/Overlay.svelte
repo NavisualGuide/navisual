@@ -30,7 +30,9 @@
   // alongside the main overlay so it doesn't replace the locator highlight.
   let appBoundary: OverlayUpdate | null = null;
   let appBoundaryStart = 0;
-  const APP_BOUNDARY_DURATION_MS = 10_000; // 9s solid + 1s ease-out fade
+  // Must match lib.rs's APP_BOUNDARY_DURATION_MS (no shared constant across
+  // the Rust/Svelte boundary — keep both in sync by hand if this changes).
+  const APP_BOUNDARY_DURATION_MS = 3_000; // 250ms flash + 1.75s solid + 1s ease-out fade
   // Plain object — NOT $state. drawBox/drawArrow read this in rAF callbacks where
   // Svelte's reactive getters don't fire; mutating fields in-place ensures every
   // frame sees the latest values without any signal overhead.
@@ -289,11 +291,13 @@
 
   /**
    * Phase 0.2: draw the "shared app" boundary overlay.
-   * Three-stage animation over APP_BOUNDARY_DURATION_MS (10 s):
+   * Three-stage animation over APP_BOUNDARY_DURATION_MS (3 s):
    *   0..250ms  — flash in at full opacity with inner glow
-   *   250..9000ms — hold at full opacity (solid outline)
-   *   9000..10000ms — ease-out cubic fade to 0
+   *   250..2000ms — hold at full opacity (solid outline)
+   *   2000..3000ms — ease-out cubic fade to 0
    * A new capture replaces appBoundary immediately, resetting the timer.
+   * Also cleared early (bbox goes null) if the backend detects the window
+   * was minimized mid-flash — see track.rs's `watch_boundary`.
    * Returns true while the animation is still running, false when complete.
    */
   function drawAppBoundary(
@@ -498,7 +502,14 @@
 
     // Pick a virtual_origin/size — prefer currentUpdate, fall back to appBoundary.
     const reference = currentUpdate ?? appBoundary;
-    if (!reference) return;
+    if (!reference) {
+      // Nothing active at all — animFrame must go back to null here, or the
+      // "if (animFrame === null)" re-arm check in the app_boundary listener
+      // below will wrongly believe a loop is still running (it holds this
+      // frame's own now-spent id) and silently skip scheduling the next flash.
+      animFrame = null;
+      return;
+    }
     const [ox, oy] = reference.virtual_origin;
     const [vw, vh] = reference.virtual_size;
 
@@ -561,7 +572,7 @@
           animFrame = requestAnimationFrame(renderFrame);
           return;
         }
-        if (needNextFrame) animFrame = requestAnimationFrame(renderFrame);
+        animFrame = needNextFrame ? requestAnimationFrame(renderFrame) : null;
         return;
       }
 
@@ -580,7 +591,7 @@
           animFrame = requestAnimationFrame(renderFrame);
           return;
         }
-        if (needNextFrame) animFrame = requestAnimationFrame(renderFrame);
+        animFrame = needNextFrame ? requestAnimationFrame(renderFrame) : null;
         return;
       }
 
@@ -610,7 +621,10 @@
       }
     }
 
-    if (needNextFrame) animFrame = requestAnimationFrame(renderFrame);
+    // Reached when only appBoundary was active (no currentUpdate) or it just
+    // finished — must explicitly null animFrame, not just skip re-arming it,
+    // so a later boundary-only flash isn't blocked by a stale non-null id.
+    animFrame = needNextFrame ? requestAnimationFrame(renderFrame) : null;
   }
 
   function startAnimation(update: OverlayUpdate) {
