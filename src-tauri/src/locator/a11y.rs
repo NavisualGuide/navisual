@@ -22,6 +22,7 @@ use regex::Regex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uiautomation::controls::ControlType;
+use uiautomation::core::UICondition;
 use uiautomation::types::{Point, TreeScope, UIProperty};
 use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
@@ -403,10 +404,17 @@ fn ai_bbox_probe(
 
 /// S.1 cap: more surviving elements than this → the whole block is skipped, never
 /// truncated (Decision 4 — a partial list biases the model toward "the answer must
-/// be in here").
-pub const CONTEXT_ELEMENTS_CAP: usize = 80;
+/// be in here"). Raised from 80 (2026-07-05): a live VS Code window with a busy
+/// Explorer tree + an extension side panel measured 125 qualifying elements at
+/// ~$0.001/request extra cost even at 2-3x that — token cost is negligible here,
+/// so the cap is sized for real-world headroom, not budget.
+pub const CONTEXT_ELEMENTS_CAP: usize = 200;
 /// S.1 hard budget; exceeded → skip the block (the AI call proceeds without it).
-const CONTEXT_BUDGET_MS: u128 = 300;
+/// Raised from 300 (2026-07-05): a live VS Code window measured ~287 ms for the
+/// raw `find_all_build_cache` query alone, before any filtering — the query
+/// itself, not the element count, was the dominant cost and left almost no
+/// margin at 300 ms.
+const CONTEXT_BUDGET_MS: u128 = 500;
 
 /// Interactive control types enumerated for the Structured-Context list — the
 /// CLICKABLE family from `role_control_type_ids` plus Edit/Slider (inputs a "textbox"/
@@ -445,6 +453,122 @@ fn context_display_name(raw: &str) -> String {
 fn context_role_compatible(live: &str, snapshot: &str) -> bool {
     const BUTTON_FAMILY: &[&str] = &["Button", "SplitButton", "Hyperlink", "MenuItem"];
     live == snapshot || (BUTTON_FAMILY.contains(&live) && BUTTON_FAMILY.contains(&snapshot))
+}
+
+/// Excel's ribbon/scrollbar automation provider class — its own `FindAll(Descendants)`
+/// never terminates correctly. Confirmed live 2026-07-06: sampled "Line up" instances at
+/// array positions 0/15/30/45/60 (of 61 total) all shared one identical RuntimeId,
+/// ClassName, rect, and zero children — not 61 real siblings, the same element returned 61
+/// times. Word and OneNote expose the exact same `NetUI*`/`NUIScrollbar` framework classes
+/// with zero duplication, so this is specific to Excel's scrollbar, not the shared Office
+/// ribbon chrome.
+///
+/// It's worse than a single bad branch, though: the scrollbar pane's own container (a small
+/// `NetUIHWNDElement`) contains ANOTHER copy of the same `[NUIScrollbar, NUIScrollbar,
+/// XLCTL, ExcelGrid]` group nested inside itself — a self-referential structure, not a
+/// fixed depth. So a plain `find_all(Descendants)` explodes to 1,200+ duplicate nodes and
+/// blows the budget (1.8–4 s). [`excel_collect_candidates`] instead does a pruned collecting
+/// walk: it skips the `NUIScrollbar` branch outright and stops recursing into any
+/// (ClassName, rect) signature already visited (which breaks the self-nesting loop), while
+/// collecting each context-type node as it goes.
+pub(crate) const EXCEL_BROKEN_SCROLLBAR_CLASS: &str = "NUIScrollbar";
+/// Excel's main window class (`XLMAIN`) — gates the workaround below to Excel specifically,
+/// so every other app's enumeration takes the original single-bulk-search path, unchanged.
+pub(crate) const EXCEL_MAIN_WINDOW_CLASS: &str = "XLMAIN";
+/// The worksheet grid pane's class — a sibling of the broken scrollbar panes under `XLDESK`,
+/// not their descendant. Its own children (incl. the sheet-tab strip) are only exposed via a
+/// true `Descendants` traversal, not `Children` — see `excel_pruned_walk`.
+pub(crate) const EXCEL_GRID_CLASS: &str = "ExcelGrid";
+/// Safety bound on the collecting-walk depth, independent of the (class, rect) dedup (which
+/// is what actually stops the self-nesting) — just prevents runaway recursion if some other,
+/// truly-infinite pattern is ever found. Excel's real tree is < 8 deep.
+pub(crate) const SCROLLBAR_SCAN_DEPTH: u32 = 12;
+/// Excel gets a larger budget than [`CONTEXT_BUDGET_MS`]: the pruned collecting walk is
+/// inherently ~290 ms (measured, cached) vs the sub-100 ms bulk search other apps use, and a
+/// PivotTable field pane pushes it higher — so the general 500 ms budget would spuriously
+/// skip Excel even though the walk is correct and bounded. This is a one-time cost before the
+/// multi-second AI call, so ~1 s of headroom is an acceptable trade for Structured-Context
+/// actually working on Excel.
+const EXCEL_CONTEXT_BUDGET_MS: u128 = 1500;
+
+/// (ClassName, (left, top, width, height)) — a structural signature for the walk's dedup.
+pub(crate) type ClassRectSignature = (String, (i32, i32, i32, i32));
+
+/// Shared pruned walk for Excel: one cached round-trip per container
+/// (`find_all_build_cache(Children)`), visiting every descendant self-inclusively while
+/// pruning (a) the broken [`EXCEL_BROKEN_SCROLLBAR_CLASS`] branch and (b) any (ClassName,
+/// rect) signature already visited (breaks the self-nested `NetUIHWNDElement` loop). The
+/// requested `cache` rides along on every element `visit` receives, so callers read cached
+/// props with zero further COM. Calls `visit(element, class_name)` for every surviving node
+/// before recursing into it.
+///
+/// `ExcelGrid` gets a special case: it's a sibling of the broken scrollbar panes (not their
+/// descendant, confirmed live), but its own children are only exposed via a true
+/// `Descendants` COM traversal, not step-by-step `Children` queries — a plain `Children` walk
+/// finds 0, silently missing content that lives inside it (e.g. the sheet-tab strip: Sheet1,
+/// Add Sheet, Scroll Left/Right). Since `ExcelGrid` itself is outside the broken branch, one
+/// bounded `find_all_build_cache(Descendants, gc, cache)` scoped to just that node is safe —
+/// verified live (172 ms, no explosion). Pass `grid_cond: Some(cond)` to run that supplement
+/// (each match also visited); `None` skips it (e.g. the cell adapter only needs the
+/// `ExcelGrid` node itself, not what's inside it).
+///
+/// `pub(crate)` so both the Structured-Context enumeration (this module) and the Excel cell
+/// adapter (`adapters::excel`) share the exact same pruning — they hit the identical
+/// broken-scrollbar problem via their own tree walks, and duplicating this logic in two
+/// places would only need to drift out of sync once to reintroduce the bug in one of them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn excel_pruned_walk(
+    el: &UIElement,
+    depth_budget: u32,
+    true_cond: &UICondition,
+    grid_cond: Option<&UICondition>,
+    cache: &uiautomation::core::UICacheRequest,
+    seen: &mut std::collections::HashSet<ClassRectSignature>,
+    deadline: Instant,
+    visit: &mut impl FnMut(&UIElement, &str),
+) {
+    if depth_budget == 0 || Instant::now() >= deadline {
+        return;
+    }
+    let Ok(children) = el.find_all_build_cache(TreeScope::Children, true_cond, cache) else {
+        return;
+    };
+    for child in children {
+        let class_name = child.get_cached_classname().unwrap_or_default();
+        if class_name == EXCEL_BROKEN_SCROLLBAR_CLASS {
+            continue; // known-broken scrollbar — never recurse into it
+        }
+        if class_name == EXCEL_GRID_CLASS {
+            if let Some(gc) = grid_cond {
+                if let Ok(els) = child.find_all_build_cache(TreeScope::Descendants, gc, cache) {
+                    for el in &els {
+                        let cn = el.get_cached_classname().unwrap_or_default();
+                        visit(el, &cn);
+                    }
+                }
+            }
+        }
+        if let Ok(r) = child.get_cached_bounding_rectangle() {
+            let key = (
+                class_name.clone(),
+                (r.get_left(), r.get_top(), r.get_width(), r.get_height()),
+            );
+            if !seen.insert(key) {
+                continue; // same (class, rect) already visited — the self-nested repeat
+            }
+        }
+        visit(&child, &class_name);
+        excel_pruned_walk(
+            &child,
+            depth_budget - 1,
+            true_cond,
+            grid_cond,
+            cache,
+            seen,
+            deadline,
+            visit,
+        );
+    }
 }
 
 /// S.1 — enumerate the interactive, named, on-screen elements of `hwnd_raw`'s window
@@ -493,19 +617,33 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
         return Err("no search roots".to_string());
     }
 
-    let mut cond = None;
-    for &id in CONTEXT_CT_IDS {
-        let c = automation
-            .create_property_condition(UIProperty::ControlType, Variant::from(id), None)
-            .map_err(|e| format!("condition: {e}"))?;
-        cond = Some(match cond.take() {
-            None => c,
-            Some(prev) => automation
-                .create_or_condition(prev, c)
-                .map_err(|e| format!("or-condition: {e}"))?,
-        });
-    }
-    let cond = cond.ok_or_else(|| "empty condition".to_string())?;
+    // Excel's scrollbar provider makes a bulk `find_all(Descendants)` explode into 1,200+
+    // duplicate nodes (see EXCEL_BROKEN_SCROLLBAR_CLASS) — detect it and use the pruned
+    // collecting walk instead, with a larger budget. Every other app keeps the fast bulk path.
+    let is_excel = roots
+        .iter()
+        .any(|r| matches!(r.get_classname(), Ok(c) if c == EXCEL_MAIN_WINDOW_CLASS));
+    let budget_ms = if is_excel {
+        EXCEL_CONTEXT_BUDGET_MS
+    } else {
+        CONTEXT_BUDGET_MS
+    };
+
+    let cond = {
+        let mut cond = None;
+        for &id in CONTEXT_CT_IDS {
+            let c = automation
+                .create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+                .map_err(|e| format!("condition: {e}"))?;
+            cond = Some(match cond.take() {
+                None => c,
+                Some(prev) => automation
+                    .create_or_condition(prev, c)
+                    .map_err(|e| format!("or-condition: {e}"))?,
+            });
+        }
+        cond.ok_or_else(|| "empty condition".to_string())?
+    };
     let cache = automation
         .create_cache_request()
         .map_err(|e| format!("cache request: {e}"))?;
@@ -513,66 +651,113 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let _ = cache.add_property(UIProperty::ControlType);
     let _ = cache.add_property(UIProperty::BoundingRectangle);
     let _ = cache.add_property(UIProperty::IsOffscreen);
+    let _ = cache.add_property(UIProperty::ClassName); // for the Excel walk's dedup
 
+    // Gather candidate elements (context-type, with the cache attached). Two ways in:
+    // Excel → the pruned collecting walk; everything else → the original bulk Descendants
+    // search per root. Both yield the SAME 12 context control types, so the filter below
+    // is identical for both.
+    let gather_started = Instant::now();
+    let candidates: Vec<UIElement> = if is_excel {
+        let mut out = Vec::new();
+        if let Ok(true_cond) = automation.create_true_condition() {
+            let mut seen: std::collections::HashSet<ClassRectSignature> =
+                std::collections::HashSet::new();
+            let deadline = started + Duration::from_millis(budget_ms as u64);
+            for root in &roots {
+                excel_pruned_walk(
+                    root,
+                    SCROLLBAR_SCAN_DEPTH,
+                    &true_cond,
+                    Some(&cond),
+                    &cache,
+                    &mut seen,
+                    deadline,
+                    &mut |el, _class_name| {
+                        if matches!(el.get_cached_control_type(), Ok(ct) if is_context_ct(ct)) {
+                            out.push(el.clone());
+                        }
+                    },
+                );
+            }
+        }
+        log::info!(
+            "[context] excel: collecting walk gathered {} candidate(s) in {} ms",
+            out.len(),
+            gather_started.elapsed().as_millis()
+        );
+        out
+    } else {
+        let mut out = Vec::new();
+        for root in &roots {
+            // A dead popup root must not kill the main window's list.
+            if let Ok(els) = root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
+                out.extend(els);
+            }
+        }
+        out
+    };
+
+    if started.elapsed().as_millis() > budget_ms {
+        return Err(format!(
+            "budget exceeded ({} ms)",
+            started.elapsed().as_millis()
+        ));
+    }
+
+    // Single filter pass over the cached candidates (name / on-screen / geometry / dedup).
     let mut out: Vec<super::ContextElement> = Vec::new();
     let mut seen: std::collections::HashSet<(String, (i32, i32, u32, u32))> =
         std::collections::HashSet::new();
-    for root in &roots {
-        if started.elapsed().as_millis() > CONTEXT_BUDGET_MS {
-            return Err(format!(
-                "budget exceeded ({} ms)",
-                started.elapsed().as_millis()
-            ));
-        }
-        let els = match root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
-            Ok(e) => e,
-            Err(_) => continue, // a dead popup root must not kill the main window's list
+    let mut total_qualifying: usize = 0;
+    for el in &candidates {
+        // Non-empty display name (a glyph-only control has nothing to select by).
+        let Ok(raw_name) = el.get_cached_name() else {
+            continue;
         };
-        for el in els {
-            // Non-empty display name (a glyph-only control has nothing to select by).
-            let Ok(raw_name) = el.get_cached_name() else {
-                continue;
-            };
-            let name = context_display_name(&raw_name);
-            if name.is_empty() {
-                continue;
-            }
-            // On-screen: UIA's own flag (scrolled-out list items) + rect ∩ window.
-            if el.is_cached_offscreen().unwrap_or(false) {
-                continue;
-            }
-            let Ok(ct) = el.get_cached_control_type() else {
-                continue;
-            };
-            let Ok(rect) = el.get_cached_bounding_rectangle() else {
-                continue;
-            };
-            let (left, top) = (rect.get_left(), rect.get_top());
-            let (w, h) = (
-                rect.get_width().max(0) as u32,
-                rect.get_height().max(0) as u32,
-            );
-            if w == 0 || h == 0 || !rect_is_onscreen(left, top) {
-                continue;
-            }
-            if left + (w as i32) <= win_rect.left
-                || left >= win_rect.right
-                || top + (h as i32) <= win_rect.top
-                || top >= win_rect.bottom
-            {
-                continue;
-            }
-            // Control-sized: >90% of the window in either axis is a container.
-            if (w as i64) * 10 > win_w * 9 || (h as i64) * 10 > win_h * 9 {
-                continue;
-            }
-            // Dedupe exact (name, rect) repeats (Chrome doubles names).
-            if !seen.insert((name.clone(), (left, top, w, h))) {
-                continue;
-            }
-            if out.len() >= CONTEXT_ELEMENTS_CAP {
-                return Err(format!("over cap (> {CONTEXT_ELEMENTS_CAP})"));
-            }
+        let name = context_display_name(&raw_name);
+        if name.is_empty() {
+            continue;
+        }
+        // On-screen: UIA's own flag (scrolled-out list items) + rect ∩ window.
+        if el.is_cached_offscreen().unwrap_or(false) {
+            continue;
+        }
+        let Ok(ct) = el.get_cached_control_type() else {
+            continue;
+        };
+        let Ok(rect) = el.get_cached_bounding_rectangle() else {
+            continue;
+        };
+        let (left, top) = (rect.get_left(), rect.get_top());
+        let (w, h) = (
+            rect.get_width().max(0) as u32,
+            rect.get_height().max(0) as u32,
+        );
+        if w == 0 || h == 0 || !rect_is_onscreen(left, top) {
+            continue;
+        }
+        if left + (w as i32) <= win_rect.left
+            || left >= win_rect.right
+            || top + (h as i32) <= win_rect.top
+            || top >= win_rect.bottom
+        {
+            continue;
+        }
+        // Control-sized: >90% of the window in either axis is a container.
+        if (w as i64) * 10 > win_w * 9 || (h as i64) * 10 > win_h * 9 {
+            continue;
+        }
+        // Dedupe exact (name, rect) repeats (Chrome doubles names).
+        if !seen.insert((name.clone(), (left, top, w, h))) {
+            continue;
+        }
+        // Keep counting past the cap (cheap — the candidates are already cached) so an
+        // over-cap skip reports the true qualifying count, not just ">CAP". Stop building
+        // `out` at the cap since an over-cap result is always discarded by the caller
+        // (Decision 4 — skip the whole block, never truncate).
+        total_qualifying += 1;
+        if out.len() < CONTEXT_ELEMENTS_CAP {
             out.push(super::ContextElement {
                 id: out.len() as u32 + 1,
                 name,
@@ -586,10 +771,9 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
             });
         }
     }
-    if started.elapsed().as_millis() > CONTEXT_BUDGET_MS {
+    if total_qualifying > CONTEXT_ELEMENTS_CAP {
         return Err(format!(
-            "budget exceeded ({} ms)",
-            started.elapsed().as_millis()
+            "over cap ({total_qualifying} > {CONTEXT_ELEMENTS_CAP})"
         ));
     }
     Ok(out)

@@ -19,12 +19,16 @@
 
 use super::{window_class_lower, window_exe_stem_lower, Adapter, AdapterHit};
 use crate::capture::Rect;
+use crate::locator::a11y::{excel_pruned_walk, ClassRectSignature, SCROLLBAR_SCAN_DEPTH};
 use crate::locator::LocateResult;
 use anyhow::{anyhow, Result};
 use regex::Regex;
+use std::collections::HashSet;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use uiautomation::controls::ControlType;
 use uiautomation::patterns::UIGridPattern;
-use uiautomation::types::{TreeScope, UIProperty};
+use uiautomation::types::UIProperty;
 use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
 use windows::Win32::Foundation::HWND;
@@ -33,11 +37,16 @@ use windows::Win32::Foundation::HWND;
 const MAX_COL: i32 = 16_384;
 const MAX_ROW: i32 = 1_048_576;
 
-/// UIA ControlType ids of containers that may host the worksheet grid. We accept whichever
-/// supports `GridPattern`; the numeric form avoids depending on enum-variant names.
+/// UIA ControlType ids for building the property condition passed into `excel_pruned_walk`'s
+/// `ExcelGrid` escape hatch (which needs a `&UICondition`, not the enum) — numeric form of
+/// the same three types checked via `ControlType` matching in `find_grid`'s `consider`.
 const CT_TABLE: i32 = 50_036;
 const CT_DATA_GRID: i32 = 50_028;
 const CT_CUSTOM: i32 = 50_025;
+/// Same budget-scale as the Structured-Context Excel walk (`a11y::EXCEL_CONTEXT_BUDGET_MS`)
+/// — this is the same pruned-walk shape, so it should finish in the same ~300 ms ballpark;
+/// this is a safety bound against runaway recursion, not an expected duration.
+const FIND_GRID_BUDGET_MS: u64 = 1500;
 
 pub struct ExcelAdapter;
 
@@ -125,13 +134,60 @@ impl Adapter for ExcelAdapter {
 }
 
 /// Find the worksheet grid: the descendant container that exposes a `GridPattern` with a
-/// non-empty shape. Searches the few table/grid/custom containers (the cell `DataItem`s are
-/// excluded by the control-type filter, so this stays cheap) and picks the largest grid.
+/// non-empty shape (Table / DataGrid / Custom control types; the cell `DataItem`s are
+/// excluded by the control-type check, so this stays cheap) and picks the largest grid.
+///
+/// Uses [`excel_pruned_walk`] rather than a plain `find_all(Subtree, ...)` — the naive form
+/// hits the exact same broken-scrollbar problem as the Structured-Context enumeration did
+/// (confirmed live 2026-07-06: a real `A1` request reported "no GridPattern surface found"
+/// after the walk apparently stalled inside the self-nested `NUIScrollbar` branch — same
+/// root cause, different call site). Sharing the walker means this can't drift out of sync
+/// with that fix.
+///
+/// The real grid is NOT the `ExcelGrid`-classed pane itself (that's just `ControlType::Pane`,
+/// no pattern support) — it's a `DataGrid`-typed grandchild (class `XLSpreadsheetGrid`, live
+/// name "Grid") one level further in. Like the sheet-tab strip, it's only reachable via a
+/// true `Descendants` search scoped to `ExcelGrid`, so this passes the Table/DataGrid/Custom
+/// condition as `grid_cond` to use that escape hatch — confirmed live: 173 ms, resolves A1
+/// correctly (rect 26,239 64×20).
 fn find_grid(
     automation: &UIAutomation,
     root: &UIElement,
 ) -> Option<(UIGridPattern, i32, i32)> {
-    let cond = {
+    let mut best: Option<(UIGridPattern, i32, i32)> = None;
+
+    let mut consider = |el: &UIElement| {
+        let Ok(ct) = el.get_cached_control_type().or_else(|_| el.get_control_type()) else {
+            return;
+        };
+        if !matches!(
+            ct,
+            ControlType::Table | ControlType::DataGrid | ControlType::Custom
+        ) {
+            return;
+        }
+        let Ok(grid) = el.get_pattern::<UIGridPattern>() else {
+            return;
+        };
+        let rows = grid.get_row_count().unwrap_or(0);
+        let cols = grid.get_column_count().unwrap_or(0);
+        if rows <= 0 || cols <= 0 {
+            return;
+        }
+        let area = (rows as i64) * (cols as i64);
+        let better = best
+            .as_ref()
+            .map(|(_, r, c)| area > (*r as i64) * (*c as i64))
+            .unwrap_or(true);
+        if better {
+            best = Some((grid, rows, cols));
+        }
+    };
+    // Test root itself first, in case the window element is the grid (mirrors the old
+    // TreeScope::Subtree behaviour, which included the search root).
+    consider(root);
+
+    let grid_type_cond = {
         let mut acc: Option<uiautomation::core::UICondition> = None;
         for id in [CT_TABLE, CT_DATA_GRID, CT_CUSTOM] {
             let c = automation
@@ -144,28 +200,24 @@ fn find_grid(
         }
         acc?
     };
+    let true_cond = automation.create_true_condition().ok()?;
+    let cache = automation.create_cache_request().ok()?;
+    let _ = cache.add_property(UIProperty::ClassName);
+    let _ = cache.add_property(UIProperty::ControlType);
+    let _ = cache.add_property(UIProperty::BoundingRectangle);
+    let mut seen: HashSet<ClassRectSignature> = HashSet::new();
+    let deadline = Instant::now() + Duration::from_millis(FIND_GRID_BUDGET_MS);
 
-    // TreeScope::Subtree includes `root` itself, in case the window element is the grid.
-    let candidates = root.find_all(TreeScope::Subtree, &cond).ok()?;
-    let mut best: Option<(UIGridPattern, i32, i32)> = None;
-    for el in candidates {
-        let Ok(grid) = el.get_pattern::<UIGridPattern>() else {
-            continue;
-        };
-        let rows = grid.get_row_count().unwrap_or(0);
-        let cols = grid.get_column_count().unwrap_or(0);
-        if rows <= 0 || cols <= 0 {
-            continue;
-        }
-        let area = (rows as i64) * (cols as i64);
-        let better = best
-            .as_ref()
-            .map(|(_, r, c)| area > (*r as i64) * (*c as i64))
-            .unwrap_or(true);
-        if better {
-            best = Some((grid, rows, cols));
-        }
-    }
+    excel_pruned_walk(
+        root,
+        SCROLLBAR_SCAN_DEPTH,
+        &true_cond,
+        Some(&grid_type_cond), // the ExcelGrid escape hatch — reaches XLSpreadsheetGrid
+        &cache,
+        &mut seen,
+        deadline,
+        &mut |el, _class_name| consider(el),
+    );
     best
 }
 
