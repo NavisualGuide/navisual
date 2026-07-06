@@ -363,13 +363,18 @@ pub fn get_window_info_for_hwnd(hwnd_raw: usize) -> Option<ActiveWindowInfo> {
 /// Enumerate all plausible capture targets visible on screen. Used by the
 /// "target window picker" so the user can explicitly pin an app.
 ///
-/// Deduplicates by exe stem: if the same app has multiple windows open,
-/// only the topmost (most recently focused) window is returned — EnumWindows
-/// walks in z-order so the first hit per exe is always the most recently active.
+/// Deduplicates by (exe stem, title): multiple windows of the same app are
+/// only collapsed to one entry when their titles are indistinguishable (equal
+/// once trimmed + lowercased, including two blank titles) — otherwise every
+/// distinctly-titled window is listed (e.g. two VS Code windows on different
+/// projects both appear; the frontend renders `title` as the sub-line under
+/// `display_name` whenever they differ). EnumWindows walks in z-order, so
+/// among indistinguishable duplicates the one kept is always the topmost
+/// (most recently active).
 pub fn list_target_windows() -> Vec<TargetWindowInfo> {
     struct State {
         our_pid: u32,
-        seen_exe_stems: Vec<String>,
+        seen_keys: Vec<(String, String)>,
         results: Vec<TargetWindowInfo>,
     }
 
@@ -391,12 +396,12 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
             .unwrap_or("Unknown")
             .to_string();
 
-        // One entry per app — skip duplicate exe stems (same app, different window).
-        let key = exe_stem.to_lowercase();
-        if state.seen_exe_stems.contains(&key) {
+        // One entry per (app, distinguishable title) — skip only true duplicates.
+        let key = (exe_stem.to_lowercase(), title.to_lowercase());
+        if state.seen_keys.contains(&key) {
             return TRUE;
         }
-        state.seen_exe_stems.push(key);
+        state.seen_keys.push(key);
 
         let display_name = friendly_exe_name(&exe_stem);
         state.results.push(TargetWindowInfo {
@@ -411,7 +416,7 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
     let our_pid = std::process::id();
     let mut state = State {
         our_pid,
-        seen_exe_stems: Vec::new(),
+        seen_keys: Vec::new(),
         results: Vec::new(),
     };
     unsafe {
