@@ -89,7 +89,6 @@ See the LICENSE file in the root of this repository for complete details.
     debug_locate_trace_enabled: boolean;
     debug_locate_log_file_enabled: boolean;
     debug_prompt_log_file_enabled: boolean;
-    structured_context: boolean;
     task_suggestions: boolean;
     debug_show_ai_bbox: boolean;
     developer_mode: boolean;
@@ -287,11 +286,16 @@ See the LICENSE file in the root of this repository for complete details.
 
   // ---- Workstream P (v0.7): prefilled task suggestions ----
   // The task box is prefilled with a plausible task, rendered SELECTED so one
-  // keystroke replaces it; a small list under the box offers alternatives when
-  // there is more than one guess. Display-only — nothing is ever auto-submitted.
+  // keystroke replaces it; a small ▾ toggle reveals the other guesses in a
+  // popover when there is more than one. Display-only — nothing is ever
+  // auto-submitted.
   let taskSuggestions = $state<string[]>([]); // current guess list (≤3)
   let prefillActive = $state(false); // task box holds an untouched prefill
+  let showSuggestAlts = $state(false); // the ▾ popover of alternates is open
   let taskInputEl: HTMLTextAreaElement | undefined = $state(undefined);
+  // The suggestion currently sitting in the box never repeats in its own
+  // dropdown — only the OTHER guesses are worth surfacing there.
+  let suggestAlternatives = $derived(taskSuggestions.filter((s) => s !== task));
 
   /// Prefill the box with `suggestions[0]` + list the rest. Never clobbers
   /// user-typed text (only an empty box or an untouched previous prefill is
@@ -318,11 +322,13 @@ See the LICENSE file in the root of this repository for complete details.
   function clearPrefill() {
     prefillActive = false;
     taskSuggestions = [];
+    showSuggestAlts = false;
   }
 
   function selectSuggestion(s: string) {
     task = s;
     prefillActive = true; // still a prefill — typing replaces, submit sends
+    showSuggestAlts = false;
     tick().then(() => {
       taskInputEl?.focus();
       taskInputEl?.select();
@@ -527,7 +533,6 @@ See the LICENSE file in the root of this repository for complete details.
     debug_locate_trace_enabled: false,
     debug_locate_log_file_enabled: false,
     debug_prompt_log_file_enabled: false,
-    structured_context: false,
     task_suggestions: true,
     debug_show_ai_bbox: false,
     developer_mode: false,
@@ -2213,37 +2218,49 @@ See the LICENSE file in the root of this repository for complete details.
       {:else if phase === "guiding"}
         <div class="input-hint">Type a follow-up or correction · ＋ for a new task</div>
       {/if}
-      <textarea
-        bind:value={task}
-        bind:this={taskInputEl}
-        onkeydown={handleKeydown}
-        oninput={() => {
-          // Real typing replaces the prefill (the selection is typed over) and
-          // protects the user's text from any further prefill.
-          if (prefillActive) clearPrefill();
-        }}
-        onfocus={() => {
-          // Select-on-focus: applyPrefill skips select() while the panel is a
-          // background window (it would steal focus from the target app), so the
-          // "one keystroke replaces" behaviour arms when the user clicks in.
-          if (prefillActive) taskInputEl?.select();
-        }}
-        placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
-        rows={2}
-      ></textarea>
-      {#if prefillActive && taskSuggestions.length > 1}
-        <div class="suggest-menu" role="listbox" aria-label="Suggested tasks">
-          {#each taskSuggestions as s (s)}
-            <button
-              class="suggest-item"
-              class:suggest-active={s === task}
-              role="option"
-              aria-selected={s === task}
-              onclick={() => selectSuggestion(s)}
-            >{s}</button>
-          {/each}
-        </div>
-      {/if}
+      <div class="task-input-wrap">
+        <textarea
+          bind:value={task}
+          bind:this={taskInputEl}
+          onkeydown={handleKeydown}
+          oninput={() => {
+            // Real typing replaces the prefill (the selection is typed over) and
+            // protects the user's text from any further prefill.
+            if (prefillActive) clearPrefill();
+          }}
+          onfocus={() => {
+            // Select-on-focus: applyPrefill skips select() while the panel is a
+            // background window (it would steal focus from the target app), so the
+            // "one keystroke replaces" behaviour arms when the user clicks in.
+            if (prefillActive) taskInputEl?.select();
+          }}
+          placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
+          rows={2}
+        ></textarea>
+        {#if prefillActive && suggestAlternatives.length > 0}
+          <button
+            type="button"
+            class="suggest-toggle"
+            class:suggest-toggle-open={showSuggestAlts}
+            onclick={() => (showSuggestAlts = !showSuggestAlts)}
+            title="Other suggested tasks"
+            aria-label="Show other suggested tasks"
+            aria-expanded={showSuggestAlts}
+          >▾</button>
+          {#if showSuggestAlts}
+            <div class="suggest-menu" role="listbox" aria-label="Other suggested tasks">
+              {#each suggestAlternatives as s (s)}
+                <button
+                  class="suggest-item"
+                  role="option"
+                  aria-selected="false"
+                  onclick={() => selectSuggestion(s)}
+                >{s}</button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+      </div>
       {#if isThinking}
         <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
       {:else}
@@ -3159,14 +3176,6 @@ See the LICENSE file in the root of this repository for complete details.
               <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\prompt_log.jsonl — a single running history covering every request (task, follow-up, re-query, and ✗ Wrong corrections). The system prompt is static (src-tauri/src/ai/prompts.rs) and never logged, only the per-request dynamic text.</p>
             </div>
             <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
-              <p class="setting-label">Structured context (v0.7)</p>
-              <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.structured_context} />
-                <span>Send an indexed [Screen Elements] list with each screenshot; the AI selects an element id, verified before use</span>
-              </label>
-              <p class="stub-hint" style="margin-top:4px">"Select, don't ground" — Chrome/Eager windows only; falls back to the normal locator on any doubt. Default off until the live-verification matrix passes.</p>
-            </div>
-            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
               <p class="setting-label">AI bounding box</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.debug_show_ai_bbox} />
@@ -4075,20 +4084,63 @@ See the LICENSE file in the root of this repository for complete details.
     font-style: italic;
   }
 
-  /* Workstream P — suggested-task list under the input (shown when >1 guess) */
+  /* Workstream P — the task box holds exactly one prefill; a small ▾ toggle
+     (only rendered when there's something else to show) reveals the other
+     guesses in a floating popover instead of listing all of them inline. */
+  .task-input-wrap {
+    position: relative;
+    width: 100%;
+  }
+  .suggest-toggle {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-size: 17px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 120ms ease-out, background 120ms ease-out, transform 120ms ease-out;
+  }
+  .suggest-toggle:hover {
+    color: var(--text-primary);
+    background: var(--surface-3);
+  }
+  .suggest-toggle-open {
+    color: var(--accent-500);
+    transform: rotate(180deg);
+  }
   .suggest-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 5;
     display: flex;
     flex-direction: column;
     gap: 2px;
+    padding: 4px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   }
   .suggest-item {
     text-align: left;
     font-family: inherit;
     font-size: 12px;
-    padding: 5px 9px;
+    padding: 6px 8px;
     border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
+    border: 1px solid transparent;
+    background: transparent;
     color: var(--text-secondary);
     cursor: pointer;
     overflow: hidden;
@@ -4097,14 +4149,13 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .suggest-item:hover {
     color: var(--text-primary);
-    border-color: var(--text-tertiary);
-  }
-  .suggest-active {
-    color: var(--text-primary);
-    border-color: var(--accent);
+    background: var(--surface-3);
+    border-color: var(--border);
   }
 
   textarea {
+    width: 100%;
+    box-sizing: border-box;
     font-family: inherit;
     font-size: 13px;
     padding: 8px 10px;
