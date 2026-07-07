@@ -410,11 +410,12 @@ fn ai_bbox_probe(
 /// so the cap is sized for real-world headroom, not budget.
 pub const CONTEXT_ELEMENTS_CAP: usize = 200;
 /// S.1 hard budget; exceeded → skip the block (the AI call proceeds without it).
-/// Raised from 300 (2026-07-05): a live VS Code window measured ~287 ms for the
-/// raw `find_all_build_cache` query alone, before any filtering — the query
-/// itself, not the element count, was the dominant cost and left almost no
-/// margin at 300 ms.
-const CONTEXT_BUDGET_MS: u128 = 500;
+/// Raised 300→500 (2026-07-05, VS Code's raw query alone measured ~287 ms) then
+/// 500→1000 (2026-07-06): a live SolidWorks session crept from ~400 ms early on to
+/// 520/780 ms later as the FeatureManager tree grew with the design, tipping over
+/// the 500 ms floor with no engine change — headroom against normal tree growth,
+/// not a new failure mode. Still well under the multi-second AI call this precedes.
+const CONTEXT_BUDGET_MS: u128 = 1000;
 
 /// Interactive control types enumerated for the Structured-Context list — the
 /// CLICKABLE family from `role_control_type_ids` plus Edit/Slider (inputs a "textbox"/
