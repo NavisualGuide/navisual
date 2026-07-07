@@ -856,10 +856,6 @@ struct SettingsPayload {
     debug_locate_trace_enabled: bool,
     debug_locate_log_file_enabled: bool,
     debug_prompt_log_file_enabled: bool,
-    /// v0.7 Workstream S — Structured-Context Locator ("select, don't ground").
-    /// Developer-tab toggle; default off until the S.4 live-verification matrix.
-    #[serde(default)]
-    structured_context: bool,
     /// v0.7 Workstream P — prefilled task suggestions (cold-start prefill + AI
     /// suggested_tasks). Screen Guide toggle; default on (display-only, no risk).
     #[serde(default = "default_true_setting")]
@@ -1064,13 +1060,7 @@ async fn guide(
         }
     };
 
-    let (debug_screenshot_enabled, structured_context_enabled) = {
-        let router = state.ai_router.lock().await;
-        (
-            router.config.debug_screenshot_enabled,
-            router.config.structured_context,
-        )
-    };
+    let debug_screenshot_enabled = state.ai_router.lock().await.config.debug_screenshot_enabled;
 
     // `is_fs` is the user's sticky "Entire desktop" choice from the target picker
     // (GuidanceState.full_screen_mode). The AI no longer decides this — full-screen
@@ -1251,12 +1241,12 @@ async fn guide(
 
     // S.1 — Structured-Context enumeration at AI-capture time (v0.7 Workstream S): the
     // element list the AI can select from, same freshness contract as the screenshot.
-    // Gated on the flag + a single captured window (full-screen mode has no one tree).
-    // A warm tree is ~ms; the 300 ms hard budget bounds the worst case before the
-    // (multi-second) AI call starts.
+    // Gated only on a single captured window (full-screen mode has no one tree). A warm
+    // tree is ~ms; the hard budget bounds the worst case before the (multi-second) AI
+    // call starts.
     let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
-        match (structured_context_enabled && !is_fs, new_hwnd_opt) {
-            (true, Some(hwnd)) => tokio::task::spawn_blocking(move || {
+        match (is_fs, new_hwnd_opt) {
+            (false, Some(hwnd)) => tokio::task::spawn_blocking(move || {
                 enumerate_context_snapshot(hwnd).map(std::sync::Arc::new)
             })
             .await
@@ -1774,7 +1764,6 @@ async fn send_correction(
 
     let router = state.ai_router.lock().await;
     let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
-    let structured_context_enabled = router.config.structured_context;
     drop(router); // Release lock before blocking capture
 
     let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
@@ -1893,8 +1882,8 @@ async fn send_correction(
     // S.1 — fresh Structured-Context snapshot for the correction capture (the retry
     // may be looking at a different window/state than the original guide()).
     let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
-        match (structured_context_enabled && !is_fs, new_hwnd) {
-            (true, Some(hwnd)) => tokio::task::spawn_blocking(move || {
+        match (is_fs, new_hwnd) {
+            (false, Some(hwnd)) => tokio::task::spawn_blocking(move || {
                 enumerate_context_snapshot(hwnd).map(std::sync::Arc::new)
             })
             .await
@@ -2661,7 +2650,6 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
         debug_prompt_log_file_enabled: c.debug_prompt_log_file_enabled,
-        structured_context: c.structured_context,
         task_suggestions: c.task_suggestions,
         debug_show_ai_bbox: c.debug_show_ai_bbox,
         developer_mode: developer_mode_enabled(),
@@ -2748,10 +2736,6 @@ async fn save_settings(
         (
             "DEBUG_PROMPT_LOG_FILE_ENABLED".into(),
             payload.debug_prompt_log_file_enabled.to_string(),
-        ),
-        (
-            "STRUCTURED_CONTEXT".into(),
-            payload.structured_context.to_string(),
         ),
         (
             "TASK_SUGGESTIONS".into(),

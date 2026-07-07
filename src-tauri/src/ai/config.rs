@@ -50,16 +50,10 @@ pub struct Config {
     // Shared
     pub api_timeout_sec: u64,
 
-    // v0.7 Workstream S — Structured-Context Locator ("select, don't ground"): send an
-    // indexed UIA element list with the screenshot; the AI returns target_element_id,
-    // verified before use. Default OFF in the first build; flipped on for Chrome/Eager
-    // after the S.4 live-verification matrix (navisual-internal/docs/v0.7-plan.md).
-    pub structured_context: bool,
-
     // v0.7 Workstream P — prefilled task suggestions: surface the AI's suggested_tasks
     // (piggybacked on navigate_step) + the local cold-start prefill. Display-only UI
-    // sugar with no wrong-pointer risk, so unlike structured_context it defaults ON;
-    // the Settings → Screen Guide toggle turns it off.
+    // sugar with no wrong-pointer risk, so it defaults ON; the Settings → Screen Guide
+    // toggle turns it off.
     pub task_suggestions: bool,
 
     // Locator — comma-separated, case-insensitive substrings of model names whose AI
@@ -137,7 +131,6 @@ impl Default for Config {
             managed_model: "openrouter/free".to_string(),
             managed_tier: "regular".to_string(),
             api_timeout_sec: 90,
-            structured_context: false,
             task_suggestions: true,
             bbox_distrust_models: "nemotron,gemma,kimi".to_string(),
             overlay_color: "#FF6B35".to_string(),
@@ -289,9 +282,6 @@ impl Config {
             if v == "speed" || v == "regular" || v == "smart" {
                 config.managed_tier = v;
             }
-        }
-        if let Ok(v) = env::var("STRUCTURED_CONTEXT") {
-            config.structured_context = v == "true" || v == "1";
         }
         if let Ok(v) = env::var("TASK_SUGGESTIONS") {
             config.task_suggestions = v == "true" || v == "1";
