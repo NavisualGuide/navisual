@@ -19,15 +19,21 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::core::PCWSTR;
+#[cfg(windows)]
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+#[cfg(windows)]
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetAncestor, GetMessageW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
-    IsWindow, KillTimer, SetTimer, TranslateMessage, WindowFromPoint, EVENT_OBJECT_HIDE,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor, GetMessageW, GetWindowRect,
+    GetWindowThreadProcessId, IsIconic, IsWindow, KillTimer, RegisterClassExW, SetTimer,
+    TranslateMessage, WindowFromPoint, CW_USEDEFAULT, EVENT_OBJECT_HIDE,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
-    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, MSG, WINEVENT_OUTOFCONTEXT,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, MSG, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_DISPLAYCHANGE, WNDCLASSEXW,
 };
 
 struct TrackState {
@@ -242,10 +248,14 @@ impl WindowTracker {
     }
 }
 
-/// Dedicated thread: register the window-event hooks, then pump messages so the OS
-/// delivers `WINEVENT_OUTOFCONTEXT` callbacks to `win_event_proc`.
+/// Dedicated thread: register the window-event hooks, create the hidden
+/// `WM_DISPLAYCHANGE` watch window, then pump messages so the OS delivers
+/// `WINEVENT_OUTOFCONTEXT` callbacks to `win_event_proc` and window messages to
+/// `display_watch_wndproc`.
 #[cfg(windows)]
 unsafe fn run_event_thread() {
+    create_display_watch_window();
+
     // Keep the hook handles alive for the life of the thread (process lifetime).
     let _hooks: [HWINEVENTHOOK; 5] = [
         SetWinEventHook(
@@ -300,6 +310,70 @@ unsafe fn run_event_thread() {
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+}
+
+/// Create a genuinely invisible (never shown) top-level window purely to receive
+/// `WM_DISPLAYCHANGE`. This message is broadcast by the OS to top-level windows when the
+/// display configuration changes (monitor plugged/unplugged, resolution changed) — a
+/// message-only window (`HWND_MESSAGE` parent) does *not* qualify to receive it, so a real,
+/// if invisible, top-level window is required. Created on this thread so the existing
+/// `GetMessageW`/`DispatchMessageW` pump above (already running for the WinEvent hooks)
+/// delivers its messages too, with no separate thread or second message loop needed.
+/// Never destroyed — lives for the process's lifetime, same as the hook handles.
+#[cfg(windows)]
+unsafe fn create_display_watch_window() {
+    let class_name: Vec<u16> = "NavisualDisplayWatch\0".encode_utf16().collect();
+    let hinstance = GetModuleHandleW(None).unwrap_or_default();
+
+    let wc = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(display_watch_wndproc),
+        hInstance: hinstance.into(),
+        lpszClassName: PCWSTR(class_name.as_ptr()),
+        ..Default::default()
+    };
+    if RegisterClassExW(&wc) == 0 {
+        log::warn!("display-watch: RegisterClassExW failed");
+        return;
+    }
+
+    // No WS_VISIBLE, no parent (None) -> a real top-level window that's never shown.
+    let hwnd = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        PCWSTR(class_name.as_ptr()),
+        PCWSTR::null(),
+        WINDOW_STYLE(0),
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        0,
+        0,
+        None,
+        None,
+        Some(hinstance.into()),
+        None,
+    );
+    match hwnd {
+        Ok(h) if !h.0.is_null() => log::info!("display-watch: window created {:#x}", h.0 as usize),
+        _ => log::warn!("display-watch: CreateWindowExW failed"),
+    }
+}
+
+/// WNDPROC for the hidden display-watch window. `WM_DISPLAYCHANGE` triggers a full overlay
+/// reconfigure (see `overlay::reconfigure`'s doc comment for why this is needed at all);
+/// everything else passes straight to the default handler.
+#[cfg(windows)]
+unsafe extern "system" fn display_watch_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_DISPLAYCHANGE {
+        if let Some(app) = crate::APP_HANDLE.get() {
+            crate::overlay::reconfigure(app);
+        }
+    }
+    DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
 /// WinEvent callback (runs on the tracker thread's message loop). Drops the noisy

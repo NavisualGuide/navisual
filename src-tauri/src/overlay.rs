@@ -183,6 +183,36 @@ pub fn configure(window: &WebviewWindow) -> Result<()> {
     Ok(())
 }
 
+/// Drop the cached virtual-desktop rect so the next `virtual_desktop_rect()` call
+/// re-enumerates monitors instead of returning up-to-30s-stale data. Called from
+/// `reconfigure` below so a real display-configuration change is reflected immediately
+/// rather than waiting out the cache.
+fn invalidate_virtual_desktop_cache() {
+    let cache = VD_CACHE.get_or_init(|| Mutex::new(None));
+    *cache.lock().unwrap() = None;
+}
+
+/// Re-run `configure` against the live overlay window and current monitor topology.
+///
+/// `configure` itself only ever runs once, ~2s after app startup (`lib.rs` setup) — nothing
+/// previously re-ran it, so the overlay window's *physical* OS-level position and size stayed
+/// permanently fixed to whatever topology existed at that moment. Plugging/unplugging a
+/// monitor during the session left the window misaligned with the real desktop for the rest
+/// of the run (pointer/box invisible, or clipped to stale bounds) — confirmed live 2026-07-07.
+/// `track.rs` calls this in response to the OS's `WM_DISPLAYCHANGE` message, which is the
+/// correct, immediate signal for "the display configuration just changed."
+pub fn reconfigure(app: &AppHandle) {
+    invalidate_virtual_desktop_cache();
+    let Some(window) = app.get_webview_window("overlay") else {
+        log::warn!("overlay reconfigure: overlay window not found");
+        return;
+    };
+    match configure(&window) {
+        Ok(()) => log::info!("overlay reconfigured after display change"),
+        Err(e) => log::warn!("overlay reconfigure failed: {e}"),
+    }
+}
+
 /// Emit an `overlay:update` event to the overlay frontend.
 pub fn emit_update(app: &AppHandle, update: OverlayUpdate) -> Result<()> {
     let Some(window) = app.get_webview_window("overlay") else {

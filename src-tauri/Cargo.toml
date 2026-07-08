@@ -83,6 +83,8 @@ windows = { version = "0.62", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   # GetDpiForMonitor — physical per-monitor DPI for the template-matching DPI prior
   "Win32_UI_HiDpi",
+  # GetModuleHandleW — hInstance for the hidden WM_DISPLAYCHANGE watch window
+  "Win32_System_LibraryLoader",
 ] }
 uiautomation = { version = "0.24.4", features = ["process", "event", "pattern"] }
 
