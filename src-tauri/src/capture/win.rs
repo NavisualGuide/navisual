@@ -403,7 +403,20 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
         }
         state.seen_keys.push(key);
 
-        let display_name = friendly_exe_name(&exe_stem);
+        // UWP/Store apps (Microsoft To Do, Mail, Calculator, ...) don't get their own
+        // exe — they all run hosted inside the shared ApplicationFrameHost.exe process, so
+        // exe_stem is useless for naming them (every UWP app looks identical by that
+        // measure). The window title is what the user actually sees, so use it directly
+        // rather than falling through friendly_exe_name to the generic host name.
+        let display_name = if exe_stem.eq_ignore_ascii_case("ApplicationFrameHost") {
+            if title.is_empty() {
+                exe_stem.clone()
+            } else {
+                title.clone()
+            }
+        } else {
+            friendly_exe_name(&exe_stem)
+        };
         state.results.push(TargetWindowInfo {
             hwnd: hwnd.0 as usize,
             title,

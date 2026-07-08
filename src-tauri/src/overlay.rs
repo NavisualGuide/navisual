@@ -130,6 +130,11 @@ pub fn virtual_desktop_rect() -> Result<Rect> {
     if monitors.is_empty() {
         return Err(anyhow!("no monitors found"));
     }
+    // Logged unconditionally (cache misses only happen on startup + every 30s + right
+    // after a display-change reconfigure, so this isn't hot-path noise) — the per-monitor
+    // list is what actually distinguishes "the OS hadn't finished re-registering a
+    // just-reconnected monitor yet" from any other failure mode further down the pipeline.
+    log::info!("virtual_desktop_rect: {} monitor(s): {:?}", monitors.len(), monitors);
     let mut min_x = i32::MAX;
     let mut min_y = i32::MAX;
     let mut max_x = i32::MIN;
@@ -170,6 +175,17 @@ pub fn configure(window: &WebviewWindow) -> Result<()> {
     // mispositioned but still click-through and safe to show.
     match virtual_desktop_rect() {
         Ok(rect) => {
+            // Logged unconditionally (not just on error) so a live monitor-topology
+            // test has concrete numbers to check against — the computed rect is the
+            // one fact needed to tell "wrong topology was read" apart from "topology
+            // was read correctly but something downstream didn't apply it right".
+            log::info!(
+                "overlay configure: applying rect x={} y={} w={} h={}",
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height
+            );
             if let Err(e) = window.set_position(PhysicalPosition::new(rect.x, rect.y)) {
                 log::warn!("overlay set_position failed: {e}");
             }

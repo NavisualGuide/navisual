@@ -59,6 +59,21 @@ static STATE: OnceLock<Arc<Mutex<Option<TrackState>>>> = OnceLock::new();
 /// Active one-shot "settle" timer id (0 = none). See `schedule_settle`.
 static SETTLE_TIMER: AtomicUsize = AtomicUsize::new(0);
 
+/// Active one-shot "display settle" timer id (0 = none). See `display_watch_wndproc`.
+/// Separate from `SETTLE_TIMER` — different trigger, different (longer) delay, and the
+/// two must never cancel each other if they happen to be armed at the same time.
+static DISPLAY_SETTLE_TIMER: AtomicUsize = AtomicUsize::new(0);
+
+/// How long to wait after `WM_DISPLAYCHANGE` before re-reading monitor topology. The
+/// message can fire before Windows has fully finished re-registering a just-reconnected
+/// monitor (EDID renegotiation, driver reinit) — reacting synchronously risked reading an
+/// incomplete monitor list and sizing the overlay for only part of the true virtual
+/// desktop. Not yet confirmed as the exact mechanism behind a live "squeezed to half"
+/// report (2026-07-08) — this is the leading hypothesis, paired with unconditional
+/// logging in `overlay::virtual_desktop_rect`/`configure` so the next occurrence has
+/// concrete numbers to check against rather than more speculation.
+const DISPLAY_SETTLE_DELAY_MS: u32 = 500;
+
 /// The AppBoundary flash (see `lib.rs::announce_shared_app`) plays out as a
 /// one-shot, client-timed animation with no ongoing backend involvement — so
 /// if its window is minimized or closed mid-flash, the box would otherwise
@@ -358,9 +373,10 @@ unsafe fn create_display_watch_window() {
     }
 }
 
-/// WNDPROC for the hidden display-watch window. `WM_DISPLAYCHANGE` triggers a full overlay
-/// reconfigure (see `overlay::reconfigure`'s doc comment for why this is needed at all);
-/// everything else passes straight to the default handler.
+/// WNDPROC for the hidden display-watch window. `WM_DISPLAYCHANGE` arms a debounced
+/// one-shot reconfigure (`schedule_display_settle`) rather than acting immediately — see
+/// `DISPLAY_SETTLE_DELAY_MS`'s doc comment for why. Everything else passes straight to the
+/// default handler.
 #[cfg(windows)]
 unsafe extern "system" fn display_watch_wndproc(
     hwnd: HWND,
@@ -369,11 +385,40 @@ unsafe extern "system" fn display_watch_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_DISPLAYCHANGE {
-        if let Some(app) = crate::APP_HANDLE.get() {
-            crate::overlay::reconfigure(app);
-        }
+        log::info!("display-watch: WM_DISPLAYCHANGE received, scheduling reconfigure");
+        schedule_display_settle();
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+/// (Re)arm a coalesced one-shot timer that reconfigures the overlay
+/// `DISPLAY_SETTLE_DELAY_MS` after the last `WM_DISPLAYCHANGE` — Windows can send several
+/// in quick succession while settling a topology change (e.g. one per monitor), so this
+/// resets on each and fires once, after the dust settles. Mirrors `schedule_settle`'s
+/// coalescing shape but is a distinct timer: different trigger, different delay, must not
+/// cancel or be cancelled by it.
+#[cfg(windows)]
+unsafe fn schedule_display_settle() {
+    let prev = DISPLAY_SETTLE_TIMER.swap(0, Ordering::SeqCst);
+    if prev != 0 {
+        let _ = KillTimer(None, prev);
+    }
+    let id = SetTimer(
+        None,
+        0,
+        DISPLAY_SETTLE_DELAY_MS,
+        Some(display_settle_timer_proc),
+    );
+    DISPLAY_SETTLE_TIMER.store(id, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn display_settle_timer_proc(_hwnd: HWND, _msg: u32, id: usize, _time: u32) {
+    let _ = KillTimer(None, id);
+    let _ = DISPLAY_SETTLE_TIMER.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    if let Some(app) = crate::APP_HANDLE.get() {
+        crate::overlay::reconfigure(app);
+    }
 }
 
 /// WinEvent callback (runs on the tracker thread's message loop). Drops the noisy
