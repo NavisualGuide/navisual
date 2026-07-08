@@ -4,7 +4,7 @@
 // this is display-only.
 
 const KEY_SYMBOL: Record<string, string> = {
-  Backquote: "`", Minus: "-", Equal: "=", Backslash: "\\", Slash: "/",
+  Backquote: "~", Minus: "-", Equal: "=", Backslash: "\\", Slash: "/",
   Comma: ",", Period: ".", Semicolon: ";", Quote: "'",
   BracketLeft: "[", BracketRight: "]", Space: "Space",
   Escape: "Esc", Delete: "Del", ArrowUp: "↑", ArrowDown: "↓",

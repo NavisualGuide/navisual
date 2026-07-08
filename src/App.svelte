@@ -3116,6 +3116,9 @@ See the LICENSE file in the root of this repository for complete details.
             <div class="setting-group">
               <label class="setting-label">Next step</label>
               <HotkeyInput bind:value={settingsForm.hotkey_next} />
+              {#if settingsForm.hotkey_next?.includes("Backquote")}
+                <p class="setting-hint" style="margin-top: 4px;">The <strong>~ (Tilde / Backtick)</strong> key is located directly below the Esc key (top left of the keyboard).</p>
+              {/if}
             </div>
             <div class="setting-group">
               <label class="setting-label">Mark wrong</label>
