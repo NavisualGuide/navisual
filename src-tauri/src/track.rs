@@ -422,13 +422,16 @@ unsafe extern "system" fn display_settle_timer_proc(_hwnd: HWND, _msg: u32, id: 
     // reconfigure() only resizes/repositions the overlay's own OS window — it has no way
     // to know what's currently being tracked, so whatever was already drawn stays exactly
     // as it was, now potentially misaligned with (or entirely outside) the just-changed
-    // window bounds. Force an immediate redraw against the corrected coordinate space —
-    // live-reported 2026-07-08: an active pointer went invisible after unplugging a
-    // monitor, and after replugging briefly showed correctly (via the target app's own
-    // move triggering an unrelated WinEvent → recompute) before jumping to the wrong
-    // screen, distorted, ~1s later — exactly when this debounce timer fires and changes
-    // the window bounds out from under the already-drawn pointer.
-    recompute();
+    // window bounds. force=true is load-bearing here, not just belt-and-suspenders: the
+    // target window itself very often does NOT move or resize during a monitor topology
+    // change, so recompute(false)'s normal `moved || resized` gate would silently emit
+    // nothing at all, leaving the frontend on stale virtual_origin/virtual_size even
+    // though recompute ran. Root-caused live 2026-07-08 from exactly this symptom (an
+    // already-shown pointer going invisible, or landing on the wrong screen distorted,
+    // after a monitor was unplugged/replugged with the target app's own position
+    // unchanged) after two earlier attempts (WM_DISPLAYCHANGE handling, then an
+    // unforced recompute) both still reproduced it.
+    recompute(true);
     if let Some(app) = crate::APP_HANDLE.get() {
         crate::refresh_active_window(app);
     }
@@ -452,7 +455,7 @@ unsafe extern "system" fn win_event_proc(
         return;
     }
     clear_boundary_if_gone(hwnd);
-    recompute();
+    recompute(false);
     // Z-order / foreground / show-hide / minimize changes aren't always settled at the
     // instant the event fires (alt-tab to an un-minimizing window, restore animations),
     // and the system can drop OUTOFCONTEXT events during a burst — so re-check shortly
@@ -484,7 +487,7 @@ unsafe fn schedule_settle() {
 unsafe extern "system" fn settle_timer_proc(_hwnd: HWND, _msg: u32, id: usize, _time: u32) {
     let _ = KillTimer(None, id);
     let _ = SETTLE_TIMER.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
-    recompute();
+    recompute(false);
     if let Some(app) = crate::APP_HANDLE.get() {
         crate::refresh_active_window(app);
     }
@@ -492,8 +495,21 @@ unsafe extern "system" fn settle_timer_proc(_hwnd: HWND, _msg: u32, id: usize, _
 
 /// Re-align the overlay and toggle its visibility against the target window. Same
 /// logic the old 200 ms poll ran, now invoked only when an OS event fires.
+///
+/// `force`: `moved`/`resized` below only compare the *target window's own* rect against
+/// what's cached — they say nothing about whether the overlay's virtual-desktop
+/// coordinate space itself changed. A monitor topology change can leave the target
+/// window's own position untouched while `virtual_origin`/`virtual_size` (what the
+/// frontend needs to place `abs_bbox` correctly) changes underneath it — in that case
+/// the normal gate silently skips emitting anything, leaving the frontend on stale
+/// coordinates (live-confirmed 2026-07-08: an already-shown pointer went invisible or
+/// rendered on the wrong screen, distorted, after a monitor was unplugged/replugged,
+/// because nothing re-sent it fresh virtual_origin/virtual_size). `force: true` bypasses
+/// `moved || resized` and emits whenever `should_show` holds, regardless. Normal
+/// WinEvent-driven calls pass `force: false`, preserving the original "only emit when
+/// something visually relevant changed" behaviour.
 #[cfg(windows)]
-unsafe fn recompute() {
+unsafe fn recompute(force: bool) {
     let Some(arc) = STATE.get() else {
         return;
     };
@@ -552,7 +568,7 @@ unsafe fn recompute() {
         // Keep the overlay above any transient popup (ribbon dropdown, combo list,
         // tooltip) the user just opened, which Windows would otherwise stack on top.
         crate::capture::raise_overlay_topmost();
-        if !s.shown || moved || resized {
+        if !s.shown || moved || resized || force {
             if let Ok(u) = overlay::make_update(s.kind, Some(abs_bbox), s.text.clone()) {
                 let _ = overlay::emit_update(&s.app, u);
             }
