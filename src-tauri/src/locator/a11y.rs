@@ -18,8 +18,10 @@ use super::trace::{A11yCandidate, A11yTrace, BboxProbe};
 use super::LocateResult;
 use crate::capture::Rect;
 use anyhow::{anyhow, Context, Result};
+use parking_lot::Mutex;
 use regex::Regex;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use uiautomation::controls::ControlType;
 use uiautomation::core::UICondition;
@@ -410,11 +412,60 @@ fn ai_bbox_probe(
 /// so the cap is sized for real-world headroom, not budget.
 pub const CONTEXT_ELEMENTS_CAP: usize = 200;
 /// S.1 hard budget; exceeded → skip the block (the AI call proceeds without it).
-/// Raised from 300 (2026-07-05): a live VS Code window measured ~287 ms for the
-/// raw `find_all_build_cache` query alone, before any filtering — the query
-/// itself, not the element count, was the dominant cost and left almost no
-/// margin at 300 ms.
-const CONTEXT_BUDGET_MS: u128 = 500;
+/// Raised 300→500 (2026-07-05, VS Code's raw query alone measured ~287 ms) then
+/// 500→1000 (2026-07-06): a live SolidWorks session crept from ~400 ms early on to
+/// 520/780 ms later as the FeatureManager tree grew with the design, tipping over
+/// the 500 ms floor with no engine change — headroom against normal tree growth,
+/// not a new failure mode. Still well under the multi-second AI call this precedes.
+///
+/// This bound is *advisory only* for the general (non-Excel) bulk path below — it's
+/// checked after `find_all_build_cache` already returned, so it can decide to keep or
+/// discard a result but can never cut the underlying blocking COM call short (Lightroom
+/// Classic measured 2.2-5.7s here regardless of this value; see `context_window_is_slow`
+/// for the mechanism that actually bounds wall-clock wait time).
+pub(crate) const CONTEXT_BUDGET_MS: u128 = 1000;
+
+/// S.1 adaptive skip — windows whose enumeration has already proven itself unproductive
+/// this session. Deliberately identity-agnostic: no window class, no app name, no
+/// executable check. It reacts only to *observed behaviour* (did the bulk query finish in
+/// time on this specific window), so it automatically covers any app with this pathology —
+/// discovered or not — and can't be broken by a vendor renaming a window class out from
+/// under a hardcoded check the way `is_excel`/`EXCEL_MAIN_WINDOW_CLASS` could be.
+///
+/// Root cause this exists for (2026-07-07, Lightroom Classic): its ~370 UIA nodes are all
+/// `Pane`/`IsControlElement=false` (confirmed live), so `find_all_build_cache`'s control-view
+/// filter can only ever return empty — but the underlying COM enumeration still has to
+/// physically walk the whole raw tree to determine that, so the cost (2.2-5.7s measured)
+/// scales with tree size even though the result never does. Raising `CONTEXT_BUDGET_MS`
+/// doesn't help this case (see its doc comment) since the call itself can't be shortened,
+/// only abandoned — which is exactly what the timeout in `enumerate_context_snapshot_bounded`
+/// (lib.rs) does, recording the outcome here.
+static CONTEXT_SLOW_WINDOWS: OnceLock<Mutex<HashMap<usize, u32>>> = OnceLock::new();
+/// Consecutive timeouts required before a window is skipped outright. Kept above 1 so a
+/// single transient blip (a GC pause, a disk hiccup) on an otherwise-fine window can't
+/// permanently blacklist it for the rest of the session — Lightroom Classic timed out 5/5
+/// times by a wide margin (2.2-5.7s vs a 1s budget), so a threshold of 2 still catches the
+/// real case almost immediately.
+const CONTEXT_SLOW_THRESHOLD: u32 = 2;
+
+/// Has `hwnd` already timed out enough times in a row to skip trying again this session?
+pub(crate) fn context_window_is_slow(hwnd: usize) -> bool {
+    let cell = CONTEXT_SLOW_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
+    cell.lock().get(&hwnd).copied().unwrap_or(0) >= CONTEXT_SLOW_THRESHOLD
+}
+
+/// Record that enumeration against `hwnd` didn't finish inside the wait budget.
+pub(crate) fn context_window_mark_slow(hwnd: usize) {
+    let cell = CONTEXT_SLOW_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
+    *cell.lock().entry(hwnd).or_insert(0) += 1;
+}
+
+/// Record that enumeration against `hwnd` completed within budget, clearing any prior
+/// strikes — a window that's fast now shouldn't stay penalised by an old, unrelated blip.
+pub(crate) fn context_window_mark_fast(hwnd: usize) {
+    let cell = CONTEXT_SLOW_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
+    cell.lock().remove(&hwnd);
+}
 
 /// Interactive control types enumerated for the Structured-Context list — the
 /// CLICKABLE family from `role_control_type_ids` plus Edit/Slider (inputs a "textbox"/
@@ -2211,5 +2262,39 @@ mod tests {
         assert!(re.is_match(&norm_dashes(&strip_paren_suffix("Auto (Bridge View)"))));
         assert!(!re.is_match(&norm_dashes(&strip_paren_suffix("Auto Tone (Bridge View)"))));
         assert!(!re.is_match(&norm_dashes(&strip_paren_suffix("AgDevelop_navigatorPanel"))));
+    }
+
+    // Distinct, arbitrary hwnd values per test — CONTEXT_SLOW_WINDOWS is one process-wide
+    // static, and Rust runs tests in parallel within a binary, so two tests sharing an hwnd
+    // could interfere with each other.
+    #[test]
+    fn slow_window_tracking_requires_consecutive_strikes() {
+        use super::{context_window_is_slow, context_window_mark_slow};
+        let hwnd = 0xDEAD_0001;
+        assert!(!context_window_is_slow(hwnd), "fresh hwnd starts clean");
+        context_window_mark_slow(hwnd);
+        assert!(
+            !context_window_is_slow(hwnd),
+            "one strike alone must not blacklist — a single blip shouldn't be permanent"
+        );
+        context_window_mark_slow(hwnd);
+        assert!(
+            context_window_is_slow(hwnd),
+            "two consecutive strikes (CONTEXT_SLOW_THRESHOLD) should skip the window"
+        );
+    }
+
+    #[test]
+    fn a_fast_result_clears_prior_strikes() {
+        use super::{context_window_is_slow, context_window_mark_fast, context_window_mark_slow};
+        let hwnd = 0xDEAD_0002;
+        context_window_mark_slow(hwnd);
+        context_window_mark_fast(hwnd);
+        context_window_mark_slow(hwnd);
+        assert!(
+            !context_window_is_slow(hwnd),
+            "mark_fast must reset the counter, not just decrement it — otherwise an old, \
+             unrelated blip plus one new strike could wrongly cross the threshold"
+        );
     }
 }

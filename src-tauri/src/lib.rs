@@ -111,6 +111,54 @@ fn enumerate_context_snapshot(_hwnd: usize) -> Option<Vec<locator::ContextElemen
     None
 }
 
+/// S.1 adaptive skip (2026-07-07) — wraps `enumerate_context_snapshot` with a real
+/// wall-clock bound. `CONTEXT_BUDGET_MS` alone can't do this: it's checked only after the
+/// blocking `find_all_build_cache` call already returned, so on a window like Lightroom
+/// Classic (measured 2.2-5.7s per call — see `locator-testing.md` §0) every request pays
+/// the full cost regardless of what that constant is set to. This wraps the call in a
+/// timeout matching the same budget, so the *caller* never waits longer than that; if a
+/// window trips the timeout enough times in a row, `context_window_is_slow` skips it
+/// outright on later calls — no window class, no app identity, purely behavioural, so it
+/// adapts to any app with this pathology instead of needing a per-app hardcoded check.
+/// The abandoned blocking task keeps running to completion on its own thread regardless
+/// (COM calls can't be cancelled) — accepted cost, paid once or twice per window per
+/// session rather than on every single request.
+#[cfg(windows)]
+async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    if locator::a11y::context_window_is_slow(hwnd) {
+        log::info!("[context] skipped: window already proven slow this session");
+        return None;
+    }
+    let budget = std::time::Duration::from_millis(locator::a11y::CONTEXT_BUDGET_MS as u64);
+    match tokio::time::timeout(
+        budget,
+        tokio::task::spawn_blocking(move || enumerate_context_snapshot(hwnd)),
+    )
+    .await
+    {
+        Ok(Ok(result)) => {
+            locator::a11y::context_window_mark_fast(hwnd);
+            result
+        }
+        Ok(Err(_join_error)) => None,
+        Err(_timed_out) => {
+            log::info!(
+                "[context] skipped: enumeration exceeded {} ms wall-clock, abandoning (still finishing in the background)",
+                budget.as_millis()
+            );
+            locator::a11y::context_window_mark_slow(hwnd);
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+async fn enumerate_context_snapshot_bounded(
+    _hwnd: usize,
+) -> Option<Vec<locator::ContextElement>> {
+    None
+}
+
 /// Shared app state.
 struct AppState {
     ai_router: Mutex<AiRouter>,
@@ -856,10 +904,6 @@ struct SettingsPayload {
     debug_locate_trace_enabled: bool,
     debug_locate_log_file_enabled: bool,
     debug_prompt_log_file_enabled: bool,
-    /// v0.7 Workstream S — Structured-Context Locator ("select, don't ground").
-    /// Developer-tab toggle; default off until the S.4 live-verification matrix.
-    #[serde(default)]
-    structured_context: bool,
     /// v0.7 Workstream P — prefilled task suggestions (cold-start prefill + AI
     /// suggested_tasks). Screen Guide toggle; default on (display-only, no risk).
     #[serde(default = "default_true_setting")]
@@ -1064,13 +1108,7 @@ async fn guide(
         }
     };
 
-    let (debug_screenshot_enabled, structured_context_enabled) = {
-        let router = state.ai_router.lock().await;
-        (
-            router.config.debug_screenshot_enabled,
-            router.config.structured_context,
-        )
-    };
+    let debug_screenshot_enabled = state.ai_router.lock().await.config.debug_screenshot_enabled;
 
     // `is_fs` is the user's sticky "Entire desktop" choice from the target picker
     // (GuidanceState.full_screen_mode). The AI no longer decides this — full-screen
@@ -1251,19 +1289,19 @@ async fn guide(
 
     // S.1 — Structured-Context enumeration at AI-capture time (v0.7 Workstream S): the
     // element list the AI can select from, same freshness contract as the screenshot.
-    // Gated on the flag + a single captured window (full-screen mode has no one tree).
-    // A warm tree is ~ms; the 300 ms hard budget bounds the worst case before the
-    // (multi-second) AI call starts.
-    let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
-        match (structured_context_enabled && !is_fs, new_hwnd_opt) {
-            (true, Some(hwnd)) => tokio::task::spawn_blocking(move || {
-                enumerate_context_snapshot(hwnd).map(std::sync::Arc::new)
-            })
+    // Gated only on a single captured window (full-screen mode has no one tree). A warm
+    // tree is ~ms; enumerate_context_snapshot_bounded caps the worst case (see its doc
+    // comment — a window that's already proven itself slow this session is skipped
+    // outright) before the (multi-second) AI call starts.
+    let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> = match (
+        is_fs,
+        new_hwnd_opt,
+    ) {
+        (false, Some(hwnd)) => enumerate_context_snapshot_bounded(hwnd)
             .await
-            .ok()
-            .flatten(),
-            _ => None,
-        };
+            .map(std::sync::Arc::new),
+        _ => None,
+    };
 
     let mut router = state.ai_router.lock().await;
 
@@ -1774,7 +1812,6 @@ async fn send_correction(
 
     let router = state.ai_router.lock().await;
     let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
-    let structured_context_enabled = router.config.structured_context;
     drop(router); // Release lock before blocking capture
 
     let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
@@ -1893,13 +1930,10 @@ async fn send_correction(
     // S.1 — fresh Structured-Context snapshot for the correction capture (the retry
     // may be looking at a different window/state than the original guide()).
     let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
-        match (structured_context_enabled && !is_fs, new_hwnd) {
-            (true, Some(hwnd)) => tokio::task::spawn_blocking(move || {
-                enumerate_context_snapshot(hwnd).map(std::sync::Arc::new)
-            })
-            .await
-            .ok()
-            .flatten(),
+        match (is_fs, new_hwnd) {
+            (false, Some(hwnd)) => enumerate_context_snapshot_bounded(hwnd)
+                .await
+                .map(std::sync::Arc::new),
             _ => None,
         };
 
@@ -2661,7 +2695,6 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
         debug_prompt_log_file_enabled: c.debug_prompt_log_file_enabled,
-        structured_context: c.structured_context,
         task_suggestions: c.task_suggestions,
         debug_show_ai_bbox: c.debug_show_ai_bbox,
         developer_mode: developer_mode_enabled(),
@@ -2748,10 +2781,6 @@ async fn save_settings(
         (
             "DEBUG_PROMPT_LOG_FILE_ENABLED".into(),
             payload.debug_prompt_log_file_enabled.to_string(),
-        ),
-        (
-            "STRUCTURED_CONTEXT".into(),
-            payload.structured_context.to_string(),
         ),
         (
             "TASK_SUGGESTIONS".into(),
