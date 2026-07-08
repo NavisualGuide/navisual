@@ -511,14 +511,28 @@ unsafe extern "system" fn settle_timer_proc(_hwnd: HWND, _msg: u32, id: usize, _
 #[cfg(windows)]
 unsafe fn recompute(force: bool) {
     let Some(arc) = STATE.get() else {
+        if force {
+            log::info!("recompute(force): STATE not initialised, bailing");
+        }
         return;
     };
     let mut guard = match arc.lock() {
         Ok(g) => g,
-        Err(_) => return,
+        Err(_) => {
+            if force {
+                log::info!("recompute(force): STATE lock poisoned, bailing");
+            }
+            return;
+        }
     };
     let Some(s) = guard.as_mut() else {
-        return; // no pointer tracked — nothing to do (cheap early-out)
+        // no pointer tracked — nothing to do (cheap early-out). Logged under force since
+        // this is the exact branch that would explain "still nothing shown after unplug"
+        // if, for whatever reason, no pointer was actually being tracked at that moment.
+        if force {
+            log::info!("recompute(force): no pointer currently tracked, nothing to do");
+        }
+        return;
     };
 
     let hwnd = HWND(s.hwnd as *mut core::ffi::c_void);
@@ -526,6 +540,9 @@ unsafe fn recompute(force: bool) {
     let mut wr = RECT::default();
     if GetWindowRect(hwnd, &mut wr).is_err() {
         // Window gone — hide the pointer if it was showing.
+        if force {
+            log::info!("recompute(force): GetWindowRect failed for target hwnd {:#x} — treating as gone", s.hwnd);
+        }
         if s.shown {
             if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
                 let _ = overlay::emit_update(&s.app, u);
@@ -555,14 +572,24 @@ unsafe fn recompute(force: bool) {
     // Visible only when the target window is neither minimized nor covered by another
     // app at the located spot. (s.hwnd is a window of the target app — anchored in
     // start() — so it's the right occlusion reference.)
-    let should_show = !IsIconic(hwnd).as_bool()
-        && crate::capture::target_visible_in_rect(
-            abs_bbox.x,
-            abs_bbox.y,
-            abs_bbox.width as i32,
-            abs_bbox.height as i32,
-            s.hwnd as usize,
+    let iconic = IsIconic(hwnd).as_bool();
+    let visible = crate::capture::target_visible_in_rect(
+        abs_bbox.x,
+        abs_bbox.y,
+        abs_bbox.width as i32,
+        abs_bbox.height as i32,
+        s.hwnd as usize,
+    );
+    let should_show = !iconic && visible;
+
+    if force {
+        log::info!(
+            "recompute(force): target_rect=({},{},{}x{}) abs_bbox=({},{},{}x{}) iconic={} visible={} should_show={} shown={} moved={} resized={}",
+            wr.left, wr.top, new_w, new_h,
+            abs_bbox.x, abs_bbox.y, abs_bbox.width, abs_bbox.height,
+            iconic, visible, should_show, s.shown, moved, resized,
         );
+    }
 
     if should_show {
         // Keep the overlay above any transient popup (ribbon dropdown, combo list,
