@@ -419,6 +419,19 @@ unsafe extern "system" fn display_settle_timer_proc(_hwnd: HWND, _msg: u32, id: 
     if let Some(app) = crate::APP_HANDLE.get() {
         crate::overlay::reconfigure(app);
     }
+    // reconfigure() only resizes/repositions the overlay's own OS window — it has no way
+    // to know what's currently being tracked, so whatever was already drawn stays exactly
+    // as it was, now potentially misaligned with (or entirely outside) the just-changed
+    // window bounds. Force an immediate redraw against the corrected coordinate space —
+    // live-reported 2026-07-08: an active pointer went invisible after unplugging a
+    // monitor, and after replugging briefly showed correctly (via the target app's own
+    // move triggering an unrelated WinEvent → recompute) before jumping to the wrong
+    // screen, distorted, ~1s later — exactly when this debounce timer fires and changes
+    // the window bounds out from under the already-drawn pointer.
+    recompute();
+    if let Some(app) = crate::APP_HANDLE.get() {
+        crate::refresh_active_window(app);
+    }
 }
 
 /// WinEvent callback (runs on the tracker thread's message loop). Drops the noisy
