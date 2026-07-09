@@ -596,8 +596,24 @@ unsafe fn recompute(force: bool) {
         // tooltip) the user just opened, which Windows would otherwise stack on top.
         crate::capture::raise_overlay_topmost();
         if !s.shown || moved || resized || force {
-            if let Ok(u) = overlay::make_update(s.kind, Some(abs_bbox), s.text.clone()) {
-                let _ = overlay::emit_update(&s.app, u);
+            match overlay::make_update(s.kind, Some(abs_bbox), s.text.clone()) {
+                Ok(u) => {
+                    if force {
+                        log::info!(
+                            "recompute(force): emitting kind={:?} bbox={:?} virtual_origin={:?} virtual_size={:?}",
+                            u.kind, u.bbox, u.virtual_origin, u.virtual_size
+                        );
+                    }
+                    match overlay::emit_update(&s.app, u) {
+                        Ok(()) => {
+                            if force {
+                                log::info!("recompute(force): emit_update succeeded");
+                            }
+                        }
+                        Err(e) => log::warn!("recompute(force): emit_update failed: {e}"),
+                    }
+                }
+                Err(e) => log::warn!("recompute(force): make_update failed: {e}"),
             }
             if !s.shown {
                 s.shown = true;
