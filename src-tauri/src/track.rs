@@ -74,6 +74,37 @@ static DISPLAY_SETTLE_TIMER: AtomicUsize = AtomicUsize::new(0);
 /// concrete numbers to check against rather than more speculation.
 const DISPLAY_SETTLE_DELAY_MS: u32 = 500;
 
+/// When the last `WM_DISPLAYCHANGE` was received (`None` = none yet this session). Lets
+/// `recompute` log its decision for *every* call — not just the forced, display-settle-
+/// triggered one — for a short window after a real display change, so a natural
+/// WinEvent-driven recompute (e.g. the target window's own un-minimize/move as Windows
+/// finishes relocating it, which happens on its own timeline, not ours) is visible too.
+/// Diagnostic-only; doesn't affect `force`, which is a separate, narrower concern (see
+/// `recompute`'s doc comment).
+static LAST_DISPLAY_CHANGE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+/// How long after a display change to keep logging every recompute call's decision.
+/// Generous on purpose — live-observed the target app's own OS-driven settling
+/// (minimize/move/restore/maximize as it's relocated to the surviving monitor) can take
+/// several seconds, well past DISPLAY_SETTLE_DELAY_MS itself.
+const DISPLAY_CHANGE_LOG_WINDOW: Duration = Duration::from_secs(15);
+
+#[cfg(windows)]
+fn mark_display_change_for_logging() {
+    let cell = LAST_DISPLAY_CHANGE.get_or_init(|| Mutex::new(None));
+    *cell.lock().unwrap() = Some(Instant::now());
+}
+
+#[cfg(windows)]
+fn recently_had_display_change() -> bool {
+    let Some(cell) = LAST_DISPLAY_CHANGE.get() else {
+        return false;
+    };
+    match *cell.lock().unwrap() {
+        Some(t) => t.elapsed() < DISPLAY_CHANGE_LOG_WINDOW,
+        None => false,
+    }
+}
+
 /// The AppBoundary flash (see `lib.rs::announce_shared_app`) plays out as a
 /// one-shot, client-timed animation with no ongoing backend involvement — so
 /// if its window is minimized or closed mid-flash, the box would otherwise
@@ -386,6 +417,7 @@ unsafe extern "system" fn display_watch_wndproc(
 ) -> LRESULT {
     if msg == WM_DISPLAYCHANGE {
         log::info!("display-watch: WM_DISPLAYCHANGE received, scheduling reconfigure");
+        mark_display_change_for_logging();
         schedule_display_settle();
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -510,27 +542,34 @@ unsafe extern "system" fn settle_timer_proc(_hwnd: HWND, _msg: u32, id: usize, _
 /// something visually relevant changed" behaviour.
 #[cfg(windows)]
 unsafe fn recompute(force: bool) {
+    // Widen logging to cover natural (non-forced) calls too, for a while after a real
+    // display change. The one forced call per display-settle cycle only captures a single
+    // instant; live testing (2026-07-09) showed the target window's own OS-driven settling
+    // (un-minimize/move/maximize as Windows relocates it to a surviving monitor) happens on
+    // its own timeline afterward, via ordinary WinEvent-triggered `recompute(false)` calls —
+    // which this function previously had zero visibility into.
+    let log_this = force || recently_had_display_change();
     let Some(arc) = STATE.get() else {
-        if force {
-            log::info!("recompute(force): STATE not initialised, bailing");
+        if log_this {
+            log::info!("recompute(force={force}): STATE not initialised, bailing");
         }
         return;
     };
     let mut guard = match arc.lock() {
         Ok(g) => g,
         Err(_) => {
-            if force {
-                log::info!("recompute(force): STATE lock poisoned, bailing");
+            if log_this {
+                log::info!("recompute(force={force}): STATE lock poisoned, bailing");
             }
             return;
         }
     };
     let Some(s) = guard.as_mut() else {
-        // no pointer tracked — nothing to do (cheap early-out). Logged under force since
+        // no pointer tracked — nothing to do (cheap early-out). Logged under log_this since
         // this is the exact branch that would explain "still nothing shown after unplug"
         // if, for whatever reason, no pointer was actually being tracked at that moment.
-        if force {
-            log::info!("recompute(force): no pointer currently tracked, nothing to do");
+        if log_this {
+            log::info!("recompute(force={force}): no pointer currently tracked, nothing to do");
         }
         return;
     };
@@ -540,8 +579,8 @@ unsafe fn recompute(force: bool) {
     let mut wr = RECT::default();
     if GetWindowRect(hwnd, &mut wr).is_err() {
         // Window gone — hide the pointer if it was showing.
-        if force {
-            log::info!("recompute(force): GetWindowRect failed for target hwnd {:#x} — treating as gone", s.hwnd);
+        if log_this {
+            log::info!("recompute(force={force}): GetWindowRect failed for target hwnd {:#x} — treating as gone", s.hwnd);
         }
         if s.shown {
             if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
@@ -582,9 +621,9 @@ unsafe fn recompute(force: bool) {
     );
     let should_show = !iconic && visible;
 
-    if force {
+    if log_this {
         log::info!(
-            "recompute(force): target_rect=({},{},{}x{}) abs_bbox=({},{},{}x{}) iconic={} visible={} should_show={} shown={} moved={} resized={}",
+            "recompute(force={force}): target_rect=({},{},{}x{}) abs_bbox=({},{},{}x{}) iconic={} visible={} should_show={} shown={} moved={} resized={}",
             wr.left, wr.top, new_w, new_h,
             abs_bbox.x, abs_bbox.y, abs_bbox.width, abs_bbox.height,
             iconic, visible, should_show, s.shown, moved, resized,
@@ -598,33 +637,43 @@ unsafe fn recompute(force: bool) {
         if !s.shown || moved || resized || force {
             match overlay::make_update(s.kind, Some(abs_bbox), s.text.clone()) {
                 Ok(u) => {
-                    if force {
+                    if log_this {
                         log::info!(
-                            "recompute(force): emitting kind={:?} bbox={:?} virtual_origin={:?} virtual_size={:?}",
+                            "recompute(force={force}): emitting kind={:?} bbox={:?} virtual_origin={:?} virtual_size={:?}",
                             u.kind, u.bbox, u.virtual_origin, u.virtual_size
                         );
                     }
                     match overlay::emit_update(&s.app, u) {
                         Ok(()) => {
-                            if force {
-                                log::info!("recompute(force): emit_update succeeded");
+                            if log_this {
+                                log::info!("recompute(force={force}): emit_update succeeded");
                             }
                         }
-                        Err(e) => log::warn!("recompute(force): emit_update failed: {e}"),
+                        Err(e) => log::warn!("recompute(force={force}): emit_update failed: {e}"),
                     }
                 }
-                Err(e) => log::warn!("recompute(force): make_update failed: {e}"),
+                Err(e) => log::warn!("recompute(force={force}): make_update failed: {e}"),
             }
             if !s.shown {
                 s.shown = true;
                 let _ = s.app.emit("pointer_restored", ());
             }
+        } else if log_this {
+            log::info!(
+                "recompute(force={force}): should_show=true but not re-emitting (shown={}, moved={moved}, resized={resized}) — pointer stays as-is",
+                s.shown
+            );
         }
     } else if s.shown {
+        if log_this {
+            log::info!("recompute(force={force}): should_show=false, hiding previously-shown pointer");
+        }
         if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
             let _ = overlay::emit_update(&s.app, u);
         }
         s.shown = false;
         let _ = s.app.emit("pointer_occluded", ());
+    } else if log_this {
+        log::info!("recompute(force={force}): should_show=false, already hidden — no-op");
     }
 }
