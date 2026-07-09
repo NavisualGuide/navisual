@@ -105,6 +105,37 @@ fn recently_had_display_change() -> bool {
     }
 }
 
+/// (iconic, visible, should_show, shown-before-this-call).
+type RecomputeDecision = (bool, bool, bool, bool);
+
+/// The most recently *logged* `recompute` decision. `None` until the first decision is
+/// logged, or right after a new tracking session starts (`reset_logged_decision`).
+static LAST_LOGGED_DECISION: OnceLock<Mutex<Option<RecomputeDecision>>> = OnceLock::new();
+
+/// `DISPLAY_CHANGE_LOG_WINDOW` (15s) turned out to be far shorter than a real manual test:
+/// live-tested 2026-07-09, unplugging the primary monitor and then moving/resizing the
+/// target window for ~3 minutes before observing "no overlay at all" — well past the 15s
+/// window, so the actual failure happened in a completely unlogged stretch. Time-boxing
+/// can't work when we don't know how long the user will take. Instead, log whenever the
+/// decision *itself* changes, for as long as it takes: `recompute` calls this once it has
+/// computed (iconic, visible, should_show) and compares against the last-logged tuple. A
+/// stuck-hidden (or stuck-shown) state naturally goes quiet after the one transition log —
+/// no time limit needed, and no flood during steady state either.
+#[cfg(windows)]
+fn decision_changed(current: RecomputeDecision) -> bool {
+    let cell = LAST_LOGGED_DECISION.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap();
+    let changed = *guard != Some(current);
+    *guard = Some(current);
+    changed
+}
+
+#[cfg(windows)]
+fn reset_logged_decision() {
+    let cell = LAST_LOGGED_DECISION.get_or_init(|| Mutex::new(None));
+    *cell.lock().unwrap() = None;
+}
+
 /// The AppBoundary flash (see `lib.rs::announce_shared_app`) plays out as a
 /// one-shot, client-timed animation with no ongoing backend involvement — so
 /// if its window is minimized or closed mid-flash, the box would otherwise
@@ -281,6 +312,11 @@ impl WindowTracker {
                 app,
                 shown: initially_shown,
             });
+            // A new tracking session starting shouldn't be silently suppressed by a
+            // decision tuple left over from whatever the previous tracked window was
+            // last logged at — clear it so `recompute`'s first call for this pointer
+            // always logs if it's otherwise eligible.
+            reset_logged_decision();
         }
         #[cfg(not(windows))]
         {
@@ -547,10 +583,14 @@ unsafe fn recompute(force: bool) {
     // instant; live testing (2026-07-09) showed the target window's own OS-driven settling
     // (un-minimize/move/maximize as Windows relocates it to a surviving monitor) happens on
     // its own timeline afterward, via ordinary WinEvent-triggered `recompute(false)` calls —
-    // which this function previously had zero visibility into.
-    let log_this = force || recently_had_display_change();
+    // which this function previously had zero visibility into. `base_log_this` covers the
+    // early-exit branches below (before we have a decision tuple to compare); the real
+    // `log_this` used from the should_show computation onward also ORs in
+    // `decision_changed` so a change that surfaces well outside the 15s window (a slow
+    // manual test) still gets logged — see `decision_changed`'s doc comment.
+    let base_log_this = force || recently_had_display_change();
     let Some(arc) = STATE.get() else {
-        if log_this {
+        if base_log_this {
             log::info!("recompute(force={force}): STATE not initialised, bailing");
         }
         return;
@@ -558,17 +598,17 @@ unsafe fn recompute(force: bool) {
     let mut guard = match arc.lock() {
         Ok(g) => g,
         Err(_) => {
-            if log_this {
+            if base_log_this {
                 log::info!("recompute(force={force}): STATE lock poisoned, bailing");
             }
             return;
         }
     };
     let Some(s) = guard.as_mut() else {
-        // no pointer tracked — nothing to do (cheap early-out). Logged under log_this since
-        // this is the exact branch that would explain "still nothing shown after unplug"
-        // if, for whatever reason, no pointer was actually being tracked at that moment.
-        if log_this {
+        // no pointer tracked — nothing to do (cheap early-out). Logged under base_log_this
+        // since this is the exact branch that would explain "still nothing shown after
+        // unplug" if, for whatever reason, no pointer was actually being tracked.
+        if base_log_this {
             log::info!("recompute(force={force}): no pointer currently tracked, nothing to do");
         }
         return;
@@ -578,10 +618,11 @@ unsafe fn recompute(force: bool) {
 
     let mut wr = RECT::default();
     if GetWindowRect(hwnd, &mut wr).is_err() {
-        // Window gone — hide the pointer if it was showing.
-        if log_this {
-            log::info!("recompute(force={force}): GetWindowRect failed for target hwnd {:#x} — treating as gone", s.hwnd);
-        }
+        // Window gone — hide the pointer if it was showing. Always logged (not gated) —
+        // this is rare enough that it's never hot-path noise, and it's exactly the kind of
+        // fact ("the tracked hwnd itself disappeared") that would otherwise need its own
+        // special-cased gate to catch during a long unlogged stretch.
+        log::info!("recompute(force={force}): GetWindowRect failed for target hwnd {:#x} — treating as gone", s.hwnd);
         if s.shown {
             if let Ok(u) = overlay::make_update(OverlayKind::None, None, None) {
                 let _ = overlay::emit_update(&s.app, u);
@@ -620,6 +661,11 @@ unsafe fn recompute(force: bool) {
         s.hwnd as usize,
     );
     let should_show = !iconic && visible;
+
+    // The real gate: the 15s post-display-change window, OR this exact decision differs
+    // from the last one we logged — however long that takes to show up. See
+    // `decision_changed`'s doc comment for why the time-boxed window alone isn't enough.
+    let log_this = base_log_this || decision_changed((iconic, visible, should_show, s.shown));
 
     if log_this {
         log::info!(
