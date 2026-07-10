@@ -281,10 +281,30 @@ fn exe_path_of_pid(pid: u32) -> String {
     }
 }
 
+/// For UWP/Store apps (Microsoft To Do, OneNote, Mail, …) the process is the
+/// shared `ApplicationFrameHost`, so the exe name is useless. Windows titles a
+/// UWP window `"Document - App Name"` (or just the app name), so the **last**
+/// ` - ` segment is the app name by convention — this reads cleanly in the
+/// header chip and the "Show me around X" prompt, where the full title would
+/// not: `"Bugs - OneNote"` → `"OneNote"`, `"Microsoft To Do"` → `"Microsoft To Do"`.
+fn uwp_app_name_from_title(title: &str) -> &str {
+    title.rsplit(" - ").next().unwrap_or(title).trim()
+}
+
+fn is_uwp_host(exe_path: &str) -> bool {
+    std::path::Path::new(exe_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("ApplicationFrameHost"))
+        .unwrap_or(false)
+}
+
 /// Resolve a friendly app display name. Priority:
-/// 1. Window title (truncated to 60 chars)
+/// 1. Window title — for UWP apps, cleaned to just the app name (see above);
+///    truncated to 60 chars
 /// 2. Exe file basename minus `.exe`
 fn resolve_app_name(hwnd: HWND, exe_path: &str) -> String {
+    let uwp = is_uwp_host(exe_path);
     unsafe {
         let mut title = [0u16; 256];
         let len = GetWindowTextW(hwnd, &mut title) as usize;
@@ -292,6 +312,7 @@ fn resolve_app_name(hwnd: HWND, exe_path: &str) -> String {
             let s = String::from_utf16_lossy(&title[..len]);
             let s = s.trim();
             if !s.is_empty() {
+                let s = if uwp { uwp_app_name_from_title(s) } else { s };
                 return if s.chars().count() > 60 {
                     s.chars().take(57).chain("...".chars()).collect()
                 } else {
@@ -406,13 +427,14 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
         // UWP/Store apps (Microsoft To Do, Mail, Calculator, ...) don't get their own
         // exe — they all run hosted inside the shared ApplicationFrameHost.exe process, so
         // exe_stem is useless for naming them (every UWP app looks identical by that
-        // measure). The window title is what the user actually sees, so use it directly
-        // rather than falling through friendly_exe_name to the generic host name.
+        // measure). Derive the app name from the window title (`uwp_app_name_from_title`),
+        // matching the header chip / prompt; the picker still shows the full title as its
+        // primary label (that's what the user sees), with this as the app-identity subtitle.
         let display_name = if exe_stem.eq_ignore_ascii_case("ApplicationFrameHost") {
             if title.is_empty() {
                 exe_stem.clone()
             } else {
-                title.clone()
+                uwp_app_name_from_title(&title).to_string()
             }
         } else {
             friendly_exe_name(&exe_stem)

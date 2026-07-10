@@ -389,6 +389,11 @@ See the LICENSE file in the root of this repository for complete details.
   }
   function friendlyName(exeName: string): string {
     const stem = exeStem(exeName).toLowerCase();
+    // UWP/Store apps all run in the shared ApplicationFrameHost.exe, so the exe
+    // name is a useless label. Return "" so callers (`friendlyName(exe) || app_name`)
+    // fall through to the backend-resolved app_name — the real app name derived
+    // from the window title (e.g. "OneNote", "Microsoft To Do").
+    if (stem === "applicationframehost") return "";
     return EXE_DISPLAY[stem] ?? exeStem(exeName);
   }
 
@@ -2369,11 +2374,14 @@ See the LICENSE file in the root of this repository for complete details.
         <span class="target-pick-sub">follow the foreground window</span>
       </button>
       {#each targetWindows as w (w.hwnd)}
+        {@const primary = w.title || w.display_name}
         <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === w.hwnd} onclick={() => selectTarget(w.hwnd)}>
           <span class="target-pick-check">{pinnedHwnd === w.hwnd ? "✓" : ""}</span>
-          <span class="target-pick-name">{w.display_name}</span>
-          {#if w.title && w.title !== w.display_name}
-            <span class="target-pick-sub">{w.title.length > 40 ? w.title.slice(0, 38) + "…" : w.title}</span>
+          <!-- Primary = the window title (what the user actually sees on screen);
+               subtitle = the friendly app name for identity, when it adds info. -->
+          <span class="target-pick-name">{primary.length > 46 ? primary.slice(0, 44) + "…" : primary}</span>
+          {#if w.display_name && w.display_name !== primary}
+            <span class="target-pick-sub">{w.display_name}</span>
           {/if}
         </button>
       {/each}
