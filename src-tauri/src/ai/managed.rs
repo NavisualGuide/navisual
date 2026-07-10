@@ -21,6 +21,13 @@ pub struct ManagedClient {
     session_path: Option<PathBuf>,
     free_remaining: AtomicI64, // -1 = unknown
     coin_balance_micro: AtomicI64, // -1 = unknown; µ$ after the last paid request
+    // Which billing tier the relay serves this session: -1 = unknown, 0 = free, 1 = paid.
+    // Learned from the balance GET (`tier`) and from each relay response's headers
+    // (X-Free-Remaining ⇒ free, X-Coin-Balance ⇒ paid). Drives `is_free_tier()`, which
+    // gates the Structured-Context payload off for the weak free models (see
+    // router::structured_context_enabled — the big [Screen Elements] block hangs
+    // Gemma/Nemotron past the client timeout; confirmed 2026-07-10).
+    billing_paid: AtomicI64,
     // The model OpenRouter actually routed to on the last request (the relay sends
     // `openrouter/free`, a router; the response `model` names the concrete model used).
     last_model: parking_lot::Mutex<Option<String>>,
@@ -51,6 +58,7 @@ impl ManagedClient {
             session_path,
             free_remaining: AtomicI64::new(-1),
             coin_balance_micro: AtomicI64::new(-1),
+            billing_paid: AtomicI64::new(-1),
             last_model: parking_lot::Mutex::new(None),
         })
     }
@@ -73,6 +81,22 @@ impl ManagedClient {
         } else {
             Some(v)
         }
+    }
+
+    /// Record the billing tier the relay reported ("paid" ⇒ paid, anything else ⇒ free).
+    /// Called from the balance GET and inferred from each relay response's headers.
+    pub fn set_billing_tier(&self, tier: &str) {
+        self.billing_paid
+            .store(if tier == "paid" { 1 } else { 0 }, Ordering::Relaxed);
+    }
+
+    /// True when the relay is serving this session on the FREE tier (weak OpenRouter
+    /// vision models). Also true when the tier isn't known yet (-1) — the safe default,
+    /// since skipping Structured-Context keeps the free tier working; a paid user's very
+    /// first request before the balance is known simply omits it once (harmless, and the
+    /// startup balance fetch usually sets the tier before any request runs).
+    pub fn is_free_tier(&self) -> bool {
+        self.billing_paid.load(Ordering::Relaxed) != 1
     }
 
     /// The concrete model OpenRouter routed to on the most recent request.
@@ -178,6 +202,15 @@ impl ManagedClient {
 
         if let Some(c) = coin_balance {
             self.coin_balance_micro.store(c, Ordering::Relaxed);
+        }
+
+        // The two balance headers are mutually exclusive per relay branch: handleFree
+        // sends X-Free-Remaining, handlePaid sends X-Coin-Balance. Use whichever appeared
+        // to keep the billing tier fresh per request (drives is_free_tier()).
+        if remaining.is_some() {
+            self.billing_paid.store(0, Ordering::Relaxed);
+        } else if coin_balance.is_some() {
+            self.billing_paid.store(1, Ordering::Relaxed);
         }
 
         let body: Value = resp.json().await?;

@@ -122,6 +122,29 @@ impl AiRouter {
         }
     }
 
+    /// Record the relay-reported billing tier on the managed client (from a balance GET).
+    /// No-op for non-managed providers.
+    pub fn set_managed_billing_tier(&self, tier: &str) {
+        if let Some(ApiClient::Managed(ref c)) = self.client {
+            c.set_billing_tier(tier);
+        }
+    }
+
+    /// Whether to build the Structured-Context `[Screen Elements]` block for this request.
+    /// False *only* on the managed FREE tier: the weak OpenRouter vision models
+    /// (Gemma/Nemotron) hang past the client timeout on the big element list AND are
+    /// bbox-denylisted so they can't use element selection well anyway (confirmed live
+    /// 2026-07-10 — a 90-element block turned a 2.4 s free response into a >120 s hang).
+    /// Every other path keeps it: paid managed (fast gpt/gemini handle it in ~2 s), and
+    /// all BYOK providers — including the text-only-but-smart DeepSeek, for which the
+    /// element list is the *only* way to ground since it can't see the screenshot.
+    pub fn structured_context_enabled(&self) -> bool {
+        match self.client {
+            Some(ApiClient::Managed(ref c)) => !c.is_free_tier(),
+            _ => true,
+        }
+    }
+
     /// (input, output) token counts from the most recent guidance/correction call.
     pub fn get_last_usage(&self) -> (u64, u64) {
         self.last_usage

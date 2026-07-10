@@ -1289,15 +1289,20 @@ async fn guide(
 
     // S.1 — Structured-Context enumeration at AI-capture time (v0.7 Workstream S): the
     // element list the AI can select from, same freshness contract as the screenshot.
-    // Gated only on a single captured window (full-screen mode has no one tree). A warm
-    // tree is ~ms; enumerate_context_snapshot_bounded caps the worst case (see its doc
-    // comment — a window that's already proven itself slow this session is skipped
-    // outright) before the (multi-second) AI call starts.
+    // Gated on: (a) a single captured window (full-screen mode has no one tree), and
+    // (b) the provider being able to USE the block without choking on it — the managed
+    // free tier's weak OpenRouter vision models hang past the client timeout on the big
+    // [Screen Elements] block (confirmed 2026-07-10) and can't select from it well
+    // anyway, so it's skipped for them; every other provider (paid managed, all BYOK
+    // incl. text-only DeepSeek) keeps it. A warm tree is ~ms; enumerate_context_snapshot_bounded
+    // caps the worst case (see its doc comment) before the (multi-second) AI call starts.
+    let sc_enabled = state.ai_router.lock().await.structured_context_enabled();
     let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> = match (
         is_fs,
         new_hwnd_opt,
+        sc_enabled,
     ) {
-        (false, Some(hwnd)) => enumerate_context_snapshot_bounded(hwnd)
+        (false, Some(hwnd), true) => enumerate_context_snapshot_bounded(hwnd)
             .await
             .map(std::sync::Arc::new),
         _ => None,
@@ -1937,10 +1942,12 @@ async fn send_correction(
     }
 
     // S.1 — fresh Structured-Context snapshot for the correction capture (the retry
-    // may be looking at a different window/state than the original guide()).
+    // may be looking at a different window/state than the original guide()). Skipped for
+    // the managed free tier — see the matching gate + rationale in guide().
+    let sc_enabled = state.ai_router.lock().await.structured_context_enabled();
     let context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>> =
-        match (is_fs, new_hwnd) {
-            (false, Some(hwnd)) => enumerate_context_snapshot_bounded(hwnd)
+        match (is_fs, new_hwnd, sc_enabled) {
+            (false, Some(hwnd), true) => enumerate_context_snapshot_bounded(hwnd)
                 .await
                 .map(std::sync::Arc::new),
             _ => None,
@@ -2926,9 +2933,17 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
         let token = acct_session_token(&state).await?;
         (url, token)
     };
-    server::get_balance(&supabase_url, &access_token)
+    let balance = server::get_balance(&supabase_url, &access_token)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Record the billing tier so Structured-Context can be gated off for the managed
+    // free tier before the first request even runs (the startup balance fetch sets it).
+    state
+        .ai_router
+        .lock()
+        .await
+        .set_managed_billing_tier(&balance.tier);
+    Ok(balance)
 }
 
 /// Sign in with Google via PKCE OAuth in the system browser.
