@@ -31,6 +31,9 @@ pub struct LocateTrace {
     pub template: Option<TemplateTrace>,
     pub final_decision: FinalDecision,
     pub final_bbox: Option<Rect>,
+    /// LOCATE latency only (A11y/OCR/template/etc. inside `orchestrator::locate`) — does
+    /// NOT include the AI round-trip that produced `target_text`/`ai_bbox` in the first
+    /// place. See `ai_elapsed_ms` for that.
     pub elapsed_ms: u32,
     /// The model that produced `target_text`/`ai_bbox` for this step — the concrete routed
     /// model for `managed`, else the configured one (same resolution used for cost_tracker
@@ -45,6 +48,12 @@ pub struct LocateTrace {
     /// a prior response's steps/bbox, so there's no new usage to attribute here).
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// Wall-clock time of the AI round-trip that produced this step (`ai_started.elapsed()`
+    /// in `lib.rs` — the same number `model_timings.csv` records, but attached directly to
+    /// this locate so there's no lossy timestamp-join needed to compare it against
+    /// `elapsed_ms`/grounding accuracy). `None` for `next_step` — same reason as the token
+    /// fields: it reuses a prior response, no new AI call happens.
+    pub ai_elapsed_ms: Option<u32>,
 }
 
 /// Pass-0 adapter outcome. An adapter "claims" a locate when it recognises the focused app

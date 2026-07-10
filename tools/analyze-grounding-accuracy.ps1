@@ -93,8 +93,8 @@ if ($candidates.Count -eq 0) {
 
 # -- Per-model grounding accuracy --------------------------------------------
 Write-Output "-- Per model (provider|model) --"
-Write-Output ("  {0,-34} {1,5} {2,7} {3,7} {4,9} {5,9} {6,7} {7,7} {8,8}" -f `
-    "model", "n", "bbox%", "hit%", "med-px", "p90-px", "in-tok", "out-tok", "med-ms")
+Write-Output ("  {0,-34} {1,5} {2,7} {3,7} {4,9} {5,9} {6,7} {7,7} {8,9} {9,6}" -f `
+    "model", "n", "bbox%", "hit%", "med-px", "p90-px", "in-tok", "out-tok", "med-ai-ms", "n-ai")
 
 $candidates | Group-Object {
     $p = if ($_.provider) { $_.provider } else { "(unknown)" }
@@ -120,12 +120,16 @@ $candidates | Group-Object {
 
     $inTok = @($g | Where-Object { $null -ne $_.input_tokens } | ForEach-Object { $_.input_tokens })
     $outTok = @($g | Where-Object { $null -ne $_.output_tokens } | ForEach-Object { $_.output_tokens })
+    # ai_elapsed_ms is only set on guide()/send_correction() (real AI round-trips); a
+    # next_step() row reuses a prior response and carries no new AI-latency sample, so it's
+    # excluded here rather than silently coming through as 0.
+    $aiMs = @($g | Where-Object { $null -ne $_.ai_elapsed_ms } | ForEach-Object { $_.ai_elapsed_ms })
 
-    Write-Output ("  {0,-34} {1,5} {2,6:P0} {3,6:P0} {4,7}px {5,7}px {6,7} {7,7} {8,6}ms" -f `
+    Write-Output ("  {0,-34} {1,5} {2,6:P0} {3,6:P0} {4,7}px {5,7}px {6,7} {7,7} {8,7}ms {9,6}" -f `
         $_.Name, $n, $bboxRate, $hitRate, `
         (Percentile $dists 0.5), (Percentile $dists 0.9), `
         (Percentile $inTok 0.5), (Percentile $outTok 0.5), `
-        (Percentile ($g | ForEach-Object { $_.elapsed_ms }) 0.5))
+        (Percentile $aiMs 0.5), $aiMs.Count)
 }
 Write-Output ""
 Write-Output "bbox% = target_bbox present & usable (model omitted it, or it was degenerate/"
@@ -136,8 +140,12 @@ Write-Output "med/p90-px = center-to-center distance in screen pixels; not norma
 Write-Output "        resolution, so only compare runs from similar screen setups."
 Write-Output "in/out-tok = median tokens for the AI call that produced this step (None for"
 Write-Output "        next_step -- it makes no AI call, so nothing new to attribute)."
-Write-Output "med-ms = LOCATE latency (A11y/OCR/etc.), NOT AI response time -- cross-reference"
-Write-Output "        model_timings.csv for that; the two are separate phases of one request."
+Write-Output "med-ai-ms = AI round-trip latency (ai_elapsed_ms -- the same number"
+Write-Output "        model_timings.csv records, attached directly to this locate). NOT locate"
+Write-Output "        latency (A11y/OCR/etc.) -- that's the separate elapsed_ms field, and"
+Write-Output "        usually much smaller. n-ai is the sample size behind med-ai-ms -- entries"
+Write-Output "        logged before 2026-07-09 (or via next_step) have no ai_elapsed_ms, so n-ai"
+Write-Output "        can be smaller than the model's total n above."
 Write-Output ""
 
 # -- Worst individual misses (optional) --------------------------------------

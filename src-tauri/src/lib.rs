@@ -1654,6 +1654,7 @@ async fn guide(
         t.provider = Some(provider.clone());
         t.input_tokens = Some(in_tok);
         t.output_tokens = Some(out_tok);
+        t.ai_elapsed_ms = Some(ai_elapsed_ms as u32);
         maybe_log_trace(&app, t, log_trace);
     }
 
@@ -2195,6 +2196,7 @@ async fn send_correction(
         t.provider = Some(provider.clone());
         t.input_tokens = Some(in_tok);
         t.output_tokens = Some(out_tok);
+        t.ai_elapsed_ms = Some(ai_elapsed_ms as u32);
         maybe_log_trace(&app, t, log_trace);
     }
 
