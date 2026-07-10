@@ -29,9 +29,9 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SetWindowPos, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, HWND_TOPMOST,
+    SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, HWND_TOPMOST,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -628,6 +628,17 @@ pub fn raise_overlay_topmost() {
         }
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         if (ex_style & WS_EX_TRANSPARENT.0) != 0 && IsWindowVisible(hwnd).as_bool() {
+            // A window keeps WS_VISIBLE while minimized — IsWindowVisible alone can't
+            // tell iconic apart from actually on-screen. Windows can minimize the
+            // overlay itself when it's anchored to a monitor that just disconnected
+            // (it spans the whole virtual desktop, so it's a prime target for that
+            // policy); SetWindowPos below only reasserts z-order, it does not restore
+            // an iconic window. Self-healing here — not just in `overlay::reconfigure`
+            // — covers the case where the overlay gets re-minimized sometime after the
+            // one-shot display-settle reconfigure already ran.
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),

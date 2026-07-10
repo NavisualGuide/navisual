@@ -223,6 +223,27 @@ pub fn reconfigure(app: &AppHandle) {
         log::warn!("overlay reconfigure: overlay window not found");
         return;
     };
+
+    // Windows minimizes windows anchored to a monitor that just disconnected — and the
+    // overlay spans the *whole* virtual desktop, so it's exactly the kind of window this
+    // policy targets on a primary-monitor unplug (live-suspected 2026-07-09: Krita's
+    // overlay pointer never appeared for the ~25s the primary was unplugged despite
+    // `recompute` correctly computing should_show=true and emit_update succeeding
+    // throughout — consistent with the OS-level window being iconic the whole time, so
+    // nothing was ever actually painted regardless of what got sent to it).
+    // `set_position`/`set_size` below do NOT undo this — they update the window's
+    // "restored" bounds but a minimized window stays invisible until explicitly restored.
+    match window.is_minimized() {
+        Ok(true) => {
+            log::info!("overlay reconfigure: window was minimized — restoring");
+            if let Err(e) = window.unminimize() {
+                log::warn!("overlay unminimize failed: {e}");
+            }
+        }
+        Ok(false) => {}
+        Err(e) => log::warn!("overlay is_minimized check failed: {e}"),
+    }
+
     match configure(&window) {
         Ok(()) => log::info!("overlay reconfigured after display change"),
         Err(e) => log::warn!("overlay reconfigure failed: {e}"),
