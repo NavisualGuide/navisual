@@ -80,13 +80,21 @@
     const cy = by + bh / 2;
 
     // ── 1. RIPPLE RINGS from element center ──────────────────────────────
-    const baseR = Math.max(bw, bh) / 2 + 8;
+    // Ellipse, not circle: a circle sized by max(bw,bh) balloons hugely past a
+    // long, thin element's short axis (e.g. a full-width row) — the ring's base
+    // shape now follows the element's own aspect ratio, and the outward growth
+    // is capped by the SHORTER axis so it stays a modest puff on any shape
+    // instead of an extreme one on long/thin targets.
+    const baseRx = bw / 2 + 8;
+    const baseRy = bh / 2 + 8;
+    const growth = Math.min(bw, bh) * 0.7;
     for (let i = 0; i < 3; i++) {
       const phase = ((t / 1500 + i / 3) % 1);
-      const radius = baseR + phase * Math.max(bw, bh) * 0.7;
+      const rx = baseRx + phase * growth;
+      const ry = baseRy + phase * growth;
       const alpha  = (1 - phase) * 0.55;
       ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy, Math.max(rx, 0.1), Math.max(ry, 0.1), 0, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
       ctx.lineWidth = 2.5 - phase * 1.8;
       ctx.shadowColor = theme.color;
@@ -382,13 +390,17 @@
     const cy = by + bh / 2;
 
     // ── RIPPLE RINGS — same animation as drawBox, slightly fainter ──
-    const baseR = Math.max(bw, bh) / 2 + 8;
+    // Ellipse, not circle — see drawBox's identical fix for why.
+    const baseRx = bw / 2 + 8;
+    const baseRy = bh / 2 + 8;
+    const growth = Math.min(bw, bh) * 0.7;
     for (let i = 0; i < 3; i++) {
       const phase = ((t / 1500 + i / 3) % 1);
-      const radius = baseR + phase * Math.max(bw, bh) * 0.7;
+      const rx = baseRx + phase * growth;
+      const ry = baseRy + phase * growth;
       const alpha  = (1 - phase) * 0.40;
       ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy, Math.max(rx, 0.1), Math.max(ry, 0.1), 0, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
       ctx.lineWidth = 2 - phase * 1.4;
       ctx.shadowColor = theme.color;
