@@ -1678,7 +1678,12 @@ See the LICENSE file in the root of this repository for complete details.
   const TIER_LABELS: Record<string, string> = { speed: "Speed", regular: "Regular", smart: "Smart" };
   const TIER_COINS: Record<string, number> = { speed: 6, regular: 12, smart: 18 };
   let providerLabel = $derived(
-    settingsForm.api_provider === "managed" ? `Managed (${TIER_LABELS[settingsForm.managed_tier] ?? "Regular"})`
+    // Free users have no quality tier — the Speed/Regular/Smart picker is paid-only
+    // (and the relay ignores a free user's tier param), so showing "Managed (Speed)"
+    // for a logged-out/free user is misleading. Show "Managed (free)" instead; only a
+    // paid user sees their selected quality tier.
+    settingsForm.api_provider === "managed"
+      ? (managedTier === "paid" ? `Managed (${TIER_LABELS[settingsForm.managed_tier] ?? "Regular"})` : "Managed (free)")
     : settingsForm.api_provider === "anthropic" ? `Anthropic · ${settingsForm.anthropic_model}`
     : settingsForm.api_provider === "gemini" ? `Google Gemini · ${settingsForm.gemini_model}`
     : settingsForm.api_provider === "openai" ? `OpenAI · ${settingsForm.openai_model}`
