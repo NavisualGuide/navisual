@@ -328,6 +328,21 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
     }
 }
 
+/// True when the target window is fully hidden behind other apps — capturing it
+/// would leak the occluding app's pixels, so the caller should refuse. Never
+/// occluded off-Windows.
+pub fn window_fully_occluded(hwnd_raw: usize) -> bool {
+    #[cfg(windows)]
+    {
+        win::window_fully_occluded(hwnd_raw)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd_raw;
+        false
+    }
+}
+
 /// Get debug information about a specific window by its raw HWND.
 pub fn get_window_info(hwnd_raw: usize) -> String {
     #[cfg(windows)]

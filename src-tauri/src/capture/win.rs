@@ -753,8 +753,15 @@ pub fn blank_outside_rects(
         })
         .collect();
 
-    // Nothing to key off — leave the image untouched rather than blanking all.
+    // Empty keep-set = the target app is fully occluded in this region (or couldn't
+    // be resolved). FAIL SAFE: grey the WHOLE image rather than leak whatever
+    // (another app's) pixels the BitBlt happened to grab. Was previously "leave
+    // untouched," which leaked an occluding app's content to the AI — see
+    // `pid_visible_keep_rects` / the pinned-target refuse guard in `guide()`.
     if locals.is_empty() {
+        for px in img.pixels_mut() {
+            *px = BLANK;
+        }
         return;
     }
 
@@ -1226,9 +1233,16 @@ fn rect_subtract_many(a: Rect, covered: &[Rect]) -> Vec<Rect> {
 ///
 /// Result: same-PID pixels actually visible on screen are preserved; covered
 /// portions (the other-app slivers that previously leaked into the capture)
-/// fall outside the keep-set and `blank_outside_rects` greys them. Returns the
-/// target's frame as a single-element fallback when enumeration finds nothing,
-/// so the keep-set is never empty.
+/// fall outside the keep-set and `blank_outside_rects` greys them.
+///
+/// Returns an **empty** vec when the target app is *fully* occluded within `bbox`
+/// (every same-PID pixel is covered by another app). This is deliberate and
+/// fail-safe: `blank_outside_rects` then greys the whole capture rather than
+/// leaking the occluding app's pixels. (A previous "defensive" fallback returned
+/// the full frame here to avoid an all-grey image — but that KEPT the occluder's
+/// pixels, a data leak. Callers that capture for the AI should refuse before
+/// reaching this state — see `window_fully_occluded` + the pinned-target guard in
+/// `guide()`/`send_correction()`.)
 pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
     let mut target_pid: u32 = 0;
     unsafe {
@@ -1296,22 +1310,35 @@ pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
 
-    if state.keep.is_empty() {
-        // Defensive: don't return an empty keep-set, otherwise blank_outside_rects
-        // greys the whole capture. Fall back to the target's clipped frame.
-        if let Some(r) = frame_rect_of(target) {
-            let clipped = rect_intersect(&r, bbox);
-            if clipped.width > 0 && clipped.height > 0 {
-                return vec![clipped];
-            }
-        }
-    }
+    // Empty when fully occluded — returned as-is (fail-safe; see the doc comment).
     state.keep
 }
 
 /// Convenience wrapper for callers that hold a raw HWND value (usize).
 pub fn pid_visible_keep_rects_raw(hwnd_raw: usize, bbox: &Rect) -> Vec<Rect> {
     pid_visible_keep_rects(HWND(hwnd_raw as *mut _), bbox)
+}
+
+/// True when `hwnd` is a real, non-minimized window whose **entire** on-screen area
+/// is currently covered by *other apps'* windows — so a screen BitBlt of its rect
+/// would grab the occluding apps' pixels, not the target's. Used to REFUSE a
+/// capture that would otherwise leak another app's content to the AI (the
+/// pinned-target-hidden-behind-another-window case). Returns false when the window
+/// is even partly visible (the mask greys just the covered parts, which is safe),
+/// or gone/minimized (a separate, already-handled case).
+pub fn window_fully_occluded(hwnd_raw: usize) -> bool {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return false;
+        }
+    }
+    let Some(rect) = pid_union_rect(hwnd).or_else(|| frame_rect_of(hwnd)) else {
+        return false;
+    };
+    // pid_visible_keep_rects returns empty iff every same-PID pixel in `rect` is
+    // covered by another app — i.e. fully occluded.
+    pid_visible_keep_rects(hwnd, &rect).is_empty()
 }
 
 /// Returns true when `pid` belongs to Tauri's embedded WebView2 renderer

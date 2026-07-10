@@ -1114,14 +1114,57 @@ async fn guide(
     // (GuidanceState.full_screen_mode). The AI no longer decides this — full-screen
     // is now an explicit, user-initiated capture scope. When set, pinned/target HWNDs
     // are ignored and the whole virtual desktop is captured.
-    let (stored_hwnd, is_fs, fs_monitor) = {
+    let (stored_hwnd, is_pinned, is_fs, fs_monitor) = {
         let g = state.guidance.lock();
         (
             g.pinned_hwnd.or(g.target_hwnd),
+            g.pinned_hwnd.is_some(),
             g.full_screen_mode,
             g.full_screen_monitor,
         )
     };
+
+    // Data-leak guard: a screen BitBlt of a window's rect grabs whatever is
+    // *visually* there, so a PINNED target that's fully hidden behind another app
+    // would be captured as the OCCLUDING app's pixels and sent to the AI. The user
+    // chose "refuse + prompt" over auto-raising (which steals focus / is unreliable),
+    // so bail before capturing and tell them to bring it forward. (Scoped to pinned:
+    // in auto-detect the tracker keeps the target on the foreground, and the capture
+    // mask now fails safe — greys, never leaks — if a stale target is ever occluded.)
+    #[cfg(windows)]
+    if !is_fs && is_pinned {
+        if let Some(hwnd) = stored_hwnd {
+            if capture::window_fully_occluded(hwnd) {
+                let app = capture::get_window_info_for_hwnd(hwnd)
+                    .map(|i| i.app_name)
+                    .unwrap_or_else(|| "The pinned app".to_string());
+                return Ok(GuideResponse {
+                    ok: false,
+                    session_id,
+                    steps: vec![],
+                    step_index: 0,
+                    instruction: String::new(),
+                    located: None,
+                    needs_input: false,
+                    request_full_screen: false,
+                    provider: String::new(),
+                    model: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    error: Some(format!(
+                        "{app} is hidden behind another window, so Navisual can't see it. \
+                         Bring it to the front (click it in the taskbar), or pick a different \
+                         app with the target selector (🎯), then try again."
+                    )),
+                    debug_screenshot_path: None,
+                    chat_thumb_b64: None,
+                    locate_trace: None,
+                    ai_bbox: None,
+                    suggested_tasks: Vec::new(),
+                });
+            }
+        }
+    }
 
     // Get the panel rect before entering spawn_blocking — blanked from the
     // capture so the AI never sees our own UI chrome in screenshots.
