@@ -80,7 +80,8 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 
 | Provider | Where the screenshot goes |
 |---|---|
-| **Managed (default)** | Supabase Edge Function → OpenRouter free model router |
+| **Managed — free (default)** | Supabase Edge Function → OpenRouter → free AI models (Google/NVIDIA) — **may be retained & used to train their models** (see note below) |
+| **Managed — paid** | Supabase Edge Function → Google/OpenAI paid endpoints — not used for training |
 | Anthropic | `api.anthropic.com` |
 | Gemini | `generativelanguage.googleapis.com` |
 | OpenAI | `api.openai.com` |
@@ -89,6 +90,7 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 | Ollama | `http://localhost:11434` — nothing leaves your machine |
 
 Additional notes:
+- **Free managed tier & model training:** the free tier is served by *free-of-charge* AI models (via OpenRouter — currently Google's and NVIDIA's free models), and those providers may retain your requests — **including the screenshot** — and use them to train their models. This is how the models are offered for free. To avoid it, use the **paid** managed tier (Google/OpenAI paid endpoints — no training), a **bring-your-own-key** provider on a *paid* plan (a provider's own *free* key may still train — check its policy), or **Ollama** (fully local). See the [Privacy Policy](https://navisualguide.com/privacy.html).
 - Screenshots are held in memory only — never written to disk at default settings
 - Full-screen / multi-monitor capture requires explicit one-time permission each time
 - Assign a Pause hotkey in **Settings → Hotkeys** to stop all capture instantly

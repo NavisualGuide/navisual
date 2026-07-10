@@ -2441,7 +2441,7 @@ See the LICENSE file in the root of this repository for complete details.
           <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
             <li>Screenshots are held in memory only — never written to disk by Navisual.</li>
             <li>Only the active window is captured by default; full-screen needs your permission each time.</li>
-            <li>Your selected provider may log requests per their own terms.</li>
+            <li><strong>The default free tier uses free AI models that may keep your requests — including the screenshot — to train their models.</strong> The paid tiers don't, and Ollama keeps everything on your machine. (<button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>details</button>)</li>
             <li>On the free tier, a one-way hash of a device identifier counts your 50 free requests per machine — it can't identify you and isn't used on paid or your-own-key providers.</li>
             <li>Voice input (optional) sends audio to Microsoft's online speech service via the WebView2 Web Speech API.</li>
             <li>For zero data sharing, use the Ollama provider — it runs locally.</li>
@@ -2783,7 +2783,7 @@ See the LICENSE file in the root of this repository for complete details.
             <!-- Per-provider contextual hint -->
             <p class="setting-hint provider-hint">
               {#if settingsForm.api_provider === "managed"}
-                Free · 50 requests included. Powered by OpenRouter's free model router via the Navisual relay. May be slower than BYOK providers — ideal for getting started.
+                Free · 50 requests included. Powered by OpenRouter's free model router via the Navisual relay. May be slower than BYOK providers — ideal for getting started. <strong>Note:</strong> the free models may use your requests (including screenshots) to train their AI; paid tiers and Ollama do not.
               {:else if settingsForm.api_provider === "gemini"}
                 Recommended for most users outside mainland China. Free API key available at aistudio.google.com.
               {:else if settingsForm.api_provider === "anthropic"}
