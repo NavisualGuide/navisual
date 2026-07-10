@@ -1633,7 +1633,7 @@ async fn guide(
         }
     }
 
-    let (located, locate_trace) = execute_step(
+    let (located, mut locate_trace) = execute_step(
         &app,
         &steps[0],
         new_hwnd_opt,
@@ -1649,7 +1649,11 @@ async fn guide(
         context_elements,
     )
     .unwrap_or((None, None));
-    if let Some(ref t) = locate_trace {
+    if let Some(ref mut t) = locate_trace {
+        t.model = Some(used_model.clone());
+        t.provider = Some(provider.clone());
+        t.input_tokens = Some(in_tok);
+        t.output_tokens = Some(out_tok);
         maybe_log_trace(&app, t, log_trace);
     }
 
@@ -1706,7 +1710,7 @@ async fn next_step(
         ));
     }
 
-    let (log_trace, debug_screenshot_enabled, bbox_decisive) = {
+    let (log_trace, debug_screenshot_enabled, bbox_decisive, used_model) = {
         let router = state.ai_router.lock().await;
         // No AI call here; the cached routed/active model is the one that produced
         // these steps (and their bboxes), so its trust still applies.
@@ -1717,6 +1721,7 @@ async fn next_step(
             router.config.debug_locate_log_file_enabled,
             router.config.debug_screenshot_enabled,
             ai::bbox::bbox_is_decisive(&used_model, &router.config.bbox_distrust_models),
+            used_model,
         )
     };
     let stored_hwnd = {
@@ -1733,7 +1738,7 @@ async fn next_step(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
-    let (located, locate_trace) = execute_step(
+    let (located, mut locate_trace) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -1749,7 +1754,10 @@ async fn next_step(
         context_elements,
     )
     .unwrap_or((None, None));
-    if let Some(ref t) = locate_trace {
+    if let Some(ref mut t) = locate_trace {
+        t.model = Some(used_model.clone());
+        t.provider = Some(provider.clone());
+        // No AI call this turn — nothing new to attribute (see LocateTrace doc comment).
         maybe_log_trace(&app, t, log_trace);
     }
 
@@ -2166,7 +2174,7 @@ async fn send_correction(
         }
     }
 
-    let (located, locate_trace) = execute_step(
+    let (located, mut locate_trace) = execute_step(
         &app,
         &steps[0],
         new_hwnd,
@@ -2182,7 +2190,11 @@ async fn send_correction(
         context_elements,
     )
     .unwrap_or((None, None));
-    if let Some(ref t) = locate_trace {
+    if let Some(ref mut t) = locate_trace {
+        t.model = Some(used_model.clone());
+        t.provider = Some(provider.clone());
+        t.input_tokens = Some(in_tok);
+        t.output_tokens = Some(out_tok);
         maybe_log_trace(&app, t, log_trace);
     }
 

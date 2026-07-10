@@ -32,6 +32,19 @@ pub struct LocateTrace {
     pub final_decision: FinalDecision,
     pub final_bbox: Option<Rect>,
     pub elapsed_ms: u32,
+    /// The model that produced `target_text`/`ai_bbox` for this step — the concrete routed
+    /// model for `managed`, else the configured one (same resolution used for cost_tracker
+    /// attribution and the debug drawer's response-info line). `None` only if unset before
+    /// logging (shouldn't happen; all three call sites set it).
+    pub model: Option<String>,
+    /// `Config.api_provider` at call time ("managed" / "gemini" / "anthropic" / …).
+    pub provider: Option<String>,
+    /// Token usage from the AI call that produced this step, for per-request cost
+    /// estimation (`pricing::estimate_cost`) — `usage.json` only tracks cumulative
+    /// per-model totals, not per-request. `None` for `next_step` (no AI call — it reuses
+    /// a prior response's steps/bbox, so there's no new usage to attribute here).
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
 }
 
 /// Pass-0 adapter outcome. An adapter "claims" a locate when it recognises the focused app
