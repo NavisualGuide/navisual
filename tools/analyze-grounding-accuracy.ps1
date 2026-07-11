@@ -8,11 +8,21 @@
 #   .\tools\analyze-grounding-accuracy.ps1 -Path other.jsonl -Last 500
 #   .\tools\analyze-grounding-accuracy.ps1 -IncludeOcr        # see below
 #   .\tools\analyze-grounding-accuracy.ps1 -ShowOutliers
+#   .\tools\analyze-grounding-accuracy.ps1 -GroupByApp        # see below
 #
 # Requires: locate_log.jsonl logging enabled (Settings -> Developer, or
 # DEBUG_LOCATE_LOG_FILE_ENABLED=true in .env) and model/provider/token
 # attribution on LocateTrace (locator/trace.rs, added 2026-07-09 -- entries
 # logged before that fall into the "(unknown)|(unknown)" bucket).
+#
+# -GroupByApp adds the target window's exe stem ("olk", "chrome", "notepad", ...)
+# to the grouping key, so results split per model-per-app instead of collapsing
+# every app a model was tested on into one row -- the manual, error-prone step
+# this flag replaces was guessing the app from target_text/OCR content alone
+# (added 2026-07-11 after exactly that happened). Deliberately the exe stem, not
+# the window title -- see LocateTrace.app_name's doc comment (trace.rs): the
+# title can carry PII (e.g. a signed-in email address in an Outlook title bar).
+# Entries logged before 2026-07-11 have no app_name and fall into "(unknown)".
 #
 # Ground truth: hit_adapter (deterministic geometry, e.g. Excel GridPattern),
 # hit_selection (the AI's own element pick, but only counted once it's been
@@ -35,7 +45,8 @@ param(
     [string]$Path = "$env:LOCALAPPDATA\com.navisual.app\locate_log.jsonl",
     [int]$Last = 0,          # 0 = all entries
     [switch]$IncludeOcr,
-    [switch]$ShowOutliers
+    [switch]$ShowOutliers,
+    [switch]$GroupByApp
 )
 
 if (-not (Test-Path $Path)) {
@@ -92,14 +103,21 @@ if ($candidates.Count -eq 0) {
 }
 
 # -- Per-model grounding accuracy --------------------------------------------
-Write-Output "-- Per model (provider|model) --"
-Write-Output ("  {0,-34} {1,5} {2,7} {3,7} {4,9} {5,9} {6,7} {7,7} {8,9} {9,6}" -f `
+$groupLabel = if ($GroupByApp) { "provider|model|app" } else { "provider|model" }
+$nameWidth = if ($GroupByApp) { 46 } else { 34 }
+Write-Output "-- Per model ($groupLabel) --"
+Write-Output ("  {0,-$nameWidth} {1,5} {2,7} {3,7} {4,9} {5,9} {6,7} {7,7} {8,9} {9,6}" -f `
     "model", "n", "bbox%", "hit%", "med-px", "p90-px", "in-tok", "out-tok", "med-ai-ms", "n-ai")
 
 $candidates | Group-Object {
     $p = if ($_.provider) { $_.provider } else { "(unknown)" }
     $m = if ($_.model) { $_.model } else { "(unknown)" }
-    "$p|$m"
+    if ($GroupByApp) {
+        $a = if ($_.app_name) { $_.app_name } else { "(unknown)" }
+        "$p|$m|$a"
+    } else {
+        "$p|$m"
+    }
 } | Sort-Object Count -Descending | ForEach-Object {
     $g = $_.Group
     $n = $g.Count
@@ -125,7 +143,7 @@ $candidates | Group-Object {
     # excluded here rather than silently coming through as 0.
     $aiMs = @($g | Where-Object { $null -ne $_.ai_elapsed_ms } | ForEach-Object { $_.ai_elapsed_ms })
 
-    Write-Output ("  {0,-34} {1,5} {2,6:P0} {3,6:P0} {4,7}px {5,7}px {6,7} {7,7} {8,7}ms {9,6}" -f `
+    Write-Output ("  {0,-$nameWidth} {1,5} {2,6:P0} {3,6:P0} {4,7}px {5,7}px {6,7} {7,7} {8,7}ms {9,6}" -f `
         $_.Name, $n, $bboxRate, $hitRate, `
         (Percentile $dists 0.5), (Percentile $dists 0.9), `
         (Percentile $inTok 0.5), (Percentile $outTok 0.5), `
@@ -159,10 +177,11 @@ if ($ShowOutliers) {
         [PSCustomObject]@{
             dist  = [int][Math]::Sqrt($dx * $dx + $dy * $dy)
             model = "{0}|{1}" -f $(if ($_.provider) { $_.provider } else { "(unknown)" }), $(if ($_.model) { $_.model } else { "(unknown)" })
+            app   = if ($_.app_name) { $_.app_name } else { "(unknown)" }
             target = $_.target_text
             kind  = $_.final_decision.kind
         }
     } | Sort-Object dist -Descending | Select-Object -First 20 | ForEach-Object {
-        Write-Output ("  {0,6}px  {1,-30} target='{2}' ({3})" -f $_.dist, $_.model, $_.target, $_.kind)
+        Write-Output ("  {0,6}px  {1,-30} {2,-12} target='{3}' ({4})" -f $_.dist, $_.model, $_.app, $_.target, $_.kind)
     }
 }

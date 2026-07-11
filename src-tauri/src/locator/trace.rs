@@ -42,6 +42,13 @@ pub struct LocateTrace {
     pub model: Option<String>,
     /// `Config.api_provider` at call time ("managed" / "gemini" / "anthropic" / …).
     pub provider: Option<String>,
+    /// Exe filename stem of the target window (`"olk"`, `"chrome"`, `"notepad"`, …) —
+    /// deliberately the exe stem, not the resolved display title: for non-UWP apps
+    /// `resolve_app_name` returns the raw window title verbatim (e.g. New Outlook's
+    /// title includes the signed-in email address), which has no place in a log meant
+    /// to be read/shared casually for debugging. `None` if no window was targeted
+    /// (full-screen mode) or the hwnd couldn't be resolved.
+    pub app_name: Option<String>,
     /// Token usage from the AI call that produced this step, for per-request cost
     /// estimation (`pricing::estimate_cost`) — `usage.json` only tracks cumulative
     /// per-model totals, not per-request. `None` for `next_step` (no AI call — it reuses

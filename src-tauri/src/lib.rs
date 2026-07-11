@@ -621,6 +621,18 @@ fn maybe_log_trace(app: &AppHandle, trace: &locator::trace::LocateTrace, log_ena
     }
 }
 
+/// Exe filename stem for `LocateTrace.app_name` — PII-free app identity (see the field's
+/// doc comment for why this is the exe stem and not the resolved display title).
+fn trace_app_name(hwnd_opt: Option<usize>) -> Option<String> {
+    let info = capture::get_window_info_for_hwnd(hwnd_opt?)?;
+    let stem = std::path::Path::new(&info.exe_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&info.exe_name)
+        .to_string();
+    Some(stem)
+}
+
 /// Developer option — append the exact prompt sent to the AI to a single running
 /// `prompt_log.jsonl`, when enabled. Covers every call site (guide/reply/requery/
 /// correction), unlike `debug_screenshot_enabled`'s per-call `prompt_<ts>.txt` dumps
@@ -1703,6 +1715,7 @@ async fn guide(
         t.input_tokens = Some(in_tok);
         t.output_tokens = Some(out_tok);
         t.ai_elapsed_ms = Some(ai_elapsed_ms as u32);
+        t.app_name = trace_app_name(new_hwnd_opt);
         maybe_log_trace(&app, t, log_trace);
     }
 
@@ -1807,6 +1820,7 @@ async fn next_step(
         t.model = Some(used_model.clone());
         t.provider = Some(provider.clone());
         // No AI call this turn — nothing new to attribute (see LocateTrace doc comment).
+        t.app_name = trace_app_name(stored_hwnd);
         maybe_log_trace(&app, t, log_trace);
     }
 
@@ -2247,6 +2261,7 @@ async fn send_correction(
         t.input_tokens = Some(in_tok);
         t.output_tokens = Some(out_tok);
         t.ai_elapsed_ms = Some(ai_elapsed_ms as u32);
+        t.app_name = trace_app_name(new_hwnd);
         maybe_log_trace(&app, t, log_trace);
     }
 
