@@ -1562,7 +1562,7 @@ async fn guide(
                 input_tokens: Some(in_tok),
                 output_tokens: Some(out_tok),
                 error: Some(if err_str == "free_trial_exhausted" {
-                    "Your 50 free requests have been used.".to_string()
+                    "Your free requests have been used.".to_string()
                 } else {
                     err_str
                 }),
@@ -2130,7 +2130,7 @@ async fn send_correction(
             let err_str = e.to_string();
             if err_str == "free_trial_exhausted" {
                 let _ = app.emit("trial_exhausted", ());
-                return Err("Your 50 free requests have been used.".to_string());
+                return Err("Your free requests have been used.".to_string());
             }
             return Err(err_str);
         }

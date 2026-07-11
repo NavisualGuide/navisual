@@ -245,6 +245,17 @@ See the LICENSE file in the root of this repository for complete details.
   let freeRemaining = $state<number | null>(null);
   let coinBalance = $state<number | null>(null);       // µ$ (divide by 5_000 for coins; 1 coin = $0.005)
   let managedTier = $state<"free" | "paid">("free");
+  // The relay draws down any remaining free allowance FIRST regardless of the
+  // account's permanent billing tier (fixed 2026-07-14 — a user who bought
+  // coins once used to permanently lose free access, even with unused
+  // requests left). So "which mode is my NEXT request actually in" is NOT the
+  // same as the account's raw `tier` — a user who has purchased before still
+  // shows "free" here as long as free_remaining > 0, matching what will
+  // really happen. Only once free is exhausted does `tier` decide the rest.
+  function deriveManagedTier(tier: string, freeRemainingVal: number | null): "free" | "paid" {
+    if (freeRemainingVal !== null && freeRemainingVal > 0) return "free";
+    return tier === "paid" ? "paid" : "free";
+  }
   let showTrialExhausted = $state(false);
   let oauthPending = $state(false);     // true while waiting for Google OAuth callback
   let checkoutPending = $state(false);  // true while waiting for user to pay in browser
@@ -995,12 +1006,13 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Buy coins. Tries to create a Stripe Checkout session directly; if the
-  // backend says oauth_required (anonymous session), it runs Google OAuth
-  // first and retries. Signed-in users skip OAuth entirely — no need to track
-  // is_anonymous on the client. Opens Stripe Checkout in the system browser.
+  // backend says oauth_required (anonymous session), sends the user to the
+  // Account tab to sign in — Google OR email, their choice (2026-07-14: used
+  // to auto-trigger Google OAuth with no alternative offered). Signed-in
+  // users skip this entirely. Opens Stripe Checkout in the system browser.
   async function buyCoins(amountUsd = 20) {
     if (oauthPending || checkoutPending) return;
-    // The checkout/OAuth pages open in the system browser. The panel is
+    // The checkout page opens in the system browser. The panel is
     // alwaysOnTop, so it would sit OVER the browser even when the browser has
     // focus — and the open Settings modal covers the draggable titlebar. So
     // close Settings and drop always-on-top here; refreshBalance() restores it
@@ -1013,13 +1025,19 @@ See the LICENSE file in the root of this repository for complete details.
         url = await invoke<string>("create_checkout", { amountUsd });
       } catch (e) {
         if (String(e).includes("oauth_required")) {
-          oauthPending = true;
-          await invoke("start_google_oauth"); // oauth_complete listener refreshes balance
-          oauthPending = false;
-          url = await invoke<string>("create_checkout", { amountUsd });
-        } else {
-          throw e;
+          // Not signed in yet — stay in-app (no browser was opened) and let
+          // the user pick a sign-in method on the Account tab, which already
+          // offers both Google and email. They click Buy Coins again once
+          // signed in; account linking preserves free requests and any coins.
+          await setPanelOnTop(true);
+          settingsTab = "account";
+          accountView = "signin";
+          acctError = "";
+          acctNotice = "Sign in to buy coins — use Google below, or enter your email.";
+          showSettings = true;
+          return;
         }
+        throw e;
       }
       checkoutPending = true;
       openUrl(url);
@@ -1040,7 +1058,7 @@ See the LICENSE file in the root of this repository for complete details.
       const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
       freeRemaining = bal.free_remaining;
       coinBalance = bal.coin_balance_microdollars;
-      managedTier = (bal.tier === "paid") ? "paid" : "free";
+      managedTier = deriveManagedTier(bal.tier, bal.free_remaining);
       if (managedTier === "paid") showTrialExhausted = false;
     } catch (_) {}
     oauthPending = false;
@@ -1261,7 +1279,8 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  async function openSettings() {
+  async function openSettings(tab: SettingsTab = "provider") {
+    settingsTab = tab;
     settingsError = null;
     settingsSaved = false;
     showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false; showKeyCustom = false;
@@ -1822,7 +1841,7 @@ See the LICENSE file in the root of this repository for complete details.
         const bal = await invokeReady<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
         freeRemaining = bal.free_remaining;
         coinBalance = bal.coin_balance_microdollars;
-        managedTier = (bal.tier === "paid") ? "paid" : "free";
+        managedTier = deriveManagedTier(bal.tier, bal.free_remaining);
       } catch (_) {}
     }
 
@@ -1857,7 +1876,7 @@ See the LICENSE file in the root of this repository for complete details.
         const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
         freeRemaining = bal.free_remaining;
         coinBalance = bal.coin_balance_microdollars;
-        managedTier = (bal.tier === "paid") ? "paid" : "free";
+        managedTier = deriveManagedTier(bal.tier, bal.free_remaining);
       } catch (_) {}
     });
 
@@ -1939,7 +1958,7 @@ See the LICENSE file in the root of this repository for complete details.
              before their trial runs out. -->
         <button class="header-balance" onclick={() => openAbout("usage")} title="View coin balance">🪙</button>
       {:else if settingsForm.api_provider === "managed" && freeRemaining !== null}
-        <button class="header-balance" class:header-balance-low={freeRemaining <= 5} onclick={() => openAbout("usage")} title="View usage">{freeRemaining} left</button>
+        <button class="header-balance" class:header-balance-low={freeRemaining <= 5} onclick={() => openSettings("billing")} title="Get more requests">{freeRemaining} left</button>
       {/if}
       {#if pendingUpdate}
         <button class="header-update" onclick={() => openAbout("about")} title="Update available">
@@ -1950,7 +1969,7 @@ See the LICENSE file in the root of this repository for complete details.
         <button class="hdr-btn" onclick={() => openAbout("about")} title="About Navisual" aria-label="About Navisual">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
         </button>
-        <button class="hdr-btn" onclick={openSettings} title="Settings" aria-label="Settings">
+        <button class="hdr-btn" onclick={() => openSettings()} title="Settings" aria-label="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
         <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to floating icon" aria-label="Collapse to floating icon">
@@ -2457,7 +2476,7 @@ See the LICENSE file in the root of this repository for complete details.
             <li>Screenshots are held in memory only — never written to disk by Navisual.</li>
             <li>Only the active window is captured by default; full-screen needs your permission each time.</li>
             <li><strong>The default free tier uses free AI models that may keep your requests — including the screenshot — to train their models.</strong> Paid tiers, per their providers' current policies, don't; Ollama keeps everything on your machine. (<button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>details</button>)</li>
-            <li>On the free tier, a one-way hash of a device identifier counts your 50 free requests per machine — it can't identify you and isn't used on paid or your-own-key providers.</li>
+            <li>On the free tier, a one-way hash of a device identifier counts your 30 free requests per machine — it can't identify you and isn't used on paid or your-own-key providers.</li>
             <li>Voice input (optional) sends audio to Microsoft's online speech service via the WebView2 Web Speech API.</li>
             <li>For zero data sharing, use the Ollama provider — it runs locally.</li>
           </ul>
@@ -2502,7 +2521,7 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
         <div class="modal-body" style="padding: 20px; text-align: center; line-height: 1.6;">
           <p style="font-size: 2em; margin-bottom: 12px;">🎯</p>
-          <p style="margin-bottom: 8px; font-weight: 600;">Your 50 free requests have been used.</p>
+          <p style="margin-bottom: 8px; font-weight: 600;">Your free requests have been used.</p>
 
           {#if oauthPending}
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
@@ -2583,7 +2602,7 @@ See the LICENSE file in the root of this repository for complete details.
             {/if}
             <div class="setting-group">
               <span class="setting-label">Free requests</span>
-              <p class="setting-hint">{freeRemaining ?? "—"} remaining of 50</p>
+              <p class="setting-hint">{freeRemaining ?? "—"} remaining of 30</p>
             </div>
             <p class="setting-hint">Change your <strong>quality tier</strong> (which model answers, and its coin cost) on the <strong>Provider</strong> tab.</p>
 
@@ -2798,7 +2817,7 @@ See the LICENSE file in the root of this repository for complete details.
             <!-- Per-provider contextual hint -->
             <p class="setting-hint provider-hint">
               {#if settingsForm.api_provider === "managed"}
-                Free · 50 requests included. Routed via the Navisual relay to a free-tier AI provider (the specific provider may change over time as we optimize for reliability and speed). May be slower than BYOK providers — ideal for getting started. <strong>Note:</strong> free-tier AI providers commonly retain and may train on your requests (including screenshots) as part of offering the service at no cost; paid tiers (per their providers' current policies) and Ollama do not.
+                Free · 30 requests included. Routed via the Navisual relay to a free-tier AI provider (the specific provider may change over time as we optimize for reliability and speed). May be slower than BYOK providers — ideal for getting started. <strong>Note:</strong> free-tier AI providers commonly retain and may train on your requests (including screenshots) as part of offering the service at no cost; paid tiers (per their providers' current policies) and Ollama do not.
               {:else if settingsForm.api_provider === "gemini"}
                 Recommended for most users outside mainland China. Free API key available at aistudio.google.com.
               {:else if settingsForm.api_provider === "anthropic"}

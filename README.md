@@ -8,7 +8,7 @@ Navisual watches your screen and walks you through any task step by step — poi
 
 **[Download for Windows](https://navisualguide.com)** · [View on GitHub](https://github.com/NavisualGuide/navisual) · [navisualguide.com](https://navisualguide.com)
 
-> **50 free requests included — no sign-up, no API key required.**
+> **30 free requests included — no sign-up, no API key required.**
 
 ---
 
@@ -16,7 +16,7 @@ Navisual watches your screen and walks you through any task step by step — poi
 
 | Provider | Setup | Cost |
 |----------|-------|------|
-| **Managed (free, default)** | None — works on first launch | 50 free requests, then paid |
+| **Managed (free, default)** | None — works on first launch | 30 free requests, then paid |
 | Gemini | Free key at [aistudio.google.com](https://aistudio.google.com/apikey) | Free tier available |
 | Anthropic (Claude) | Key at [console.anthropic.com](https://console.anthropic.com) | Pay per use |
 | OpenAI | Key at [platform.openai.com](https://platform.openai.com) | Pay per use |
@@ -33,7 +33,7 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 ## Quick Start
 
 1. **[Download the installer](https://navisualguide.com)** and run `Navisual-Setup.exe`
-2. Launch Navisual — it signs you in anonymously and gives you 50 free requests
+2. Launch Navisual — it signs you in anonymously and gives you 30 free requests
 3. Type what you need help with: *"How do I export a PDF in Illustrator?"*
 4. Follow the on-screen arrows and spoken instructions
 5. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> when you've completed each step to advance
@@ -95,7 +95,7 @@ Additional notes:
 - Full-screen / multi-monitor capture requires explicit one-time permission each time
 - Assign a Pause hotkey in **Settings → Hotkeys** to stop all capture instantly
 - Settings and auth token live in `%LOCALAPPDATA%\com.navisual.app\`
-- On the free tier, a one-way hash of a Windows machine identifier is sent with requests so the 50 free requests are counted per device (it can't be reversed to identify your machine, and is used only to enforce the free limit — not on paid or bring-your-own-key providers)
+- On the free tier, a one-way hash of a Windows machine identifier is sent with requests so the 30 free requests are counted per device (it can't be reversed to identify your machine, and is used only to enforce the free limit — not on paid or bring-your-own-key providers)
 - Voice input (optional) uses the WebView2 Web Speech API, which sends your spoken audio to Microsoft's online speech service
 - Debug captures are off by default; when enabled, files older than 7 days are auto-deleted
 
