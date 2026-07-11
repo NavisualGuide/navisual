@@ -245,15 +245,19 @@ See the LICENSE file in the root of this repository for complete details.
   let freeRemaining = $state<number | null>(null);
   let coinBalance = $state<number | null>(null);       // µ$ (divide by 5_000 for coins; 1 coin = $0.005)
   let managedTier = $state<"free" | "paid">("free");
-  // The relay draws down any remaining free allowance FIRST regardless of the
-  // account's permanent billing tier (fixed 2026-07-11 — a user who bought
-  // coins once used to permanently lose free access, even with unused
-  // requests left). So "which mode is my NEXT request actually in" is NOT the
-  // same as the account's raw `tier` — a user who has purchased before still
-  // shows "free" here as long as free_remaining > 0, matching what will
-  // really happen. Only once free is exhausted does `tier` decide the rest.
-  function deriveManagedTier(tier: string, freeRemainingVal: number | null): "free" | "paid" {
-    if (freeRemainingVal !== null && freeRemainingVal > 0) return "free";
+  // Mirrors the account's real tier, full stop — deliberately NOT aware of
+  // free_remaining. A 2026-07-11 fix briefly made this show "free" whenever
+  // free_remaining > 0 (reasoning: "which pool does my next request actually
+  // draw from"), which had a real regression: a genuine paying customer with
+  // unused free requests got the free-tier UI forced on them — no quality-
+  // tier picker, no way to see/choose paid mode, even with thousands of coins
+  // on the account (reported live the same day). Reverted. The relay's
+  // free-before-paid routing fix (same day) is what actually makes this safe
+  // — free requests get drawn down first regardless of what this shows or
+  // what tier is selected, so the UI is free to just tell the truth: are you
+  // a paying customer or not. Free-remaining count is shown separately
+  // (Billing tab), unconditionally, regardless of this value.
+  function deriveManagedTier(tier: string, _freeRemainingVal: number | null): "free" | "paid" {
     return tier === "paid" ? "paid" : "free";
   }
   let showTrialExhausted = $state(false);
