@@ -246,7 +246,7 @@ See the LICENSE file in the root of this repository for complete details.
   let coinBalance = $state<number | null>(null);       // µ$ (divide by 5_000 for coins; 1 coin = $0.005)
   let managedTier = $state<"free" | "paid">("free");
   // The relay draws down any remaining free allowance FIRST regardless of the
-  // account's permanent billing tier (fixed 2026-07-14 — a user who bought
+  // account's permanent billing tier (fixed 2026-07-11 — a user who bought
   // coins once used to permanently lose free access, even with unused
   // requests left). So "which mode is my NEXT request actually in" is NOT the
   // same as the account's raw `tier` — a user who has purchased before still
@@ -1007,7 +1007,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Buy coins. Tries to create a Stripe Checkout session directly; if the
   // backend says oauth_required (anonymous session), sends the user to the
-  // Account tab to sign in — Google OR email, their choice (2026-07-14: used
+  // Account tab to sign in — Google OR email, their choice (2026-07-11: used
   // to auto-trigger Google OAuth with no alternative offered). Signed-in
   // users skip this entirely. Opens Stripe Checkout in the system browser.
   async function buyCoins(amountUsd = 20) {
