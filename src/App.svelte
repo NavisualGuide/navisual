@@ -233,8 +233,9 @@ See the LICENSE file in the root of this repository for complete details.
   let sessionId = $state("");
   let provider = $state("");
   // The model that actually handled the last AI response. For managed this is the
-  // concrete model OpenRouter routed to (the relay sends the `openrouter/free` router);
-  // shown in the debug drawer and logged with feedback. Empty until the first response.
+  // concrete model the relay routed to — the free tier tries a primary provider and
+  // falls back to another on failure, so this can vary request to request; shown in
+  // the debug drawer and logged with feedback. Empty until the first response.
   let routedModel = $state("");
   // Set when the screen drifted during the 5–90s AI thinking window.
   // Surfaces a soft banner over the instruction so the user knows the
@@ -2797,7 +2798,7 @@ See the LICENSE file in the root of this repository for complete details.
             <!-- Per-provider contextual hint -->
             <p class="setting-hint provider-hint">
               {#if settingsForm.api_provider === "managed"}
-                Free · 50 requests included. Powered by OpenRouter's free model router via the Navisual relay. May be slower than BYOK providers — ideal for getting started. <strong>Note:</strong> the free models may use your requests (including screenshots) to train their AI; paid tiers (per their providers' current policies) and Ollama do not.
+                Free · 50 requests included. Routed via the Navisual relay to a free-tier AI provider (the specific provider may change over time as we optimize for reliability and speed). May be slower than BYOK providers — ideal for getting started. <strong>Note:</strong> free-tier AI providers commonly retain and may train on your requests (including screenshots) as part of offering the service at no cost; paid tiers (per their providers' current policies) and Ollama do not.
               {:else if settingsForm.api_provider === "gemini"}
                 Recommended for most users outside mainland China. Free API key available at aistudio.google.com.
               {:else if settingsForm.api_provider === "anthropic"}

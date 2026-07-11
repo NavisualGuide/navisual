@@ -80,8 +80,8 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 
 | Provider | Where the screenshot goes |
 |---|---|
-| **Managed — free (default)** | Supabase Edge Function → OpenRouter → free AI models (Google/NVIDIA) — **may be retained & used to train their models** (see note below) |
-| **Managed — paid** | Supabase Edge Function → Google/OpenAI paid endpoints — not used for training under their current API policies |
+| **Managed — free (default)** | Supabase Edge Function → a free-tier AI provider (the specific provider may change over time) — **may be retained & used to train their models** (see note below) |
+| **Managed — paid** | Supabase Edge Function → paid AI provider endpoints — not used for training under their current API policies |
 | Anthropic | `api.anthropic.com` |
 | Gemini | `generativelanguage.googleapis.com` |
 | OpenAI | `api.openai.com` |
@@ -90,7 +90,7 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 | Ollama | `http://localhost:11434` — nothing leaves your machine |
 
 Additional notes:
-- **Free managed tier & model training:** the free tier is served by *free-of-charge* AI models (via OpenRouter — currently Google's and NVIDIA's free models), and those providers may retain your requests — **including the screenshot** — and use them to train their models. This is how the models are offered for free. To avoid it, use the **paid** managed tier (Google/OpenAI paid endpoints, which under their *current* policies don't train on API data — their policy, which can change), a **bring-your-own-key** provider on a *paid* plan (a provider's own *free* key may still train — check its policy), or **Ollama** (fully local — the only option that doesn't depend on a provider's policy). See the [Privacy Policy](https://navisualguide.com/privacy.html).
+- **Free managed tier & model training:** the free tier is served by *free-of-charge* AI models — we route to whichever provider currently offers the best reliability/cost for the free tier, and that routing changes from time to time — and free-tier providers commonly retain your requests — **including the screenshot** — and use them to train their models. This is typically how free-of-charge AI access is offered. To avoid it, use the **paid** managed tier (paid provider endpoints, which under their *current* policies don't train on API data — their policy, which can change), a **bring-your-own-key** provider on a *paid* plan (a provider's own *free* key may still train — check its policy), or **Ollama** (fully local — the only option that doesn't depend on a provider's policy). See the [Privacy Policy](https://navisualguide.com/privacy.html).
 - Screenshots are held in memory only — never written to disk at default settings
 - Full-screen / multi-monitor capture requires explicit one-time permission each time
 - Assign a Pause hotkey in **Settings → Hotkeys** to stop all capture instantly
