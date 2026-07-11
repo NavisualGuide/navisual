@@ -1930,7 +1930,12 @@ See the LICENSE file in the root of this repository for complete details.
         <span class="header-shared-caret">▾</span>
       </button>
       {#if settingsForm.api_provider === "managed" && managedTier === "paid" && coinBalance !== null}
-        <button class="header-balance" class:header-balance-low={coinBalance < 200_000} onclick={() => openAbout("usage")} title="View coin balance">{Math.floor(coinBalance / 5_000)} 🪙</button>
+        <!-- Paid users: never alarm-red this. It's a purchased balance, not a
+             countdown to being cut off — running low just means "buy more," and
+             a persistent red warning in the title bar reads as dunning, not help.
+             Free users get the opposite treatment just below: red is an
+             intentional, appropriate nudge before their trial runs out. -->
+        <button class="header-balance" onclick={() => openAbout("usage")} title="View coin balance">{Math.floor(coinBalance / 5_000)} 🪙</button>
       {:else if settingsForm.api_provider === "managed" && freeRemaining !== null}
         <button class="header-balance" class:header-balance-low={freeRemaining <= 5} onclick={() => openAbout("usage")} title="View usage">{freeRemaining} left</button>
       {/if}
