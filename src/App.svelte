@@ -1197,7 +1197,8 @@ See the LICENSE file in the root of this repository for complete details.
       showChangePw = false;
       showDeleteConfirm = false;
       await loadAccountInfo();
-      await refreshBalance();
+      await refreshBalance(); // re-derives managedTier from the fresh anon session's real tier ('free')
+      addToHistory("system", "Signed out — you're back on the free tier.");
     } catch (e) {
       acctError = String(e);
     } finally {
@@ -1704,8 +1705,8 @@ See the LICENSE file in the root of this repository for complete details.
   // Human-readable "supplier — detail" for the chat status messages. For managed
   // it names the selected quality tier (Speed/Regular/Smart) so the user can see
   // which managed model is active; for BYOK it's the provider + model.
-  const TIER_LABELS: Record<string, string> = { speed: "Speed", regular: "Regular", smart: "Smart" };
-  const TIER_COINS: Record<string, number> = { speed: 6, regular: 12, smart: 18 };
+  const TIER_LABELS: Record<string, string> = { free: "Free", speed: "Speed", regular: "Regular", smart: "Smart" };
+  const TIER_COINS: Record<string, number> = { free: 0, speed: 6, regular: 12, smart: 18 };
   let providerLabel = $derived(
     // Free users have no quality tier — the Speed/Regular/Smart picker is paid-only
     // (and the relay ignores a free user's tier param), so showing "Managed (Speed)"
@@ -1957,10 +1958,11 @@ See the LICENSE file in the root of this repository for complete details.
         <!-- Paid users: icon only, no number, no alarm styling. It's a purchased
              balance, not a countdown to being cut off — a shrinking number in the
              title bar reads as dunning, not help. The exact count is one click
-             away (Usage tab). Free users get the opposite treatment just below:
-             a visible, reddening count is an intentional, appropriate nudge
-             before their trial runs out. -->
-        <button class="header-balance" onclick={() => openAbout("usage")} title="View coin balance">🪙</button>
+             away (Billing tab, same destination as the free chip below — both
+             lead somewhere actionable, not a read-only report). Free users get
+             the opposite treatment just below: a visible, reddening count is an
+             intentional, appropriate nudge before their trial runs out. -->
+        <button class="header-balance" onclick={() => openSettings("billing")} title="View billing">🪙</button>
       {:else if settingsForm.api_provider === "managed" && freeRemaining !== null}
         <button class="header-balance" class:header-balance-low={freeRemaining <= 5} onclick={() => openSettings("billing")} title="Get more requests">{freeRemaining} left</button>
       {/if}
@@ -2840,37 +2842,38 @@ See the LICENSE file in the root of this repository for complete details.
             </p>
 
             {#if settingsForm.api_provider === "managed"}
-              {#if managedTier === "paid"}
-                <!-- Quality tier — which managed model answers (and its coin cost). Persisted via
-                     Apply/OK. Paid only: the relay routes free users to the free model chain and
-                     ignores this tier, so showing Speed/Regular/Smart to them is misleading. -->
-                <div class="setting-group">
-                  <label class="setting-label" for="tier-select">Quality tier</label>
-                  <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
-                    <option value="speed">Speed — fastest · 6 coins/request</option>
-                    <option value="regular">Regular — balanced · 12 coins/request</option>
-                    <option value="smart">Smart — best grounding · 18 coins/request</option>
-                  </select>
-                  <p class="setting-hint">
-                    {#if settingsForm.managed_tier === "speed"}
-                      GPT-5.4-mini, falls back to Gemini 3 Flash. Cheapest; good for simple, text-heavy UIs.
-                    {:else if settingsForm.managed_tier === "smart"}
-                      Gemini 3 Pro, falls back to GPT-5.4. Best at pointing precisely on dense/visual UIs.
-                    {:else}
-                      Gemini 3.5 Flash, falls back to GPT-5.4-mini. The best all-round default.
-                    {/if}
-                    Coins are bought on the Billing tab.
-                  </p>
-                </div>
-              {:else}
-                <div class="setting-group">
-                  <span class="setting-label">Quality tier</span>
-                  <p class="setting-hint">
-                    You're on the <strong>free tier</strong> — requests use the free model.
-                    Buy coins on the <strong>Billing</strong> tab to choose Speed / Regular / Smart.
-                  </p>
-                </div>
-              {/if}
+              <!-- Quality tier / free preference. Persisted via Apply/OK, defaults to
+                   "regular" for a never-configured install (SETTINGS_DEFAULTS) and
+                   otherwise remembers whatever was last saved. Always shown regardless
+                   of managedTier (2026-07-14 fix — previously hidden entirely once
+                   managedTier was "paid", so a real paying customer with unused free
+                   requests had no way to see or pick "Free" at all). The relay always
+                   draws down any remaining free requests first, automatically,
+                   regardless of this selection (2026-07-11 routing fix) — so "Free"
+                   here is a preference/acknowledgment, not a hard switch; it only
+                   actually matters once free is exhausted, at which point "free" isn't
+                   a recognized paid-tier key on the relay and degrades safely to
+                   Regular pricing with no server-side handling needed. -->
+              <div class="setting-group">
+                <label class="setting-label" for="tier-select">Quality tier</label>
+                <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
+                  <option value="free">Free — uses your free requests</option>
+                  <option value="speed">Speed — fastest · 6 coins/request</option>
+                  <option value="regular">Regular — balanced · 12 coins/request</option>
+                  <option value="smart">Smart — best grounding · 18 coins/request</option>
+                </select>
+                <p class="setting-hint">
+                  {#if settingsForm.managed_tier === "free"}
+                    Free requests are used automatically until they run out, no matter which tier is selected here — this only decides what happens afterward, or once you buy coins.
+                  {:else if settingsForm.managed_tier === "speed"}
+                    GPT-5.4-mini, falls back to Gemini 3 Flash. Cheapest; good for simple, text-heavy UIs. Coins are bought on the Billing tab.
+                  {:else if settingsForm.managed_tier === "smart"}
+                    Gemini 3 Pro, falls back to GPT-5.4. Best at pointing precisely on dense/visual UIs. Coins are bought on the Billing tab.
+                  {:else}
+                    Gemini 3.5 Flash, falls back to GPT-5.4-mini. The best all-round default. Coins are bought on the Billing tab.
+                  {/if}
+                </p>
+              </div>
             {/if}
 
             {#if settingsForm.api_provider === "anthropic"}
@@ -3375,7 +3378,7 @@ See the LICENSE file in the root of this repository for complete details.
             {#if managedTier === "paid" && coinBalance != null}
               <p class="setting-hint">🪙 {Math.floor(coinBalance / 5_000).toLocaleString()} coins left · {TIER_LABELS[settingsForm.managed_tier] ?? "Regular"} tier · {TIER_COINS[settingsForm.managed_tier] ?? 12} coins/request</p>
             {:else if usageManagedRemaining != null}
-              <p class="setting-hint">Free tier — {usageManagedRemaining} / 50 requests left</p>
+              <p class="setting-hint">Free tier — {usageManagedRemaining} / 30 requests left</p>
             {:else}
               <p class="setting-hint">Free tier</p>
             {/if}
