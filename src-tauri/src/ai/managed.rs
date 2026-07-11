@@ -215,11 +215,15 @@ impl ManagedClient {
 
         let body: Value = resp.json().await?;
 
-        // OpenRouter returns the concrete model it routed to (the relay sends the
-        // `openrouter/free` router). Record it so the UI/feedback can show which
-        // free model actually handled the request.
+        // The relay always picks the real model server-side (Gemini/Qwen for free,
+        // tier-based for paid) and echoes it back in the response body — that's the
+        // only meaningful signal here. `self.model` (sent as `payload.model`) is
+        // NOT what actually gets requested from any upstream: the relay overwrites
+        // it unconditionally on every path, so logging it as "requested=" would
+        // just be restating whatever's in `managed_model` config, not what
+        // happened. Record only what's real, for the UI/feedback/debug drawer.
         let routed = body["model"].as_str().map(str::to_string);
-        log::info!("[managed] requested={} routed={routed:?}", self.model);
+        log::info!("[managed] routed={routed:?}");
         *self.last_model.lock() = routed;
 
         // Token usage. The relay forwards the upstream body verbatim, and both

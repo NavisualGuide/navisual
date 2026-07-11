@@ -42,9 +42,19 @@ pub struct Config {
     // Supabase managed relay (S.1 free trial + paid tiers)
     pub supabase_url: Option<String>,
     pub supabase_anon_key: Option<String>,
+    // Display-only placeholder shown before the first managed response (e.g. the
+    // "Navisual ready — using {model}" first message) — the relay always decides
+    // the real model server-side (Gemini primary / Qwen fallback for free,
+    // tier-based for paid) and that gets surfaced via router::get_managed_routed_model()
+    // once a real request has happened. Sent as `payload.model` to the relay too,
+    // but every relay path (free and paid) overwrites it unconditionally, so it
+    // has no bearing on what actually answers — keep this generic rather than
+    // naming a specific model, so it can't go stale the way "openrouter/free"
+    // did once the free tier stopped routing through OpenRouter (2026-07-11).
     pub managed_model: String,
     // Paid-tier selection sent to the relay: "speed" | "regular" | "smart".
-    // Ignored on the free tier (relay routes free users to the OpenRouter chain).
+    // Ignored on the free tier (relay routes free users direct to Gemini, Qwen on
+    // fallback — see relay/index.ts's handleFreeDirect in navisual-internal).
     pub managed_tier: String,
 
     // Shared
@@ -128,7 +138,7 @@ impl Default for Config {
             custom_base_url: String::new(),
             supabase_url: Some("https://gwekzberpfuxsoddwwqj.supabase.co".to_string()),
             supabase_anon_key: Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd3ZWt6YmVycGZ1eHNvZGR3d3FqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMTUxMjEsImV4cCI6MjA5MzY5MTEyMX0.gCXLsnFq3NMv8_JvZGcR9TB9bAfyjCnEnj4u0RZnRbg".to_string()),
-            managed_model: "openrouter/free".to_string(),
+            managed_model: "managed".to_string(),
             managed_tier: "regular".to_string(),
             api_timeout_sec: 90,
             task_suggestions: true,
