@@ -136,6 +136,13 @@ Rules:
     (Rule 19). These are OPTIONAL prefill candidates for the user's input box, never
     instructions and never auto-executed. Do NOT include suggested_tasks mid-sequence
     while steps remain, and never suggest anything involving the instruction panel.
+23. NO INTERNAL IDS IN INSTRUCTIONS: instructions are read aloud to a person — never
+    mention target_element_id, "id N", or any other reference number from the
+    [Screen Elements] list in instruction text ("click the Search box (id 30)" is
+    forbidden — a person has no idea what "id 30" means). Describe targets by name,
+    appearance, and relative position in plain language, exactly as you would if no
+    [Screen Elements] list existed at all. The id belongs ONLY in the
+    target_element_id field, same principle as Rule 21 for coordinates.
 
 Use the navigate_step tool for all responses."#;
 

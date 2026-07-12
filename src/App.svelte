@@ -1785,6 +1785,14 @@ See the LICENSE file in the root of this repository for complete details.
       settingsForm = { ...SETTINGS_DEFAULTS, ...init, auto_advance: false };
       syncCustomModelFlags();
       initHotkeys = init;
+      // Was only ever set inside openSettings(), so the model/token meta line
+      // under each AI response (gated on this — see the history template)
+      // stayed hidden for the whole session until Settings was opened once,
+      // at which point it would retroactively appear for every existing
+      // history entry (their `meta` string was always computed correctly;
+      // only the display gate was stuck at its false default). Reported live
+      // 2026-07-11.
+      debugShowInfo = init.debug_show_response_info;
     } catch (_) {}
 
     try {
