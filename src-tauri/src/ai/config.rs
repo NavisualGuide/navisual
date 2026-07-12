@@ -338,30 +338,31 @@ impl Config {
                 config.voice_language = v;
             }
         }
+        // Hotkeys: NO is_empty guard, unlike most string settings above. An empty
+        // value here is a real user decision — the Settings clear (×) button writes
+        // `HOTKEY_NEXT=` to unset a binding — and the guard used to resurrect the
+        // struct default on the next load, silently re-registering the "cleared"
+        // hotkey after a restart (audit 2026-07-12 F4; only visible on the three
+        // keys with non-empty defaults — Next/Wrong/Talk). A missing key (fresh
+        // install, hand-edited .env) still gets the default via Config::default().
+        // Platform note: this relies on an empty-valued env var reading back as
+        // Ok("") rather than Err(NotPresent) — pinned by env_empty_value_roundtrip
+        // in the tests below; if that assumption ever breaks, absent and cleared
+        // become indistinguishable and this needs a sentinel value instead.
         if let Ok(v) = env::var("HOTKEY_NEXT") {
-            if !v.is_empty() {
-                config.hotkey_next = v;
-            }
+            config.hotkey_next = v;
         }
         if let Ok(v) = env::var("HOTKEY_WRONG") {
-            if !v.is_empty() {
-                config.hotkey_wrong = v;
-            }
+            config.hotkey_wrong = v;
         }
         if let Ok(v) = env::var("HOTKEY_PAUSE") {
-            if !v.is_empty() {
-                config.hotkey_pause = v;
-            }
+            config.hotkey_pause = v;
         }
         if let Ok(v) = env::var("HOTKEY_ICON") {
-            if !v.is_empty() {
-                config.hotkey_icon = v;
-            }
+            config.hotkey_icon = v;
         }
         if let Ok(v) = env::var("HOTKEY_TALK") {
-            if !v.is_empty() {
-                config.hotkey_talk = v;
-            }
+            config.hotkey_talk = v;
         }
         if let Ok(v) = env::var("DEBUG_SCREENSHOT_ENABLED") {
             config.debug_screenshot_enabled = v == "true" || v == "1";
@@ -374,9 +375,6 @@ impl Config {
         }
         if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") {
             config.debug_locate_log_file_enabled = v == "true" || v == "1";
-        }
-        if let Ok(v) = env::var("DEBUG_PROMPT_LOG_FILE_ENABLED") {
-            config.debug_prompt_log_file_enabled = v == "true" || v == "1";
         }
         if let Ok(v) = env::var("DEBUG_PROMPT_LOG_FILE_ENABLED") {
             config.debug_prompt_log_file_enabled = v == "true" || v == "1";
@@ -415,5 +413,29 @@ fn load_env_file_simple(path: &std::path::Path) {
         if env::var_os(key).is_none() {
             env::set_var(key, value);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    /// Pins the platform assumption the hotkey-clear round-trip relies on (see the
+    /// hotkey block in Config::load): an env var set to the EMPTY string must read
+    /// back as Ok("") — i.e. present-but-empty is distinguishable from absent. If
+    /// this ever fails (a platform where setting an empty value deletes the var),
+    /// a cleared hotkey would silently resurrect its default on the next load, and
+    /// the clear feature needs a sentinel value ("none") instead of "".
+    #[test]
+    fn env_empty_value_roundtrip() {
+        const KEY: &str = "NAVISUAL_TEST_EMPTY_ENV_VALUE";
+        env::set_var(KEY, "");
+        assert_eq!(
+            env::var(KEY).as_deref(),
+            Ok(""),
+            "empty-valued env var must read back as Ok(\"\") — hotkey clearing depends on it"
+        );
+        env::remove_var(KEY);
+        assert!(env::var(KEY).is_err(), "removed var must read as absent");
     }
 }

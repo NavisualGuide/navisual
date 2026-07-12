@@ -80,6 +80,24 @@ impl ManagedClient {
         self.tier_auto_selected.lock().take()
     }
 
+    /// Wipe every cached per-ACCOUNT value back to "unknown". Must be called whenever
+    /// the session stops belonging to the same account (sign-out → fresh anonymous
+    /// session). Audit 2026-07-12 (F1): clear_managed_session used to drop only the
+    /// session token, so `coin_balance_micro` survived a sign-out — the next request
+    /// (running as the fresh anon user, whose relay response carries no X-Coin-Balance
+    /// header to overwrite it) re-emitted the PREVIOUS account's coin balance, and the
+    /// frontend's coin_balance_update listener dutifully flipped the UI back to "paid"
+    /// showing the old account's coins. Token *refresh* for the same account must NOT
+    /// call this (nothing about the account changed; wiping would just blank the UI
+    /// until the next request re-populates).
+    pub fn reset_account_state(&self) {
+        self.free_remaining.store(-1, Ordering::Relaxed);
+        self.coin_balance_micro.store(-1, Ordering::Relaxed);
+        self.billing_paid.store(-1, Ordering::Relaxed);
+        *self.last_model.lock() = None;
+        *self.tier_auto_selected.lock() = None;
+    }
+
     pub fn free_remaining(&self) -> Option<u32> {
         let v = self.free_remaining.load(Ordering::Relaxed);
         if v < 0 {
@@ -181,25 +199,40 @@ impl ManagedClient {
 
         let status = resp.status();
 
-        // The relay returns 402 for two distinct reasons — free requests used up
-        // (free_trial_exhausted) or a paid tier selected without enough coins
-        // (insufficient_coins, e.g. the "Free" quality-tier preference degraded
-        // to a paid tier once free ran out, or the user picked Speed/Regular/
-        // Smart directly). Treating every 402 as free_trial_exhausted (as this
-        // used to) showed a genuine paying customer low on coins the "free
-        // trial used" message, which is simply wrong for them — read the body's
-        // `error` field to tell the two apart instead of trusting the status
-        // code alone.
+        // The relay returns 402 for three distinct reasons — free requests used up
+        // (free_trial_exhausted), a paid tier selected without enough coins
+        // (insufficient_coins), or the per-IP new-device velocity gate refusing a
+        // brand-new device an allowance (free_velocity_blocked — anti-abuse, NOT
+        // real usage). Treating every 402 as free_trial_exhausted (as this used
+        // to) showed the wrong message for the other two cases — read the body's
+        // `error` field instead of trusting the status code alone. The velocity
+        // case passes the relay's own message text through verbatim (it explains
+        // the situation better than any fixed client string could, and lib.rs
+        // surfaces unrecognized error strings as-is), rather than triggering the
+        // "free trial used" modal for a user who never received any free requests.
         if status.as_u16() == 402 {
             let body_text = resp.text().await.unwrap_or_default();
-            let is_insufficient_coins = serde_json::from_str::<serde_json::Value>(&body_text)
-                .ok()
-                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-                .is_some_and(|e| e == "insufficient_coins");
-            if is_insufficient_coins {
-                bail!("insufficient_coins");
+            let body: Option<serde_json::Value> = serde_json::from_str(&body_text).ok();
+            let err_code = body
+                .as_ref()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()))
+                .unwrap_or_default()
+                .to_string();
+            match err_code.as_str() {
+                "insufficient_coins" => bail!("insufficient_coins"),
+                "free_velocity_blocked" => {
+                    let msg = body
+                        .as_ref()
+                        .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                        .unwrap_or(
+                            "The free tier is temporarily unavailable on this device. \
+                             Please try again later, or purchase coins to continue.",
+                        )
+                        .to_string();
+                    bail!("{msg}");
+                }
+                _ => bail!("free_trial_exhausted"),
             }
-            bail!("free_trial_exhausted");
         }
 
         if !status.is_success() {
@@ -334,7 +367,6 @@ impl ManagedClient {
                             }],
                             state_summary: String::new(),
                             needs_input: true,
-                            request_full_screen: false,
                             suggested_tasks: Vec::new(),
                         }
                     }

@@ -249,7 +249,6 @@ impl OllamaClient {
             }],
             state_summary: "Continuing task...".to_string(),
             needs_input: false,
-            request_full_screen: false,
             suggested_tasks: Vec::new(),
         };
         if emitted_instruction_len == 0 {

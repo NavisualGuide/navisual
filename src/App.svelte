@@ -1295,6 +1295,10 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function openSettings(tab: SettingsTab = "provider") {
     settingsTab = tab;
+    // The Billing tab renders live balance state; the tab *button* refreshes it
+    // on click, but this deep-link path (header balance chips) used to skip the
+    // refresh and show stale numbers (audit F9).
+    if (tab === "billing") refreshBalance();
     settingsError = null;
     settingsSaved = false;
     showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false; showKeyCustom = false;
@@ -1884,7 +1888,14 @@ See the LICENSE file in the root of this repository for complete details.
     listen<number>("coin_balance_update", (event) => {
       coinBalance = event.payload;
       managedTier = "paid";
-      if (coinBalance <= 0) showTrialExhausted = true;
+      // Balance just hit zero on a paid account — the modal's copy must say
+      // "not enough coins", not the default "free trial used" (audit F6: this
+      // used to open the modal without setting the reason, showing whichever
+      // copy was last displayed).
+      if (coinBalance <= 0) {
+        exhaustedReason = "coins";
+        showTrialExhausted = true;
+      }
     });
 
     // When the panel regains focus after a checkout, pull the fresh balance and
@@ -2590,6 +2601,14 @@ See the LICENSE file in the root of this repository for complete details.
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 16px;">
               Top up with coins to continue on the Navisual managed relay.
             </p>
+            {#if exhaustedReason === "coins"}
+              <!-- audit F8: a paid account low on coins may still have unused free
+                   requests — "buy more" alone hides that option. -->
+              <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 12px;">
+                Still have free requests left? Switch <strong>Quality tier</strong> to
+                <strong>Free</strong> on Settings → Provider to use them instead.
+              </p>
+            {/if}
             <button class="btn-primary btn-full" style="margin-bottom: 6px;" onclick={() => buyCoins(20)}>Buy coins ($20)</button>
             <p class="legal-agree" style="margin-bottom: 14px;">
               By buying coins you agree to our

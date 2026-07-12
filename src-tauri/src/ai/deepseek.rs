@@ -370,7 +370,6 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
         }],
         state_summary: "Continuing task...".to_string(),
         needs_input: false,
-        request_full_screen: false,
         suggested_tasks: Vec::new(),
     }
 }

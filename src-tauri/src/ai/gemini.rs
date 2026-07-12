@@ -304,7 +304,6 @@ impl GeminiClient {
                     }],
                     state_summary,
                     needs_input,
-                    request_full_screen: false,
                     suggested_tasks: Vec::new(),
                 };
 

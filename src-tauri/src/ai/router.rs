@@ -179,9 +179,18 @@ impl AiRouter {
     /// Drop the in-memory managed session (sign-out). The caller deletes the
     /// on-disk session file and seeds a fresh anonymous session afterwards so
     /// the free tier keeps working. No-op for other providers.
+    ///
+    /// Also wipes the cached per-account state (balance/tier/routed-model) —
+    /// see ManagedClient::reset_account_state for the sign-out bleed this
+    /// fixes. Every reachable account-switch flow in the UI passes through
+    /// here first (sign-out / delete-account → reset_to_anonymous; there is
+    /// no switch-account-while-signed-in path), and the anonymous→signed-in
+    /// direction can't bleed (an anon session never populated coin state),
+    /// so this single reset point covers all real paths.
     pub fn clear_managed_session(&mut self) {
         if let Some(ApiClient::Managed(ref mut c)) = self.client {
             c.session = None;
+            c.reset_account_state();
         }
     }
 

@@ -832,7 +832,6 @@ struct GuideResponse {
     instruction: String,
     located: Option<locator::LocateResult>,
     needs_input: bool,
-    request_full_screen: bool,
     provider: String,
     /// The model that actually handled this request. For managed this is the concrete
     /// model OpenRouter routed to (the relay sends the `openrouter/free` router); for
@@ -1158,7 +1157,6 @@ async fn guide(
                     instruction: String::new(),
                     located: None,
                     needs_input: false,
-                    request_full_screen: false,
                     provider: String::new(),
                     model: None,
                     input_tokens: None,
@@ -1316,7 +1314,6 @@ async fn guide(
                 instruction: String::new(),
                 located: None,
                 needs_input: false,
-                request_full_screen: false,
                 provider: String::new(),
                 model: None,
                 input_tokens: None,
@@ -1564,7 +1561,6 @@ async fn guide(
                 instruction: String::new(),
                 located: None,
                 needs_input: false,
-                request_full_screen: false,
                 provider: router.config.api_provider.clone(),
                 model: Some(used_model.clone()),
                 input_tokens: Some(in_tok),
@@ -1588,7 +1584,6 @@ async fn guide(
     let steps = response.steps;
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
-    let request_full_screen = response.request_full_screen;
     // Workstream P: the toggle gates the data at the source — when off, suggestions
     // never reach the frontend (the static prompt rule stays; making it dynamic
     // would break Anthropic prompt caching for ~4 lines of text).
@@ -1654,7 +1649,6 @@ async fn guide(
             instruction: String::new(),
             located: None,
             needs_input,
-            request_full_screen,
             provider,
             model: Some(used_model.clone()),
             input_tokens: Some(in_tok),
@@ -1741,7 +1735,6 @@ async fn guide(
         instruction: steps[0].instruction.clone(),
         located,
         needs_input,
-        request_full_screen,
         provider,
         model: Some(used_model),
         input_tokens: Some(in_tok),
@@ -1848,7 +1841,6 @@ async fn next_step(
         instruction: steps[step_index].instruction.clone(),
         located,
         needs_input,
-        request_full_screen: false, // next_step just steps forward
         provider,
         model: None, // local advance, no AI call — frontend keeps the prior routed model
         input_tokens: None,
@@ -1878,16 +1870,39 @@ async fn send_correction(
     };
     let session_id = session_id.ok_or("no active session")?;
 
-    // Clear the stored HWND so the correction capture always re-discovers the
-    // currently focused window. If the first guide pointed at the wrong app,
-    // the user can switch focus to the right app then press Wrong and the next
-    // capture will find the correct window. In sticky "Entire desktop" mode
-    // (full_screen_mode) the capture grabs the whole virtual desktop instead.
-    let (is_fs, fs_monitor) = {
+    // Clear the stored HWND so the correction capture re-discovers the currently
+    // focused window. If the first guide pointed at the wrong app, the user can
+    // switch focus to the right app then press Wrong and the next capture will
+    // find the correct window. That rediscovery logic is for AUTO-DETECT only —
+    // an explicit 📌 pin is a user-set capture scope that a correction must
+    // honor exactly like guide() does (audit 2026-07-12 F3: corrections used to
+    // capture whatever was foreground, sending a different app's pixels to the
+    // AI despite the pin). In sticky "Entire desktop" mode (full_screen_mode)
+    // the capture grabs the whole virtual desktop instead.
+    let (pinned_hwnd, is_fs, fs_monitor) = {
         let mut g = state.guidance.lock();
         g.target_hwnd = None;
-        (g.full_screen_mode, g.full_screen_monitor)
+        (g.pinned_hwnd, g.full_screen_mode, g.full_screen_monitor)
     };
+
+    // Same refuse-don't-leak guard as guide(): a fully occluded pinned target
+    // would BitBlt as an all-grey image (the occlusion mask fails safe) — a
+    // wasted request and a confused AI reply instead of a clear error.
+    #[cfg(windows)]
+    if !is_fs {
+        if let Some(hwnd) = pinned_hwnd {
+            if capture::window_fully_occluded(hwnd) {
+                let app_name = capture::get_window_info_for_hwnd(hwnd)
+                    .map(|i| i.app_name)
+                    .unwrap_or_else(|| "The pinned app".to_string());
+                return Err(format!(
+                    "{app_name} is hidden behind another window, so Navisual can't see it. \
+                     Bring it to the front (click it in the taskbar), or pick a different \
+                     app with the target selector (🎯), then try again."
+                ));
+            }
+        }
+    }
 
     let exclude = capture::get_panel_rects();
 
@@ -1925,7 +1940,9 @@ async fn send_correction(
         Option<u64>,
         Option<(Vec<u8>, capture::Rect)>,
     ) = tokio::task::spawn_blocking(move || {
-        // Full desktop (sticky "Entire desktop" user choice) or the focused window.
+        // Full desktop (sticky "Entire desktop" user choice), the pinned app
+        // (explicit 📌 scope — honored here exactly like guide() does), or the
+        // focused window (auto-detect rediscovery).
         let captured: Option<(Vec<u8>, capture::Rect, Option<usize>)> = if is_fs {
             match fs_monitor {
                 Some(r) => capture::capture_region_jpeg(r, 75, &exclude),
@@ -1933,6 +1950,18 @@ async fn send_correction(
             }
             .ok()
             .map(|(bytes, rect)| (bytes, rect, None))
+        } else if let Some(hwnd_raw) = pinned_hwnd {
+            // Pinned window closed/minimised mid-session → fall back to
+            // rediscovery rather than failing the correction outright
+            // (mirrors guide()'s recapture fallback).
+            capture::recapture_window_jpeg(hwnd_raw, 75, &exclude)
+                .ok()
+                .map(|(bytes, rect)| (bytes, rect, Some(hwnd_raw)))
+                .or_else(|| {
+                    capture::capture_active_window_jpeg(75, &exclude)
+                        .ok()
+                        .map(|(bytes, rect, hwnd)| (bytes, rect, Some(hwnd)))
+                })
         } else {
             capture::capture_active_window_jpeg(75, &exclude)
                 .ok()
@@ -2155,7 +2184,6 @@ async fn send_correction(
     let steps = response.steps;
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
-    let request_full_screen = response.request_full_screen;
     // Workstream P: same source-gating as guide().
     let suggested_tasks = if router.config.task_suggestions {
         response.suggested_tasks
@@ -2210,7 +2238,6 @@ async fn send_correction(
             instruction: String::new(),
             located: None,
             needs_input,
-            request_full_screen,
             provider,
             model: Some(used_model.clone()),
             input_tokens: Some(in_tok),
@@ -2292,7 +2319,6 @@ async fn send_correction(
         instruction: steps[0].instruction.clone(),
         located,
         needs_input,
-        request_full_screen,
         provider,
         model: Some(used_model),
         input_tokens: Some(in_tok),

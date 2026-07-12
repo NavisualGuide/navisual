@@ -202,13 +202,10 @@ pub struct NavigateStepResponse {
     /// never auto-submits. Absence is the norm mid-task.
     #[serde(default, deserialize_with = "lax_suggestions")]
     pub suggested_tasks: Vec<String>,
-    /// Inert. The AI no longer drives full-screen capture — it is now a
-    /// user-initiated, sticky "Entire desktop" choice in the target picker
-    /// (`GuidanceState.full_screen_mode`). The key was removed from every provider
-    /// schema/prompt; this field is kept only so any stray model output that still
-    /// emits it deserializes cleanly (always false in practice).
-    #[serde(default)]
-    pub request_full_screen: bool,
+    // The old AI-driven full-screen request field was removed 2026-07-12 (audit
+    // F12) — the mechanism was deleted at SDD rev 2.17 and the field had been
+    // inert ever since. Stray model output still emitting the key is simply
+    // ignored (serde's default unknown-field behavior) — no tolerated field needed.
 }
 
 /// Lax `suggested_tasks` deserializer (Workstream P): keep only string entries that
@@ -350,7 +347,6 @@ mod tests {
         assert_eq!(r.steps.len(), 1);
         assert_eq!(r.state_summary, "");
         assert!(!r.needs_input);
-        assert!(!r.request_full_screen);
         assert!(r.suggested_tasks.is_empty());
     }
 
