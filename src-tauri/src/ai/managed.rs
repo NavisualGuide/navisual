@@ -23,14 +23,22 @@ pub struct ManagedClient {
     coin_balance_micro: AtomicI64, // -1 = unknown; µ$ after the last paid request
     // Which billing tier the relay serves this session: -1 = unknown, 0 = free, 1 = paid.
     // Learned from the balance GET (`tier`) and from each relay response's headers
-    // (X-Free-Remaining ⇒ free, X-Coin-Balance ⇒ paid). Drives `is_free_tier()`, which
-    // gates the Structured-Context payload off for the weak free models (see
-    // router::structured_context_enabled — the big [Screen Elements] block hangs
-    // Gemma/Nemotron past the client timeout; confirmed 2026-07-10).
+    // (X-Free-Remaining ⇒ free, X-Coin-Balance ⇒ paid). No reader left as of
+    // 2026-07-11 (used to drive the now-removed is_free_tier(), which gated
+    // Structured-Context off for the free tier — see router::structured_context_enabled
+    // for why that gate was lifted) — kept written in case a future feature needs it.
     billing_paid: AtomicI64,
     // The model OpenRouter actually routed to on the last request (the relay sends
     // `openrouter/free`, a router; the response `model` names the concrete model used).
     last_model: parking_lot::Mutex<Option<String>>,
+    // Set only when the LAST request billed real coins despite a "Free" quality-tier
+    // preference (X-Tier-Auto-Selected / X-Tier-Auto-Selected-Price headers — see
+    // relay/index.ts's handlePaid, wasFreePreference). (tier name, price in µ$). None
+    // on every other request, including a "Free"-preference request that was still
+    // actually free — this exists specifically to surface the one moment billing
+    // silently kicks in, not to track billing state generally (coin_balance_micro
+    // already does that).
+    tier_auto_selected: parking_lot::Mutex<Option<(String, i64)>>,
 }
 
 impl ManagedClient {
@@ -60,7 +68,16 @@ impl ManagedClient {
             coin_balance_micro: AtomicI64::new(-1),
             billing_paid: AtomicI64::new(-1),
             last_model: parking_lot::Mutex::new(None),
+            tier_auto_selected: parking_lot::Mutex::new(None),
         })
+    }
+
+    /// (tier name, price in µ$) if the request that just completed billed real coins
+    /// despite a "Free" quality-tier preference — see the field's doc comment. Cleared
+    /// (returns None) on every other request, so lib.rs can check this once per call
+    /// without separately tracking "did this change since last time."
+    pub fn take_tier_auto_selected(&self) -> Option<(String, i64)> {
+        self.tier_auto_selected.lock().take()
     }
 
     pub fn free_remaining(&self) -> Option<u32> {
@@ -214,12 +231,33 @@ impl ManagedClient {
 
         // The two balance headers are mutually exclusive per relay branch: handleFree
         // sends X-Free-Remaining, handlePaid sends X-Coin-Balance. Use whichever appeared
-        // to keep the billing tier fresh per request (drives is_free_tier()).
+        // to keep the billing tier fresh per request. No current reader (see the field's
+        // doc comment) — kept written for a future feature.
         if remaining.is_some() {
             self.billing_paid.store(0, Ordering::Relaxed);
         } else if coin_balance.is_some() {
             self.billing_paid.store(1, Ordering::Relaxed);
         }
+
+        // Only present when this request billed real coins despite a "Free"
+        // preference (see the tier_auto_selected field doc comment). Always
+        // overwritten (not just set-if-present) so a request that DIDN'T trigger
+        // this correctly clears out a stale value from an earlier one, rather than
+        // take_tier_auto_selected() picking up something that already happened.
+        let auto_tier = resp
+            .headers()
+            .get("x-tier-auto-selected")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let auto_tier_price = resp
+            .headers()
+            .get("x-tier-auto-selected-price")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok());
+        *self.tier_auto_selected.lock() = match (auto_tier, auto_tier_price) {
+            (Some(t), Some(p)) => Some((t, p)),
+            _ => None,
+        };
 
         let body: Value = resp.json().await?;
 

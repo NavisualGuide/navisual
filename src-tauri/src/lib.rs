@@ -1540,6 +1540,12 @@ async fn guide(
     if let Some(coins) = router.get_managed_coin_balance() {
         let _ = app.emit("coin_balance_update", coins);
     }
+    // One-shot: only present when THIS request billed real coins despite a
+    // "Free" quality-tier preference (ran out mid-preference, silently fell
+    // back to paid — reported live 2026-07-11, needed a user-visible notice).
+    if let Some((tier, price_micro)) = router.take_managed_tier_auto_selected() {
+        let _ = app.emit("tier_auto_selected", (tier, price_micro));
+    }
 
     let response = match resp {
         Ok(r) => r,
@@ -2126,6 +2132,9 @@ async fn send_correction(
     }
     if let Some(coins) = router.get_managed_coin_balance() {
         let _ = app.emit("coin_balance_update", coins);
+    }
+    if let Some((tier, price_micro)) = router.take_managed_tier_auto_selected() {
+        let _ = app.emit("tier_auto_selected", (tier, price_micro));
     }
 
     let response = match resp {

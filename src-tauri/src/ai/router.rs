@@ -111,6 +111,18 @@ impl AiRouter {
         }
     }
 
+    /// (tier name, price in µ$) if the request that just completed billed real coins
+    /// despite a "Free" quality-tier preference — see ManagedClient's field doc
+    /// comment. One-shot: calling this consumes the value, so it's None again even
+    /// if called twice for the same request.
+    pub fn take_managed_tier_auto_selected(&self) -> Option<(String, i64)> {
+        if let Some(ApiClient::Managed(ref c)) = self.client {
+            c.take_tier_auto_selected()
+        } else {
+            None
+        }
+    }
+
     /// The concrete model OpenRouter routed the last managed request to (the relay
     /// sends the `openrouter/free` router). None for non-managed providers or before
     /// the first request.

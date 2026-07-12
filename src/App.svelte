@@ -1896,6 +1896,22 @@ See the LICENSE file in the root of this repository for complete details.
       showTrialExhausted = true;
     });
 
+    // Fires when a request billed real coins despite the "Free" quality-tier
+    // preference being selected — i.e. free ran out and it silently fell back
+    // to a paid tier. The billing itself is intentional (the alternative is
+    // refusing a request the user could pay for), but it must not be silent —
+    // reported live 2026-07-11. One-shot per request (see take_tier_auto_selected
+    // in managed.rs), so this can't repeat-fire for the same charge.
+    listen<[string, number]>("tier_auto_selected", (event) => {
+      const [tier, priceMicro] = event.payload;
+      const coins = Math.floor(priceMicro / 5_000);
+      const label = TIER_LABELS[tier] ?? tier;
+      addToHistory(
+        "system",
+        `Your free requests ran out — this used ${coins} coin${coins === 1 ? "" : "s"} (${label} tier).`,
+      );
+    });
+
     listen("oauth_complete", async () => {
       oauthPending = false;
       // Refresh balance — tier is now paid if the user had pre-existing coins.
