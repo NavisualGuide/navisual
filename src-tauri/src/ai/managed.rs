@@ -90,15 +90,6 @@ impl ManagedClient {
             .store(if tier == "paid" { 1 } else { 0 }, Ordering::Relaxed);
     }
 
-    /// True when the relay is serving this session on the FREE tier (weak OpenRouter
-    /// vision models). Also true when the tier isn't known yet (-1) — the safe default,
-    /// since skipping Structured-Context keeps the free tier working; a paid user's very
-    /// first request before the balance is known simply omits it once (harmless, and the
-    /// startup balance fetch usually sets the tier before any request runs).
-    pub fn is_free_tier(&self) -> bool {
-        self.billing_paid.load(Ordering::Relaxed) != 1
-    }
-
     /// The concrete model OpenRouter routed to on the most recent request.
     pub fn last_routed_model(&self) -> Option<String> {
         self.last_model.lock().clone()

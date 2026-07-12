@@ -131,18 +131,25 @@ impl AiRouter {
     }
 
     /// Whether to build the Structured-Context `[Screen Elements]` block for this request.
-    /// False *only* on the managed FREE tier: the weak OpenRouter vision models
-    /// (Gemma/Nemotron) hang past the client timeout on the big element list AND are
-    /// bbox-denylisted so they can't use element selection well anyway (confirmed live
-    /// 2026-07-10 — a 90-element block turned a 2.4 s free response into a >120 s hang).
-    /// Every other path keeps it: paid managed (fast gpt/gemini handle it in ~2 s), and
-    /// all BYOK providers — including the text-only-but-smart DeepSeek, for which the
-    /// element list is the *only* way to ground since it can't see the screenshot.
+    /// Re-enabled for the managed FREE tier 2026-07-11 — was false there from 2026-07-10
+    /// through the free-tier routing change: the OLD free chain's weak OpenRouter vision
+    /// models (Gemma/Nemotron) hung past the client timeout on the big element list AND
+    /// were bbox-denylisted so they couldn't use element selection well anyway (confirmed
+    /// live 2026-07-10 — a 90-element block turned a 2.4 s free response into a >120 s
+    /// hang). That reasoning no longer applies: free now routes direct to Gemini 3.1
+    /// Flash-Lite / Qwen3.5-flash (see relay/index.ts's handleFreeDirect,
+    /// navisual-internal), not the old weak chain. Confirmed via real BYOK usage before
+    /// flipping this back on, not just the model swap alone — 21/21 logged BYOK requests
+    /// across 5 provider/model pairs had the block active with zero hangs, worst case
+    /// 20.4 s (qwen3.6-plus); critically, gemini-3.1-flash-lite (1.96–2.43 s) and
+    /// qwen3.5-flash (7.3–11.2 s) are the *exact* models the free tier now uses, not just
+    /// similar ones. If this needs reverting: the gate was `!c.is_free_tier()`, reading
+    /// `ManagedClient.billing_paid` (still tracked, just unread now — see
+    /// `set_billing_tier`/`send_message`'s header parsing in managed.rs, both left in
+    /// place) via a since-removed `is_free_tier()` one-liner
+    /// (`self.billing_paid.load(Ordering::Relaxed) != 1`).
     pub fn structured_context_enabled(&self) -> bool {
-        match self.client {
-            Some(ApiClient::Managed(ref c)) => !c.is_free_tier(),
-            _ => true,
-        }
+        true
     }
 
     /// (input, output) token counts from the most recent guidance/correction call.
