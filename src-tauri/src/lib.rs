@@ -1547,6 +1547,8 @@ async fn guide(
             let err_str = e.to_string();
             if err_str == "free_trial_exhausted" {
                 let _ = app.emit("trial_exhausted", ());
+            } else if err_str == "insufficient_coins" {
+                let _ = app.emit("insufficient_coins", ());
             }
             return Ok(GuideResponse {
                 ok: false,
@@ -1561,10 +1563,12 @@ async fn guide(
                 model: Some(used_model.clone()),
                 input_tokens: Some(in_tok),
                 output_tokens: Some(out_tok),
-                error: Some(if err_str == "free_trial_exhausted" {
-                    "Your free requests have been used.".to_string()
-                } else {
-                    err_str
+                error: Some(match err_str.as_str() {
+                    "free_trial_exhausted" => "Your free requests have been used.".to_string(),
+                    "insufficient_coins" => {
+                        "Not enough coins for this quality tier. Buy more to continue.".to_string()
+                    }
+                    _ => err_str,
                 }),
                 debug_screenshot_path: None,
                 chat_thumb_b64: None,
@@ -2131,6 +2135,9 @@ async fn send_correction(
             if err_str == "free_trial_exhausted" {
                 let _ = app.emit("trial_exhausted", ());
                 return Err("Your free requests have been used.".to_string());
+            } else if err_str == "insufficient_coins" {
+                let _ = app.emit("insufficient_coins", ());
+                return Err("Not enough coins for this quality tier. Buy more to continue.".to_string());
             }
             return Err(err_str);
         }

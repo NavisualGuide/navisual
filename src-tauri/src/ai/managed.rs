@@ -173,7 +173,24 @@ impl ManagedClient {
 
         let status = resp.status();
 
+        // The relay returns 402 for two distinct reasons — free requests used up
+        // (free_trial_exhausted) or a paid tier selected without enough coins
+        // (insufficient_coins, e.g. the "Free" quality-tier preference degraded
+        // to a paid tier once free ran out, or the user picked Speed/Regular/
+        // Smart directly). Treating every 402 as free_trial_exhausted (as this
+        // used to) showed a genuine paying customer low on coins the "free
+        // trial used" message, which is simply wrong for them — read the body's
+        // `error` field to tell the two apart instead of trusting the status
+        // code alone.
         if status.as_u16() == 402 {
+            let body_text = resp.text().await.unwrap_or_default();
+            let is_insufficient_coins = serde_json::from_str::<serde_json::Value>(&body_text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                .is_some_and(|e| e == "insufficient_coins");
+            if is_insufficient_coins {
+                bail!("insufficient_coins");
+            }
             bail!("free_trial_exhausted");
         }
 

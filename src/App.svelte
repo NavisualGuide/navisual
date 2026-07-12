@@ -261,6 +261,15 @@ See the LICENSE file in the root of this repository for complete details.
     return tier === "paid" ? "paid" : "free";
   }
   let showTrialExhausted = $state(false);
+  // Which reason opened the modal above — free requests genuinely used up, vs.
+  // a paid tier selected without enough coins (e.g. "Free" fell back to a paid
+  // tier once free ran out, or Speed/Regular/Smart picked directly). Same
+  // modal, same "buy coins" resolution either way, but the copy must differ:
+  // telling an existing paying customer low on coins "your free trial is
+  // used" is simply wrong for them. Was a real bug until 2026-07-11 — the
+  // backend treated every 402 as free_trial_exhausted regardless of which the
+  // relay actually meant.
+  let exhaustedReason = $state<"free" | "coins">("free");
   let oauthPending = $state(false);     // true while waiting for Google OAuth callback
   let checkoutPending = $state(false);  // true while waiting for user to pay in browser
   let buyAmount = $state<number | "custom">(20);  // USD top-up; "custom" reveals a field
@@ -1707,6 +1716,13 @@ See the LICENSE file in the root of this repository for complete details.
   // which managed model is active; for BYOK it's the provider + model.
   const TIER_LABELS: Record<string, string> = { free: "Free", speed: "Speed", regular: "Regular", smart: "Smart" };
   const TIER_COINS: Record<string, number> = { free: 0, speed: 6, regular: 12, smart: 18 };
+  // Greys out a paid tier's <option> when the current coin balance can't
+  // cover even one request at it — purely a UI hint (picking a disabled
+  // option isn't possible, so this can't desync from the relay's own
+  // insufficient_coins check; that stays the real enforcement).
+  function canAffordTier(tier: string): boolean {
+    return (coinBalance ?? 0) >= TIER_COINS[tier] * 5_000;
+  }
   let providerLabel = $derived(
     // Free users have no quality tier — the Speed/Regular/Smart picker is paid-only
     // (and the relay ignores a free user's tier param), so showing "Managed (Speed)"
@@ -1871,6 +1887,12 @@ See the LICENSE file in the root of this repository for complete details.
 
     listen("trial_exhausted", () => {
       freeRemaining = 0;
+      exhaustedReason = "free";
+      showTrialExhausted = true;
+    });
+
+    listen("insufficient_coins", () => {
+      exhaustedReason = "coins";
       showTrialExhausted = true;
     });
 
@@ -2516,18 +2538,20 @@ See the LICENSE file in the root of this repository for complete details.
         role="dialog"
         tabindex="-1"
         aria-modal="true"
-        aria-label="Free trial exhausted"
+        aria-label={exhaustedReason === "coins" ? "Not enough coins" : "Free trial exhausted"}
         onclick={(e) => e.stopPropagation()}
         onkeydown={(e) => e.stopPropagation()}
         style="max-width: 320px;"
       >
         <div class="modal-header">
-          <span class="modal-title">Free trial used</span>
+          <span class="modal-title">{exhaustedReason === "coins" ? "Not enough coins" : "Free trial used"}</span>
           <button class="hdr-btn hdr-btn-close" onclick={() => (showTrialExhausted = false)}>✕</button>
         </div>
         <div class="modal-body" style="padding: 20px; text-align: center; line-height: 1.6;">
-          <p style="font-size: 2em; margin-bottom: 12px;">🎯</p>
-          <p style="margin-bottom: 8px; font-weight: 600;">Your free requests have been used.</p>
+          <p style="font-size: 2em; margin-bottom: 12px;">{exhaustedReason === "coins" ? "🪙" : "🎯"}</p>
+          <p style="margin-bottom: 8px; font-weight: 600;">
+            {exhaustedReason === "coins" ? "Not enough coins for this quality tier." : "Your free requests have been used."}
+          </p>
 
           {#if oauthPending}
             <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
@@ -2845,7 +2869,7 @@ See the LICENSE file in the root of this repository for complete details.
               <!-- Quality tier / free preference. Persisted via Apply/OK, defaults to
                    "regular" for a never-configured install (SETTINGS_DEFAULTS) and
                    otherwise remembers whatever was last saved. Always shown regardless
-                   of managedTier (2026-07-14 fix — previously hidden entirely once
+                   of managedTier (2026-07-11 fix — previously hidden entirely once
                    managedTier was "paid", so a real paying customer with unused free
                    requests had no way to see or pick "Free" at all). The relay always
                    draws down any remaining free requests first, automatically,
@@ -2858,9 +2882,9 @@ See the LICENSE file in the root of this repository for complete details.
                 <label class="setting-label" for="tier-select">Quality tier</label>
                 <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
                   <option value="free">Free — uses your free requests</option>
-                  <option value="speed">Speed — fastest · 6 coins/request</option>
-                  <option value="regular">Regular — balanced · 12 coins/request</option>
-                  <option value="smart">Smart — best grounding · 18 coins/request</option>
+                  <option value="speed" disabled={!canAffordTier("speed")}>Speed — fastest · 6 coins/request{canAffordTier("speed") ? "" : " (not enough coins)"}</option>
+                  <option value="regular" disabled={!canAffordTier("regular")}>Regular — balanced · 12 coins/request{canAffordTier("regular") ? "" : " (not enough coins)"}</option>
+                  <option value="smart" disabled={!canAffordTier("smart")}>Smart — best grounding · 18 coins/request{canAffordTier("smart") ? "" : " (not enough coins)"}</option>
                 </select>
                 <p class="setting-hint">
                   {#if settingsForm.managed_tier === "free"}
