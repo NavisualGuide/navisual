@@ -289,7 +289,14 @@ impl Config {
         }
         if let Ok(v) = env::var("MANAGED_TIER") {
             let v = v.trim().to_lowercase();
-            if v == "speed" || v == "regular" || v == "smart" {
+            // "free" added 2026-07-11 alongside the Quality Tier dropdown's Free
+            // option — missed here originally, so a saved "free" preference was
+            // silently rejected on the next read and reverted to whatever this
+            // struct's in-memory default was ("regular"), even though it had
+            // written correctly to .env. Not a validated paid-tier key on the
+            // relay either way (see relay/index.ts's PAID_TIERS) — it degrades
+            // safely there regardless of whether it round-trips here.
+            if v == "free" || v == "speed" || v == "regular" || v == "smart" {
                 config.managed_tier = v;
             }
         }
