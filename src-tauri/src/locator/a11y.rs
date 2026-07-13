@@ -716,11 +716,27 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                 std::collections::HashSet::new();
             let deadline = started + Duration::from_millis(budget_ms as u64);
             for root in &roots {
+                // grid_cond: None DISABLES the ExcelGrid flat-Descendants escape hatch for
+                // enumeration (audit 2026-07-13, confirmed by the excel_enum_histogram_live
+                // probe against a live 209-cell CSV). That escape hatch — a raw
+                // find_all_build_cache(Descendants) on the ExcelGrid pane — never prunes the
+                // broken scrollbar the way this walk's own body does, so on any sheet with an
+                // active scrollbar the NUIScrollbar self-nesting explodes it: measured **23,320
+                // duplicate NetUIRepeatButton over 138 s**, and zero useful elements (no sheet
+                // tabs). Even the foreground-abandoned attempts each leave a 138 s uninterruptible
+                // COM task running. The normal recursion below (`excel_pruned_walk` at the child
+                // level) already prunes the NUIScrollbar *container*, so it never reaches those
+                // buttons — enumeration stays fast (~90 ms measured). Cost: the sheet-tab strip,
+                // reachable only via that flat Descendants, drops out of the enumerated list on
+                // sheets where it existed — a rare target that falls back to A11y/OCR, an
+                // acceptable trade for never exploding. The adapter's find_grid keeps the escape
+                // hatch (its grid_cond targets XLSpreadsheetGrid, one element, not the 12 context
+                // types, so it can't collect the scrollbar buttons).
                 excel_pruned_walk(
                     root,
                     SCROLLBAR_SCAN_DEPTH,
                     &true_cond,
-                    Some(&cond),
+                    None,
                     &cache,
                     &mut seen,
                     deadline,
@@ -2162,6 +2178,104 @@ mod tests {
                 }
             }
             Err(reason) => eprintln!("skipped in {ms} ms: {reason}"),
+        }
+    }
+
+    // Diagnose WHAT the Excel ExcelGrid-Descendants search returns (2026-07-13). A live log
+    // showed a plain 209-cell data sheet (no PivotTable) yielding 559 context-type candidates
+    // in ~7 s; this probe auto-finds the open Excel window and prints a (control_type,
+    // class_name) histogram of that search plus its count/time in isolation. It confirmed the
+    // real cause: 23,320 NetUIRepeatButton (scrollbar arrow-repeat buttons) across self-nested
+    // ExcelGrid panes over 138 s, zero useful elements — the escape-hatch's flat Descendants
+    // never prunes the broken scrollbar. Motivated switching enumeration to grid_cond=None
+    // (see enumerate_context_elements above). Kept lean to re-verify any future regression.
+    // Run (Excel open on the sheet): cargo test --lib excel_enum_histogram_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn excel_enum_histogram_live() {
+        use super::{CONTEXT_CT_IDS, EXCEL_GRID_CLASS, EXCEL_MAIN_WINDOW_CLASS};
+        use std::collections::BTreeMap;
+        use std::time::Instant;
+        use uiautomation::types::{TreeScope, UIProperty};
+        use uiautomation::variants::Variant;
+        use uiautomation::UIAutomation;
+        use windows::Win32::Foundation::HWND;
+        // Auto-find the Excel window by title; override with NAVISUAL_TEST_HWND if needed.
+        let hwnd_raw: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| crate::capture::find_window_by_title("excel", ""))
+            .or_else(|| crate::capture::find_window_by_title(".csv", ""))
+            .or_else(|| crate::capture::find_window_by_title(".xlsx", ""))
+            .expect("no Excel window found (open the sheet, or set NAVISUAL_TEST_HWND)");
+        eprintln!("Excel hwnd = {hwnd_raw:#x}");
+
+        let automation = UIAutomation::new().expect("uia init");
+        let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+        let root = automation.element_from_handle(hwnd.into()).expect("root");
+
+        // Same 12 context control-type OR-condition enumerate_context_elements builds.
+        let mut cond = None;
+        for &id in CONTEXT_CT_IDS {
+            let c = automation
+                .create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+                .unwrap();
+            cond = Some(match cond.take() {
+                None => c,
+                Some(prev) => automation.create_or_condition(prev, c).unwrap(),
+            });
+        }
+        let cond = cond.unwrap();
+        let cache = automation.create_cache_request().unwrap();
+        let _ = cache.add_property(UIProperty::Name);
+        let _ = cache.add_property(UIProperty::ControlType);
+        let _ = cache.add_property(UIProperty::BoundingRectangle);
+        let _ = cache.add_property(UIProperty::ClassName);
+
+        // Histogram every context node the ExcelGrid Descendants search returns by
+        // (control_type, class_name), and time the call. This is the exact query the
+        // (now-disabled) escape-hatch made; it reveals the NetUIRepeatButton scrollbar
+        // explosion that motivated switching enumeration's excel_pruned_walk to grid_cond=None.
+        let _ = EXCEL_MAIN_WINDOW_CLASS; // root IS the XLMAIN window; no child lookup needed
+        let mut hist: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut grid_ms = 0u128;
+        let mut grid_count = 0usize;
+        // Find every ExcelGrid pane under the root, and time each one's context-type
+        // Descendants search in isolation (this is the exact call the real walk makes).
+        let grid_cond = automation
+            .create_property_condition(
+                UIProperty::ClassName,
+                Variant::from(EXCEL_GRID_CLASS),
+                None,
+            )
+            .unwrap();
+        let grids = root
+            .find_all_build_cache(TreeScope::Descendants, &grid_cond, &cache)
+            .unwrap_or_default();
+        eprintln!("ExcelGrid panes found: {}", grids.len());
+        for g in &grids {
+            let t0 = Instant::now();
+            if let Ok(els) = g.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
+                grid_ms += t0.elapsed().as_millis();
+                grid_count += els.len();
+                for el in &els {
+                    let ct = el
+                        .get_cached_control_type()
+                        .map(|c| format!("{c:?}"))
+                        .unwrap_or_default();
+                    let ecn = el.get_cached_classname().unwrap_or_default();
+                    *hist.entry((ct, ecn)).or_insert(0) += 1;
+                }
+            }
+        }
+        eprintln!(
+            "ExcelGrid Descendants(context-types): {grid_count} elements in {grid_ms} ms"
+        );
+        eprintln!("Histogram (control_type | class_name | count), sorted:");
+        let mut rows: Vec<_> = hist.clone().into_iter().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+        for ((ct, cn), n) in rows {
+            eprintln!("  {n:>5} | {ct:<12} | {cn}");
         }
     }
 
