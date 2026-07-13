@@ -189,13 +189,14 @@ impl OllamaClient {
                             in_instruction = true;
                         }
                         if in_instruction {
-                            let visible = crate::ai::streaming::extract_visible_instruction(
+                            let (delta, new_len) = crate::ai::streaming::instruction_delta(
                                 &accumulated_text,
+                                emitted_instruction_len,
                             );
-                            if visible.len() > emitted_instruction_len {
-                                on_chunk(&visible[emitted_instruction_len..]);
-                                emitted_instruction_len = visible.len();
+                            if !delta.is_empty() {
+                                on_chunk(&delta);
                             }
+                            emitted_instruction_len = new_len;
                         }
                     }
                 }

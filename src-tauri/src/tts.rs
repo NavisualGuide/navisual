@@ -32,8 +32,11 @@ mod imp {
     }
 
     enum Msg {
-        /// (text, language): language is a BCP-47 locale, or "auto"/"" to detect.
-        Speak(String, String),
+        /// (text, language, fallback_locale): `language` is a BCP-47 locale, or
+        /// "auto"/"" to detect from the text's script. `fallback_locale` is the OS UI
+        /// locale (e.g. "fr-FR"), used ONLY when script detection is ambiguous (Latin
+        /// script can't distinguish en/fr/es/de) — see `detect_lang`.
+        Speak(String, String, String),
         SetVoice(String),
         ListVoices(mpsc::SyncSender<Vec<VoiceInfo>>),
         Quit,
@@ -53,8 +56,8 @@ mod imp {
             Self { tx }
         }
 
-        pub fn speak(&self, text: String, lang: String) {
-            let _ = self.tx.send(Msg::Speak(text, lang));
+        pub fn speak(&self, text: String, lang: String, fallback_locale: String) {
+            let _ = self.tx.send(Msg::Speak(text, lang, fallback_locale));
         }
 
         /// Set the *preferred* voice (a WinRT VoiceInformation Id). Empty = no
@@ -78,7 +81,14 @@ mod imp {
     }
 
     /// Best-effort primary-language detection from script, for "auto" TTS.
-    fn detect_lang(text: &str) -> String {
+    ///
+    /// Non-Latin scripts are detected reliably (kana→ja, hangul→ko, han→zh, Cyrillic→ru,
+    /// Arabic→ar). Latin script is inherently ambiguous — en/fr/es/de/… all share it — so
+    /// it can't be told apart from the text alone; in that case fall back to the primary
+    /// subtag of `fallback_locale` (the OS UI locale, the user's default language), or "en"
+    /// if that's empty/also Latin-ambiguous-but-unknown. Fixes audit 2026-07-12 C7, where a
+    /// French/Spanish/German reply under `auto` always got an English voice.
+    fn detect_lang(text: &str, fallback_locale: &str) -> String {
         let (mut kana, mut hangul, mut han, mut cyr, mut arab) =
             (false, false, false, false, false);
         for c in text.chars() {
@@ -95,20 +105,25 @@ mod imp {
                 arab = true;
             }
         }
-        let code = if kana {
-            "ja"
+        if kana {
+            "ja".to_string()
         } else if hangul {
-            "ko"
+            "ko".to_string()
         } else if han {
-            "zh"
+            "zh".to_string()
         } else if cyr {
-            "ru"
+            "ru".to_string()
         } else if arab {
-            "ar"
+            "ar".to_string()
         } else {
-            "en"
-        };
-        code.to_string()
+            // Latin (or no strong script signal) — defer to the OS locale.
+            let fb = lang_code_of_locale(fallback_locale);
+            if fb.is_empty() {
+                "en".to_string()
+            } else {
+                fb
+            }
+        }
     }
 
     /// Minimal single-thread blocking executor — drives a WinRT async operation
@@ -209,23 +224,37 @@ mod imp {
             }
         };
 
-        let voices = enum_voices();
+        // Refreshed lazily: re-enumerated on ListVoices (the user just opened Settings —
+        // the natural moment to pick up a newly-installed voice) and on a resolve miss
+        // during Speak, so a voice installed mid-session becomes usable without a restart
+        // (audit 2026-07-12 C2 — the list used to be a one-time boot snapshot, so a voice
+        // that appeared in the Settings dropdown via ListVoices' own fresh enumeration
+        // still silently failed to play against this stale copy).
+        let mut voices = enum_voices();
         let mut preferred_id: Option<String> = None;
         let mut current_id: Option<String> = None;
 
         for msg in rx {
             match msg {
-                Msg::Speak(text, lang) => {
+                Msg::Speak(text, lang, fallback_locale) => {
                     if text.is_empty() {
                         // Empty text = stop any in-flight speech.
                         let _ = player.Pause();
                         continue;
                     }
                     let target = if lang.is_empty() || lang.eq_ignore_ascii_case("auto") {
-                        detect_lang(&text)
+                        detect_lang(&text, &fallback_locale)
                     } else {
                         lang_code_of_locale(&lang)
                     };
+                    // If a preferred voice is set but not in our cached list, re-enumerate
+                    // once before treating it as unset — it may have been installed since
+                    // boot (C2). Cheap and only fires on an actual miss.
+                    if let Some(pid) = preferred_id.as_deref() {
+                        if !voices.iter().any(|v| v.id == pid) {
+                            voices = enum_voices();
+                        }
+                    }
                     // Resolve the preferred voice against the installed list — a stale
                     // id (e.g. saved before the WinRT migration) is treated as unset
                     // instead of silently leaving the OS default voice in place.
@@ -290,7 +319,10 @@ mod imp {
                     preferred_id = if id.is_empty() { None } else { Some(id) };
                 }
                 Msg::ListVoices(reply) => {
-                    let _ = reply.send(enum_voices());
+                    // Re-enumerate and update the cache so a mid-session-installed voice
+                    // is both returned to the Settings dropdown AND usable by Speak (C2).
+                    voices = enum_voices();
+                    let _ = reply.send(voices.clone());
                 }
                 Msg::Quit => break,
             }
@@ -311,7 +343,7 @@ mod imp {
         pub fn new() -> Self {
             Self
         }
-        pub fn speak(&self, _text: String, _lang: String) {}
+        pub fn speak(&self, _text: String, _lang: String, _fallback_locale: String) {}
         pub fn set_voice(&self, _voice_id: String) {}
         pub fn list_voices(&self) -> Vec<VoiceInfo> {
             vec![]

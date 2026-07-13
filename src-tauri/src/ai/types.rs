@@ -48,27 +48,32 @@ fn bbox_from_value(value: &serde_json::Value) -> Option<[f64; 4]> {
             return Some([n[0], n[1], n[2], n[3]]);
         }
     }
-    // Polygon form: corner points `[a, b]` → bounding box. Each point uses the
-    // same axis order as the requested format, so the box is just
-    // [min a, min b, max a, max b].
-    let mut a = Vec::with_capacity(arr.len());
-    let mut b = Vec::with_capacity(arr.len());
+    // Polygon form: corner points → bounding box. A polygon means the model IGNORED
+    // the requested flat `[ymin,xmin,ymax,xmax]` and fell back to its native detection
+    // format — and in every vision convention (COCO, image/canvas/SVG coords, GPT
+    // point output) a corner point is `[x, y]`, x-first. So read p[0]=x, p[1]=y and
+    // emit in OUR y-first order. (Audit 2026-07-12 C9: this used to assume corners
+    // matched the flat form's y-first order, transposing a real GPT polygon — width
+    // and height swapped. Bounded impact — the bbox is only a locator tiebreaker/hint
+    // — but a transposed box actively mis-aims the "look here" cue.)
+    let mut xs = Vec::with_capacity(arr.len());
+    let mut ys = Vec::with_capacity(arr.len());
     for pt in arr {
         let p = pt.as_array()?;
         if p.len() < 2 {
             return None;
         }
-        a.push(p[0].as_f64()?);
-        b.push(p[1].as_f64()?);
+        xs.push(p[0].as_f64()?);
+        ys.push(p[1].as_f64()?);
     }
-    if a.is_empty() {
+    if xs.is_empty() {
         return None;
     }
-    let amin = a.iter().copied().fold(f64::INFINITY, f64::min);
-    let amax = a.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let bmin = b.iter().copied().fold(f64::INFINITY, f64::min);
-    let bmax = b.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    Some([amin, bmin, amax, bmax])
+    let xmin = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let xmax = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let ymin = ys.iter().copied().fold(f64::INFINITY, f64::min);
+    let ymax = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Some([ymin, xmin, ymax, xmax])
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,12 +297,17 @@ mod tests {
 
     #[test]
     fn bbox_accepts_canonical_and_polygon_forms() {
+        // Flat form is the requested [ymin, xmin, ymax, xmax] — used verbatim.
         let s = step(r#"{"instruction": "x", "target_bbox": [80, 450, 110, 550]}"#);
         assert_eq!(s.target_bbox, Some([80.0, 450.0, 110.0, 550.0]));
 
-        // GPT-style 4-corner polygon → normalized to its bounding box.
+        // GPT-style 4-corner polygon → normalized to its bounding box. Corners are
+        // [x, y] (the universal vision convention — audit C9), so an element spanning
+        // x:450–550, y:80–110 → flat [ymin, xmin, ymax, xmax] = [80, 450, 110, 550].
+        // Deliberately non-square (100 wide × 30 tall) so a width/height transpose
+        // would fail this assertion.
         let s = step(
-            r#"{"instruction": "x", "target_bbox": [[80, 450], [80, 550], [110, 450], [110, 550]]}"#,
+            r#"{"instruction": "x", "target_bbox": [[450, 80], [550, 80], [450, 110], [550, 110]]}"#,
         );
         assert_eq!(s.target_bbox, Some([80.0, 450.0, 110.0, 550.0]));
     }

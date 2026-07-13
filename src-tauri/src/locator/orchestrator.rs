@@ -603,6 +603,15 @@ fn try_selection_pass(
 /// ≥1 shared alphanumeric token (case-insensitive) between two labels — the S.3 text
 /// cross-check. Deliberately loose (truncation, badges, partial copies still pass);
 /// the live verification is the strong gate. Both sides empty-tokenised → false.
+///
+/// CJK path (audit 2026-07-12 C4): Chinese/Japanese/Korean text is space-free, so the
+/// whitespace/punct tokenizer collapses "保存" and "保存文件" to one token *each* that
+/// never matches — Structured-Context selection then silently never fired for CJK UIs
+/// whenever the model shortened a label (the English equivalent, "Save" ∈ "Save File",
+/// matches for free). When either side carries CJK, fall back to substring containment
+/// either way, plus a shared-character check for the reordered case. This loosens layer 2
+/// only; the live `verify_context_element` (layer 3) remains the strong gate, so the
+/// risk profile matches the existing English behaviour.
 fn shares_token(a: &str, b: &str) -> bool {
     let tokens = |s: &str| -> Vec<String> {
         s.to_lowercase()
@@ -613,7 +622,28 @@ fn shares_token(a: &str, b: &str) -> bool {
     };
     let ta = tokens(a);
     let tb = tokens(b);
-    ta.iter().any(|t| tb.contains(t))
+    if ta.iter().any(|t| tb.contains(t)) {
+        return true;
+    }
+
+    // CJK fallback: containment (handles truncation/shortening) or a shared CJK
+    // character (handles reordering). Only engaged when CJK is actually present, so
+    // ASCII behaviour is byte-for-byte unchanged.
+    let is_cjk = |c: char| {
+        let u = c as u32;
+        (0x4e00..=0x9fff).contains(&u)      // CJK Unified Ideographs
+            || (0x3400..=0x4dbf).contains(&u) // Ext A
+            || (0x3040..=0x30ff).contains(&u) // Hiragana + Katakana
+            || (0xac00..=0xd7af).contains(&u) // Hangul syllables
+    };
+    if a.chars().any(is_cjk) || b.chars().any(is_cjk) {
+        let (al, bl) = (a.to_lowercase(), b.to_lowercase());
+        if al.contains(&bl) || bl.contains(&al) {
+            return true;
+        }
+        return a.chars().filter(|c| is_cjk(*c)).any(|c| b.contains(c));
+    }
+    false
 }
 
 /// UIA role family under the OCR match, for the corroboration decision.
@@ -1158,6 +1188,20 @@ mod tests {
         // No shared token → reject (the weak-model copied-wrong-id case).
         assert!(!shares_token("Performance", "Save As"));
         assert!(!shares_token("", "Save As"));
+    }
+
+    #[test]
+    fn shares_token_cjk_path() {
+        use super::shares_token;
+        // Shortened label — the exact case English gets for free but the whitespace
+        // tokenizer missed for CJK (C4): "保存" (Save) ⊂ "保存文件" (Save File).
+        assert!(shares_token("保存", "保存文件"));
+        assert!(shares_token("保存文件", "保存")); // and the reverse
+        // Japanese + Korean containment.
+        assert!(shares_token("設定", "設定を開く"));
+        assert!(shares_token("저장", "파일 저장")); // shared syllable, reordered
+        // Still rejects genuinely unrelated CJK labels (no shared character).
+        assert!(!shares_token("印刷", "保存"));
     }
 
     #[test]

@@ -766,7 +766,7 @@ See the LICENSE file in the root of this repository for complete details.
         if (!currentStep) return;
         screenChangeDebounce = Date.now();
         addToHistory("system", "Screen changed — checking next step…");
-        nextStep();
+        nextStep(true); // autopilot-triggered — don't log an implicit "worked" (C3)
       } catch (_) {}
     }, 500);
   }
@@ -1455,7 +1455,7 @@ See the LICENSE file in the root of this repository for complete details.
         meta = meta ? `${meta} · ${tok}` : tok;
       }
       addToHistory("ai", cleanInstruction, meta);
-      if (!isMuted) invoke("speak", { text: cleanInstruction, lang: settingsForm.voice_language }).catch(() => {});
+      if (!isMuted) invoke("speak", { text: cleanInstruction, lang: settingsForm.voice_language, fallbackLocale: navigator.language }).catch(() => {});
     }
     if (res.debug_screenshot_path) {
       addToHistory("system", `📷 ${res.debug_screenshot_path}`);
@@ -1504,13 +1504,16 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  async function nextStep() {
+  async function nextStep(viaAutopilot = false) {
     // Don't allow next while an AI call is in flight — the hotkey can fire
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
     isOverlayCleared = false;
-    // Pressing Next means the current step worked → implicit success signal.
-    if (phase === "guiding") logFeedback("worked", "");
+    // A HUMAN pressing Next is an implicit success signal for the current step;
+    // an AUTOPILOT-triggered advance (a screen change fired the poll) is not —
+    // it's automation, not confirmation. Logging it would inflate the per-model
+    // success rate, which SDD §10 defines as human-validated (audit C3).
+    if (phase === "guiding" && !viaAutopilot) logFeedback("worked", "");
     const nextIdx = stepIndex + 1;
     const prevPhase = phase;
     if (nextIdx >= steps.length) {
@@ -2395,7 +2398,7 @@ See the LICENSE file in the root of this repository for complete details.
 
     <!-- Action row: Next · Autopilot · New Task · 🎤 · ··· -->
     <div class="action-row">
-      <button class="btn-action btn-next" onclick={nextStep} disabled={actionDisabled} title="Next step (Ctrl+`)">
+      <button class="btn-action btn-next" onclick={() => nextStep()} disabled={actionDisabled} title="Next step (Ctrl+`)">
         → Next
       </button>
       <button class="btn-action {autoAdvanceEnabled ? 'btn-pause' : 'btn-resume'}"

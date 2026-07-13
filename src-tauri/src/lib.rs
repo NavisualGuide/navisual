@@ -400,7 +400,15 @@ fn execute_step(
     // user gets a "search this region" cue instead of nothing. The
     // "pointer unavailable" caption in the panel still tells them it's
     // approximate.
+    //
+    // Gated on bbox_decisive (audit 2026-07-12 C6): a distrusted model's bbox is,
+    // by the same definition that keeps it from corroborating an OCR match, an
+    // unreliable region — drawing "look here" at it points the user at a spot the
+    // model likely got wrong, which is worse than an honest "pointer unavailable"
+    // with no region. Trusted grounders (the default for all but the weak free
+    // chain) still get the hint.
     if located.is_none()
+        && bbox_decisive
         && step
             .target_text
             .as_ref()
@@ -518,15 +526,40 @@ fn ahash_of_jpeg(jpeg: &[u8]) -> Option<u64> {
     Some(ahash_from_luma8(&img.to_luma8()))
 }
 
-/// Capture the active window raw + compute aHash in one step. Used by both
-/// the autopilot polling loop and the post-AI-call baseline anchor. Skipping
-/// the JPEG roundtrip used elsewhere saves ~10 ms per call — meaningful at
-/// 2 captures/sec while autopilot is on.
-fn ahash_of_screen() -> Option<u64> {
+/// Capture the guidance target raw + compute aHash in one step. Used by the autopilot
+/// polling loop, the post-AI-call baseline anchor, and stale-response detection. Skipping
+/// the JPEG roundtrip used elsewhere saves ~10 ms per call — meaningful at 2 captures/sec
+/// while autopilot is on.
+///
+/// `target_hwnd` (audit 2026-07-12 C5): the window guidance is anchored to (a pin, or the
+/// last-guided foreground window). When set, hash THAT window — so autopilot reacts to
+/// changes in the app being guided, not whatever the user alt-tabbed to, and the
+/// stale-response check compares like-for-like against `guide()`'s own target capture. A
+/// closed/minimized target (or `None`, e.g. full-screen mode) falls back to the foreground
+/// window, matching the pre-C5 behaviour.
+fn ahash_of_screen(target_hwnd: Option<usize>) -> Option<u64> {
     let exclude = capture::get_panel_rects();
-    let (img, _rect, _hwnd) = capture::capture_active_window_raw(&exclude).ok()?;
+    let img = match target_hwnd {
+        Some(h) => capture::recapture_window_raw(h, &exclude)
+            .map(|(img, _rect)| img)
+            .or_else(|_| capture::capture_active_window_raw(&exclude).map(|(img, _, _)| img))
+            .ok()?,
+        None => capture::capture_active_window_raw(&exclude).map(|(img, _, _)| img).ok()?,
+    };
     let luma = image::imageops::grayscale(&img);
     Some(ahash_from_luma8(&luma))
+}
+
+/// The window guidance is currently anchored to — a pin if set, else the last-guided
+/// target window. `None` in full-screen mode (no single window) so hashing falls back
+/// to the foreground. This is the reference `ahash_of_screen` should hash so autopilot
+/// and stale-detection watch the guided app, not whatever is foreground (C5).
+fn guidance_target_hwnd(state: &AppState) -> Option<usize> {
+    let g = state.guidance.lock();
+    if g.full_screen_mode {
+        return None;
+    }
+    g.pinned_hwnd.or(g.target_hwnd)
 }
 
 fn hamming64(a: u64, b: u64) -> u32 {
@@ -539,7 +572,8 @@ fn hamming64(a: u64, b: u64) -> u32 {
 /// the screen the user is being directed against, not a drifting 500 ms-old
 /// sample. Returns the captured hash for the caller (used by stale detection).
 async fn anchor_autopilot_baseline(state: &AppState) -> Option<u64> {
-    let h = tokio::task::spawn_blocking(ahash_of_screen)
+    let target = guidance_target_hwnd(state);
+    let h = tokio::task::spawn_blocking(move || ahash_of_screen(target))
         .await
         .ok()
         .flatten();
@@ -559,7 +593,8 @@ async fn anchor_autopilot_baseline(state: &AppState) -> Option<u64> {
 /// AI streaming request shares those workers.
 #[tauri::command]
 async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let hash = tokio::task::spawn_blocking(ahash_of_screen)
+    let target = guidance_target_hwnd(&state);
+    let hash = tokio::task::spawn_blocking(move || ahash_of_screen(target))
         .await
         .ok()
         .flatten();
@@ -1686,7 +1721,10 @@ async fn guide(
     // visual change that trips the threshold on every response. The overlay
     // was cleared before the AI capture, so the screen is pointer-free here
     // too; any drift now reflects a real user change while the AI was thinking.
-    let stale_hash = tokio::task::spawn_blocking(ahash_of_screen)
+    // Hash the SAME window the AI capture used (new_hwnd_opt) so pre/post compare
+    // like-for-like (C5) — pre_hash came from that window, not the foreground.
+    let stale_target = if is_fs { None } else { new_hwnd_opt };
+    let stale_hash = tokio::task::spawn_blocking(move || ahash_of_screen(stale_target))
         .await
         .ok()
         .flatten();
@@ -2271,7 +2309,9 @@ async fn send_correction(
     let bbox_decisive = ai::bbox::bbox_is_decisive(&used_model, &bbox_distrust);
 
     // Stale detection before the pointer is drawn — see guide() for rationale.
-    let stale_hash = tokio::task::spawn_blocking(ahash_of_screen)
+    // Hash the same window the correction capture used (C5).
+    let stale_target = if is_fs { None } else { new_hwnd };
+    let stale_hash = tokio::task::spawn_blocking(move || ahash_of_screen(stale_target))
         .await
         .ok()
         .flatten();
@@ -2333,8 +2373,17 @@ async fn send_correction(
 }
 
 #[tauri::command]
-fn speak(text: String, lang: Option<String>, state: State<'_, AppState>) {
-    state.tts.speak(text, lang.unwrap_or_default());
+fn speak(
+    text: String,
+    lang: Option<String>,
+    // OS UI locale (navigator.language) — used only as the fallback when lang is "auto"
+    // and the reply is Latin script (script detection can't tell en/fr/es/de apart). C7.
+    fallback_locale: Option<String>,
+    state: State<'_, AppState>,
+) {
+    state
+        .tts
+        .speak(text, lang.unwrap_or_default(), fallback_locale.unwrap_or_default());
 }
 
 #[tauri::command]

@@ -146,12 +146,17 @@ Rules:
 
 Use the navigate_step tool for all responses."#;
 
+// Category-neutral (audit 2026-07-12 C8): a specific steering hint usually follows this
+// (the frontend folds in one of the ✗ Wrong reason categories — "wrong spot", "already
+// did that", etc.) but not always (a bare Wrong with no reason reaches this alone), so
+// this base text must work standalone AND not prescribe a remedy that fights the category
+// that follows. It used to say "describe the target element differently", which directly
+// contradicts the "already did that → advance, don't re-point" category. Now it sets up
+// the situation and asks for a fix in the general — compatible with re-pointing, advancing,
+// or scrolling, whichever the following guidance (or the model's own read) calls for.
 pub const CORRECTION_CONTEXT: &str =
-    "The user pressed the 'wrong' button, indicating the previous instruction was \
-incorrect or they cannot find the element. Analyze the current screen carefully \
-and provide a corrected instruction. Describe the target element differently — \
-use different identifying features (color, position, size, nearby elements) \
-than the previous attempt.";
+    "The user pressed the 'wrong' button on the previous instruction. Re-examine the \
+current screen carefully and provide a corrected instruction that resolves the problem.";
 
 pub fn session_resume_template(state_summary: &str) -> String {
     format!(
