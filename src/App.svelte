@@ -16,6 +16,10 @@ See the LICENSE file in the root of this repository for complete details.
   import HotkeyInput from "./HotkeyInput.svelte";
   import { prettyHotkey } from "./lib/hotkey";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
+  import { account } from "./lib/account.svelte";
+  import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
+  import BillingPanel from "./BillingPanel.svelte";
+  import AccountPanel from "./AccountPanel.svelte";
 
   type Rect = { x: number; y: number; width: number; height: number };
   type LocateResult = { bbox: Rect; name: string; role: string; confidence: number };
@@ -263,35 +267,11 @@ See the LICENSE file in the root of this repository for complete details.
   // backend treated every 402 as free_trial_exhausted regardless of which the
   // relay actually meant.
   let exhaustedReason = $state<"free" | "coins">("free");
-  let oauthPending = $state(false);     // true while waiting for Google OAuth callback
-  let checkoutPending = $state(false);  // true while waiting for user to pay in browser
-  let buyAmount = $state<number | "custom">(20);  // USD top-up; "custom" reveals a field
-  let customAmount = $state(20);                   // USD entered when buyAmount === "custom"
-  let effectiveAmount = $derived(buyAmount === "custom" ? customAmount : buyAmount);
-  let amountValid = $derived(effectiveAmount >= 5 && effectiveAmount <= 500);
-
-  // Account management (S.2.1) state
-  type AccountInfo = { email: string | null; is_anonymous: boolean; providers: string[] };
-  let accountInfo = $state<AccountInfo | null>(null);
-  type AccountView = "signin" | "signup" | "verify_signup" | "forgot" | "verify_reset" | "account";
-  let accountView = $state<AccountView>("signin");
-  let acctEmail = $state("");
-  let acctPassword = $state("");
-  let acctCode = $state("");          // 6-digit OTP
-  let acctNewPassword = $state("");
-  let acctBusy = $state(false);
-  let acctError = $state("");
-  let acctNotice = $state("");
-  let showChangePw = $state(false);
-  let showDeleteConfirm = $state(false);
-  // Signed in with a real (non-anonymous) email account?
-  let acctSignedIn = $derived(!!accountInfo && !accountInfo.is_anonymous && !!accountInfo.email);
-  // How they authenticated — drives password UI. A Google (OAuth) account's
-  // password is managed by Google, so we don't offer "Change password" for it.
-  let acctIsGoogle = $derived(!!accountInfo && accountInfo.providers.includes("google"));
-  let acctHasPassword = $derived(!!accountInfo && accountInfo.providers.includes("email"));
-  // Show the change-password control unless it's an OAuth-only account.
-  let acctShowChangePw = $derived(acctHasPassword || !acctIsGoogle);
+  // Checkout flow flags (billing.oauthPending / billing.checkoutPending), the
+  // top-up amount picker (BillingPanel), and the whole Account-tab state cluster
+  // (AccountPanel + the account store) moved out in the 2026-07-13
+  // componentization pass — see src/BillingPanel.svelte, src/AccountPanel.svelte,
+  // src/lib/account.svelte.ts, src/TrialExhaustedModal.svelte.
 
   // Phase 0.2: which app is currently shared with the AI.
   type SharedAppInfo = {
@@ -1022,7 +1002,7 @@ See the LICENSE file in the root of this repository for complete details.
   // to auto-trigger Google OAuth with no alternative offered). Signed-in
   // users skip this entirely. Opens Stripe Checkout in the system browser.
   async function buyCoins(amountUsd = 20) {
-    if (oauthPending || checkoutPending) return;
+    if (billing.oauthPending || billing.checkoutPending) return;
     // The checkout page opens in the system browser. The panel is
     // alwaysOnTop, so it would sit OVER the browser even when the browser has
     // focus — and the open Settings modal covers the draggable titlebar. So
@@ -1042,21 +1022,21 @@ See the LICENSE file in the root of this repository for complete details.
           // signed in; account linking preserves free requests and any coins.
           await setPanelOnTop(true);
           settingsTab = "account";
-          accountView = "signin";
-          acctError = "";
-          acctNotice = "Sign in to buy coins — use Google below, or enter your email.";
+          account.view = "signin";
+          account.error = "";
+          account.notice = "Sign in to buy coins — use Google below, or enter your email.";
           showSettings = true;
           return;
         }
         throw e;
       }
-      checkoutPending = true;
+      billing.checkoutPending = true;
       openUrl(url);
     } catch (e) {
       addToHistory("system", "⚠️ Checkout failed: " + String(e));
       await setPanelOnTop(true); // nothing opened — restore always-on-top
     } finally {
-      oauthPending = false;
+      billing.oauthPending = false;
     }
   }
 
@@ -1068,224 +1048,17 @@ See the LICENSE file in the root of this repository for complete details.
     if (await billing.refresh()) {
       if (billing.tier === "paid") showTrialExhausted = false;
     }
-    oauthPending = false;
-    checkoutPending = false;
+    billing.oauthPending = false;
+    billing.checkoutPending = false;
     await setPanelOnTop(true); // back from the browser — restore always-on-top
   }
 
   // ── Account management (S.2.1) ──────────────────────────────────────────────
-
-  // Fetch the current identity and pick the right Account view. Called when the
-  // Account tab opens and on every `account_changed` event. Pass force=true from a
-  // flow that has just *completed* (verify success) so it advances past the guard.
-  async function loadAccountInfo(force = false) {
-    try {
-      accountInfo = await invoke<AccountInfo>("get_account_info");
-    } catch (_) {
-      accountInfo = null;
-    }
-    // Don't yank the user out of a multi-step flow (verify/forgot) on a passive refresh.
-    if (!force && (accountView === "verify_signup" || accountView === "verify_reset" || accountView === "forgot")) return;
-    accountView = acctSignedIn ? "account" : "signin";
-  }
-
-  function resetAcctFields() {
-    acctPassword = "";
-    acctCode = "";
-    acctNewPassword = "";
-    acctError = "";
-    acctNotice = "";
-  }
-
-  // Add an email + password to the current anonymous account (in-place upgrade),
-  // then move to the OTP-entry step.
-  async function acctSignUp() {
-    if (acctBusy) return;
-    acctError = ""; acctNotice = "";
-    if (!acctEmail.trim() || acctPassword.length < 6) {
-      acctError = "Enter an email and a password of at least 6 characters.";
-      return;
-    }
-    acctBusy = true;
-    try {
-      await invoke("sign_up_email", { email: acctEmail.trim(), password: acctPassword });
-      acctNotice = `Enter the verification code we emailed to ${acctEmail.trim()}. Already requested one? It's valid for 1 hour.`;
-      accountView = "verify_signup";
-    } catch (e) {
-      const msg = String(e);
-      if (/sign in instead/i.test(msg)) {
-        // Email already belongs to a confirmed account — route to sign-in (email stays prefilled).
-        accountView = "signin";
-        acctNotice = "This email already has an account. Enter your password to sign in.";
-      } else {
-        acctError = msg;
-      }
-    } finally {
-      acctBusy = false;
-    }
-  }
-
-  // Resend a fresh sign-up code (used by "Resend code" and the unverified-login path).
-  async function acctResend() {
-    if (acctBusy) return;
-    acctError = ""; acctNotice = "";
-    if (!acctEmail.trim()) { acctError = "Enter your email first."; return; }
-    acctBusy = true;
-    try {
-      await invoke("resend_email_otp", { email: acctEmail.trim() });
-      acctNotice = `New code sent to ${acctEmail.trim()}. Enter it below.`;
-      accountView = "verify_signup";
-    } catch (e) {
-      acctError = String(e);
-    } finally {
-      acctBusy = false;
-    }
-  }
-
-  async function acctVerifySignup() {
-    if (acctBusy) return;
-    acctError = "";
-    if (acctCode.trim().length < 6) { acctError = "Enter the code from your email."; return; }
-    acctBusy = true;
-    try {
-      await invoke("verify_email_otp", { email: acctEmail.trim(), token: acctCode.trim() });
-      resetAcctFields();
-      await loadAccountInfo(true);   // flow complete → leave the verify page for "account"
-      await refreshBalance();
-    } catch (e) {
-      acctError = String(e);
-    } finally {
-      acctBusy = false;
-    }
-  }
-
-  async function acctSignIn() {
-    if (acctBusy) return;
-    acctError = ""; acctNotice = "";
-    if (!acctEmail.trim() || !acctPassword) { acctError = "Enter your email and password."; return; }
-    acctBusy = true;
-    try {
-      await invoke("sign_in_email", { email: acctEmail.trim(), password: acctPassword });
-      resetAcctFields();
-      await loadAccountInfo();   // → "account"
-      await refreshBalance();
-    } catch (e) {
-      const msg = String(e);
-      if (/EMAIL_NOT_CONFIRMED/i.test(msg)) {
-        // Account exists but its email was never verified → finish verification.
-        accountView = "verify_signup";
-        try {
-          await invoke("resend_email_otp", { email: acctEmail.trim() });
-          acctNotice = `Your email isn't verified yet — we sent a new code to ${acctEmail.trim()}. Enter it below.`;
-        } catch {
-          acctNotice = `Your email isn't verified yet. Enter the code we emailed to ${acctEmail.trim()}, or tap Resend code.`;
-        }
-      } else {
-        acctError = msg;
-      }
-    } finally {
-      acctBusy = false;
-    }
-  }
-
-  async function acctSignOut() {
-    if (acctBusy) return;
-    acctBusy = true; acctError = "";
-    try {
-      await invoke("sign_out");  // backend re-signs anonymously (free quota is per-device)
-      accountInfo = null;
-      acctEmail = "";
-      resetAcctFields();
-      accountView = "signin";
-      showChangePw = false;
-      showDeleteConfirm = false;
-      await loadAccountInfo();
-      await refreshBalance(); // re-derives billing.tier from the fresh anon session's real tier ('free')
-      addToHistory("system", "Signed out — you're back on the free tier.");
-    } catch (e) {
-      acctError = String(e);
-    } finally {
-      acctBusy = false;
-    }
-  }
-
-  async function acctForgot() {
-    if (acctBusy) return;
-    acctError = ""; acctNotice = "";
-    if (!acctEmail.trim()) { acctError = "Enter your account email."; return; }
-    acctBusy = true;
-    try {
-      await invoke("request_password_reset", { email: acctEmail.trim() });
-      acctNotice = `We sent a reset code to ${acctEmail.trim()}. Enter it with your new password.`;
-      accountView = "verify_reset";
-    } catch (e) {
-      acctError = String(e);
-    } finally {
-      acctBusy = false;
-    }
-  }
-
-  async function acctVerifyReset() {
-    if (acctBusy) return;
-    acctError = "";
-    if (acctCode.trim().length < 6 || acctNewPassword.length < 6) {
-      acctError = "Enter the code from your email and a new password (min 6 characters).";
-      return;
-    }
-    acctBusy = true;
-    try {
-      await invoke("verify_password_reset", {
-        email: acctEmail.trim(),
-        token: acctCode.trim(),
-        newPassword: acctNewPassword,
-      });
-      resetAcctFields();
-      await loadAccountInfo(true);   // reset complete → leave the verify page for "account"
-      await refreshBalance();
-    } catch (e) {
-      acctError = String(e);
-    } finally {
-      acctBusy = false;
-    }
-  }
-
-  async function acctChangePassword() {
-    if (acctBusy) return;
-    acctError = ""; acctNotice = "";
-    if (acctNewPassword.length < 6) { acctError = "New password must be at least 6 characters."; return; }
-    acctBusy = true;
-    try {
-      await invoke("change_password", { newPassword: acctNewPassword });
-      acctNewPassword = "";
-      showChangePw = false;
-      acctNotice = "Password changed.";
-    } catch (e) {
-      acctError = String(e);
-    } finally {
-      acctBusy = false;
-    }
-  }
-
-  async function acctDeleteAccount() {
-    if (acctBusy) return;
-    acctBusy = true; acctError = "";
-    try {
-      await invoke("delete_account");  // backend re-signs anonymously (free quota is per-device)
-      accountInfo = null;
-      acctEmail = "";
-      resetAcctFields();
-      showDeleteConfirm = false;
-      showChangePw = false;
-      accountView = "signin";
-      await loadAccountInfo();
-      await refreshBalance();
-    } catch (e) {
-      acctError = String(e);
-      showDeleteConfirm = false;
-    } finally {
-      acctBusy = false;
-    }
-  }
+  // The identity/view state and every acct* handler moved to
+  // src/AccountPanel.svelte + src/lib/account.svelte.ts (componentization pass,
+  // 2026-07-13). App keeps only the cross-cutting pieces: buyCoins' redirect
+  // into the Account tab (via the account store) and the account_changed
+  // listener below.
 
   async function openSettings(tab: SettingsTab = "provider") {
     settingsTab = tab;
@@ -1904,7 +1677,7 @@ See the LICENSE file in the root of this repository for complete details.
     // When the panel regains focus after a checkout, pull the fresh balance and
     // clear the pending state — covers both "paid" and "cancelled the page".
     getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-      if (focused && checkoutPending) refreshBalance();
+      if (focused && billing.checkoutPending) refreshBalance();
     });
 
     listen("trial_exhausted", () => {
@@ -1935,7 +1708,7 @@ See the LICENSE file in the root of this repository for complete details.
     });
 
     listen("oauth_complete", async () => {
-      oauthPending = false;
+      billing.oauthPending = false;
       // Refresh balance — tier is now paid if the user had pre-existing coins.
       await billing.refresh();
     });
@@ -1943,7 +1716,7 @@ See the LICENSE file in the root of this repository for complete details.
     // Emitted after any account change (sign in/up/out, delete) so the Account
     // tab reflects the new identity if it's open.
     listen("account_changed", () => {
-      if (showSettings && settingsTab === "account") loadAccountInfo();
+      if (showSettings && settingsTab === "account") account.load();
     });
 
     // Backend detected the screen drifted enough during AI thinking
@@ -2564,73 +2337,14 @@ See the LICENSE file in the root of this repository for complete details.
     </div>
   {/if}
 
-  <!-- Trial exhausted modal (S.1) -->
-  {#if showTrialExhausted}
-    <div
-      class="modal-backdrop"
-      role="presentation"
-      onclick={() => (showTrialExhausted = false)}
-      onkeydown={(e) => { if (e.key === "Escape") showTrialExhausted = false; }}
-    >
-      <div
-        class="modal"
-        role="dialog"
-        tabindex="-1"
-        aria-modal="true"
-        aria-label={exhaustedReason === "coins" ? "Not enough coins" : "Free trial exhausted"}
-        onclick={(e) => e.stopPropagation()}
-        onkeydown={(e) => e.stopPropagation()}
-        style="max-width: 320px;"
-      >
-        <div class="modal-header">
-          <span class="modal-title">{exhaustedReason === "coins" ? "Not enough coins" : "Free trial used"}</span>
-          <button class="hdr-btn hdr-btn-close" onclick={() => (showTrialExhausted = false)}>✕</button>
-        </div>
-        <div class="modal-body" style="padding: 20px; text-align: center; line-height: 1.6;">
-          <p style="font-size: 2em; margin-bottom: 12px;">{exhaustedReason === "coins" ? "🪙" : "🎯"}</p>
-          <p style="margin-bottom: 8px; font-weight: 600;">
-            {exhaustedReason === "coins" ? "Not enough coins for this quality tier." : "Your free requests have been used."}
-          </p>
+  <!-- Trial exhausted modal (S.1) — extracted to TrialExhaustedModal.svelte -->
+  <TrialExhaustedModal
+    bind:open={showTrialExhausted}
+    reason={exhaustedReason}
+    onBuy={buyCoins}
+    onRefreshBalance={refreshBalance}
+  />
 
-          {#if oauthPending}
-            <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
-              Signing in with Google in your browser…
-            </p>
-          {:else if checkoutPending}
-            <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
-              Checkout opened in your browser. Come back once you've paid — your balance will update automatically.
-            </p>
-            <button class="btn-primary btn-full" onclick={refreshBalance}>Refresh balance</button>
-          {:else}
-            <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 16px;">
-              Top up with coins to continue on the Navisual managed relay.
-            </p>
-            {#if exhaustedReason === "coins"}
-              <!-- audit F8: a paid account low on coins may still have unused free
-                   requests — "buy more" alone hides that option. -->
-              <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 12px;">
-                Still have free requests left? Switch <strong>Quality tier</strong> to
-                <strong>Free</strong> on Settings → Provider to use them instead.
-              </p>
-            {/if}
-            <button class="btn-primary btn-full" style="margin-bottom: 6px;" onclick={() => buyCoins(20)}>Buy coins ($20)</button>
-            <p class="legal-agree" style="margin-bottom: 14px;">
-              By buying coins you agree to our
-              <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/terms.html")}>Terms</button>
-              and
-              <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy Policy</button>.
-            </p>
-            <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 16px;">
-              Or keep going free with your own key:
-              Settings → Provider → Gemini (Google AI Studio) or Ollama (local).
-            </p>
-          {/if}
-
-          <button class="btn-ghost btn-full" onclick={() => { showTrialExhausted = false; oauthPending = false; checkoutPending = false; }}>Close</button>
-        </div>
-      </div>
-    </div>
-  {/if}
 
   <!-- Settings modal (E.6) -->
   <!-- Click-outside does NOT dismiss: Settings is a form with unsaved state, so a
@@ -2656,7 +2370,7 @@ See the LICENSE file in the root of this repository for complete details.
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
           <button class="tab-btn {settingsTab === 'billing' ? 'tab-active' : ''}" onclick={() => { settingsTab = "billing"; refreshBalance(); }}>Billing</button>
-          <button class="tab-btn {settingsTab === 'account' ? 'tab-active' : ''}" onclick={() => { settingsTab = "account"; loadAccountInfo(); }}>Account</button>
+          <button class="tab-btn {settingsTab === 'account' ? 'tab-active' : ''}" onclick={() => { settingsTab = "account"; account.load(); }}>Account</button>
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
@@ -2667,206 +2381,18 @@ See the LICENSE file in the root of this repository for complete details.
 
         <div class="modal-body">
           {#if settingsTab === "billing"}
-            <div class="setting-group">
-              <span class="setting-label">Account</span>
-              <p class="setting-hint">{billing.tier === "paid" ? "Paid (coins)" : "Free trial"}</p>
-            </div>
-            {#if billing.coins !== null && billing.coins > 0}
-              <div class="setting-group">
-                <span class="setting-label">Coin balance</span>
-                <p class="setting-hint">{billing.coins} coins</p>
-              </div>
-            {/if}
-            <div class="setting-group">
-              <span class="setting-label">Free requests</span>
-              <p class="setting-hint">{billing.freeRemaining ?? "—"} remaining of 30</p>
-            </div>
-            <p class="setting-hint">Change your <strong>quality tier</strong> (which model answers, and its coin cost) on the <strong>Provider</strong> tab.</p>
-
-            <!-- Amount picker -->
-            <div class="setting-group" style="margin-top: 14px;">
-              <label class="setting-label" for="amount-select">Top-up amount</label>
-              <select id="amount-select" class="setting-select" bind:value={buyAmount}>
-                <option value={5}>$5 · 1,000 coins</option>
-                <option value={10}>$10 · 2,000 coins</option>
-                <option value={20}>$20 · 4,000 coins</option>
-                <option value={50}>$50 · 10,000 coins</option>
-                <option value="custom">Custom…</option>
-              </select>
-              {#if buyAmount === "custom"}
-                <input
-                  class="setting-input" type="number" min="5" max="500" step="1"
-                  bind:value={customAmount} placeholder="Enter $5–$500" style="margin-top: 8px;" />
-                <p class="setting-hint">
-                  {amountValid
-                    ? `${(customAmount * 200).toLocaleString()} coins`
-                    : "Amount must be $5–$500"}
-                </p>
-              {/if}
-            </div>
-
-            <div class="setting-group" style="margin-top: 12px;">
-              <button class="btn-primary" onclick={() => buyCoins(effectiveAmount)} disabled={oauthPending || checkoutPending || !amountValid}>
-                {oauthPending ? "Signing in…" : checkoutPending ? "Checkout open in browser…" : `Buy coins ($${effectiveAmount})`}
-              </button>
-              {#if checkoutPending}
-                <button class="btn-ghost" style="margin-top: 8px;" onclick={refreshBalance}>Refresh balance</button>
-              {/if}
-            </div>
-            <p class="setting-hint legal-agree">
-              By buying coins you agree to our
-              <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/terms.html")}>Terms</button>
-              and
-              <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy Policy</button>.
-            </p>
-            <p class="setting-hint" style="margin-top: 8px;">
-              Coins power the Managed provider's paid tiers. Checkout opens in your default
-              browser; if you're not signed in yet, Google sign-in runs first. Your balance
-              updates automatically when you return.
-              {#if settingsForm.api_provider !== "managed"}
-                <br /><br />Note: you're currently on the <strong>{settingsForm.api_provider}</strong>
-                provider. Switch to <strong>Managed</strong> on the Provider tab to spend coins.
-              {/if}
-            </p>
+            <!-- Extracted to BillingPanel.svelte (componentization pass, 2026-07-13) -->
+            <BillingPanel
+              provider={settingsForm.api_provider}
+              onBuy={buyCoins}
+              onRefreshBalance={refreshBalance}
+            />
           {:else if settingsTab === "account"}
-            <!-- Account management (S.2.1): sign in/up/out, forgot/change password, delete -->
-            {#if acctError}<p class="setting-hint acct-error">⚠️ {acctError}</p>{/if}
-            {#if acctNotice}<p class="setting-hint acct-notice">{acctNotice}</p>{/if}
-
-            {#if accountView === "account"}
-              <div class="setting-group">
-                <span class="setting-label">Signed in as</span>
-                <p class="setting-hint"><strong>{accountInfo?.email}</strong></p>
-              </div>
-              {#if billing.coins !== null && billing.coins > 0}
-                <p class="setting-hint">{billing.coins} coins · your balance and purchases stay with this account.</p>
-              {/if}
-
-              {#if acctShowChangePw}
-                {#if !showChangePw}
-                  <div class="setting-group" style="margin-top: 12px;">
-                    <button class="btn-ghost" onclick={() => { showChangePw = true; acctError = ""; acctNotice = ""; }}>Change password</button>
-                  </div>
-                {:else}
-                  <div class="setting-group" style="margin-top: 12px;">
-                    <label class="setting-label" for="acct-newpw">New password</label>
-                    <input id="acct-newpw" class="setting-input" type="password" bind:value={acctNewPassword} placeholder="At least 6 characters" />
-                    <div style="display:flex; gap:8px; margin-top:8px;">
-                      <button class="btn-primary" onclick={acctChangePassword} disabled={acctBusy}>{acctBusy ? "Saving…" : "Save password"}</button>
-                      <button class="btn-ghost" onclick={() => { showChangePw = false; acctNewPassword = ""; }}>Cancel</button>
-                    </div>
-                  </div>
-                {/if}
-              {:else if acctIsGoogle}
-                <p class="setting-hint" style="margin-top: 12px;">
-                  Signed in with Google — your password is managed by Google, not Navisual. Change it at
-                  <button class="legal-link" onclick={() => openUrl("https://myaccount.google.com/security")}>myaccount.google.com</button>.
-                </p>
-              {/if}
-
-              <div class="setting-group" style="margin-top: 12px;">
-                <button class="btn-ghost" onclick={acctSignOut} disabled={acctBusy}>Sign out</button>
-              </div>
-
-              <hr class="acct-sep" />
-              {#if !showDeleteConfirm}
-                <button class="legal-link acct-danger" onclick={() => { showDeleteConfirm = true; acctError = ""; }}>Delete account</button>
-              {:else}
-                <div class="setting-group">
-                  <p class="setting-hint acct-error">This permanently deletes your account. Coins are <strong>not</strong> refunded and cannot be recovered.</p>
-                  <div style="display:flex; gap:8px; margin-top:8px;">
-                    <button class="btn-danger" onclick={acctDeleteAccount} disabled={acctBusy}>{acctBusy ? "Deleting…" : "Delete permanently"}</button>
-                    <button class="btn-ghost" onclick={() => (showDeleteConfirm = false)}>Cancel</button>
-                  </div>
-                </div>
-              {/if}
-
-            {:else if accountView === "signin"}
-              <p class="setting-hint">Sign in to keep your coins and purchases across devices.</p>
-              <div class="setting-group">
-                <label class="setting-label" for="acct-email">Email</label>
-                <input id="acct-email" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
-              </div>
-              <div class="setting-group">
-                <label class="setting-label" for="acct-pw">Password</label>
-                <input id="acct-pw" class="setting-input" type="password" autocomplete="current-password" bind:value={acctPassword} placeholder="Your password" />
-              </div>
-              <div class="setting-group" style="margin-top: 10px;">
-                <button class="btn-primary" onclick={acctSignIn} disabled={acctBusy}>{acctBusy ? "Signing in…" : "Sign in"}</button>
-              </div>
-              <div class="acct-links">
-                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signup"; }}>Create account</button>
-                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "forgot"; }}>Forgot password?</button>
-              </div>
-              <p class="setting-hint" style="margin-top: 8px;">
-                Signed up but never verified?
-                <button class="legal-link" onclick={acctResend} disabled={acctBusy}>Resend verification code</button>
-              </p>
-              <hr class="acct-sep" />
-              <button class="btn-ghost" onclick={async () => { if (oauthPending) return; oauthPending = true; acctError = ""; try { await invoke("start_google_oauth"); await loadAccountInfo(); await refreshBalance(); } catch (e) { acctError = String(e); } finally { oauthPending = false; } }} disabled={oauthPending}>
-                {oauthPending ? "Signing in…" : "Continue with Google"}
-              </button>
-
-            {:else if accountView === "signup"}
-              <p class="setting-hint">Create an account — your current free requests and any coins carry over.</p>
-              <div class="setting-group">
-                <label class="setting-label" for="acct-email-up">Email</label>
-                <input id="acct-email-up" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
-              </div>
-              <div class="setting-group">
-                <label class="setting-label" for="acct-pw-up">Password</label>
-                <input id="acct-pw-up" class="setting-input" type="password" autocomplete="new-password" bind:value={acctPassword} placeholder="At least 6 characters" />
-              </div>
-              <div class="setting-group" style="margin-top: 10px;">
-                <button class="btn-primary" onclick={acctSignUp} disabled={acctBusy}>{acctBusy ? "Sending code…" : "Create account"}</button>
-              </div>
-              <div class="acct-links">
-                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signin"; }}>Already have an account? Sign in</button>
-              </div>
-
-            {:else if accountView === "verify_signup"}
-              <div class="setting-group">
-                <label class="setting-label" for="acct-code">Verification code</label>
-                <input id="acct-code" class="setting-input" inputmode="numeric" maxlength="10" bind:value={acctCode} placeholder="Code from email" />
-              </div>
-              <div class="setting-group" style="margin-top: 10px;">
-                <button class="btn-primary" onclick={acctVerifySignup} disabled={acctBusy}>{acctBusy ? "Verifying…" : "Verify & finish"}</button>
-              </div>
-              <div class="acct-links">
-                <button class="legal-link" onclick={acctResend} disabled={acctBusy}>Resend code</button>
-                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signin"; }}>Cancel</button>
-              </div>
-
-            {:else if accountView === "forgot"}
-              <p class="setting-hint">Enter your account email and we'll send a reset code.</p>
-              <div class="setting-group">
-                <label class="setting-label" for="acct-email-fp">Email</label>
-                <input id="acct-email-fp" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
-              </div>
-              <div class="setting-group" style="margin-top: 10px;">
-                <button class="btn-primary" onclick={acctForgot} disabled={acctBusy}>{acctBusy ? "Sending…" : "Send reset code"}</button>
-              </div>
-              <div class="acct-links">
-                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signin"; }}>Back to sign in</button>
-              </div>
-
-            {:else if accountView === "verify_reset"}
-              <div class="setting-group">
-                <label class="setting-label" for="acct-code-r">Reset code</label>
-                <input id="acct-code-r" class="setting-input" inputmode="numeric" maxlength="10" bind:value={acctCode} placeholder="Code from email" />
-              </div>
-              <div class="setting-group">
-                <label class="setting-label" for="acct-newpw-r">New password</label>
-                <input id="acct-newpw-r" class="setting-input" type="password" autocomplete="new-password" bind:value={acctNewPassword} placeholder="At least 6 characters" />
-              </div>
-              <div class="setting-group" style="margin-top: 10px;">
-                <button class="btn-primary" onclick={acctVerifyReset} disabled={acctBusy}>{acctBusy ? "Saving…" : "Set new password"}</button>
-              </div>
-              <div class="acct-links">
-                <button class="legal-link" onclick={() => { resetAcctFields(); accountView = "signin"; }}>Cancel</button>
-              </div>
-            {/if}
-
+            <!-- Extracted to AccountPanel.svelte + lib/account.svelte.ts (componentization pass, 2026-07-13) -->
+            <AccountPanel
+              onRefreshBalance={refreshBalance}
+              onSignedOut={() => addToHistory("system", "Signed out — you're back on the free tier.")}
+            />
           {:else if settingsTab === "provider"}
             <!-- Provider selector — grouped so it scales as providers + paid tiers grow -->
             <div class="setting-group">
@@ -3788,7 +3314,7 @@ See the LICENSE file in the root of this repository for complete details.
     flex-shrink: 0;
   }
 
-  .hdr-btn {
+  :global(.hdr-btn) {
     width: 28px;
     height: 28px;
     padding: 0;
@@ -3805,19 +3331,19 @@ See the LICENSE file in the root of this repository for complete details.
     font-family: inherit;
     transition: background 120ms ease-out, color 120ms ease-out;
   }
-  .hdr-btn svg { width: 17px; height: 17px; display: block; }
-  .hdr-btn:hover { background: var(--surface-3); color: var(--text-primary); }
-  .hdr-btn-close:hover { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+  :global(.hdr-btn svg) { width: 17px; height: 17px; display: block; }
+  :global(.hdr-btn:hover) { background: var(--surface-3); color: var(--text-primary); }
+  :global(.hdr-btn-close:hover) { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
 
   /* Point-of-purchase legal agreement line + inline links */
-  .legal-agree {
+  :global(.legal-agree) {
     font-size: 11.5px;
     color: var(--text-tertiary);
     line-height: 1.5;
     text-align: center;
     margin-top: 8px;
   }
-  .legal-link {
+  :global(.legal-link) {
     background: none;
     border: none;
     padding: 0;
@@ -3827,7 +3353,7 @@ See the LICENSE file in the root of this repository for complete details.
     text-underline-offset: 2px;
     cursor: pointer;
   }
-  .legal-link:hover { color: var(--accent-500); }
+  :global(.legal-link:hover) { color: var(--accent-500); }
 
   /* ── Latest instruction box ─────────────────────── */
 
@@ -4507,48 +4033,48 @@ See the LICENSE file in the root of this repository for complete details.
     transition: background 120ms ease-out, border-color 120ms ease-out;
   }
 
-  .btn-primary {
+  :global(.btn-primary) {
     background: var(--accent-500);
     color: #fff;
     border-color: transparent;
   }
-  .btn-primary:hover:not(:disabled) { background: var(--accent-400); }
-  .btn-primary:active { background: var(--accent-600); }
-  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  :global(.btn-primary:hover:not(:disabled)) { background: var(--accent-400); }
+  :global(.btn-primary:active) { background: var(--accent-600); }
+  :global(.btn-primary:disabled) { opacity: 0.4; cursor: not-allowed; }
 
-  .btn-ghost {
+  :global(.btn-ghost) {
     background: var(--surface-3);
     color: var(--text-primary);
     border-color: var(--border);
   }
-  .btn-ghost:hover { background: #2d2d33; }
+  :global(.btn-ghost:hover) { background: #2d2d33; }
 
-  .btn-danger {
+  :global(.btn-danger) {
     background: #b91c1c;
     color: #fff;
     border-color: transparent;
   }
-  .btn-danger:hover:not(:disabled) { background: #dc2626; }
-  .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+  :global(.btn-danger:hover:not(:disabled)) { background: #dc2626; }
+  :global(.btn-danger:disabled) { opacity: 0.4; cursor: not-allowed; }
 
   /* ── Account tab ─────────────────────────────────── */
-  .acct-error { color: #f87171; }
-  .acct-notice { color: var(--accent-400); }
-  .acct-sep {
+  :global(.acct-error) { color: #f87171; }
+  :global(.acct-notice) { color: var(--accent-400); }
+  :global(.acct-sep) {
     border: none;
     border-top: 1px solid var(--border);
     margin: 14px 0;
   }
-  .acct-links {
+  :global(.acct-links) {
     display: flex;
     gap: 14px;
     flex-wrap: wrap;
     margin-top: 10px;
   }
-  .acct-danger { color: #f87171; }
-  .acct-danger:hover { color: #fca5a5; }
+  :global(.acct-danger) { color: #f87171; }
+  :global(.acct-danger:hover) { color: #fca5a5; }
 
-  .btn-full { width: 100%; }
+  :global(.btn-full) { width: 100%; }
 
   /* ── Badges ──────────────────────────────────────── */
 
@@ -4568,7 +4094,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   /* ── Settings modal ──────────────────────────────── */
 
-  .modal-backdrop {
+  :global(.modal-backdrop) {
     position: fixed;
     inset: 0;
     /* Leave the titlebar (~44px) uncovered so the window stays draggable and the
@@ -4583,7 +4109,7 @@ See the LICENSE file in the root of this repository for complete details.
     border-radius: 14px;
   }
 
-  .modal {
+  :global(.modal) {
     background: var(--surface-1);
     border: 1px solid var(--border);
     border-radius: 12px;
@@ -4595,14 +4121,14 @@ See the LICENSE file in the root of this repository for complete details.
     box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
   }
 
-  .modal-header {
+  :global(.modal-header) {
     display: flex;
     align-items: center;
     padding: 12px 14px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
-  .modal-title {
+  :global(.modal-title) {
     font-size: 14px;
     font-weight: 600;
     flex: 1;
@@ -4629,13 +4155,13 @@ See the LICENSE file in the root of this repository for complete details.
   .tab-btn:hover { color: var(--text-primary); }
   .tab-active { color: var(--accent-500) !important; border-bottom-color: var(--accent-500) !important; }
 
-  .modal-body {
+  :global(.modal-body) {
     padding: 12px 14px;
     flex: 1;
     overflow-y: auto;
   }
 
-  .stub-hint, .setting-hint {
+  .stub-hint, :global(.setting-hint) {
     font-size: 12px;
     color: var(--text-tertiary);
     margin: 0;
@@ -4672,15 +4198,15 @@ See the LICENSE file in the root of this repository for complete details.
 
   /* ── Settings form elements ──────────────────────── */
 
-  .setting-group {
+  :global(.setting-group) {
     display: flex;
     flex-direction: column;
     gap: 5px;
     margin-bottom: 12px;
   }
-  .setting-group:last-child { margin-bottom: 0; }
+  :global(.setting-group:last-child) { margin-bottom: 0; }
 
-  .setting-label {
+  :global(.setting-label) {
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
@@ -4689,7 +4215,7 @@ See the LICENSE file in the root of this repository for complete details.
     margin: 0;
   }
 
-  .setting-input {
+  :global(.setting-input) {
     width: 100%;
     font-family: inherit;
     font-size: 13px;
@@ -4702,16 +4228,16 @@ See the LICENSE file in the root of this repository for complete details.
     box-sizing: border-box;
     transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
   }
-  .setting-input:focus { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255, 107, 53, 0.15); }
-  .setting-select {
+  :global(.setting-input:focus) { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255, 107, 53, 0.15); }
+  :global(.setting-select) {
     width: 100%; font-family: inherit; font-size: 13px; padding: 7px 10px;
     border-radius: 7px; background: var(--surface-2); color: var(--text-primary);
     border: 1px solid var(--border); outline: none; box-sizing: border-box; cursor: pointer;
     transition: border-color 120ms ease-out;
     appearance: auto;
   }
-  .setting-select:focus { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255,107,53,0.15); }
-  .setting-select:disabled { opacity: 0.4; cursor: not-allowed; }
+  :global(.setting-select:focus) { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255,107,53,0.15); }
+  :global(.setting-select:disabled) { opacity: 0.4; cursor: not-allowed; }
 
   .key-row {
     display: flex;

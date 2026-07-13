@@ -43,6 +43,13 @@ class Billing {
     this.coinBalanceMicro == null ? null : Math.floor(this.coinBalanceMicro / MICRO_PER_COIN),
   );
 
+  // Checkout-journey flow flags — shared by the Billing tab, the exhausted
+  // modal, and the Account panel's Google button, which is why they live here
+  // and not in any one component. True while the respective browser round-trip
+  // is in flight; refreshBalance() (App) clears both when the user returns.
+  oauthPending = $state(false);
+  checkoutPending = $state(false);
+
   /** THE one place a get_balance response becomes state. */
   applyBalance(bal: BalanceInfo) {
     this.freeRemaining = bal.free_remaining;
