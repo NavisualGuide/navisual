@@ -2425,8 +2425,8 @@ fn speak(
     text: String,
     lang: Option<String>,
     // The user's ORIGINAL request text — in "auto" mode its script outranks the OS
-    // locale when the reply itself is Latin-ambiguous (Rule 19 pins the reply language
-    // to the request; design suggestion #7). Reply script still wins when strong.
+    // locale when the reply itself is Latin-ambiguous (the LANGUAGE rule pins the reply
+    // language to the request; design suggestion #7). Reply script still wins when strong.
     request_hint: Option<String>,
     // OS UI locale (navigator.language) — the last-resort fallback when both the reply
     // and the request are Latin script (script detection can't tell en/fr/es/de apart). C7.

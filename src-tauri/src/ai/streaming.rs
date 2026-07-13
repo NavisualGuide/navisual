@@ -9,7 +9,7 @@
 /// against the previous length — splicing a mid-word tail of step 2 onto step 1's caption
 /// ("Click the File menu" + "firm the dialog"), and byte-slicing across two different
 /// strings, which **panics** when the cut lands mid-character (routine for the CJK replies
-/// Rule 19 produces). Anchoring on the first instruction makes the returned prefix grow
+/// the LANGUAGE rule produces). Anchoring on the first instruction makes the returned prefix grow
 /// **monotonically** (bytes, once decoded, never change), so every caller's recorded
 /// length stays a valid char boundary and the delta is always a clean suffix — fixing both
 /// the garble and the panic at the source.

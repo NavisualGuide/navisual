@@ -638,9 +638,9 @@ See the LICENSE file in the root of this repository for complete details.
   let elapsedStart = 0;
   let requestToken = 0;
   // The most recent real user request text — threaded to speak() as the auto-language
-  // hint (Rule 19 pins the reply language to the request, so its script outranks the
-  // OS locale when the reply itself is Latin-ambiguous). Not reactive — read only
-  // inside applyResponse's speak call.
+  // hint (the LANGUAGE rule pins the reply language to the request, so its script
+  // outranks the OS locale when the reply itself is Latin-ambiguous). Not reactive —
+  // read only inside applyResponse's speak call.
   let lastRequestHint = "";
 
   const PANEL_W = 420;

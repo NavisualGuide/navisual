@@ -34,8 +34,8 @@ mod imp {
     enum Msg {
         /// (text, language, request_hint, fallback_locale): `language` is a BCP-47
         /// locale, or "auto"/"" to detect. `request_hint` is the user's ORIGINAL
-        /// request text — Rule 19 pins the reply language to it, so in auto mode its
-        /// script is a better signal than re-guessing from an ambiguous reply.
+        /// request text — the LANGUAGE rule pins the reply language to it, so in auto
+        /// mode its script is a better signal than re-guessing from an ambiguous reply.
         /// `fallback_locale` is the OS UI locale (e.g. "fr-FR"), the last resort when
         /// both are Latin-ambiguous — see `detect_lang`.
         Speak(String, String, String, String),
@@ -131,7 +131,7 @@ mod imp {
     ///    to pronounce what's actually on screen (an English voice can't read Han at
     ///    all), so this always wins.
     /// 2. A strong non-Latin script in the user's ORIGINAL request (`request_hint`) —
-    ///    Rule 19 pins the reply language to the request, so when the reply is
+    ///    the LANGUAGE rule pins the reply language to the request, so when the reply is
     ///    Latin-ambiguous (e.g. "Press Ctrl+B" answering a Chinese request) the
     ///    request's language is the user's actual language, better than guessing from
     ///    the OS locale. (Design suggestion #7, 2026-07-13: the request language is
