@@ -63,7 +63,7 @@ impl NormBox {
     /// (models overshoot routinely) and rejects a sub-pixel result. The returned
     /// [`AiRect`] remembers `(ai_w, ai_h)` so the later un-downscale can't be
     /// computed against the wrong image size.
-    pub fn to_ai_rect(&self, ai_w: u32, ai_h: u32) -> Option<AiRect> {
+    pub fn to_ai_rect(self, ai_w: u32, ai_h: u32) -> Option<AiRect> {
         if ai_w == 0 || ai_h == 0 {
             return None;
         }
@@ -142,7 +142,7 @@ impl AiRect {
     /// `capture_rect` is the captured region in virtual-desktop physical pixels
     /// (what `capture_active_window_jpeg` returned) — the intermediate
     /// capture-relative space exists only inside this method.
-    pub fn to_virtual_desktop(&self, capture_rect: Rect) -> VdRect {
+    pub fn to_virtual_desktop(self, capture_rect: Rect) -> VdRect {
         let sx = capture_rect.width as f64 / self.img_w as f64;
         let sy = capture_rect.height as f64 / self.img_h as f64;
         let x = capture_rect.x as f64 + self.x0 * sx;
