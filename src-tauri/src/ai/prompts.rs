@@ -255,6 +255,29 @@ pub fn initial_context_template(task_description: &str) -> String {
     )
 }
 
+/// A per-turn language re-anchor for continuation turns (Next / resume / reply).
+///
+/// Why (recurring live issue, 2026-07-13): on a multi-turn session a Chinese-native model
+/// (Qwen) drifts into Chinese even for an all-English task on an all-English screen —
+/// Rule 19 lives at position 19 of a long static system prompt (low salience), the immediate
+/// turn message is a machine-generated `[User completed: …]` (not the user's own words), and
+/// once the model emits ONE Chinese reply the Chinese state_summary + Chinese completed-step
+/// echo feed back and lock it in; the original request also scrolls out of the 10-turn history
+/// window. This restates the original request verbatim at the very END of the prompt (recency
+/// = high salience) as the language exemplar, re-anchoring both the goal and its language every
+/// turn. Empty task → empty string (no anchor to add).
+pub fn language_anchor(original_task: &str) -> String {
+    let t = original_task.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nIMPORTANT — the user's ORIGINAL request was: \"{t}\". Write your instruction and \
+state_summary in the SAME LANGUAGE as that original request, regardless of the language of \
+any on-screen text, window titles, or earlier turns. Do not switch languages."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{elements_context_block, pack_context_block};
@@ -358,5 +381,16 @@ mod tests {
     fn blank_target_app_falls_back() {
         let block = pack_context_block("", "Some guidance.", &BTreeMap::new());
         assert!(block.contains("[App Guide: this application]"));
+    }
+
+    #[test]
+    fn language_anchor_restates_task_or_is_empty() {
+        use super::language_anchor;
+        let a = language_anchor("make a pivottable using these data");
+        assert!(a.contains("make a pivottable using these data"));
+        assert!(a.contains("SAME LANGUAGE"));
+        // Empty / whitespace task → no anchor (first turn, or missing session).
+        assert!(language_anchor("").is_empty());
+        assert!(language_anchor("   ").is_empty());
     }
 }

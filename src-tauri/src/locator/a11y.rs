@@ -540,7 +540,7 @@ pub(crate) const SCROLLBAR_SCAN_DEPTH: u32 = 12;
 /// skip Excel even though the walk is correct and bounded. This is a one-time cost before the
 /// multi-second AI call, so ~1 s of headroom is an acceptable trade for Structured-Context
 /// actually working on Excel.
-const EXCEL_CONTEXT_BUDGET_MS: u128 = 1500;
+pub(crate) const EXCEL_CONTEXT_BUDGET_MS: u128 = 1500;
 
 /// (ClassName, (left, top, width, height)) — a structural signature for the walk's dedup.
 pub(crate) type ClassRectSignature = (String, (i32, i32, i32, i32));

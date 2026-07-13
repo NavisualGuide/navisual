@@ -129,7 +129,16 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
         log::info!("[context] skipped: window already proven slow this session");
         return None;
     }
-    let budget = std::time::Duration::from_millis(locator::a11y::CONTEXT_BUDGET_MS as u64);
+    // This outer timeout is only the uninterruptible-COM safety net — the inner
+    // `enumerate_context_elements` enforces its own, tighter, per-window budget
+    // (CONTEXT_BUDGET_MS for the bulk path, the larger EXCEL_CONTEXT_BUDGET_MS for
+    // Excel's pruned walk). So the net must be the LARGER of the two, or it would
+    // kill Excel ~500 ms before Excel's own budget even fires — silently defeating
+    // EXCEL_CONTEXT_BUDGET_MS and making the adaptive-skip trip harder for Excel than
+    // designed (found 2026-07-13). The wrapper stays app-identity-agnostic; the inner
+    // code owns the per-window value.
+    let net_ms = locator::a11y::CONTEXT_BUDGET_MS.max(locator::a11y::EXCEL_CONTEXT_BUDGET_MS);
+    let budget = std::time::Duration::from_millis(net_ms as u64);
     match tokio::time::timeout(
         budget,
         tokio::task::spawn_blocking(move || enumerate_context_snapshot(hwnd)),
@@ -1465,6 +1474,16 @@ async fn guide(
     let timing_provider = router.config.api_provider.clone();
     let ai_started = std::time::Instant::now();
 
+    // The original user request, restated each continuation turn as a language + goal
+    // anchor (see prompts::language_anchor — fixes Qwen drifting to Chinese on multi-turn
+    // English sessions). Empty for the first turn, where the request IS the prompt.
+    let original_task = router
+        .session_manager
+        .current_session
+        .as_ref()
+        .map(|s| s.task_description.clone())
+        .unwrap_or_default();
+
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let summary = {
             let g = state.guidance.lock();
@@ -1478,7 +1497,11 @@ async fn guide(
                 Here is the current screen. Please provide the next instruction.",
             )
         };
-        let prompt = add_grid(base);
+        let prompt = format!(
+            "{}{}",
+            add_grid(base),
+            crate::ai::prompts::language_anchor(&original_task)
+        );
         (
             router
                 .send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk)
@@ -1490,7 +1513,11 @@ async fn guide(
             let g = state.guidance.lock();
             g.state_summary.clone()
         };
-        let prompt = add_grid(task.clone());
+        let prompt = format!(
+            "{}{}",
+            add_grid(task.clone()),
+            crate::ai::prompts::language_anchor(&original_task)
+        );
         (
             router
                 .send_guidance_request(&prompt, Some(&screenshot_b64), Some(&summary), on_chunk)
@@ -2112,10 +2139,22 @@ async fn send_correction(
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
 
+    // Same language + goal anchor as guide()'s continuation turns — a correction is a
+    // multi-turn continuation, equally prone to the Chinese-drift feedback loop. `router`
+    // is already locked above (line ~2108); reuse it, don't re-lock (tokio Mutex isn't
+    // re-entrant — a second lock().await here would deadlock).
+    let original_task = router
+        .session_manager
+        .current_session
+        .as_ref()
+        .map(|s| s.task_description.clone())
+        .unwrap_or_default();
+    let anchor = crate::ai::prompts::language_anchor(&original_task);
+
     let final_user_text = if !window_context.is_empty() {
-        format!("{user_text_owned}\n{window_context}")
+        format!("{user_text_owned}\n{window_context}{anchor}")
     } else {
-        user_text_owned
+        format!("{user_text_owned}{anchor}")
     };
     let user_text = final_user_text.as_str();
 
