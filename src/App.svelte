@@ -15,6 +15,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
   import HotkeyInput from "./HotkeyInput.svelte";
   import { prettyHotkey } from "./lib/hotkey";
+  import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
 
   type Rect = { x: number; y: number; width: number; height: number };
   type LocateResult = { bbox: Rect; name: string; role: string; confidence: number };
@@ -244,25 +245,14 @@ See the LICENSE file in the root of this repository for complete details.
   // Surfaces a soft banner over the instruction so the user knows the
   // guidance may be referring to state that no longer exists.
   let staleResponse = $state(false);
-  // Managed provider (S.1 / S.2) state
-  let freeRemaining = $state<number | null>(null);
-  let coinBalance = $state<number | null>(null);       // µ$ (divide by 5_000 for coins; 1 coin = $0.005)
-  let managedTier = $state<"free" | "paid">("free");
-  // Mirrors the account's real tier, full stop — deliberately NOT aware of
-  // free_remaining. A 2026-07-11 fix briefly made this show "free" whenever
-  // free_remaining > 0 (reasoning: "which pool does my next request actually
-  // draw from"), which had a real regression: a genuine paying customer with
-  // unused free requests got the free-tier UI forced on them — no quality-
-  // tier picker, no way to see/choose paid mode, even with thousands of coins
-  // on the account (reported live the same day). Reverted. The relay's
-  // free-before-paid routing fix (same day) is what actually makes this safe
-  // — free requests get drawn down first regardless of what this shows or
-  // what tier is selected, so the UI is free to just tell the truth: are you
-  // a paying customer or not. Free-remaining count is shown separately
-  // (Billing tab), unconditionally, regardless of this value.
-  function deriveManagedTier(tier: string, _freeRemainingVal: number | null): "free" | "paid" {
-    return tier === "paid" ? "paid" : "free";
-  }
+  // Managed provider (S.1 / S.2) state now lives in the billing store
+  // (src/lib/billing.svelte.ts) — billing.freeRemaining/coinBalanceMicro/tier used to be
+  // three $states here written from 6+ places, the root of the F1/F6 bug class.
+  // Read billing.freeRemaining / billing.coinBalanceMicro / billing.tier; mutate
+  // only via the store's methods. tier mirrors the account's real relay-reported
+  // tier, full stop — deliberately NOT aware of free_remaining (a paying customer
+  // with unused free requests must keep the paid UI; the relay's free-before-paid
+  // routing is what makes that safe). History + rationale in the store.
   let showTrialExhausted = $state(false);
   // Which reason opened the modal above — free requests genuinely used up, vs.
   // a paid tier selected without enough coins (e.g. "Free" fell back to a paid
@@ -1075,13 +1065,9 @@ See the LICENSE file in the root of this repository for complete details.
   // round-trip is over (whether the user paid or cancelled), so the UI shouldn't
   // stay stuck on "Checkout open in browser…".
   async function refreshBalance() {
-    try {
-      const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
-      freeRemaining = bal.free_remaining;
-      coinBalance = bal.coin_balance_microdollars;
-      managedTier = deriveManagedTier(bal.tier, bal.free_remaining);
-      if (managedTier === "paid") showTrialExhausted = false;
-    } catch (_) {}
+    if (await billing.refresh()) {
+      if (billing.tier === "paid") showTrialExhausted = false;
+    }
     oauthPending = false;
     checkoutPending = false;
     await setPanelOnTop(true); // back from the browser — restore always-on-top
@@ -1214,7 +1200,7 @@ See the LICENSE file in the root of this repository for complete details.
       showChangePw = false;
       showDeleteConfirm = false;
       await loadAccountInfo();
-      await refreshBalance(); // re-derives managedTier from the fresh anon session's real tier ('free')
+      await refreshBalance(); // re-derives billing.tier from the fresh anon session's real tier ('free')
       addToHistory("system", "Signed out — you're back on the free tier.");
     } catch (e) {
       acctError = String(e);
@@ -1743,7 +1729,7 @@ See the LICENSE file in the root of this repository for complete details.
   // option isn't possible, so this can't desync from the relay's own
   // insufficient_coins check; that stays the real enforcement).
   function canAffordTier(tier: string): boolean {
-    return (coinBalance ?? 0) >= TIER_COINS[tier] * 5_000;
+    return (billing.coinBalanceMicro ?? 0) >= TIER_COINS[tier] * MICRO_PER_COIN;
   }
   let providerLabel = $derived(
     // Free users have no quality tier — the Speed/Regular/Smart picker is paid-only
@@ -1751,7 +1737,7 @@ See the LICENSE file in the root of this repository for complete details.
     // for a logged-out/free user is misleading. Show "Managed (free)" instead; only a
     // paid user sees their selected quality tier.
     settingsForm.api_provider === "managed"
-      ? (managedTier === "paid" ? `Managed (${TIER_LABELS[settingsForm.managed_tier] ?? "Regular"})` : "Managed (free)")
+      ? (billing.tier === "paid" ? `Managed (${TIER_LABELS[settingsForm.managed_tier] ?? "Regular"})` : "Managed (free)")
     : settingsForm.api_provider === "anthropic" ? `Anthropic · ${settingsForm.anthropic_model}`
     : settingsForm.api_provider === "gemini" ? `Google Gemini · ${settingsForm.gemini_model}`
     : settingsForm.api_provider === "openai" ? `OpenAI · ${settingsForm.openai_model}`
@@ -1891,29 +1877,25 @@ See the LICENSE file in the root of this repository for complete details.
       } catch (e) {
         addToHistory("system", "⚠️ Managed sign-in failed: " + String(e));
       }
-      try {
-        const bal = await invokeReady<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
-        freeRemaining = bal.free_remaining;
-        coinBalance = bal.coin_balance_microdollars;
-        managedTier = deriveManagedTier(bal.tier, bal.free_remaining);
-      } catch (_) {}
+      // Cold-start balance fetch — invokeReady retries while Rust setup() is
+      // still registering state on a fresh install.
+      await billing.refresh(invokeReady);
     }
 
     listen<number>("balance_update", (event) => {
-      freeRemaining = event.payload;
-      if (freeRemaining <= 0 && managedTier === "free") showTrialExhausted = true;
+      billing.applyFreeRemaining(event.payload);
+      if (event.payload <= 0 && billing.tier === "free") showTrialExhausted = true;
     });
 
     // Paid tier — coins debited server-side after each request; relay returns
     // the new µ$ balance in X-Coin-Balance and the backend forwards it here.
     listen<number>("coin_balance_update", (event) => {
-      coinBalance = event.payload;
-      managedTier = "paid";
+      billing.applyCoinBalance(event.payload);
       // Balance just hit zero on a paid account — the modal's copy must say
       // "not enough coins", not the default "free trial used" (audit F6: this
       // used to open the modal without setting the reason, showing whichever
       // copy was last displayed).
-      if (coinBalance <= 0) {
+      if (event.payload <= 0) {
         exhaustedReason = "coins";
         showTrialExhausted = true;
       }
@@ -1926,7 +1908,7 @@ See the LICENSE file in the root of this repository for complete details.
     });
 
     listen("trial_exhausted", () => {
-      freeRemaining = 0;
+      billing.markFreeExhausted();
       exhaustedReason = "free";
       showTrialExhausted = true;
     });
@@ -1955,12 +1937,7 @@ See the LICENSE file in the root of this repository for complete details.
     listen("oauth_complete", async () => {
       oauthPending = false;
       // Refresh balance — tier is now paid if the user had pre-existing coins.
-      try {
-        const bal = await invoke<{ tier: string; free_remaining: number; coin_balance_microdollars: number }>("get_balance");
-        freeRemaining = bal.free_remaining;
-        coinBalance = bal.coin_balance_microdollars;
-        managedTier = deriveManagedTier(bal.tier, bal.free_remaining);
-      } catch (_) {}
+      await billing.refresh();
     });
 
     // Emitted after any account change (sign in/up/out, delete) so the Account
@@ -2032,7 +2009,7 @@ See the LICENSE file in the root of this repository for complete details.
         {/if}
         <span class="header-shared-caret">▾</span>
       </button>
-      {#if settingsForm.api_provider === "managed" && managedTier === "paid" && coinBalance !== null}
+      {#if settingsForm.api_provider === "managed" && billing.tier === "paid" && billing.coinBalanceMicro !== null}
         <!-- Paid users: icon only, no number, no alarm styling. It's a purchased
              balance, not a countdown to being cut off — a shrinking number in the
              title bar reads as dunning, not help. The exact count is one click
@@ -2041,8 +2018,8 @@ See the LICENSE file in the root of this repository for complete details.
              the opposite treatment just below: a visible, reddening count is an
              intentional, appropriate nudge before their trial runs out. -->
         <button class="header-balance" onclick={() => openSettings("billing")} title="View billing">🪙</button>
-      {:else if settingsForm.api_provider === "managed" && freeRemaining !== null}
-        <button class="header-balance" class:header-balance-low={freeRemaining <= 5} onclick={() => openSettings("billing")} title="Get more requests">{freeRemaining} left</button>
+      {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null}
+        <button class="header-balance" class:header-balance-low={billing.freeRemaining <= 5} onclick={() => openSettings("billing")} title="Get more requests">{billing.freeRemaining} left</button>
       {/if}
       {#if pendingUpdate}
         <button class="header-update" onclick={() => openAbout("about")} title="Update available">
@@ -2692,17 +2669,17 @@ See the LICENSE file in the root of this repository for complete details.
           {#if settingsTab === "billing"}
             <div class="setting-group">
               <span class="setting-label">Account</span>
-              <p class="setting-hint">{managedTier === "paid" ? "Paid (coins)" : "Free trial"}</p>
+              <p class="setting-hint">{billing.tier === "paid" ? "Paid (coins)" : "Free trial"}</p>
             </div>
-            {#if coinBalance !== null && coinBalance > 0}
+            {#if billing.coins !== null && billing.coins > 0}
               <div class="setting-group">
                 <span class="setting-label">Coin balance</span>
-                <p class="setting-hint">{Math.floor(coinBalance / 5_000)} coins</p>
+                <p class="setting-hint">{billing.coins} coins</p>
               </div>
             {/if}
             <div class="setting-group">
               <span class="setting-label">Free requests</span>
-              <p class="setting-hint">{freeRemaining ?? "—"} remaining of 30</p>
+              <p class="setting-hint">{billing.freeRemaining ?? "—"} remaining of 30</p>
             </div>
             <p class="setting-hint">Change your <strong>quality tier</strong> (which model answers, and its coin cost) on the <strong>Provider</strong> tab.</p>
 
@@ -2761,8 +2738,8 @@ See the LICENSE file in the root of this repository for complete details.
                 <span class="setting-label">Signed in as</span>
                 <p class="setting-hint"><strong>{accountInfo?.email}</strong></p>
               </div>
-              {#if coinBalance !== null && coinBalance > 0}
-                <p class="setting-hint">{Math.floor(coinBalance / 5_000)} coins · your balance and purchases stay with this account.</p>
+              {#if billing.coins !== null && billing.coins > 0}
+                <p class="setting-hint">{billing.coins} coins · your balance and purchases stay with this account.</p>
               {/if}
 
               {#if acctShowChangePw}
@@ -2939,8 +2916,8 @@ See the LICENSE file in the root of this repository for complete details.
               <!-- Quality tier / free preference. Persisted via Apply/OK, defaults to
                    "regular" for a never-configured install (SETTINGS_DEFAULTS) and
                    otherwise remembers whatever was last saved. Always shown regardless
-                   of managedTier (2026-07-11 fix — previously hidden entirely once
-                   managedTier was "paid", so a real paying customer with unused free
+                   of billing.tier (2026-07-11 fix — previously hidden entirely once
+                   billing.tier was "paid", so a real paying customer with unused free
                    requests had no way to see or pick "Free" at all). The relay always
                    draws down any remaining free requests first, automatically,
                    regardless of this selection (2026-07-11 routing fix) — so "Free"
@@ -3469,8 +3446,8 @@ See the LICENSE file in the root of this repository for complete details.
           <!-- Section 1 — Navisual managed account (coins or free requests) -->
           <div class="setting-group">
             <p class="setting-label" style="margin:0 0 8px">Navisual account</p>
-            {#if managedTier === "paid" && coinBalance != null}
-              <p class="setting-hint">🪙 {Math.floor(coinBalance / 5_000).toLocaleString()} coins left · {TIER_LABELS[settingsForm.managed_tier] ?? "Regular"} tier · {TIER_COINS[settingsForm.managed_tier] ?? 12} coins/request</p>
+            {#if billing.tier === "paid" && billing.coins != null}
+              <p class="setting-hint">🪙 {billing.coins.toLocaleString()} coins left · {TIER_LABELS[settingsForm.managed_tier] ?? "Regular"} tier · {TIER_COINS[settingsForm.managed_tier] ?? 12} coins/request</p>
             {:else if usageManagedRemaining != null}
               <p class="setting-hint">Free tier — {usageManagedRemaining} / 30 requests left</p>
             {:else}
