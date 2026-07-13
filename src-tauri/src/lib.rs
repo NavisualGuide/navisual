@@ -280,7 +280,9 @@ fn compute_ai_bbox_for_step(
     let rect = capture_rect?;
     let (ai_w, ai_h) = capture::ai_image_dims(rect.width, rect.height);
     let format = ai::bbox::bbox_format_for_provider(provider);
-    ai::bbox::ai_bbox_to_screen_rect(raw, format, ai_w, ai_h, rect)
+    // Boundary unwrap: the VdRect (virtual-desktop physical pixels) feeds the
+    // overlay + locator options, which consume exactly that space.
+    ai::bbox::ai_bbox_to_screen_rect(raw, format, ai_w, ai_h, rect).map(|vd| vd.into_inner())
 }
 
 fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {

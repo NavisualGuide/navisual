@@ -9,9 +9,12 @@
 //!
 //! `ai_bbox_to_screen_rect` takes whatever the AI returned and the active
 //! provider name, plus the actual AI-image dimensions and the screen rect the
-//! image represents, and produces a `Rect` in virtual-desktop physical pixels
-//! that the overlay can draw directly.
+//! image represents, and produces a [`VdRect`] in virtual-desktop physical
+//! pixels that the overlay can draw directly. The conversion itself is the
+//! typed-space pipeline in [`crate::ai::spaces`] (NormBox → AiRect → VdRect);
+//! this module adds the provider-format dispatch and the whole-frame policy.
 
+use crate::ai::spaces::{AiRect, NormBox, VdRect};
 use crate::capture::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,11 +57,16 @@ pub fn bbox_is_decisive(model: &str, distrust_csv: &str) -> bool {
         .any(|bad| m.contains(&bad))
 }
 
-/// Convert an AI-returned `[ymin, xmin, ymax, xmax]` to a screen Rect.
+/// Convert an AI-returned `[ymin, xmin, ymax, xmax]` to a screen rect in
+/// VIRTUAL-DESKTOP PHYSICAL pixels ([`VdRect`] — unwrap at the consuming
+/// boundary only).
 ///
-/// Auto-corrects format mismatch: if all four values are ≤ 1.001 we treat
-/// it as 0–1 normalized; if all are ≤ 1000.0 but `format=Pixel` and the
-/// AI-image is much larger than 1000 px, we still trust the declared format.
+/// The space hops are the typed pipeline in [`crate::ai::spaces`]:
+/// `NormBox::from_raw` (validation + 0–1 auto-detect) → `to_ai_rect` (AI-image
+/// pixels, clamped) → `to_virtual_desktop` (un-downscale + capture origin).
+/// This function adds what ISN'T space conversion: provider-format dispatch
+/// (the reserved `Pixel` contract enters the pipeline at [`AiRect`]) and the
+/// whole-frame rejection policy.
 ///
 /// `capture_rect` is the original window/desktop region in virtual-desktop
 /// physical pixels (what `capture_active_window_jpeg` returned).
@@ -69,78 +77,34 @@ pub fn ai_bbox_to_screen_rect(
     ai_w: u32,
     ai_h: u32,
     capture_rect: Rect,
-) -> Option<Rect> {
-    let [ymin, xmin, ymax, xmax] = raw;
-
-    // Sanity checks — any NaN or negative-extent box is bogus.
-    if !ymin.is_finite() || !xmin.is_finite() || !ymax.is_finite() || !xmax.is_finite() {
-        return None;
-    }
-    if ymax <= ymin || xmax <= xmin {
-        return None;
-    }
-    if ai_w == 0 || ai_h == 0 {
-        return None;
-    }
-
-    // Auto-detect 0–1 normalized (some models do this; rare but cheap to catch).
-    let max_val = ymin.max(xmin).max(ymax).max(xmax);
-    let effective_format = if max_val <= 1.001 {
-        BboxFormat::Normalized1000 // we'll scale by 1000 below — but max is 1.0
-    } else {
-        format
-    };
-
-    // Convert raw → pixel coords in the AI-image.
-    let (ai_ymin, ai_xmin, ai_ymax, ai_xmax) = match effective_format {
-        BboxFormat::Normalized1000 => {
-            // Distinguish 0–1 vs 0–1000: scale up either way.
-            let scale = if max_val <= 1.001 { 1.0 } else { 1000.0 };
-            (
-                (ymin / scale) * ai_h as f64,
-                (xmin / scale) * ai_w as f64,
-                (ymax / scale) * ai_h as f64,
-                (xmax / scale) * ai_w as f64,
-            )
+) -> Option<VdRect> {
+    let ai_rect = match format {
+        // NormBox::from_raw auto-detects the 0–1 variant, so a model emitting
+        // fractions still lands in the right place.
+        BboxFormat::Normalized1000 => NormBox::from_raw(raw)?.to_ai_rect(ai_w, ai_h)?,
+        BboxFormat::Pixel => {
+            // Auto-detect 0–1 normalized even under the pixel contract (some
+            // models do this; rare but cheap to catch — pre-existing behavior).
+            let max_val = raw.iter().cloned().fold(f64::MIN, f64::max);
+            if max_val <= 1.001 {
+                NormBox::from_raw(raw)?.to_ai_rect(ai_w, ai_h)?
+            } else {
+                AiRect::from_ai_pixels(raw, ai_w, ai_h)?
+            }
         }
-        BboxFormat::Pixel => (ymin, xmin, ymax, xmax),
     };
-
-    // Clamp to AI-image bounds (model may overshoot).
-    let ai_xmin = ai_xmin.clamp(0.0, ai_w as f64);
-    let ai_xmax = ai_xmax.clamp(0.0, ai_w as f64);
-    let ai_ymin = ai_ymin.clamp(0.0, ai_h as f64);
-    let ai_ymax = ai_ymax.clamp(0.0, ai_h as f64);
-    if ai_xmax - ai_xmin < 1.0 || ai_ymax - ai_ymin < 1.0 {
-        return None;
-    }
 
     // Reject a box that spans almost the whole frame: it carries no localization
     // signal (the model failed to point at anything specific), and as a locator
     // filter / proximity centre it's pure noise that drags the pick toward screen
     // centre. Weak grounders (Nemotron especially) emit these. Falling back to
     // text-only locating is strictly better than steering on a whole-screen box.
-    let cover_x = (ai_xmax - ai_xmin) / ai_w as f64;
-    let cover_y = (ai_ymax - ai_ymin) / ai_h as f64;
+    let (cover_x, cover_y) = ai_rect.coverage();
     if cover_x >= 0.85 && cover_y >= 0.85 {
         return None;
     }
 
-    // Scale AI-image pixels → capture-rect pixels (un-downscale).
-    let sx = capture_rect.width as f64 / ai_w as f64;
-    let sy = capture_rect.height as f64 / ai_h as f64;
-
-    let screen_x = capture_rect.x as f64 + ai_xmin * sx;
-    let screen_y = capture_rect.y as f64 + ai_ymin * sy;
-    let screen_w = (ai_xmax - ai_xmin) * sx;
-    let screen_h = (ai_ymax - ai_ymin) * sy;
-
-    Some(Rect {
-        x: screen_x.round() as i32,
-        y: screen_y.round() as i32,
-        width: screen_w.round().max(1.0) as u32,
-        height: screen_h.round().max(1.0) as u32,
-    })
+    Some(ai_rect.to_virtual_desktop(capture_rect))
 }
 
 #[cfg(test)]
@@ -166,7 +130,8 @@ mod tests {
             500,
             capture(0, 0, 2000, 1000),
         )
-        .unwrap();
+        .unwrap()
+        .into_inner();
         assert_eq!((r.x, r.y, r.width, r.height), (400, 100, 400, 200));
     }
 
@@ -180,7 +145,8 @@ mod tests {
             500,
             capture(0, 0, 2000, 1000),
         )
-        .unwrap();
+        .unwrap()
+        .into_inner();
         assert_eq!((a.x, a.y, a.width, a.height), (400, 100, 400, 200));
     }
 
@@ -195,7 +161,8 @@ mod tests {
             500,
             capture(-1920, 50, 1000, 500),
         )
-        .unwrap();
+        .unwrap()
+        .into_inner();
         assert_eq!((r.x, r.y, r.width, r.height), (-1920, 50, 600, 300));
     }
 
@@ -210,7 +177,8 @@ mod tests {
             500,
             capture(0, 0, 2000, 1000),
         )
-        .unwrap();
+        .unwrap()
+        .into_inner();
         assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 2000, 700));
     }
 

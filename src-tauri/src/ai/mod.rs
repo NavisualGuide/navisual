@@ -10,5 +10,6 @@ pub mod pricing;
 pub mod prompts;
 pub mod router;
 pub mod session;
+pub mod spaces;
 pub mod streaming;
 pub mod types;
