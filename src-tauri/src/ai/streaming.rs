@@ -67,9 +67,32 @@ pub fn instruction_delta(partial_json: &str, already_emitted: usize) -> (String,
     }
 }
 
+/// How many steps have STARTED streaming in a partial `navigate_step` JSON: the count
+/// of `"instruction"` keys seen so far. Monotonic (the buffer only appends), so the
+/// panel can show "Step 1 of ~N" live as later steps arrive instead of discarding that
+/// signal until the response completes (design suggestion #2, 2026-07-13).
+///
+/// Exact against values-that-mention-instructions: inside a JSON string value the
+/// quotes would be escaped (`\"instruction\"`), so the literal `"instruction"`-then-`:`
+/// pattern can only match a real key. The count is still an estimate of the FINAL step
+/// count (hence "~N" in the UI) — more steps may follow.
+pub fn count_streamed_steps(partial_json: &str) -> usize {
+    let key = "\"instruction\"";
+    let mut count = 0;
+    let mut rest = partial_json;
+    while let Some(idx) = rest.find(key) {
+        let after = &rest[idx + key.len()..];
+        if after.trim_start().starts_with(':') {
+            count += 1;
+        }
+        rest = after;
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract_visible_instruction, instruction_delta};
+    use super::{count_streamed_steps, extract_visible_instruction, instruction_delta};
 
     #[test]
     fn extracts_first_instruction_not_last() {
@@ -123,5 +146,22 @@ mod tests {
     fn empty_before_instruction_appears() {
         assert_eq!(extract_visible_instruction(r#"{"steps":[{"#), "");
         assert_eq!(instruction_delta(r#"{"steps":[{"#, 0), (String::new(), 0));
+    }
+
+    #[test]
+    fn counts_steps_as_they_stream() {
+        assert_eq!(count_streamed_steps(r#"{"steps":[{"#), 0);
+        assert_eq!(count_streamed_steps(r#"{"steps":[{"instruction":"Click"#), 1);
+        assert_eq!(
+            count_streamed_steps(
+                r#"{"steps":[{"instruction":"Click File","checkpoint":true},{"instruction":"Con"#
+            ),
+            2
+        );
+        // Key mentioned INSIDE a value is escaped in raw JSON — must not count.
+        assert_eq!(
+            count_streamed_steps(r#"{"steps":[{"instruction":"type \"instruction\": here"#),
+            1
+        );
     }
 }

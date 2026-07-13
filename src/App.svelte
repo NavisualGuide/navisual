@@ -203,6 +203,9 @@ See the LICENSE file in the root of this repository for complete details.
   let steps = $state<GuidanceStep[]>([]);
   let stepIndex = $state(0);
   let currentInstruction = $state("");
+  // How many steps have started streaming in the in-flight response (backend
+  // stream_chunk.steps_seen). >1 while thinking → show "Step 1 of ~N" live.
+  let streamStepsSeen = $state(0);
   let locateResult = $state<LocateResult | null>(null);
   // Backend hid the pointer because the target window is occluded (not a locate miss).
   let pointerOccluded = $state(false);
@@ -634,6 +637,11 @@ See the LICENSE file in the root of this repository for complete details.
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
   let elapsedStart = 0;
   let requestToken = 0;
+  // The most recent real user request text — threaded to speak() as the auto-language
+  // hint (Rule 19 pins the reply language to the request, so its script outranks the
+  // OS locale when the reply itself is Latin-ambiguous). Not reactive — read only
+  // inside applyResponse's speak call.
+  let lastRequestHint = "";
 
   const PANEL_W = 420;
   const PANEL_H = 600;
@@ -766,7 +774,7 @@ See the LICENSE file in the root of this repository for complete details.
         if (!currentStep) return;
         screenChangeDebounce = Date.now();
         addToHistory("system", "Screen changed — checking next step…");
-        nextStep(true); // autopilot-triggered — don't log an implicit "worked" (C3)
+        nextStep(true); // autopilot-triggered — logs "worked_auto", not "worked" (C3 + taxonomy split)
       } catch (_) {}
     }, 500);
   }
@@ -1415,6 +1423,7 @@ See the LICENSE file in the root of this repository for complete details.
     steps = [];
     stepIndex = 0;
     currentInstruction = "";
+    streamStepsSeen = 0;
     locateResult = null;
     locateTrace = null;
     sessionId = "";
@@ -1455,7 +1464,7 @@ See the LICENSE file in the root of this repository for complete details.
         meta = meta ? `${meta} · ${tok}` : tok;
       }
       addToHistory("ai", cleanInstruction, meta);
-      if (!isMuted) invoke("speak", { text: cleanInstruction, lang: settingsForm.voice_language, fallbackLocale: navigator.language }).catch(() => {});
+      if (!isMuted) invoke("speak", { text: cleanInstruction, lang: settingsForm.voice_language, requestHint: lastRequestHint, fallbackLocale: navigator.language }).catch(() => {});
     }
     if (res.debug_screenshot_path) {
       addToHistory("system", `📷 ${res.debug_screenshot_path}`);
@@ -1472,12 +1481,14 @@ See the LICENSE file in the root of this repository for complete details.
     isOverlayCleared = false;
     const taskText = task.trim();
     task = "";
+    lastRequestHint = taskText;
     clearPrefill();
     // Keep session context when in the middle of a task; start fresh from idle/error.
     const isReply = phase === "guiding" || phase === "needs_input";
     const prevPhase = phase;
     const userEntryId = await addToHistory("user", taskText);
     currentInstruction = "";
+    streamStepsSeen = 0;
     staleResponse = false;
     pointerOccluded = false;
     phase = "thinking";
@@ -1511,9 +1522,11 @@ See the LICENSE file in the root of this repository for complete details.
     isOverlayCleared = false;
     // A HUMAN pressing Next is an implicit success signal for the current step;
     // an AUTOPILOT-triggered advance (a screen change fired the poll) is not —
-    // it's automation, not confirmation. Logging it would inflate the per-model
-    // success rate, which SDD §10 defines as human-validated (audit C3).
-    if (phase === "guiding" && !viaAutopilot) logFeedback("worked", "");
+    // it's automation, not confirmation, so it logs under a DISTINCT kind
+    // (worked_auto) instead of inflating the human-validated per-model success
+    // rate (SDD §10; audit C3 + feedback-taxonomy split 2026-07-13). Dashboards
+    // filter kind='worked' for success; worked_auto measures autopilot itself.
+    if (phase === "guiding") logFeedback(viaAutopilot ? "worked_auto" : "worked", "");
     const nextIdx = stepIndex + 1;
     const prevPhase = phase;
     if (nextIdx >= steps.length) {
@@ -1521,6 +1534,7 @@ See the LICENSE file in the root of this repository for complete details.
       const completed = currentInstruction || lastCompletedInstruction;
       lastCompletedInstruction = completed;
       currentInstruction = "";
+      streamStepsSeen = 0;
       phase = "thinking";
       startTimer();
       const token = ++requestToken;
@@ -1583,6 +1597,7 @@ See the LICENSE file in the root of this repository for complete details.
     const prevPhase = phase;
     const corrEntryId = await addToHistory("correction", rawNote ? `${label} — ${rawNote}` : `${label} — re-analysing…`);
     currentInstruction = "";
+    streamStepsSeen = 0;
     staleResponse = false;
     pointerOccluded = false;
     phase = "thinking";
@@ -1822,9 +1837,12 @@ See the LICENSE file in the root of this repository for complete details.
       show_ai_bbox: settingsForm.debug_show_ai_bbox,
     }).catch(() => {});
 
-    listen<{ delta: string }>("stream_chunk", (event) => {
+    listen<{ delta: string; steps_seen: number }>("stream_chunk", (event) => {
       if (phase === "thinking" || phase === "guiding") {
         currentInstruction += event.payload.delta;
+        // Live step counter: >1 means later steps are already streaming past —
+        // show "Step 1 of ~N" instead of discarding that signal until completion.
+        streamStepsSeen = event.payload.steps_seen ?? 0;
       }
     });
 
@@ -2051,7 +2069,13 @@ See the LICENSE file in the root of this repository for complete details.
     {#if currentInstruction && (phase === "guiding" || phase === "needs_input" || (isThinking && currentInstruction))}
       <section class="latest-box">
         <div class="latest-header">
-          <span class="step-counter">Step {stepIndex + 1} of {steps.length}</span>
+          {#if isThinking}
+            <!-- Streaming: later steps are already flowing past — surface the live
+                 count ("~" because more may follow) instead of discarding it. -->
+            <span class="step-counter">{streamStepsSeen > 1 ? `Step 1 of ~${streamStepsSeen}` : "Step 1"}</span>
+          {:else}
+            <span class="step-counter">Step {stepIndex + 1} of {steps.length}</span>
+          {/if}
           {#if steps[stepIndex]?.clipboard}
             <span class="badge badge-clip" title="Text copied to clipboard">📋 copied</span>
           {/if}

@@ -86,7 +86,8 @@ impl DeepSeekClient {
         &self,
         messages: Vec<Value>,
         model_override: Option<&str>,
-        on_chunk: &mut impl FnMut(&str),
+        // (delta, steps_seen) — see streaming::count_streamed_steps.
+        on_chunk: &mut impl FnMut(&str, usize),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
@@ -134,7 +135,7 @@ impl DeepSeekClient {
     async fn stream_once(
         &self,
         payload: &Value,
-        on_chunk: &mut impl FnMut(&str),
+        on_chunk: &mut impl FnMut(&str, usize),
     ) -> Result<Option<(NavigateStepResponse, u64, u64)>> {
         let response = self
             .client
@@ -242,7 +243,10 @@ impl DeepSeekClient {
                                 emitted_instruction_len,
                             );
                             if !delta.is_empty() {
-                                on_chunk(&delta);
+                                on_chunk(
+                                    &delta,
+                                    crate::ai::streaming::count_streamed_steps(&accumulated_text),
+                                );
                             }
                             emitted_instruction_len = new_len;
                         }
@@ -258,7 +262,7 @@ impl DeepSeekClient {
             if let Some(resp) = parse_first_nav_response(&text) {
                 if emitted_instruction_len == 0 {
                     if let Some(step) = resp.steps.first() {
-                        on_chunk(&step.instruction);
+                        on_chunk(&step.instruction, resp.steps.len().max(1));
                     }
                 }
                 return Ok(Some((resp, input_tokens, output_tokens)));
@@ -267,7 +271,7 @@ impl DeepSeekClient {
             // text as a single instruction so the user still gets guidance.
             let fallback = wrap_as_single_step(&text);
             if emitted_instruction_len == 0 {
-                on_chunk(&fallback.steps[0].instruction);
+                on_chunk(&fallback.steps[0].instruction, 1);
             }
             return Ok(Some((fallback, input_tokens, output_tokens)));
         }
@@ -278,7 +282,7 @@ impl DeepSeekClient {
             if let Some(start) = reasoning_text.find('{') {
                 if let Some(resp) = parse_first_nav_response(&reasoning_text[start..]) {
                     if let Some(step) = resp.steps.first() {
-                        on_chunk(&step.instruction);
+                        on_chunk(&step.instruction, resp.steps.len().max(1));
                     }
                     log::info!("{}: recovered answer from reasoning_content", self.name);
                     return Ok(Some((resp, input_tokens, output_tokens)));

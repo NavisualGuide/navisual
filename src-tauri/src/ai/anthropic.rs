@@ -54,7 +54,9 @@ impl AnthropicClient {
         &self,
         messages: Vec<Value>,
         model_override: Option<&str>,
-        on_chunk: &mut impl FnMut(&str),
+        // (delta, steps_seen): the new instruction text, and how many steps have started
+        // streaming so far (count_streamed_steps) — the panel shows "Step 1 of ~N" live.
+        on_chunk: &mut impl FnMut(&str, usize),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
@@ -180,7 +182,12 @@ impl AnthropicClient {
                                     emitted_instruction_len,
                                 );
                                 if !delta.is_empty() {
-                                    on_chunk(&delta);
+                                    on_chunk(
+                                        &delta,
+                                        crate::ai::streaming::count_streamed_steps(
+                                            &accumulated_json,
+                                        ),
+                                    );
                                 }
                                 emitted_instruction_len = new_len;
                             }

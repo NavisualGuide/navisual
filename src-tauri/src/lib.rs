@@ -907,6 +907,11 @@ struct GuideResponse {
 #[derive(serde::Serialize, Clone)]
 struct StreamChunkPayload {
     delta: String,
+    /// How many steps have STARTED streaming in the partial response so far
+    /// (streaming::count_streamed_steps). The panel shows "Step 1 of ~N" live while
+    /// the response is still forming, instead of discarding that signal until
+    /// completion. Monotonic within one response.
+    steps_seen: usize,
 }
 
 /// Phase 0.2: payload for "Shared: <App>" header chip and `app_changed` event.
@@ -1440,7 +1445,7 @@ async fn guide(
     // locate time (seconds later). Fired once, on a background thread; no-op off-Chromium.
     let prime_hwnd = new_hwnd_opt;
     let mut primed = false;
-    let on_chunk = move |chunk: &str| {
+    let on_chunk = move |chunk: &str, steps_seen: usize| {
         if !primed {
             primed = true;
             #[cfg(windows)]
@@ -1459,6 +1464,7 @@ async fn guide(
             "stream_chunk",
             StreamChunkPayload {
                 delta: chunk.to_string(),
+                steps_seen,
             },
         );
         if let Ok(update) =
@@ -2170,7 +2176,7 @@ async fn send_correction(
     // Warm the target window's UIA tree on first stream chunk (see guide()).
     let prime_hwnd = new_hwnd;
     let mut primed = false;
-    let on_chunk = move |chunk: &str| {
+    let on_chunk = move |chunk: &str, steps_seen: usize| {
         if !primed {
             primed = true;
             #[cfg(windows)]
@@ -2189,6 +2195,7 @@ async fn send_correction(
             "stream_chunk",
             StreamChunkPayload {
                 delta: chunk.to_string(),
+                steps_seen,
             },
         );
         if let Ok(update) =
@@ -2415,14 +2422,21 @@ async fn send_correction(
 fn speak(
     text: String,
     lang: Option<String>,
-    // OS UI locale (navigator.language) — used only as the fallback when lang is "auto"
-    // and the reply is Latin script (script detection can't tell en/fr/es/de apart). C7.
+    // The user's ORIGINAL request text — in "auto" mode its script outranks the OS
+    // locale when the reply itself is Latin-ambiguous (Rule 19 pins the reply language
+    // to the request; design suggestion #7). Reply script still wins when strong.
+    request_hint: Option<String>,
+    // OS UI locale (navigator.language) — the last-resort fallback when both the reply
+    // and the request are Latin script (script detection can't tell en/fr/es/de apart). C7.
     fallback_locale: Option<String>,
     state: State<'_, AppState>,
 ) {
-    state
-        .tts
-        .speak(text, lang.unwrap_or_default(), fallback_locale.unwrap_or_default());
+    state.tts.speak(
+        text,
+        lang.unwrap_or_default(),
+        request_hint.unwrap_or_default(),
+        fallback_locale.unwrap_or_default(),
+    );
 }
 
 #[tauri::command]

@@ -74,7 +74,8 @@ impl OllamaClient {
         &self,
         messages: Vec<Value>,
         model_override: Option<&str>,
-        on_chunk: &mut impl FnMut(&str),
+        // (delta, steps_seen) — see streaming::count_streamed_steps.
+        on_chunk: &mut impl FnMut(&str, usize),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
@@ -194,7 +195,10 @@ impl OllamaClient {
                                 emitted_instruction_len,
                             );
                             if !delta.is_empty() {
-                                on_chunk(&delta);
+                                on_chunk(
+                                    &delta,
+                                    crate::ai::streaming::count_streamed_steps(&accumulated_text),
+                                );
                             }
                             emitted_instruction_len = new_len;
                         }
@@ -228,7 +232,7 @@ impl OllamaClient {
         if let Ok(step_response) = serde_json::from_str::<NavigateStepResponse>(json_text) {
             if !step_response.steps.is_empty() {
                 if emitted_instruction_len == 0 {
-                    on_chunk(&step_response.steps[0].instruction);
+                    on_chunk(&step_response.steps[0].instruction, step_response.steps.len());
                 }
                 return Ok((step_response, input_tokens, output_tokens));
             }
@@ -253,7 +257,7 @@ impl OllamaClient {
             suggested_tasks: Vec::new(),
         };
         if emitted_instruction_len == 0 {
-            on_chunk(&fallback.steps[0].instruction);
+            on_chunk(&fallback.steps[0].instruction, 1);
         }
         Ok((fallback, input_tokens, output_tokens))
     }

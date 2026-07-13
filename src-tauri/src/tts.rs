@@ -32,11 +32,13 @@ mod imp {
     }
 
     enum Msg {
-        /// (text, language, fallback_locale): `language` is a BCP-47 locale, or
-        /// "auto"/"" to detect from the text's script. `fallback_locale` is the OS UI
-        /// locale (e.g. "fr-FR"), used ONLY when script detection is ambiguous (Latin
-        /// script can't distinguish en/fr/es/de) — see `detect_lang`.
-        Speak(String, String, String),
+        /// (text, language, request_hint, fallback_locale): `language` is a BCP-47
+        /// locale, or "auto"/"" to detect. `request_hint` is the user's ORIGINAL
+        /// request text — Rule 19 pins the reply language to it, so in auto mode its
+        /// script is a better signal than re-guessing from an ambiguous reply.
+        /// `fallback_locale` is the OS UI locale (e.g. "fr-FR"), the last resort when
+        /// both are Latin-ambiguous — see `detect_lang`.
+        Speak(String, String, String, String),
         SetVoice(String),
         ListVoices(mpsc::SyncSender<Vec<VoiceInfo>>),
         Quit,
@@ -56,8 +58,16 @@ mod imp {
             Self { tx }
         }
 
-        pub fn speak(&self, text: String, lang: String, fallback_locale: String) {
-            let _ = self.tx.send(Msg::Speak(text, lang, fallback_locale));
+        pub fn speak(
+            &self,
+            text: String,
+            lang: String,
+            request_hint: String,
+            fallback_locale: String,
+        ) {
+            let _ = self
+                .tx
+                .send(Msg::Speak(text, lang, request_hint, fallback_locale));
         }
 
         /// Set the *preferred* voice (a WinRT VoiceInformation Id). Empty = no
@@ -80,15 +90,10 @@ mod imp {
         }
     }
 
-    /// Best-effort primary-language detection from script, for "auto" TTS.
-    ///
-    /// Non-Latin scripts are detected reliably (kana→ja, hangul→ko, han→zh, Cyrillic→ru,
-    /// Arabic→ar). Latin script is inherently ambiguous — en/fr/es/de/… all share it — so
-    /// it can't be told apart from the text alone; in that case fall back to the primary
-    /// subtag of `fallback_locale` (the OS UI locale, the user's default language), or "en"
-    /// if that's empty/also Latin-ambiguous-but-unknown. Fixes audit 2026-07-12 C7, where a
-    /// French/Spanish/German reply under `auto` always got an English voice.
-    fn detect_lang(text: &str, fallback_locale: &str) -> String {
+    /// Strong-script language signal: Some("ja"/"ko"/"zh"/"ru"/"ar") when the text
+    /// contains an unambiguous non-Latin script, None for Latin/none (en/fr/es/de/…
+    /// all share Latin script and can't be told apart from the text alone).
+    fn strong_script_lang(text: &str) -> Option<&'static str> {
         let (mut kana, mut hangul, mut han, mut cyr, mut arab) =
             (false, false, false, false, false);
         for c in text.chars() {
@@ -106,23 +111,47 @@ mod imp {
             }
         }
         if kana {
-            "ja".to_string()
+            Some("ja")
         } else if hangul {
-            "ko".to_string()
+            Some("ko")
         } else if han {
-            "zh".to_string()
+            Some("zh")
         } else if cyr {
-            "ru".to_string()
+            Some("ru")
         } else if arab {
-            "ar".to_string()
+            Some("ar")
         } else {
-            // Latin (or no strong script signal) — defer to the OS locale.
-            let fb = lang_code_of_locale(fallback_locale);
-            if fb.is_empty() {
-                "en".to_string()
-            } else {
-                fb
-            }
+            None
+        }
+    }
+
+    /// Best-effort primary-language detection for "auto" TTS, in priority order:
+    ///
+    /// 1. A strong non-Latin script in the REPLY text itself — the voice must be able
+    ///    to pronounce what's actually on screen (an English voice can't read Han at
+    ///    all), so this always wins.
+    /// 2. A strong non-Latin script in the user's ORIGINAL request (`request_hint`) —
+    ///    Rule 19 pins the reply language to the request, so when the reply is
+    ///    Latin-ambiguous (e.g. "Press Ctrl+B" answering a Chinese request) the
+    ///    request's language is the user's actual language, better than guessing from
+    ///    the OS locale. (Design suggestion #7, 2026-07-13: the request language is
+    ///    known at guide() time — use it instead of re-detecting from the reply.)
+    /// 3. The primary subtag of `fallback_locale` (the OS UI locale) — Latin scripts
+    ///    can't be distinguished from text alone (audit C7: a French reply under
+    ///    `auto` always got an English voice before this existed).
+    /// 4. "en".
+    fn detect_lang(text: &str, request_hint: &str, fallback_locale: &str) -> String {
+        if let Some(l) = strong_script_lang(text) {
+            return l.to_string();
+        }
+        if let Some(l) = strong_script_lang(request_hint) {
+            return l.to_string();
+        }
+        let fb = lang_code_of_locale(fallback_locale);
+        if fb.is_empty() {
+            "en".to_string()
+        } else {
+            fb
         }
     }
 
@@ -236,14 +265,14 @@ mod imp {
 
         for msg in rx {
             match msg {
-                Msg::Speak(text, lang, fallback_locale) => {
+                Msg::Speak(text, lang, request_hint, fallback_locale) => {
                     if text.is_empty() {
                         // Empty text = stop any in-flight speech.
                         let _ = player.Pause();
                         continue;
                     }
                     let target = if lang.is_empty() || lang.eq_ignore_ascii_case("auto") {
-                        detect_lang(&text, &fallback_locale)
+                        detect_lang(&text, &request_hint, &fallback_locale)
                     } else {
                         lang_code_of_locale(&lang)
                     };
@@ -343,7 +372,14 @@ mod imp {
         pub fn new() -> Self {
             Self
         }
-        pub fn speak(&self, _text: String, _lang: String, _fallback_locale: String) {}
+        pub fn speak(
+            &self,
+            _text: String,
+            _lang: String,
+            _request_hint: String,
+            _fallback_locale: String,
+        ) {
+        }
         pub fn set_voice(&self, _voice_id: String) {}
         pub fn list_voices(&self) -> Vec<VoiceInfo> {
             vec![]

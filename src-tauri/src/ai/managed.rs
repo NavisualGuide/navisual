@@ -2,7 +2,6 @@ use anyhow::{anyhow, bail, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use crate::ai::prompts::SYSTEM_PROMPT;
@@ -10,6 +9,40 @@ use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType,
 use crate::server::{
     load_session, refresh_session, save_session, sign_in_anonymously, SupabaseSession,
 };
+
+/// Every cached per-ACCOUNT value ManagedClient holds, in ONE struct behind ONE
+/// mutex. "Reset on account change" is then a single `Default` assignment that can
+/// never miss a field — audit F1 (2026-07-12) was exactly the missed-field class:
+/// `clear_managed_session` dropped the session token but a separately-stored
+/// `coin_balance_micro` survived the sign-out and re-emitted the previous account's
+/// balance. Add future per-account fields HERE, not as new atomics/mutexes on
+/// ManagedClient, and they are safe-by-default.
+#[derive(Default)]
+struct AccountState {
+    /// Free requests remaining, from the relay's `X-Free-Remaining` header (or the
+    /// balance GET). None = unknown (no free request has run this session).
+    free_remaining: Option<u32>,
+    /// µ$ coin balance after the last paid request (`X-Coin-Balance`). None = unknown.
+    coin_balance_micro: Option<i64>,
+    /// Which billing tier the relay serves this session. Learned from the balance GET
+    /// (`tier`) and from each relay response's headers (X-Free-Remaining ⇒ free,
+    /// X-Coin-Balance ⇒ paid). No reader left as of 2026-07-11 (used to drive the
+    /// now-removed is_free_tier(), which gated Structured-Context off for the free
+    /// tier — see router::structured_context_enabled for why that gate was lifted) —
+    /// kept written in case a future feature needs it.
+    billing_paid: Option<bool>,
+    /// The model the relay actually routed to on the last request (the relay picks the
+    /// real model server-side; the response `model` names the concrete model used).
+    last_model: Option<String>,
+    /// Set only when the LAST request billed real coins despite a "Free" quality-tier
+    /// preference (X-Tier-Auto-Selected / X-Tier-Auto-Selected-Price headers — see
+    /// relay/index.ts's handlePaid, wasFreePreference). (tier name, price in µ$). None
+    /// on every other request, including a "Free"-preference request that was still
+    /// actually free — this exists specifically to surface the one moment billing
+    /// silently kicks in, not to track billing state generally (coin_balance_micro
+    /// already does that).
+    tier_auto_selected: Option<(String, i64)>,
+}
 
 pub struct ManagedClient {
     client: Client,
@@ -19,26 +52,9 @@ pub struct ManagedClient {
     pub tier: String, // "speed" | "regular" | "smart" — sent to the relay on paid requests
     pub session: Option<SupabaseSession>,
     session_path: Option<PathBuf>,
-    free_remaining: AtomicI64, // -1 = unknown
-    coin_balance_micro: AtomicI64, // -1 = unknown; µ$ after the last paid request
-    // Which billing tier the relay serves this session: -1 = unknown, 0 = free, 1 = paid.
-    // Learned from the balance GET (`tier`) and from each relay response's headers
-    // (X-Free-Remaining ⇒ free, X-Coin-Balance ⇒ paid). No reader left as of
-    // 2026-07-11 (used to drive the now-removed is_free_tier(), which gated
-    // Structured-Context off for the free tier — see router::structured_context_enabled
-    // for why that gate was lifted) — kept written in case a future feature needs it.
-    billing_paid: AtomicI64,
-    // The model OpenRouter actually routed to on the last request (the relay sends
-    // `openrouter/free`, a router; the response `model` names the concrete model used).
-    last_model: parking_lot::Mutex<Option<String>>,
-    // Set only when the LAST request billed real coins despite a "Free" quality-tier
-    // preference (X-Tier-Auto-Selected / X-Tier-Auto-Selected-Price headers — see
-    // relay/index.ts's handlePaid, wasFreePreference). (tier name, price in µ$). None
-    // on every other request, including a "Free"-preference request that was still
-    // actually free — this exists specifically to surface the one moment billing
-    // silently kicks in, not to track billing state generally (coin_balance_micro
-    // already does that).
-    tier_auto_selected: parking_lot::Mutex<Option<(String, i64)>>,
+    /// All cached per-account values — see AccountState's doc comment for why this is
+    /// one mutex and must stay that way.
+    account: parking_lot::Mutex<AccountState>,
 }
 
 impl ManagedClient {
@@ -64,11 +80,7 @@ impl ManagedClient {
             tier,
             session,
             session_path,
-            free_remaining: AtomicI64::new(-1),
-            coin_balance_micro: AtomicI64::new(-1),
-            billing_paid: AtomicI64::new(-1),
-            last_model: parking_lot::Mutex::new(None),
-            tier_auto_selected: parking_lot::Mutex::new(None),
+            account: parking_lot::Mutex::new(AccountState::default()),
         })
     }
 
@@ -77,7 +89,7 @@ impl ManagedClient {
     /// (returns None) on every other request, so lib.rs can check this once per call
     /// without separately tracking "did this change since last time."
     pub fn take_tier_auto_selected(&self) -> Option<(String, i64)> {
-        self.tier_auto_selected.lock().take()
+        self.account.lock().tier_auto_selected.take()
     }
 
     /// Wipe every cached per-ACCOUNT value back to "unknown". Must be called whenever
@@ -89,45 +101,31 @@ impl ManagedClient {
     /// frontend's coin_balance_update listener dutifully flipped the UI back to "paid"
     /// showing the old account's coins. Token *refresh* for the same account must NOT
     /// call this (nothing about the account changed; wiping would just blank the UI
-    /// until the next request re-populates).
+    /// until the next request re-populates). One Default assignment — a field added to
+    /// AccountState is reset here automatically, no per-field line to forget.
     pub fn reset_account_state(&self) {
-        self.free_remaining.store(-1, Ordering::Relaxed);
-        self.coin_balance_micro.store(-1, Ordering::Relaxed);
-        self.billing_paid.store(-1, Ordering::Relaxed);
-        *self.last_model.lock() = None;
-        *self.tier_auto_selected.lock() = None;
+        *self.account.lock() = AccountState::default();
     }
 
     pub fn free_remaining(&self) -> Option<u32> {
-        let v = self.free_remaining.load(Ordering::Relaxed);
-        if v < 0 {
-            None
-        } else {
-            Some(v as u32)
-        }
+        self.account.lock().free_remaining
     }
 
     /// µ$ coin balance reported by the relay on the last paid request (None if
     /// no paid request has run this session).
     pub fn coin_balance_micro(&self) -> Option<i64> {
-        let v = self.coin_balance_micro.load(Ordering::Relaxed);
-        if v < 0 {
-            None
-        } else {
-            Some(v)
-        }
+        self.account.lock().coin_balance_micro
     }
 
     /// Record the billing tier the relay reported ("paid" ⇒ paid, anything else ⇒ free).
     /// Called from the balance GET and inferred from each relay response's headers.
     pub fn set_billing_tier(&self, tier: &str) {
-        self.billing_paid
-            .store(if tier == "paid" { 1 } else { 0 }, Ordering::Relaxed);
+        self.account.lock().billing_paid = Some(tier == "paid");
     }
 
-    /// The concrete model OpenRouter routed to on the most recent request.
+    /// The concrete model the relay routed to on the most recent request.
     pub fn last_routed_model(&self) -> Option<String> {
-        self.last_model.lock().clone()
+        self.account.lock().last_model.clone()
     }
 
     pub async fn ensure_token(&mut self) -> Result<()> {
@@ -161,7 +159,8 @@ impl ManagedClient {
     pub async fn send_message(
         &self,
         messages: Vec<Value>,
-        on_chunk: &mut impl FnMut(&str),
+        // (delta, steps_seen) — see streaming::count_streamed_steps.
+        on_chunk: &mut impl FnMut(&str, usize),
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let access_token = self
             .session
@@ -248,29 +247,11 @@ impl ManagedClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u32>().ok());
 
-        if let Some(r) = remaining {
-            self.free_remaining.store(r as i64, Ordering::Relaxed);
-        }
-
         let coin_balance = resp
             .headers()
             .get("x-coin-balance")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<i64>().ok());
-
-        if let Some(c) = coin_balance {
-            self.coin_balance_micro.store(c, Ordering::Relaxed);
-        }
-
-        // The two balance headers are mutually exclusive per relay branch: handleFree
-        // sends X-Free-Remaining, handlePaid sends X-Coin-Balance. Use whichever appeared
-        // to keep the billing tier fresh per request. No current reader (see the field's
-        // doc comment) — kept written for a future feature.
-        if remaining.is_some() {
-            self.billing_paid.store(0, Ordering::Relaxed);
-        } else if coin_balance.is_some() {
-            self.billing_paid.store(1, Ordering::Relaxed);
-        }
 
         // Only present when this request billed real coins despite a "Free"
         // preference (see the tier_auto_selected field doc comment). Always
@@ -287,10 +268,29 @@ impl ManagedClient {
             .get("x-tier-auto-selected-price")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<i64>().ok());
-        *self.tier_auto_selected.lock() = match (auto_tier, auto_tier_price) {
-            (Some(t), Some(p)) => Some((t, p)),
-            _ => None,
-        };
+
+        {
+            let mut acct = self.account.lock();
+            if let Some(r) = remaining {
+                acct.free_remaining = Some(r);
+            }
+            if let Some(c) = coin_balance {
+                acct.coin_balance_micro = Some(c);
+            }
+            // The two balance headers are mutually exclusive per relay branch: handleFree
+            // sends X-Free-Remaining, handlePaid sends X-Coin-Balance. Use whichever
+            // appeared to keep the billing tier fresh per request. No current reader (see
+            // the field's doc comment) — kept written for a future feature.
+            if remaining.is_some() {
+                acct.billing_paid = Some(false);
+            } else if coin_balance.is_some() {
+                acct.billing_paid = Some(true);
+            }
+            acct.tier_auto_selected = match (auto_tier, auto_tier_price) {
+                (Some(t), Some(p)) => Some((t, p)),
+                _ => None,
+            };
+        }
 
         let body: Value = resp.json().await?;
 
@@ -303,7 +303,7 @@ impl ManagedClient {
         // happened. Record only what's real, for the UI/feedback/debug drawer.
         let routed = body["model"].as_str().map(str::to_string);
         log::info!("[managed] routed={routed:?}");
-        *self.last_model.lock() = routed;
+        self.account.lock().last_model = routed;
 
         // Token usage. The relay forwards the upstream body verbatim, and both
         // OpenRouter (free) and Gemini/OpenAI (paid) include an OpenAI-style `usage`
@@ -375,7 +375,7 @@ impl ManagedClient {
 
         // Emit the first instruction as a single chunk (managed tier is non-streaming).
         if let Some(step) = nav_response.steps.first() {
-            on_chunk(&step.instruction);
+            on_chunk(&step.instruction, nav_response.steps.len().max(1));
         }
 
         Ok((nav_response, in_tokens, out_tokens))

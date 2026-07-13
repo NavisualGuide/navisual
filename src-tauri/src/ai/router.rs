@@ -339,7 +339,9 @@ impl AiRouter {
         user_text: &str,
         screenshot_b64: Option<&str>,
         state_summary: Option<&str>,
-        mut on_chunk: impl FnMut(&str),
+        // (delta, steps_seen): new instruction text + how many steps have started
+        // streaming so far (streaming::count_streamed_steps) — drives "Step 1 of ~N".
+        mut on_chunk: impl FnMut(&str, usize),
     ) -> Result<NavigateStepResponse> {
         let conversation = if let Some(session) = &self.session_manager.current_session {
             session.get_conversation_for_api(10)
