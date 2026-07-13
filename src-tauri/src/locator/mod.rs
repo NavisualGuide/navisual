@@ -34,6 +34,26 @@ pub mod trace;
 /// truncated — so prefix-matching the core lets the full name match. The prefix
 /// flag is only set when the core is ≥5 chars (so a short clip like "Re…" can't
 /// match half the screen); the ellipsis is stripped regardless.
+/// Whether `c` is a CJK character (Han incl. Ext A, kana, hangul syllables).
+#[cfg(windows)]
+pub(crate) fn is_cjk_char(c: char) -> bool {
+    let u = c as u32;
+    (0x4e00..=0x9fff).contains(&u)      // CJK Unified Ideographs
+        || (0x3400..=0x4dbf).contains(&u) // Ext A
+        || (0x3040..=0x30ff).contains(&u) // Hiragana + Katakana
+        || (0xac00..=0xd7af).contains(&u) // Hangul syllables
+}
+
+/// Whether the string contains any CJK character. CJK text has no space-separated
+/// words, so word-boundary (`\b`) matching and whitespace tokenization silently
+/// never fire on it — matchers gate their CJK fallback paths on this
+/// (orchestrator's Selection cross-check, OCR's substring tier). Shared here so
+/// every matcher agrees on what "CJK" means.
+#[cfg(windows)]
+pub(crate) fn contains_cjk(s: &str) -> bool {
+    s.chars().any(is_cjk_char)
+}
+
 #[cfg(windows)]
 pub(crate) fn strip_trailing_ellipsis(target: &str) -> (String, bool) {
     let trimmed = target.trim_end();

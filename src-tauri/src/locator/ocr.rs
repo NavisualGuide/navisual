@@ -545,6 +545,14 @@ pub fn find_text<'a>(
     //   Note: "Insert" still matches "Insert Space" (space IS a boundary) — the
     //   exact-match strategy wins first when both words appear in the OCR pool.
     let target_word_count = target_lower.split_whitespace().count();
+    // CJK has no space-separated words, and between two CJK chars there is NO `\b`
+    // (they're all word characters), so the word-boundary regexes below can never
+    // fire on a CJK target inside a longer CJK line ("保存" in "点击保存按钮").
+    // Plain containment is the CJK analogue of the whole-word match — the glued-text
+    // false-positive class this tier guards against ("Insert" ⊄ "InsertedText") has
+    // no CJK equivalent, since unspaced adjacency IS how CJK words compose. Gated on
+    // actual CJK content so ASCII behaviour is unchanged (C4 parity pass, 2026-07-13).
+    let target_is_cjk = super::contains_cjk(&target_lower);
     let target_wb_re =
         regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&target_lower))).ok();
     // Second word-boundary regex from the punct-stripped target: `\b\+0\.17\b`
@@ -572,6 +580,15 @@ pub fn find_text<'a>(
                 if rc_digits.is_empty() || rc_digits != target_digits {
                     return false;
                 }
+            }
+            // CJK: word boundaries don't exist between CJK chars — use plain
+            // containment in both directions (see target_is_cjk above). The ≥2-char
+            // guard suppresses single-character noise, same as the ASCII path.
+            if target_is_cjk || super::contains_cjk(&rc) {
+                let target_in_rc =
+                    target_lower.chars().count() >= 2 && rc.contains(&target_lower);
+                let rc_in_target = rc.chars().count() >= 2 && target_lower.contains(&rc);
+                return target_in_rc || rc_in_target;
             }
             // Direction A: OCR token as whole word inside target.
             let target_contains_rc = rc.chars().count() >= 2 && {
@@ -893,6 +910,35 @@ mod tests {
         let out = find_text("Message", &results, &opts((1000, 600)));
         assert_eq!(out.strategy_used.as_deref(), Some("substring"));
         assert!(out.winner.is_some());
+    }
+
+    #[test]
+    fn cjk_target_matches_inside_unspaced_line() {
+        // CJK parity (2026-07-13): "保存" (Save) inside "点击保存按钮" (click the Save
+        // button). `\b` never fires between CJK word characters, so before the CJK
+        // containment path this could only miss.
+        let results = vec![word("点击保存按钮", (10, 10, 90, 20))];
+        let out = find_text("保存", &results, &opts((1000, 600)));
+        assert_eq!(out.strategy_used.as_deref(), Some("substring"));
+        assert!(out.winner.is_some());
+    }
+
+    #[test]
+    fn cjk_ocr_token_matches_inside_target() {
+        // Direction A: OCR read a shortened fragment of the target label.
+        let results = vec![word("设置", (10, 10, 40, 20))];
+        let out = find_text("打开设置", &results, &opts((1000, 600)));
+        assert_eq!(out.strategy_used.as_deref(), Some("substring"));
+        assert!(out.winner.is_some());
+    }
+
+    #[test]
+    fn cjk_unrelated_labels_do_not_substring_match() {
+        // No shared substring — must fall past the substring tier (and fuzzy won't
+        // rescue two unrelated 2-char labels).
+        let results = vec![word("印刷", (10, 10, 40, 20))];
+        let out = find_text("保存", &results, &opts((1000, 600)));
+        assert!(out.winner.is_none());
     }
 
     #[test]

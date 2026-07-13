@@ -628,20 +628,14 @@ fn shares_token(a: &str, b: &str) -> bool {
 
     // CJK fallback: containment (handles truncation/shortening) or a shared CJK
     // character (handles reordering). Only engaged when CJK is actually present, so
-    // ASCII behaviour is byte-for-byte unchanged.
-    let is_cjk = |c: char| {
-        let u = c as u32;
-        (0x4e00..=0x9fff).contains(&u)      // CJK Unified Ideographs
-            || (0x3400..=0x4dbf).contains(&u) // Ext A
-            || (0x3040..=0x30ff).contains(&u) // Hiragana + Katakana
-            || (0xac00..=0xd7af).contains(&u) // Hangul syllables
-    };
-    if a.chars().any(is_cjk) || b.chars().any(is_cjk) {
+    // ASCII behaviour is byte-for-byte unchanged. Uses the crate-shared CJK
+    // definition (super::is_cjk_char) — same one OCR's substring tier gates on.
+    if super::contains_cjk(a) || super::contains_cjk(b) {
         let (al, bl) = (a.to_lowercase(), b.to_lowercase());
         if al.contains(&bl) || bl.contains(&al) {
             return true;
         }
-        return a.chars().filter(|c| is_cjk(*c)).any(|c| b.contains(c));
+        return a.chars().filter(|c| super::is_cjk_char(*c)).any(|c| b.contains(c));
     }
     false
 }
