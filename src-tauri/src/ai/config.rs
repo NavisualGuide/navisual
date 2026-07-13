@@ -383,6 +383,24 @@ impl Config {
             config.debug_show_ai_bbox = v == "true" || v == "1";
         }
 
+        // BYOK keys stored in the Windows Credential Manager are referenced from
+        // .env by a sentinel value (see credvault.rs) — resolve them to the real
+        // secrets here, so every caller downstream sees a normal key. A vault miss
+        // (credential deleted by hand) degrades to "no key configured", the same
+        // as an empty .env line.
+        for (field, env_name) in [
+            (&mut config.anthropic_api_key, "ANTHROPIC_API_KEY"),
+            (&mut config.gemini_api_key, "GEMINI_API_KEY"),
+            (&mut config.openai_api_key, "OPENAI_API_KEY"),
+            (&mut config.deepseek_api_key, "DEEPSEEK_API_KEY"),
+            (&mut config.qwen_api_key, "QWEN_API_KEY"),
+            (&mut config.custom_api_key, "CUSTOM_API_KEY"),
+        ] {
+            if field.as_deref() == Some(crate::credvault::SENTINEL) {
+                *field = crate::credvault::read(env_name);
+            }
+        }
+
         config
     }
 }

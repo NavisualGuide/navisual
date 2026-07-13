@@ -85,6 +85,8 @@ windows = { version = "0.62", features = [
   "Win32_UI_HiDpi",
   # GetModuleHandleW — hInstance for the hidden WM_DISPLAYCHANGE watch window
   "Win32_System_LibraryLoader",
+  # CredWriteW/CredReadW — BYOK API keys in the Windows Credential Manager (credvault.rs)
+  "Win32_Security_Credentials",
 ] }
 uiautomation = { version = "0.24.4", features = ["process", "event", "pattern"] }
 

@@ -6,6 +6,7 @@
 
 mod ai;
 mod capture;
+mod credvault;
 mod locator;
 mod overlay;
 mod packs;
@@ -1043,6 +1044,43 @@ fn make_chat_thumbnail(jpeg_bytes: &[u8]) -> Option<String> {
 fn get_chat_full_screenshot(state: State<'_, AppState>) -> Option<String> {
     let bytes = state.chat_full_jpeg.lock().clone()?;
     Some(capture::to_base64(&bytes))
+}
+
+/// Move any plaintext BYOK API key still sitting in `.env` into the Windows
+/// Credential Manager, replacing its line with the sentinel (see credvault.rs).
+/// Idempotent: sentinel/empty lines are skipped, so this is a no-op after the
+/// first migration; a key the user hand-pastes into `.env` later simply gets
+/// migrated on the following launch. A failed vault write leaves the plaintext
+/// line untouched (the key must never be lost).
+fn migrate_env_secrets_to_credvault(env_path: &std::path::Path) {
+    let Ok(existing) = std::fs::read_to_string(env_path) else {
+        return; // no .env yet — nothing to migrate
+    };
+    let mut sentinel_updates: Vec<(&str, &str)> = Vec::new();
+    for line in existing.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        for &key in credvault::SECRET_KEYS {
+            let prefix = format!("{key}=");
+            if let Some(value) = trimmed.strip_prefix(&prefix) {
+                let value = value.trim();
+                if !value.is_empty()
+                    && value != credvault::SENTINEL
+                    && credvault::store(key, value)
+                {
+                    sentinel_updates.push((key, credvault::SENTINEL));
+                    log::info!("[credvault] migrated {key} from .env to the Credential Manager");
+                }
+            }
+        }
+    }
+    if !sentinel_updates.is_empty() {
+        if let Err(e) = update_env_file(env_path, &sentinel_updates) {
+            log::warn!("[credvault] .env rewrite after migration failed: {e}");
+        }
+    }
 }
 
 /// On first launch after the Roaming→Local migration (v0.5.24+), move any
@@ -3017,27 +3055,28 @@ async fn save_settings(
         ),
     ];
 
-    // API keys: only overwrite if the user actually typed something
-    if !payload.anthropic_api_key.trim().is_empty() {
-        updates.push((
-            "ANTHROPIC_API_KEY".into(),
-            payload.anthropic_api_key.clone(),
-        ));
-    }
-    if !payload.gemini_api_key.trim().is_empty() {
-        updates.push(("GEMINI_API_KEY".into(), payload.gemini_api_key.clone()));
-    }
-    if !payload.openai_api_key.trim().is_empty() {
-        updates.push(("OPENAI_API_KEY".into(), payload.openai_api_key.clone()));
-    }
-    if !payload.deepseek_api_key.trim().is_empty() {
-        updates.push(("DEEPSEEK_API_KEY".into(), payload.deepseek_api_key.clone()));
-    }
-    if !payload.qwen_api_key.trim().is_empty() {
-        updates.push(("QWEN_API_KEY".into(), payload.qwen_api_key.clone()));
-    }
-    if !payload.custom_api_key.trim().is_empty() {
-        updates.push(("CUSTOM_API_KEY".into(), payload.custom_api_key.clone()));
+    // API keys: only overwrite if the user actually typed something. A typed key
+    // goes to the Windows Credential Manager; .env gets the sentinel (see
+    // credvault.rs). If the vault write fails, fall back to plaintext .env so
+    // the key is never lost — Config::load handles both forms.
+    for (env_name, typed) in [
+        ("ANTHROPIC_API_KEY", &payload.anthropic_api_key),
+        ("GEMINI_API_KEY", &payload.gemini_api_key),
+        ("OPENAI_API_KEY", &payload.openai_api_key),
+        ("DEEPSEEK_API_KEY", &payload.deepseek_api_key),
+        ("QWEN_API_KEY", &payload.qwen_api_key),
+        ("CUSTOM_API_KEY", &payload.custom_api_key),
+    ] {
+        let typed = typed.trim();
+        if typed.is_empty() || typed == credvault::SENTINEL {
+            // Nothing typed (or the masked sentinel round-tripped) — leave as-is.
+            continue;
+        }
+        if credvault::store(env_name, typed) {
+            updates.push((env_name.into(), credvault::SENTINEL.into()));
+        } else {
+            updates.push((env_name.into(), typed.into()));
+        }
     }
 
     // Atomic write to .env
@@ -3744,6 +3783,12 @@ pub fn run() {
             }
             cleanup_old_debug_artifacts(&app_data_dir);
             let env_path = app_data_dir.join(".env");
+            // One-time (per key) migration: any plaintext BYOK key still in .env
+            // moves into the Windows Credential Manager, its line replaced by the
+            // sentinel. Runs BEFORE Config::load so the very first load already
+            // resolves through the vault. A hand-pasted raw key keeps working —
+            // it just gets migrated here on the next launch.
+            migrate_env_secrets_to_credvault(&env_path);
 
             // Init AI Router
             let config = Config::load(Some(&env_path));
