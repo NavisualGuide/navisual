@@ -154,6 +154,14 @@ fn norm_dashes(s: &str) -> String {
         .collect()
 }
 
+/// Whether two (x, y, w, h) rects overlap at all. Degenerate (zero/negative-extent)
+/// rects overlap nothing. Used by the off-window candidate filter in `find_element`.
+fn rects_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    aw > 0 && ah > 0 && bw > 0 && bh > 0 && ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by
+}
+
 /// Strip a trailing keyboard accelerator / mnemonic that menus append to the accessible name —
 /// `"Playback Alt+I"` → `"Playback"`, `"Save\tCtrl+S"` → `"Save"`, `"文件(&F)"` → `"文件"`. Many
 /// Win32/Qt menu bars expose the shortcut as part of the UIA Name, which defeats the anchored
@@ -1224,6 +1232,10 @@ pub fn find_element(
                 trace.timed_out = true;
                 break;
             }
+            // For the off-window filter below: everything this root's passes add is
+            // checked against the root's own on-screen rect.
+            let candidates_before_root = candidates.len();
+            let root_rect = root.get_bounding_rectangle().ok();
             if is_chrome {
                 // Chrome/Electron: one cached native find. The tree is deep and the per-element
                 // COM of the matcher/manual passes is too slow here; a control-type condition +
@@ -1330,6 +1342,44 @@ pub fn find_element(
                     }
                 }
             }
+            // Off-window filter: drop candidates whose rect doesn't even INTERSECT
+            // their own top-level window. Qt keeps ghost duplicates of every docker's
+            // Tab/TabItem parked at a stale off-screen position (Krita: (-600,-507)
+            // for ALL dockers, live 2026-07-13) — they carry perfect anchored names,
+            // so they pollute ranking (their fake distance-to-bbox is meaningless)
+            // and, when they win, the pointer draws off-screen. An element that isn't
+            // inside its own window can't be pointed at, period. Per-root, so popup
+            // roots (menus/dropdowns, separate WS_POPUP top-levels) are checked
+            // against their own rect, never the main window's.
+            if let Some(rr) = &root_rect {
+                let mut i = candidates_before_root;
+                while i < candidates.len() {
+                    let b = candidates[i].bbox;
+                    let overlaps = rects_overlap(
+                        (b.x, b.y, b.width as i32, b.height as i32),
+                        (
+                            rr.get_left(),
+                            rr.get_top(),
+                            rr.get_right() - rr.get_left(),
+                            rr.get_bottom() - rr.get_top(),
+                        ),
+                    );
+                    if overlaps {
+                        i += 1;
+                    } else {
+                        let c = candidates.remove(i);
+                        trace.candidates.push(A11yCandidate {
+                            name: c.name,
+                            role: c.role,
+                            bbox: (c.bbox.x, c.bbox.y, c.bbox.width, c.bbox.height),
+                            selected: false,
+                            reject_reason: Some(
+                                "outside its own window — stale/off-screen rect".to_string(),
+                            ),
+                        });
+                    }
+                }
+            }
         }
         if !candidates.is_empty() {
             break;
@@ -1415,37 +1465,56 @@ pub fn find_element(
     }
 
     // Rank candidates: role agreement first (an Edit named "To" must beat Text
-    // tooltips when the AI asked for a textbox), then AI-bbox proximity. Both
-    // bboxes are already in virtual-desktop physical pixels. The sort is
-    // stable, so without a role or bbox the original pass order is preserved.
+    // tooltips when the AI asked for a textbox), then ANCHORED name matches over
+    // loose fragments (the manual walk admits partial names — "Layer", the singular
+    // menubar menu, must not outrank the exact "Layers" the target asked for; live
+    // Krita wrong-pointer 2026-07-13), then AI-bbox proximity. Both bboxes are
+    // already in virtual-desktop physical pixels. The sort is stable, so without a
+    // role or bbox the original pass order is preserved.
+    let winner_anchored;
     {
         let desired_role = desired_ct.map(|ct| format!("{ct:?}"));
         let ai_center = opts
             .ai_bbox
             .map(|ai| (ai.x as f32 + ai.width as f32 / 2.0, ai.y as f32 + ai.height as f32 / 2.0));
-        candidates.sort_by(|a, b| {
+        let mut decorated: Vec<(bool, LocateResult)> = candidates
+            .into_iter()
+            .map(|c| (candidate_name_anchored(&c.name, &name_re), c))
+            .collect();
+        decorated.sort_by(|(a_anch, a), (b_anch, b)| {
             let a_role_miss = desired_role.as_deref().is_some_and(|r| a.role != r);
             let b_role_miss = desired_role.as_deref().is_some_and(|r| b.role != r);
-            a_role_miss.cmp(&b_role_miss).then_with(|| {
-                let Some((tx, ty)) = ai_center else {
-                    return std::cmp::Ordering::Equal;
-                };
-                let acx = a.bbox.x as f32 + a.bbox.width as f32 / 2.0;
-                let acy = a.bbox.y as f32 + a.bbox.height as f32 / 2.0;
-                let bcx = b.bbox.x as f32 + b.bbox.width as f32 / 2.0;
-                let bcy = b.bbox.y as f32 + b.bbox.height as f32 / 2.0;
-                let da = (acx - tx).powi(2) + (acy - ty).powi(2);
-                let db = (bcx - tx).powi(2) + (bcy - ty).powi(2);
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            })
+            a_role_miss
+                .cmp(&b_role_miss)
+                .then_with(|| b_anch.cmp(a_anch)) // anchored (true) first
+                .then_with(|| {
+                    let Some((tx, ty)) = ai_center else {
+                        return std::cmp::Ordering::Equal;
+                    };
+                    let acx = a.bbox.x as f32 + a.bbox.width as f32 / 2.0;
+                    let acy = a.bbox.y as f32 + a.bbox.height as f32 / 2.0;
+                    let bcx = b.bbox.x as f32 + b.bbox.width as f32 / 2.0;
+                    let bcy = b.bbox.y as f32 + b.bbox.height as f32 / 2.0;
+                    let da = (acx - tx).powi(2) + (acy - ty).powi(2);
+                    let db = (bcx - tx).powi(2) + (bcy - ty).powi(2);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
         });
+        winner_anchored = decorated.first().map(|(a, _)| *a).unwrap_or(false);
+        candidates = decorated.into_iter().map(|(_, c)| c).collect();
     }
 
     // Trusted-bbox guard: if the best name match sits far outside a trusted AI bbox, it's
     // likely a stray same-named element (a Text "localhost:9876" in the screen corner, nowhere
     // near the tab the AI pointed at). Try the bbox probe and prefer its validated, in-bbox
-    // element. Only fires for a trusted model + a name match well outside the bbox, and only
-    // wins if the probe actually resolves a valid control there — else the name match stands.
+    // element. Only fires for a trusted model + a name match well outside the bbox. If the
+    // probe resolves nothing, what happens next depends on the match's strength: an ANCHORED
+    // name match stands (strong name evidence beats a possibly-misgrounded bbox — the bbox is
+    // a tiebreaker, never a veto), but a LOOSE fragment match is weak on BOTH signals, so it's
+    // dropped and the pipeline falls through to OCR + its corroboration gate ("no pointer
+    // beats wrong pointer"; live Krita 2026-07-13: target "Layers", only surviving candidate
+    // the menubar's singular "Layer" 1,650 px from a correct trusted bbox — kept back then,
+    // pointer landed on the menu bar; OCR would have read the docker title at the right spot).
     if opts.bbox_decisive {
         if let Some(ai) = opts.ai_bbox {
             if center_outside_expanded(candidates[0].bbox, ai) {
@@ -1471,6 +1540,23 @@ pub fn find_element(
                     trace.elapsed_ms = started.elapsed().as_millis() as u32;
                     return Ok((Some(hit), trace));
                 }
+                if !winner_anchored {
+                    for c in &candidates {
+                        trace.candidates.push(A11yCandidate {
+                            name: c.name.clone(),
+                            role: c.role.clone(),
+                            bbox: (c.bbox.x, c.bbox.y, c.bbox.width, c.bbox.height),
+                            selected: false,
+                            reject_reason: Some(
+                                "loose name match far from trusted AI bbox, probe found nothing \
+                                 — dropped to OCR"
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                    trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                    return Ok((None, trace));
+                }
             }
         }
     }
@@ -1487,9 +1573,9 @@ pub fn find_element(
             reject_reason: if i == 0 {
                 None
             } else if desired_ct.is_some() || opts.ai_bbox.is_some() {
-                Some("ranked lower (role / AI-bbox distance)".to_string())
+                Some("ranked lower (role / anchored-name / AI-bbox distance)".to_string())
             } else {
-                Some("not first match".to_string())
+                Some("ranked lower (anchored-name / pass order)".to_string())
             },
         });
     }
@@ -1580,13 +1666,16 @@ fn match_in_subtree_all(
 /// safe: "to" must match the field named "To", never the tooltip "Attach a file
 /// to this item." — prose containing the target word is not a label (live Outlook
 /// false hit).
-fn deep_name_filter(name: &str, needle: &str, name_re: &Regex) -> Option<bool> {
-    if name.is_empty() {
-        return None;
-    }
+/// Whether a candidate's accessible name is an ANCHORED match for the target — the
+/// name IS the target (after accelerator/paren-suffix normalization, or as the
+/// leading label before a " (keybinding)" annotation), not merely containing or
+/// contained by it. Shared by `deep_name_filter`'s admission tiers and the final
+/// candidate ranking: an anchored match ("Layers") must outrank a loose fragment
+/// ("Layer", the singular menubar menu — live Krita wrong-pointer, 2026-07-13).
+fn candidate_name_anchored(name: &str, name_re: &Regex) -> bool {
     let normed = strip_accelerator(&norm_dashes(name));
     if name_re.is_match(&normed) || name_re.is_match(&strip_paren_suffix(&normed)) {
-        return Some(true);
+        return true;
     }
     // Chromium activity-bar pattern (VS Code): the UIA Name is the label followed by a
     // " (keybinding)" annotation and an optional badge, and is sometimes DOUBLED — the live
@@ -1595,9 +1684,20 @@ fn deep_name_filter(name: &str, needle: &str, name_re: &Regex) -> Option<bool> {
     // so a short target ("To") can't latch onto a longer leading label ("Tools (Ctrl+T)…").
     if let Some(lead) = normed.split(" (").next() {
         if lead != normed && name_re.is_match(lead) {
-            return Some(true);
+            return true;
         }
     }
+    false
+}
+
+fn deep_name_filter(name: &str, needle: &str, name_re: &Regex) -> Option<bool> {
+    if name.is_empty() {
+        return None;
+    }
+    if candidate_name_anchored(name, name_re) {
+        return Some(true);
+    }
+    let normed = strip_accelerator(&norm_dashes(name));
     let needle_len = needle.chars().count();
     let cap = (needle_len * 3).max(needle_len + 20);
     if normed.chars().count() <= cap && normed.to_ascii_lowercase().contains(needle) {
@@ -2313,6 +2413,44 @@ mod tests {
             deep_name_filter("Restrict permission to this item.", &needle, &re),
             None
         );
+    }
+
+    #[test]
+    fn anchored_name_outranks_loose_fragment() {
+        // Live Krita wrong-pointer (2026-07-13): target "Layers", role "other" (no
+        // desired_ct). The manual walk admitted the menubar's singular "Layer"
+        // (reverse containment), and Qt's ghost docker tabs sat at stale off-screen
+        // coords, so the distance sort picked "Layer" 1,650 px from the trusted
+        // bbox. The anchored tier must rank the exact "Layers" above the fragment
+        // "Layer" regardless of bbox distance.
+        use super::candidate_name_anchored;
+        let re = build_name_regex("Layers").unwrap();
+        assert!(candidate_name_anchored("Layers", &re));
+        assert!(!candidate_name_anchored("Layer", &re)); // singular fragment = loose
+        // The anchored tiers still apply their normalizations.
+        assert!(candidate_name_anchored("Layers\tCtrl+L", &re)); // accelerator strip
+        assert!(candidate_name_anchored("Layers (docked)", &re)); // paren suffix
+        // A random other label is neither.
+        assert!(!candidate_name_anchored("Advanced Color Selector", &re));
+    }
+
+    #[test]
+    fn off_window_rects_are_detected() {
+        use super::rects_overlap;
+        let krita_window = (0, 0, 1920, 1080);
+        // Qt's ghost docker tabs (live Krita 2026-07-13): parked at (-600,-507),
+        // entirely outside the window that owns them → no overlap.
+        assert!(!rects_overlap((-600, -507, 101, 31), krita_window));
+        // Real docker title inside the window → overlaps.
+        assert!(rects_overlap((1682, 105, 193, 14), krita_window));
+        // Partially overhanging (e.g. a dropdown at the window edge) still counts.
+        assert!(rects_overlap((1900, 1070, 100, 100), krita_window));
+        // A window on the left monitor (negative origin) works the same.
+        let left_monitor_win = (-1920, 0, 1920, 1080);
+        assert!(rects_overlap((-600, 200, 101, 31), left_monitor_win));
+        assert!(!rects_overlap((10, 200, 101, 31), left_monitor_win));
+        // Degenerate rects never overlap anything.
+        assert!(!rects_overlap((0, 0, 0, 0), krita_window));
     }
 
     #[test]
