@@ -616,6 +616,16 @@ See the LICENSE file in the root of this repository for complete details.
   const PANEL_W = 420;
   const PANEL_H = 600;
   const ICON_SIZE = 56;
+  // The panel's last known size while in normal (non-icon) mode. Restored by
+  // expandToPanel() instead of the hardcoded PANEL_W/PANEL_H, so a
+  // user-resized panel doesn't snap back to the default after collapsing to
+  // the floating icon — and persisted across restarts too (reported live:
+  // "the window size is not remembered"). Updated live by the onResized
+  // listener registered in onMount; iconMode-guarded there so the 56x56 icon
+  // size and the collapse/expand transitions themselves never get saved.
+  const PANEL_SIZE_KEY = "navisual-panel-size-v1";
+  let lastPanelSize = { width: PANEL_W, height: PANEL_H };
+  let panelSizeSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
   function startTimer() {
     elapsedStart = performance.now();
@@ -932,7 +942,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function expandToPanel() {
     iconMode = false;
-    try { await getCurrentWindow().setSize(new LogicalSize(PANEL_W, PANEL_H)); }
+    try { await getCurrentWindow().setSize(new LogicalSize(lastPanelSize.width, lastPanelSize.height)); }
     catch (e) { console.error("expandToPanel:", e); }
   }
 
@@ -1576,15 +1586,57 @@ See the LICENSE file in the root of this repository for complete details.
       debugShowInfo = init.debug_show_response_info;
     } catch (_) {}
 
+    const sw = window.screen.availWidth;
+    const sh = window.screen.availHeight;
+    const margin = 24;
+
+    // Restore the last resized panel size (cross-restart — see PANEL_SIZE_KEY's
+    // doc comment). Clamped to the min the window allows (tauri.conf.json
+    // minWidth/minHeight) and to the current screen's available space, in case
+    // a size saved on a larger/differently-scaled monitor would otherwise be
+    // replayed off-screen or absurdly oversized here.
     try {
-      const sw = window.screen.availWidth;
-      const sh = window.screen.availHeight;
-      const margin = 24;
+      const saved = localStorage.getItem(PANEL_SIZE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (typeof parsed.width === "number" && typeof parsed.height === "number") {
+          lastPanelSize = {
+            width: Math.min(Math.max(360, parsed.width), sw - margin * 2),
+            height: Math.min(Math.max(380, parsed.height), sh - margin * 2),
+          };
+        }
+      }
+    } catch (_) {}
+
+    try {
+      await getCurrentWindow().setSize(new LogicalSize(lastPanelSize.width, lastPanelSize.height));
       await getCurrentWindow().setPosition(
-        new LogicalPosition(sw - PANEL_W - margin, sh - PANEL_H - margin)
+        new LogicalPosition(sw - lastPanelSize.width - margin, sh - lastPanelSize.height - margin)
       );
     } catch (_) {}
     try { await getCurrentWindow().show(); } catch (_) {}
+
+    // Keep lastPanelSize in sync with the ACTUAL window size live, so
+    // collapseToIcon()/expandToPanel() and the next app launch both restore
+    // whatever the user last resized to — not the hardcoded PANEL_W/PANEL_H
+    // default. iconMode-guarded: the 56x56 icon size, and the resize events
+    // the collapse/expand transitions themselves generate, must never
+    // overwrite the real panel size (iconMode flips to true/false
+    // synchronously before those setSize() calls, so this always sees the
+    // correct mode for the resize it's reacting to).
+    getCurrentWindow().onResized(async ({ payload }) => {
+      if (iconMode) return;
+      try {
+        const scale = await getCurrentWindow().scaleFactor();
+        const logical = payload.toLogical(scale);
+        if (logical.width < 100 || logical.height < 100) return; // ignore transient/minimize-adjacent events
+        lastPanelSize = { width: Math.round(logical.width), height: Math.round(logical.height) };
+        if (panelSizeSaveTimer) clearTimeout(panelSizeSaveTimer);
+        panelSizeSaveTimer = setTimeout(() => {
+          try { localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify(lastPanelSize)); } catch (_) {}
+        }, 400);
+      } catch (_) {}
+    }).catch(() => {});
 
     // Sync the overlay theme from saved settings so the show_ai_bbox toggle
     // is active from the first guide call without requiring the user to open
@@ -1800,18 +1852,23 @@ See the LICENSE file in the root of this repository for complete details.
         </button>
       {/if}
       <div class="header-actions">
-        <button class="hdr-btn" onclick={() => openAbout("about")} title="About Navisual" aria-label="About Navisual">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-        </button>
-        <button class="hdr-btn" onclick={() => openSettings()} title="Settings" aria-label="Settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </button>
-        <button class="hdr-btn" onclick={collapseToIcon} title="Collapse to floating icon" aria-label="Collapse to floating icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12.5" y="12" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg>
-        </button>
-        <button class="hdr-btn hdr-btn-close" onclick={closeWindow} title="Quit" aria-label="Quit">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
+        <!-- CSS mask-image, not inline <svg> (2026-07-13): the original inline
+             <svg> markup rendered as near-invisible slivers — a genuine
+             flex-item width-axis sizing failure in this WebView2 build (CSS
+             width, native svg width/height attributes, a wrapper-span at
+             100%, and viewBox removal all reproduced the same ~2-5px squash).
+             icons/goldfish.svg, loaded via <img src>, was never affected —
+             the browser treats an EXTERNALLY REFERENCED svg as an opaque
+             image resource, not inline DOM subject to flex/intrinsic-ratio
+             layout at all. mask-image gets the same "external resource,
+             always sized right" behavior while keeping currentColor-style
+             theming (paint comes from background-color on the mask, so the
+             existing hover-to-red on Quit still works) — the actual files
+             are public/icon-{about,settings,collapse,close}.svg. -->
+        <button class="hdr-btn hdr-icon-mask hdr-icon-about" onclick={() => openAbout("about")} title="About Navisual" aria-label="About Navisual"></button>
+        <button class="hdr-btn hdr-icon-mask hdr-icon-settings" onclick={() => openSettings()} title="Settings" aria-label="Settings"></button>
+        <button class="hdr-btn hdr-icon-mask hdr-icon-collapse" onclick={collapseToIcon} title="Collapse to floating icon" aria-label="Collapse to floating icon"></button>
+        <button class="hdr-btn hdr-btn-close hdr-icon-mask hdr-icon-close" onclick={closeWindow} title="Quit" aria-label="Quit"></button>
       </div>
     </div>
 
@@ -3321,7 +3378,11 @@ See the LICENSE file in the root of this repository for complete details.
     border-radius: 6px;
     font-size: 13px;
     background: transparent;
-    color: var(--text-secondary);
+    /* text-primary, not text-secondary: reported live as "nearly invisible" —
+       these are thin glyphs with no fill weight to fall back on, so they need
+       the brighter default other controls don't. Was only promoted to
+       text-primary on :hover, which is exactly backwards for legibility. */
+    color: var(--text-primary);
     border: none;
     cursor: pointer;
     display: flex;
@@ -3331,8 +3392,42 @@ See the LICENSE file in the root of this repository for complete details.
     font-family: inherit;
     transition: background 120ms ease-out, color 120ms ease-out;
   }
-  :global(.hdr-btn svg) { width: 17px; height: 17px; display: block; }
-  :global(.hdr-btn:hover) { background: var(--surface-3); color: var(--text-primary); }
+  /* CSS mask-image icons (2026-07-13) — see the markup comment above
+     header-actions for why: the actual icon FILES are public/icon-*.svg
+     (real, standalone files, same convention as public/goldfish.svg).
+     mask-image supplies the shape from the external file, which sidesteps
+     the inline-<svg> sizing bug entirely since it's loaded as an opaque
+     resource, not inline DOM.
+     The paint lives on a ::before PSEUDO-element, not the button itself —
+     found live that .hdr-icon-mask's background-color:currentColor and
+     .hdr-btn/.hdr-btn-close:hover's own background (the rounded highlight
+     square) were the SAME property on the SAME element, so hovering Quit
+     silently overrode the icon's mask-fill color instead of tinting it red
+     (the highlight square rendered; the X itself didn't turn red — the two
+     roles need independent elements). ::before still resolves currentColor
+     against the button's own computed color, so the hover-to-red still
+     works, just without the collision. */
+  :global(.hdr-icon-mask) { position: relative; }
+  :global(.hdr-icon-mask::before) {
+    content: "";
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: 17px;
+    height: 17px;
+    background-color: currentColor;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+    -webkit-mask-size: 17px 17px;
+    mask-size: 17px 17px;
+  }
+  :global(.hdr-icon-about::before) { -webkit-mask-image: url(/icon-about.svg); mask-image: url(/icon-about.svg); }
+  :global(.hdr-icon-settings::before) { -webkit-mask-image: url(/icon-settings.svg); mask-image: url(/icon-settings.svg); }
+  :global(.hdr-icon-collapse::before) { -webkit-mask-image: url(/icon-collapse.svg); mask-image: url(/icon-collapse.svg); }
+  :global(.hdr-icon-close::before) { -webkit-mask-image: url(/icon-close.svg); mask-image: url(/icon-close.svg); }
+  :global(.hdr-btn:hover) { background: var(--surface-3); }
   :global(.hdr-btn-close:hover) { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
 
   /* Point-of-purchase legal agreement line + inline links */
