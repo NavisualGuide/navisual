@@ -418,7 +418,13 @@ fn ai_bbox_probe(
 /// Explorer tree + an extension side panel measured 125 qualifying elements at
 /// ~$0.001/request extra cost even at 2-3x that — token cost is negligible here,
 /// so the cap is sized for real-world headroom, not budget.
-pub const CONTEXT_ELEMENTS_CAP: usize = 200;
+/// Raised 200 → 300 (2026-07-15): a live Jira session in Chrome measured 209–213
+/// qualifying elements with an issue-detail + share dialog open (147–165 on normal
+/// board views) — 4 over-cap skips, each falling back to A11y. Complex SPA dialogs
+/// are exactly where Selection helps most, and the enumeration TIME was fine
+/// (~100–400 ms; the budget bounds that separately) — only the token cap fired.
+/// Worst-case prompt add at 300 ≈ +1–1.2k tokens, still dwarfed by the screenshot.
+pub const CONTEXT_ELEMENTS_CAP: usize = 300;
 /// S.1 hard budget; exceeded → skip the block (the AI call proceeds without it).
 /// Raised 300→500 (2026-07-05, VS Code's raw query alone measured ~287 ms) then
 /// 500→1000 (2026-07-06): a live SolidWorks session crept from ~400 ms early on to
