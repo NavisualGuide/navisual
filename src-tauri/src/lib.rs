@@ -336,6 +336,11 @@ fn execute_step(
     (
         Option<locator::LocateResult>,
         Option<locator::trace::LocateTrace>,
+        // The diffuse AI-bbox hint ring was drawn (locator missed, trusted bbox
+        // present). The frontend needs this third state for the ✗ Wrong picker:
+        // a visible hint IS rejectable ("Wrong spot" on it = a model-grounding
+        // fault label), even though no verified pointer exists.
+        bool,
     ),
     String,
 > {
@@ -427,6 +432,7 @@ fn execute_step(
     // model likely got wrong, which is worse than an honest "pointer unavailable"
     // with no region. Trusted grounders (the default for all but the weak free
     // chain) still get the hint.
+    let mut hint_shown = false;
     if located.is_none()
         && bbox_decisive
         && step
@@ -438,6 +444,7 @@ fn execute_step(
             if let Some(hint) = inflate_hint_bbox(ai, capture_rect) {
                 kind = overlay::OverlayKind::Hint;
                 bbox = Some(hint);
+                hint_shown = true;
             }
         }
     }
@@ -510,7 +517,7 @@ fn execute_step(
         tracker.clear();
     }
 
-    Ok((located, trace))
+    Ok((located, trace, hint_shown))
 }
 
 // ---------- Autopilot screen-change polling + stale-response detection ----------
@@ -931,6 +938,12 @@ struct GuideResponse {
     /// the `task_suggestions` setting is off. Display-only — the frontend prefills
     /// the task box (selected) and never auto-submits.
     suggested_tasks: Vec<String>,
+    /// The diffuse AI-bbox hint ring was drawn for this step (locator missed, trusted
+    /// bbox present). Third picker state: a visible hint is rejectable — "Wrong spot"
+    /// on it is a model-grounding-fault label (located=false on the feedback row
+    /// distinguishes it from a real-pointer rejection), routed straight to the AI
+    /// (the locator already ran everything and missed — nothing local to retry).
+    hint_shown: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1307,6 +1320,7 @@ async fn guide(
                     locate_trace: None,
                     ai_bbox: None,
                     suggested_tasks: Vec::new(),
+        hint_shown: false,
                 });
             }
         }
@@ -1472,6 +1486,7 @@ async fn guide(
                 locate_trace: None,
                 ai_bbox: None,
                 suggested_tasks: Vec::new(),
+        hint_shown: false,
             });
         }
     };
@@ -1755,6 +1770,7 @@ async fn guide(
                 locate_trace: None,
                 ai_bbox: None,
                 suggested_tasks: Vec::new(),
+        hint_shown: false,
             });
         }
     };
@@ -1842,6 +1858,7 @@ async fn guide(
             ai_bbox: None,
             // A no-step "looks complete" reply is exactly where suggestions matter.
             suggested_tasks,
+            hint_shown: false,
         });
     }
 
@@ -1882,7 +1899,7 @@ async fn guide(
         }
     }
 
-    let (located, mut locate_trace) = execute_step(
+    let (located, mut locate_trace, hint_shown) = execute_step(
         &app,
         &steps[0],
         new_hwnd_opt,
@@ -1897,7 +1914,7 @@ async fn guide(
         &state.packs,
         context_elements,
     )
-    .unwrap_or((None, None));
+    .unwrap_or((None, None, false));
     if let Some(ref mut t) = locate_trace {
         t.request_id = Some(request_id.clone());
         t.model = Some(used_model.clone());
@@ -1932,6 +1949,7 @@ async fn guide(
         locate_trace,
         ai_bbox,
         suggested_tasks,
+        hint_shown,
     })
 }
 
@@ -1994,7 +2012,7 @@ async fn next_step(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
-    let (located, mut locate_trace) = execute_step(
+    let (located, mut locate_trace, hint_shown) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -2009,7 +2027,7 @@ async fn next_step(
         &state.packs,
         context_elements,
     )
-    .unwrap_or((None, None));
+    .unwrap_or((None, None, false));
     if let Some(ref mut t) = locate_trace {
         t.request_id = request_id.clone();
         t.model = Some(used_model.clone());
@@ -2044,6 +2062,7 @@ async fn next_step(
         locate_trace,
         ai_bbox,
         suggested_tasks: Vec::new(), // local advance — no AI call, no new guesses
+        hint_shown,
     })
 }
 
@@ -2123,7 +2142,7 @@ async fn retry_locate(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
-    let (located, mut locate_trace) = execute_step(
+    let (located, mut locate_trace, hint_shown) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -2138,7 +2157,7 @@ async fn retry_locate(
         &state.packs,
         context_elements,
     )
-    .unwrap_or((None, None));
+    .unwrap_or((None, None, false));
     if let Some(ref mut t) = locate_trace {
         t.request_id = request_id.clone();
         t.local_retry = true;
@@ -2169,6 +2188,7 @@ async fn retry_locate(
         locate_trace,
         ai_bbox,
         suggested_tasks: Vec::new(),
+        hint_shown,
     })
 }
 
@@ -2609,6 +2629,7 @@ async fn send_correction(
             locate_trace: None,
             ai_bbox: None,
             suggested_tasks,
+            hint_shown: false,
         });
     }
 
@@ -2645,7 +2666,7 @@ async fn send_correction(
         }
     }
 
-    let (located, mut locate_trace) = execute_step(
+    let (located, mut locate_trace, hint_shown) = execute_step(
         &app,
         &steps[0],
         new_hwnd,
@@ -2660,7 +2681,7 @@ async fn send_correction(
         &state.packs,
         context_elements,
     )
-    .unwrap_or((None, None));
+    .unwrap_or((None, None, false));
     if let Some(ref mut t) = locate_trace {
         t.request_id = Some(request_id.clone());
         t.model = Some(used_model.clone());
@@ -2694,6 +2715,7 @@ async fn send_correction(
         locate_trace,
         ai_bbox,
         suggested_tasks,
+        hint_shown,
     })
 }
 

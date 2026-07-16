@@ -51,6 +51,7 @@ See the LICENSE file in the root of this repository for complete details.
     locate_trace: LocateTrace | null;
     ai_bbox: Rect | null;
     suggested_tasks: string[];
+    hint_shown: boolean;
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
@@ -226,6 +227,13 @@ See the LICENSE file in the root of this repository for complete details.
   // Reset on a new task and on step advance (capped: stale exclusions on a
   // changed layout could veto a now-correct element).
   let wrongSpotAvoid = $state<Rect[]>([]);
+  // The diffuse AI-bbox hint ring was drawn for the current step (locator missed,
+  // trusted bbox). Third picker state: the ring is visibly rejectable, so "Wrong
+  // spot" shows alongside "Can't find it" — rejecting it is a model-grounding
+  // fault (no locator pick exists), routed straight to the AI: no avoid-list push
+  // (the ring is an inflated REGION — vetoing it could block the correction's
+  // true pointer) and no local retry (the locator already ran everything).
+  let hintShown = $state(false);
   const CATEGORY_LABEL: Record<string, string> = {
     wrong_instruction: "Wrong instruction",
     wrong_spot: "Wrong spot",
@@ -1238,6 +1246,7 @@ See the LICENSE file in the root of this repository for complete details.
     currentInstruction = res.instruction;
     locateResult = res.located;
     locateTrace = res.locate_trace;
+    hintShown = res.hint_shown;
     sessionId = res.session_id;
     // Training-data join key — echoed back on feedback rows so worked/wrong
     // signals join this request's prompt/response/screenshot records. next_step
@@ -1480,6 +1489,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (res.located) {
         locateResult = res.located;
         locateTrace = res.locate_trace;
+        hintShown = res.hint_shown;
         addToHistory(
           "system",
           category === "wrong_spot"
@@ -2023,12 +2033,15 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <div class="reason-chips">
                 <button class="reason-chip" onclick={() => submitWrong("wrong_instruction")}>Wrong instruction</button>
-                <!-- D2: "Wrong spot" needs a pointer to reject; "Can't find it" means no
-                     pointer was drawn. Showing both regardless made them overlap whenever
-                     no pointer existed — pick by the actual locate state instead. -->
-                {#if locateResult}
+                <!-- D2 (three states): a verified pointer → only "Wrong spot" (something
+                     to reject). Nothing drawn → only "Can't find it". The HINT RING case
+                     (locator missed, trusted AI bbox drawn) shows BOTH — the ring is
+                     visibly rejectable ("Wrong spot" on it = a model-grounding-fault
+                     label, located=false on the row), and "Can't find it" stays valid. -->
+                {#if locateResult || hintShown}
                   <button class="reason-chip" onclick={() => submitWrong("wrong_spot")}>Wrong spot</button>
-                {:else}
+                {/if}
+                {#if !locateResult}
                   <button class="reason-chip" onclick={() => submitWrong("not_found")}>Can't find it</button>
                 {/if}
                 <button class="reason-chip" onclick={() => submitWrong("already_done")}>Already did that</button>
