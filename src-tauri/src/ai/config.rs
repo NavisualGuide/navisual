@@ -111,6 +111,15 @@ pub struct Config {
     pub debug_prompt_log_file_enabled: bool,
     /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
     pub debug_show_ai_bbox: bool,
+    /// Training-data banking (llm-finetuning-eval.md §5b) — one switch for the whole
+    /// bundle a future fine-tune needs as COMPLETE, JOINABLE triples: the exact AI-sent
+    /// JPEG saved per request (training/shot_<request_id>.jpg), prompt+response entries
+    /// in prompt_log.jsonl (forced on even if that toggle is off — a triple without the
+    /// response is worthless), rotated jsonl logs ARCHIVED to training/logs/ instead of
+    /// deleted, and feedback rows mirrored (with request_id) to training/feedback.jsonl.
+    /// The training/ dir is exempt from the 7-day debug cleanup — it exists only when
+    /// this is deliberately on, and its whole point is accumulation.
+    pub training_capture_enabled: bool,
 }
 
 impl Default for Config {
@@ -162,6 +171,7 @@ impl Default for Config {
             debug_locate_log_file_enabled: false,
             debug_prompt_log_file_enabled: false,
             debug_show_ai_bbox: false,
+            training_capture_enabled: false,
         }
     }
 }
@@ -381,6 +391,9 @@ impl Config {
         }
         if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") {
             config.debug_show_ai_bbox = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("TRAINING_CAPTURE_ENABLED") {
+            config.training_capture_enabled = v == "true" || v == "1";
         }
 
         // BYOK keys stored in the Windows Credential Manager are referenced from

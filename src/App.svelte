@@ -35,6 +35,7 @@ See the LICENSE file in the root of this repository for complete details.
   type GuideResponse = {
     ok: boolean;
     session_id: string;
+    request_id: string | null;
     steps: GuidanceStep[];
     step_index: number;
     instruction: string;
@@ -94,6 +95,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_locate_trace_enabled: boolean;
     debug_locate_log_file_enabled: boolean;
     debug_prompt_log_file_enabled: boolean;
+    training_capture_enabled: boolean;
     task_suggestions: boolean;
     debug_show_ai_bbox: boolean;
     developer_mode: boolean;
@@ -239,6 +241,9 @@ See the LICENSE file in the root of this repository for complete details.
       "I have ALREADY done this step. Do not repeat it — advance to the next action.",
   };
   let sessionId = $state("");
+  // request_id of the most recent AI response (llm-finetuning-eval.md §5b) —
+  // attached to feedback rows as the local training-data join key.
+  let lastRequestId = $state("");
   let provider = $state("");
   // The model that actually handled the last AI response. For managed this is the
   // concrete model the relay routed to — the free tier tries a primary provider and
@@ -536,6 +541,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_locate_trace_enabled: false,
     debug_locate_log_file_enabled: false,
     debug_prompt_log_file_enabled: false,
+    training_capture_enabled: false,
     task_suggestions: true,
     debug_show_ai_bbox: false,
     developer_mode: false,
@@ -1215,6 +1221,10 @@ See the LICENSE file in the root of this repository for complete details.
     locateResult = res.located;
     locateTrace = res.locate_trace;
     sessionId = res.session_id;
+    // Training-data join key — echoed back on feedback rows so worked/wrong
+    // signals join this request's prompt/response/screenshot records. next_step
+    // responses carry the ORIGINAL producing request's id (correct attribution).
+    if (res.request_id) lastRequestId = res.request_id;
     if (res.provider) provider = res.provider;
     if (res.model) routedModel = res.model;
     phase = res.needs_input ? "needs_input" : "guiding";
@@ -1411,6 +1421,7 @@ See the LICENSE file in the root of this repository for complete details.
           locate_conf: locateResult?.confidence ?? null,
           app_window: sharedApp ? (friendlyName(sharedApp.exe_name) || sharedApp.app_name) : null,
           session_id: sessionId || null,
+          request_id: lastRequestId || null,
         },
       });
     } catch (_) {
@@ -2877,6 +2888,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <span>Append every prompt sent to the AI to prompt_log.jsonl</span>
               </label>
               <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\prompt_log.jsonl — a single running history covering every request (task, follow-up, re-query, and ✗ Wrong corrections). The system prompt is static (src-tauri/src/ai/prompts.rs) and never logged, only the per-request dynamic text.</p>
+            </div>
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">Training capture</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.training_capture_enabled} />
+                <span>Bank complete training triples (screenshot + prompt + response + outcome) locally</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">Saves the exact AI-sent screenshot per request to %APPDATA%\com.navisual.app\training\, records the AI response in prompt_log.jsonl, archives rotated logs instead of deleting them, and mirrors worked/wrong feedback locally — all joined by a per-request id. Local only, never uploaded; exempt from the 7-day debug cleanup. Disk ≈ 100–200 KB per request.</p>
             </div>
             <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
               <p class="setting-label">AI bounding box</p>

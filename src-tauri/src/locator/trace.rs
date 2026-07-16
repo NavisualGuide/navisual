@@ -6,12 +6,17 @@
 //!  - A rolling JSONL log at `%LOCALAPPDATA%\com.navisual.app\locate_log.jsonl`.
 
 use crate::capture::Rect;
-use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct LocateTrace {
     pub timestamp_ms: u64,
+    /// Joins this trace to the AI request that produced its step — the same id on the
+    /// `prompt_log.jsonl` entry, the training screenshot, and any feedback row
+    /// (llm-finetuning-eval.md §5b). For `next_step` locates (no AI call) this is the
+    /// ORIGINAL request whose response the advanced-to step came from, which is the
+    /// correct attribution for training labels.
+    pub request_id: Option<String>,
     pub target_text: String,
     pub target_role: Option<String>,
     pub nearby_text: Option<String>,
@@ -279,25 +284,10 @@ impl LocateTrace {
     }
 }
 
-/// Append a trace as one JSON line. Rotates at ~5 MB.
-pub fn append_jsonl(path: &Path, trace: &LocateTrace) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > 5 * 1024 * 1024 {
-            let backup = path.with_extension("jsonl.1");
-            let _ = std::fs::remove_file(&backup);
-            let _ = std::fs::rename(path, &backup);
-        }
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+/// Append a trace as one JSON line. Rotation policy per `jsonl_log::append_line` —
+/// `archive` (training capture on) preserves rotated-out history under
+/// `training/logs/` instead of deleting it.
+pub fn append_jsonl(path: &Path, trace: &LocateTrace, archive: bool) -> std::io::Result<()> {
     let line = serde_json::to_string(trace).map_err(std::io::Error::other)?;
-    writeln!(file, "{line}")?;
-    Ok(())
+    crate::jsonl_log::append_line(path, &line, archive)
 }

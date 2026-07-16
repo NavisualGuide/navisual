@@ -7,6 +7,7 @@
 mod ai;
 mod capture;
 mod credvault;
+mod jsonl_log;
 mod locator;
 mod overlay;
 mod packs;
@@ -77,6 +78,12 @@ struct GuidanceState {
     /// the capture state so `next_step`'s locates resolve `target_element_id` against
     /// the SAME list; replaced (or cleared) on every guide/correction capture.
     context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>>,
+    /// Training-data join key (llm-finetuning-eval.md §5b): the UUID of the most
+    /// recent AI request. `next_step` attributes its locate traces to this (the
+    /// request whose response produced the steps it's advancing through); each new
+    /// guide/correction request reads it as `prev_request_id` (chaining
+    /// rejected→chosen correction pairs) before replacing it with its own.
+    request_id: Option<String>,
 }
 
 /// S.1 — enumerate the Structured-Context element snapshot for the captured window.
@@ -655,14 +662,22 @@ fn log_model_timing(
     }
 }
 
-/// Optionally append a trace to the rolling JSONL log when enabled in settings.
-fn maybe_log_trace(app: &AppHandle, trace: &locator::trace::LocateTrace, log_enabled: bool) {
-    if !log_enabled {
+/// Optionally append a trace to the rolling JSONL log. Written when the locate-log
+/// toggle OR training capture is on (a training triple needs the verified locate
+/// outcome — it's the label); `training` additionally switches rotation to
+/// archive-not-delete (see `jsonl_log`).
+fn maybe_log_trace(
+    app: &AppHandle,
+    trace: &locator::trace::LocateTrace,
+    log_enabled: bool,
+    training: bool,
+) {
+    if !log_enabled && !training {
         return;
     }
     if let Ok(dir) = app.path().app_local_data_dir() {
         let path = dir.join("locate_log.jsonl");
-        if let Err(e) = locator::trace::append_jsonl(&path, trace) {
+        if let Err(e) = locator::trace::append_jsonl(&path, trace, training) {
             log::warn!("locate_log.jsonl write failed: {e}");
         }
     }
@@ -681,37 +696,42 @@ fn trace_app_name(hwnd_opt: Option<usize>) -> Option<String> {
 }
 
 /// Developer option — append the exact prompt sent to the AI to a single running
-/// `prompt_log.jsonl`, when enabled. Covers every call site (guide/reply/requery/
-/// correction), unlike `debug_screenshot_enabled`'s per-call `prompt_<ts>.txt` dumps
-/// (guide() only). System prompt is static and never logged — see `ai/prompts.rs`.
-#[allow(clippy::too_many_arguments)]
+/// `prompt_log.jsonl`. Written when the prompt-log toggle OR training capture is on
+/// (training triples need the prompt; the toggle alone shouldn't have to be
+/// remembered separately). Covers every call site (guide/reply/requery/correction),
+/// unlike `debug_screenshot_enabled`'s per-call `prompt_<ts>.txt` dumps (guide()
+/// only). System prompt is static and never logged — see `ai/prompts.rs`. With
+/// training capture on, the entry also carries the parsed response, the
+/// request-id join keys, and archive-not-delete rotation (prompt_log.rs docs).
 fn maybe_log_prompt(
     app: &AppHandle,
     log_enabled: bool,
-    session_id: &str,
-    call_kind: &str,
-    provider: &str,
-    model: &str,
-    has_screenshot: bool,
-    prompt: &str,
+    training: bool,
+    fields: prompt_log::PromptLogFields<'_>,
 ) {
-    if !log_enabled {
+    if !log_enabled && !training {
         return;
     }
-    let entry = prompt_log::PromptLogEntry::new(
-        session_id,
-        call_kind,
-        provider,
-        model,
-        has_screenshot,
-        prompt,
-    );
+    let entry = prompt_log::PromptLogEntry::new(fields);
     if let Ok(dir) = app.path().app_local_data_dir() {
         let path = dir.join("prompt_log.jsonl");
-        if let Err(e) = prompt_log::append_jsonl(&path, &entry) {
+        if let Err(e) = prompt_log::append_jsonl(&path, &entry, training) {
             log::warn!("prompt_log.jsonl write failed: {e}");
         }
     }
+}
+
+/// Training capture (llm-finetuning-eval.md §5b): persist the exact AI-sent JPEG as
+/// `training/shot_<request_id>.jpg`. Returns the app-data-relative filename for the
+/// prompt-log entry's `screenshot_file`. The `training/` dir is deliberately exempt
+/// from `cleanup_old_debug_artifacts` — it only exists when the toggle is on, and
+/// accumulation is its purpose.
+fn save_training_shot(base_dir: Option<&std::path::Path>, request_id: &str, jpeg: &[u8]) -> Option<String> {
+    let dir = base_dir?.join("training");
+    std::fs::create_dir_all(&dir).ok()?;
+    let name = format!("shot_{request_id}.jpg");
+    std::fs::write(dir.join(&name), jpeg).ok()?;
+    Some(format!("training/{name}"))
 }
 
 /// Nav-Pack prompt injection (Workstream C): if a loaded pack's `window_title_pattern`
@@ -874,6 +894,11 @@ pub fn refresh_active_window(_app: &AppHandle) {}
 struct GuideResponse {
     ok: bool,
     session_id: String,
+    /// Training-data join key for THIS AI request (llm-finetuning-eval.md §5b) —
+    /// the frontend echoes it back on feedback rows so worked/wrong signals join
+    /// the request's prompt/response/screenshot/trace records. `None` when no AI
+    /// call happened (local advance, pre-capture errors).
+    request_id: Option<String>,
     steps: Vec<GuidanceStep>,
     step_index: usize,
     instruction: String,
@@ -967,6 +992,9 @@ struct SettingsPayload {
     debug_locate_trace_enabled: bool,
     debug_locate_log_file_enabled: bool,
     debug_prompt_log_file_enabled: bool,
+    /// Training-data banking (llm-finetuning-eval.md §5b) — see Config field docs.
+    #[serde(default)]
+    training_capture_enabled: bool,
     /// v0.7 Workstream P — prefilled task suggestions (cold-start prefill + AI
     /// suggested_tasks). Screen Guide toggle; default on (display-only, no risk).
     #[serde(default = "default_true_setting")]
@@ -1135,6 +1163,9 @@ fn migrate_roaming_to_local(old_dir: &std::path::Path, new_dir: &std::path::Path
 /// forget, and accumulate window-title / OCR-text PII indefinitely.
 ///
 /// Targets: `<app_data>/debug/*` and `<app_data>/locate_log.jsonl{,.1}`.
+/// Deliberately does NOT touch `<app_data>/training/` — that dir only exists
+/// when `TRAINING_CAPTURE_ENABLED` is deliberately on, and accumulation is its
+/// entire purpose (llm-finetuning-eval.md §5b).
 fn cleanup_old_debug_artifacts(app_data_dir: &std::path::Path) {
     use std::time::{Duration, SystemTime};
     const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -1208,7 +1239,21 @@ async fn guide(
         }
     };
 
-    let debug_screenshot_enabled = state.ai_router.lock().await.config.debug_screenshot_enabled;
+    let (debug_screenshot_enabled, training_enabled) = {
+        let router = state.ai_router.lock().await;
+        (
+            router.config.debug_screenshot_enabled,
+            router.config.training_capture_enabled,
+        )
+    };
+
+    // Training-data join key (llm-finetuning-eval.md §5b): one UUID per AI request,
+    // shared by the prompt-log entry, the locate trace, the saved screenshot, and
+    // any feedback row. prev_request_id chains this session's requests (a correction
+    // entry's prev is the response it rejects — a natural preference pair). Read
+    // before the state stores the new id; stored only once the AI call succeeds.
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let prev_request_id = state.guidance.lock().request_id.clone();
 
     // `is_fs` is the user's sticky "Entire desktop" choice from the target picker
     // (GuidanceState.full_screen_mode). The AI no longer decides this — full-screen
@@ -1241,6 +1286,7 @@ async fn guide(
                 return Ok(GuideResponse {
                     ok: false,
                     session_id,
+                    request_id: None,
                     steps: vec![],
                     step_index: 0,
                     instruction: String::new(),
@@ -1373,6 +1419,9 @@ async fn guide(
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
+    // App-data-relative filename of the saved training JPEG (None unless training
+    // capture is on and the save succeeded) — recorded on the prompt-log entry.
+    let mut training_shot_file: Option<String> = None;
     let (
         screenshot_b64,
         capture_rect_opt,
@@ -1383,6 +1432,10 @@ async fn guide(
         pre_ocr,
     ) = match capture_result {
         Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes, pre_hash, ocr_png, ocr_rect)) => {
+            if training_enabled {
+                let base = app.path().app_local_data_dir().ok();
+                training_shot_file = save_training_shot(base.as_deref(), &request_id, &full_bytes);
+            }
             *state.chat_full_jpeg.lock() = Some(full_bytes);
             (
                 b64,
@@ -1398,6 +1451,7 @@ async fn guide(
             return Ok(GuideResponse {
                 ok: false,
                 session_id,
+                request_id: None,
                 steps: vec![],
                 step_index: 0,
                 instruction: String::new(),
@@ -1611,23 +1665,37 @@ async fn guide(
         .get_managed_routed_model()
         .unwrap_or_else(|| router.active_model());
     let (in_tok, out_tok) = router.get_last_usage();
+    let app_version = app.package_info().version.to_string();
+    let resp_err_str = resp.as_ref().err().map(|e| e.to_string());
     maybe_log_prompt(
         &app,
         router.config.debug_prompt_log_file_enabled,
-        &session_id,
-        if is_reply {
-            "reply"
-        } else if is_next_requery {
-            "requery"
-        } else if task.is_empty() {
-            "resume"
-        } else {
-            "task"
+        training_enabled,
+        prompt_log::PromptLogFields {
+            session_id: &session_id,
+            request_id: Some(&request_id),
+            prev_request_id: prev_request_id.as_deref(),
+            app_version: Some(&app_version),
+            call_kind: if is_reply {
+                "reply"
+            } else if is_next_requery {
+                "requery"
+            } else if task.is_empty() {
+                "resume"
+            } else {
+                "task"
+            },
+            provider: &timing_provider,
+            model: &used_model,
+            has_screenshot: true,
+            screenshot_file: training_shot_file.as_deref(),
+            prompt: &sent_user_prompt,
+            response: resp
+                .as_ref()
+                .ok()
+                .and_then(|r| serde_json::to_value(r).ok()),
+            response_error: resp_err_str.as_deref(),
         },
-        &timing_provider,
-        &used_model,
-        true,
-        &sent_user_prompt,
     );
     log_model_timing(
         &app,
@@ -1664,6 +1732,7 @@ async fn guide(
             return Ok(GuideResponse {
                 ok: false,
                 session_id,
+                request_id: Some(request_id),
                 steps: vec![],
                 step_index: 0,
                 instruction: String::new(),
@@ -1737,6 +1806,9 @@ async fn guide(
         // Also stored when None — a skipped enumeration must clear the previous
         // snapshot, or next_step would resolve ids against a stale list.
         g.context_elements = context_elements.clone();
+        // These steps came from THIS request — next_step's locate traces and the
+        // frontend's feedback rows attribute to it (llm-finetuning-eval.md §5b).
+        g.request_id = Some(request_id.clone());
     }
 
     if steps.is_empty() {
@@ -1752,6 +1824,7 @@ async fn guide(
         return Ok(GuideResponse {
             ok: true,
             session_id,
+            request_id: Some(request_id),
             steps,
             step_index: 0,
             instruction: String::new(),
@@ -1825,13 +1898,14 @@ async fn guide(
     )
     .unwrap_or((None, None));
     if let Some(ref mut t) = locate_trace {
+        t.request_id = Some(request_id.clone());
         t.model = Some(used_model.clone());
         t.provider = Some(provider.clone());
         t.input_tokens = Some(in_tok);
         t.output_tokens = Some(out_tok);
         t.ai_elapsed_ms = Some(ai_elapsed_ms as u32);
         t.app_name = trace_app_name(new_hwnd_opt);
-        maybe_log_trace(&app, t, log_trace);
+        maybe_log_trace(&app, t, log_trace, training_enabled);
     }
 
     // Anchor the autopilot baseline AFTER the pointer is drawn so that
@@ -1841,6 +1915,7 @@ async fn guide(
     Ok(GuideResponse {
         ok: true,
         session_id,
+        request_id: Some(request_id),
         steps: steps.clone(),
         step_index: 0,
         instruction: steps[0].instruction.clone(),
@@ -1865,7 +1940,7 @@ async fn next_step(
     state: State<'_, AppState>,
     step_index: usize,
 ) -> Result<GuideResponse, String> {
-    let (steps, session_id, needs_input, provider, capture_rect, context_elements) = {
+    let (steps, session_id, needs_input, provider, capture_rect, context_elements, request_id) = {
         let g = state.guidance.lock();
         (
             g.steps.clone(),
@@ -1876,6 +1951,9 @@ async fn next_step(
             // The snapshot from the capture that produced these steps — ids in
             // steps[1..] resolve against the SAME list the AI saw (v0.7 S.1).
             g.context_elements.clone(),
+            // No AI call here — attribute this locate to the request whose
+            // response the advanced-to step came from (LocateTrace doc comment).
+            g.request_id.clone(),
         )
     };
 
@@ -1886,7 +1964,7 @@ async fn next_step(
         ));
     }
 
-    let (log_trace, debug_screenshot_enabled, bbox_decisive, used_model) = {
+    let (log_trace, training_enabled, debug_screenshot_enabled, bbox_decisive, used_model) = {
         let router = state.ai_router.lock().await;
         // No AI call here; the cached routed/active model is the one that produced
         // these steps (and their bboxes), so its trust still applies.
@@ -1895,6 +1973,7 @@ async fn next_step(
             .unwrap_or_else(|| router.active_model());
         (
             router.config.debug_locate_log_file_enabled,
+            router.config.training_capture_enabled,
             router.config.debug_screenshot_enabled,
             ai::bbox::bbox_is_decisive(&used_model, &router.config.bbox_distrust_models),
             used_model,
@@ -1931,11 +2010,12 @@ async fn next_step(
     )
     .unwrap_or((None, None));
     if let Some(ref mut t) = locate_trace {
+        t.request_id = request_id.clone();
         t.model = Some(used_model.clone());
         t.provider = Some(provider.clone());
         // No AI call this turn — nothing new to attribute (see LocateTrace doc comment).
         t.app_name = trace_app_name(stored_hwnd);
-        maybe_log_trace(&app, t, log_trace);
+        maybe_log_trace(&app, t, log_trace, training_enabled);
     }
 
     // Local step advance — no AI call, so no stale check. But anchor the
@@ -1947,6 +2027,7 @@ async fn next_step(
     Ok(GuideResponse {
         ok: true,
         session_id,
+        request_id,
         steps: steps.clone(),
         step_index,
         instruction: steps[step_index].instruction.clone(),
@@ -2019,7 +2100,14 @@ async fn send_correction(
 
     let router = state.ai_router.lock().await;
     let debug_screenshot_enabled = router.config.debug_screenshot_enabled;
+    let training_enabled = router.config.training_capture_enabled;
     drop(router); // Release lock before blocking capture
+
+    // Training-data join key — same contract as guide()'s. prev_request_id here is
+    // the request whose response the user just rejected: (prev, this) becomes a
+    // (rejected, chosen) preference pair once this retry is accepted (§5b).
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let prev_request_id = state.guidance.lock().request_id.clone();
 
     let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
 
@@ -2138,7 +2226,12 @@ async fn send_correction(
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
 
+    let mut training_shot_file: Option<String> = None;
     if let Some(bytes) = full_jpeg_opt {
+        if training_enabled {
+            let base = app.path().app_local_data_dir().ok();
+            training_shot_file = save_training_shot(base.as_deref(), &request_id, &bytes);
+        }
         *state.chat_full_jpeg.lock() = Some(bytes);
     }
 
@@ -2261,15 +2354,29 @@ async fn send_correction(
         .get_managed_routed_model()
         .unwrap_or_else(|| router.active_model());
     let (in_tok, out_tok) = router.get_last_usage();
+    let app_version = app.package_info().version.to_string();
+    let resp_err_str = resp.as_ref().err().map(|e| e.to_string());
     maybe_log_prompt(
         &app,
         router.config.debug_prompt_log_file_enabled,
-        &session_id,
-        "correction",
-        &timing_provider,
-        &used_model,
-        true,
-        user_text,
+        training_enabled,
+        prompt_log::PromptLogFields {
+            session_id: &session_id,
+            request_id: Some(&request_id),
+            prev_request_id: prev_request_id.as_deref(),
+            app_version: Some(&app_version),
+            call_kind: "correction",
+            provider: &timing_provider,
+            model: &used_model,
+            has_screenshot: true,
+            screenshot_file: training_shot_file.as_deref(),
+            prompt: user_text,
+            response: resp
+                .as_ref()
+                .ok()
+                .and_then(|r| serde_json::to_value(r).ok()),
+            response_error: resp_err_str.as_deref(),
+        },
     );
     log_model_timing(
         &app,
@@ -2344,6 +2451,8 @@ async fn send_correction(
         // Stored even when None — a skipped enumeration must clear the previous
         // snapshot, or next_step would resolve ids against a stale list.
         g.context_elements = context_elements.clone();
+        // These steps came from THIS request — see guide()'s matching line.
+        g.request_id = Some(request_id.clone());
     }
 
     if steps.is_empty() {
@@ -2357,6 +2466,7 @@ async fn send_correction(
         return Ok(GuideResponse {
             ok: true,
             session_id,
+            request_id: Some(request_id),
             steps,
             step_index: 0,
             instruction: String::new(),
@@ -2425,13 +2535,14 @@ async fn send_correction(
     )
     .unwrap_or((None, None));
     if let Some(ref mut t) = locate_trace {
+        t.request_id = Some(request_id.clone());
         t.model = Some(used_model.clone());
         t.provider = Some(provider.clone());
         t.input_tokens = Some(in_tok);
         t.output_tokens = Some(out_tok);
         t.ai_elapsed_ms = Some(ai_elapsed_ms as u32);
         t.app_name = trace_app_name(new_hwnd);
-        maybe_log_trace(&app, t, log_trace);
+        maybe_log_trace(&app, t, log_trace, training_enabled);
     }
 
     // Anchor the autopilot baseline AFTER the pointer is drawn (pointer-inclusive).
@@ -2440,6 +2551,7 @@ async fn send_correction(
     Ok(GuideResponse {
         ok: true,
         session_id,
+        request_id: Some(request_id),
         steps: steps.clone(),
         step_index: 0,
         instruction: steps[0].instruction.clone(),
@@ -2958,6 +3070,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         debug_locate_trace_enabled: c.debug_locate_trace_enabled,
         debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
         debug_prompt_log_file_enabled: c.debug_prompt_log_file_enabled,
+        training_capture_enabled: c.training_capture_enabled,
         task_suggestions: c.task_suggestions,
         debug_show_ai_bbox: c.debug_show_ai_bbox,
         developer_mode: developer_mode_enabled(),
@@ -3044,6 +3157,10 @@ async fn save_settings(
         (
             "DEBUG_PROMPT_LOG_FILE_ENABLED".into(),
             payload.debug_prompt_log_file_enabled.to_string(),
+        ),
+        (
+            "TRAINING_CAPTURE_ENABLED".into(),
+            payload.training_capture_enabled.to_string(),
         ),
         (
             "TASK_SUGGESTIONS".into(),
@@ -3692,22 +3809,62 @@ struct FeedbackPayload {
     locate_conf: Option<f32>,
     app_window: Option<String>,
     session_id: Option<String>,
+    /// Training-data join key (llm-finetuning-eval.md §5b) — the AI request this
+    /// feedback is about. LOCAL-ONLY: stripped before the Supabase insert (the
+    /// `feedback` table has no such column, and the join lives on the dev machine
+    /// where the prompt/response/screenshot records are anyway); with training
+    /// capture on, the full payload is mirrored to `training/feedback.jsonl`.
+    request_id: Option<String>,
 }
 
 /// Insert a feedback row into Supabase. Best-effort: the frontend ignores
 /// failures (offline / not configured / not signed in). Uses the managed JWT
-/// when present so `user_id` is attributed, else the anon role.
+/// when present so `user_id` is attributed, else the anon role. With training
+/// capture on, the row (incl. `request_id`) is also mirrored to the local
+/// `training/feedback.jsonl` FIRST — the human worked/wrong signal is the
+/// training label, and it must not depend on network reachability.
 #[tauri::command]
 async fn submit_feedback(
+    app: AppHandle,
     state: State<'_, AppState>,
     payload: FeedbackPayload,
 ) -> Result<(), String> {
+    let training_enabled = state
+        .ai_router
+        .lock()
+        .await
+        .config
+        .training_capture_enabled;
+    if training_enabled {
+        if let Ok(dir) = app.path().app_local_data_dir() {
+            let mut local = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = local.as_object_mut() {
+                obj.insert(
+                    "timestamp_ms".into(),
+                    serde_json::json!(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0)),
+                );
+            }
+            let path = dir.join("training").join("feedback.jsonl");
+            if let Err(e) = jsonl_log::append_line(&path, &local.to_string(), true) {
+                log::warn!("training feedback.jsonl write failed: {e}");
+            }
+        }
+    }
+
     let (supabase_url, anon_key, token) = {
         let (url, key) = managed_url_key(&state).await?;
         let token = acct_session_token(&state).await.ok();
         (url, key, token)
     };
-    let row = serde_json::to_value(&payload).map_err(|e| e.to_string())?;
+    let mut row = serde_json::to_value(&payload).map_err(|e| e.to_string())?;
+    // Strip the local-only join key — the server table has no request_id column,
+    // and PostgREST rejects inserts with unknown fields.
+    if let Some(obj) = row.as_object_mut() {
+        obj.remove("request_id");
+    }
     server::submit_feedback(&supabase_url, &anon_key, token.as_deref(), &row)
         .await
         .map_err(|e| e.to_string())
