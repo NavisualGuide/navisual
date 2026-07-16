@@ -360,8 +360,22 @@ fn ai_bbox_probe(
 
     // Role-family validation: when the AI named a role, the resolved control must match it
     // (so a bbox that drifted onto the whole TabItem can't satisfy a "button" request).
+    //
+    // Composite-item exception for "button" targets: a tab / list row / tree row with NO
+    // Button child (the descend above found none) is itself the clickable control —
+    // icon-grid items (Krita brush presets, palette swatches, toolbox tools) are ListItems
+    // that models universally call buttons. Live 2026-07-16: ListItem "686" at the trusted
+    // 60×58 bbox WAS the requested brush preset, rejected only on "ListItem ≠ Button".
+    // Safety here comes from the bbox-trust gate + interactivity + the size guard below —
+    // not exact role equality (the probe is name-agnostic by design for the same reason);
+    // and a wrong accept is now recoverable free via the B5 local retry, which vetoes it.
+    let composite_as_button = desired_ct == Some(ControlType::Button)
+        && matches!(
+            ct,
+            ControlType::TabItem | ControlType::ListItem | ControlType::TreeItem
+        );
     if let Some(want) = desired_ct {
-        if !ct_family_matches(ct, want) {
+        if !ct_family_matches(ct, want) && !composite_as_button {
             probe.detail = format!("role mismatch: {ct:?} ≠ {want:?}");
             return (None, probe);
         }
@@ -391,6 +405,8 @@ fn ai_bbox_probe(
     probe.accepted = true;
     probe.detail = if descended {
         "accepted (descended item → close Button)".to_string()
+    } else if composite_as_button {
+        format!("accepted (composite {ct:?} as the button-role target)")
     } else {
         "accepted".to_string()
     };
@@ -1994,6 +2010,40 @@ fn manual_walk_all(
         .collect()
 }
 
+/// Name-match decision for the manual walk — pure, unit-tested. Tiers: exact
+/// (trimmed) equality → reverse containment (the name is a fragment of the target,
+/// e.g. a "Layers" title inside target "Layers panel") → forward containment (the
+/// target inside a longer name, word-boundary-guarded for short targets).
+///
+/// Reverse containment carries a SUBSTANCE gate: a whitespace/punctuation-only
+/// name is contained in every multi-word target — live Krita 2026-07-16, an
+/// element named `" "` (one space) was the sole "match" for "white canvas" (the
+/// space between the words) and won the pointer. Proper-substring matches must
+/// carry ≥2 alphanumeric chars; exact equality (a literal "+" button) stays
+/// allowed via the equality arm.
+fn walk_name_matches(name: &str, target_norm_lower: &str, target_len: usize) -> bool {
+    if name.chars().count() > target_len.saturating_mul(4) {
+        return false;
+    }
+    let name_norm = norm_dashes(name).to_ascii_lowercase();
+    if name_norm.trim() == target_norm_lower.trim() {
+        return true;
+    }
+    if target_norm_lower.contains(&name_norm) {
+        let name_alnum = name_norm.chars().filter(|c| c.is_alphanumeric()).count();
+        return name_alnum >= 2;
+    }
+    if name_norm.contains(target_norm_lower) {
+        if target_len >= 4 {
+            return true;
+        }
+        return regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(target_norm_lower)))
+            .map(|re| re.is_match(&name_norm))
+            .unwrap_or(false);
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_recursive(
     element: &UIElement,
@@ -2011,35 +2061,15 @@ fn walk_recursive(
     }
 
     if let Ok(name) = element.get_name() {
-        if !name.is_empty() {
-            let name_norm = norm_dashes(&name).to_ascii_lowercase();
-            if name.chars().count() <= target_len.saturating_mul(4) {
-                let mut is_match = false;
-                if target_norm_lower.contains(&name_norm) {
-                    is_match = true;
-                } else if name_norm.contains(target_norm_lower) {
-                    if target_len >= 4 {
-                        is_match = true;
-                    } else {
-                        is_match = regex::Regex::new(&format!(
-                            r"(?i)\b{}\b",
-                            regex::escape(target_norm_lower)
-                        ))
-                        .map(|re| re.is_match(&name_norm))
-                        .unwrap_or(false);
-                    }
-                }
-                if is_match {
-                    if let Ok(ct) = element.get_control_type() {
-                        if !is_container_role(ct) {
-                            if let Some(want) = desired_ct {
-                                if ct == want {
-                                    candidates.push(element.clone());
-                                }
-                            } else {
-                                candidates.push(element.clone());
-                            }
+        if !name.is_empty() && walk_name_matches(&name, target_norm_lower, target_len) {
+            if let Ok(ct) = element.get_control_type() {
+                if !is_container_role(ct) {
+                    if let Some(want) = desired_ct {
+                        if ct == want {
+                            candidates.push(element.clone());
                         }
+                    } else {
+                        candidates.push(element.clone());
                     }
                 }
             }
@@ -2076,7 +2106,22 @@ fn _scope_hint(_: TreeScope) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{build_name_regex, norm_dashes, strip_accelerator};
+    use super::{build_name_regex, norm_dashes, strip_accelerator, walk_name_matches};
+
+    #[test]
+    fn walk_match_rejects_insubstantial_fragment_names() {
+        // Live Krita 2026-07-16: an element named " " was the sole "match" for
+        // "white canvas" (the space between the words) and won the pointer.
+        assert!(!walk_name_matches(" ", "white canvas", 12));
+        assert!(!walk_name_matches("-", "auto-save", 9));
+        assert!(!walk_name_matches("e", "eye icon", 8));
+        // Substantial fragments still match (a "Layers" title for "Layers panel").
+        assert!(walk_name_matches("Layers", "layers panel", 12));
+        // Exact equality survives even for symbol-only names (the "+" add button).
+        assert!(walk_name_matches("+", "+", 1));
+        // Forward containment unchanged.
+        assert!(walk_name_matches("Tool Options tab", "tool options", 12));
+    }
 
     #[test]
     fn accelerator_suffix_is_stripped() {

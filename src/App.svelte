@@ -1221,6 +1221,18 @@ See the LICENSE file in the root of this repository for complete details.
 
   function applyResponse(res: GuideResponse, idx: number, token: number) {
     if (token !== requestToken) return;
+    // D1: a no-step, no-question reply while steps were in flight = the AI saying
+    // the task looks complete — the prior guidance succeeded. Without this label
+    // the FINAL step of every successful session goes unlabeled ('worked' only
+    // fires on → Next, and a finished user just walks away). Logged BEFORE the
+    // state mutations below so the row carries the completed step's instruction
+    // and attributes to the request that produced it (lastRequestId is still the
+    // prior request here). Server kinds are constraint-pinned — migration
+    // 20260716000000_feedback_task_complete.sql must be applied first; the local
+    // training mirror banks the row regardless.
+    if (res.ok && res.steps.length === 0 && !res.needs_input && steps.length > 0 && lastRequestId) {
+      logFeedback("task_complete", "");
+    }
     steps = res.steps;
     stepIndex = idx;
     currentInstruction = res.instruction;
@@ -1301,7 +1313,7 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  async function nextStep(viaAutopilot = false) {
+  async function nextStep(viaAutopilot = false, skipFeedback = false) {
     // Don't allow next while an AI call is in flight — the hotkey can fire
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
@@ -1312,7 +1324,9 @@ See the LICENSE file in the root of this repository for complete details.
     // (worked_auto) instead of inflating the human-validated per-model success
     // rate (SDD §10; audit C3 + feedback-taxonomy split 2026-07-13). Dashboards
     // filter kind='worked' for success; worked_auto measures autopilot itself.
-    if (phase === "guiding") logFeedback(viaAutopilot ? "worked_auto" : "worked", "");
+    // skipFeedback: the B2 already_done advance logs its own kind first — an
+    // "already did that" is NOT a 'worked' confirmation of our guidance.
+    if (phase === "guiding" && !skipFeedback) logFeedback(viaAutopilot ? "worked_auto" : "worked", "");
     // Step advance = new target — the rejected-spot memory is for the step it
     // was rejected on (a stale exclusion could veto a now-correct element).
     wrongSpotAvoid = [];
@@ -1489,6 +1503,16 @@ See the LICENSE file in the root of this repository for complete details.
     wrongPickerOpen = false;
     const note = task.trim();
     logFeedback(category, note);
+    // B2: "Already did that" with steps remaining is deterministic — the only
+    // sane response is "advance" — so spend zero AI requests answering it.
+    // skipFeedback: already_done was just logged; a 'worked' on top would
+    // mislabel a repeated instruction as a success. At sequence end (no next
+    // step) the AI genuinely must re-plan → normal correction below.
+    if (category === "already_done" && !note && stepIndex + 1 < steps.length) {
+      addToHistory("system", "Skipping the already-done step — moving on (no AI request used).");
+      await nextStep(false, true);
+      return;
+    }
     if (category === "wrong_spot" && locateResult) {
       // Remember the rejected spot regardless of which retry path runs.
       wrongSpotAvoid = [...wrongSpotAvoid, locateResult.bbox];
