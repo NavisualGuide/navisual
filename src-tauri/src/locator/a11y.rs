@@ -1413,16 +1413,19 @@ pub fn find_element(
         }
     }
 
-    // "Wrong spot" memory: drop candidates centred inside the bbox the user just
-    // rejected, so the correction retry can surface the second-best match.
-    if let Some(av) = opts.avoid_bbox {
+    // "Wrong spot" memory: drop candidates centred inside any bbox the user has
+    // rejected this step (the list accumulates across retries — B5), so the
+    // retry can surface the next-best match.
+    if !opts.avoid_bboxes.is_empty() {
         candidates.retain(|c| {
             let cx = c.bbox.x + c.bbox.width as i32 / 2;
             let cy = c.bbox.y + c.bbox.height as i32 / 2;
-            !(cx >= av.x
-                && cx < av.x + av.width as i32
-                && cy >= av.y
-                && cy < av.y + av.height as i32)
+            !opts.avoid_bboxes.iter().any(|av| {
+                cx >= av.x
+                    && cx < av.x + av.width as i32
+                    && cy >= av.y
+                    && cy < av.y + av.height as i32
+            })
         });
     }
 
@@ -1439,6 +1442,18 @@ pub fn find_element(
             if opts.bbox_decisive && !opts.icon_target {
                 let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
                 trace.bbox_probe = Some(probe);
+                // B5 veto: the probe lands at the AI's predicted point, which on a
+                // retry is often exactly the spot the user just rejected.
+                let probe_hit = probe_hit.filter(|hit| {
+                    let cx = hit.bbox.x + hit.bbox.width as i32 / 2;
+                    let cy = hit.bbox.y + hit.bbox.height as i32 / 2;
+                    !opts.avoid_bboxes.iter().any(|av| {
+                        cx >= av.x
+                            && cx < av.x + av.width as i32
+                            && cy >= av.y
+                            && cy < av.y + av.height as i32
+                    })
+                });
                 if let Some(hit) = probe_hit {
                     trace.candidates.push(A11yCandidate {
                         name: hit.name.clone(),

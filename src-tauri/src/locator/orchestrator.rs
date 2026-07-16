@@ -35,12 +35,13 @@ pub struct LocateOptions {
     /// Used by A11y (proximity sort) and OCR (overlap filter with ±300%
     /// expansion). When `None`, both tiers run unfiltered.
     pub ai_bbox: Option<Rect>,
-    /// "Wrong spot" memory in **virtual-desktop physical pixels**: the bbox the
-    /// locator pointed at before the user pressed Wrong → Wrong spot. Candidates
-    /// whose centre falls inside it are excluded in both the A11y and OCR tiers,
-    /// so the correction retry surfaces the second-best match instead of
-    /// deterministically repeating the same wrong pick.
-    pub avoid_bbox: Option<Rect>,
+    /// "Wrong spot" memory in **virtual-desktop physical pixels**: every bbox the
+    /// locator pointed at that the user rejected this step (accumulates across
+    /// retries — B5, llm-finetuning-eval.md §5c). Candidates whose centre falls
+    /// inside any of them are excluded in the A11y and OCR tiers so a retry
+    /// surfaces the next-best match; the deterministic passes (selection,
+    /// template, region-OCR rescue) veto a result there and fall through instead.
+    pub avoid_bboxes: Vec<Rect>,
     /// The answering model's `ai_bbox` is trusted to *corroborate* (rescue) a borderline
     /// OCR match. Trust is default-on; only models on the configurable distrust list
     /// (default: the managed free-tier chain) get no corroboration vote — "no pointer
@@ -83,6 +84,18 @@ pub struct LocateOptions {
     pub selected_element_id: Option<u32>,
 }
 
+/// B5 "wrong spot" veto for the deterministic passes: a result whose centre sits
+/// inside a user-rejected bbox must not be accepted again — the pipeline falls
+/// through to the next pass instead. (The ranking passes, A11y/OCR, exclude
+/// per-candidate instead so their second-best can win outright.)
+fn rejected_by_avoid(bbox: &Rect, avoid: &[Rect]) -> bool {
+    let cx = bbox.x + bbox.width as i32 / 2;
+    let cy = bbox.y + bbox.height as i32 / 2;
+    avoid.iter().any(|a| {
+        cx >= a.x && cx < a.x + a.width as i32 && cy >= a.y && cy < a.y + a.height as i32
+    })
+}
+
 pub fn locate(
     target_text: &str,
     opts: &LocateOptions,
@@ -121,7 +134,17 @@ pub fn locate(
     // augments, never replaces).
     if let (Some(snapshot), Some(id)) = (opts.context_elements.as_ref(), opts.selected_element_id)
     {
-        let (sel_hit, sel_trace) = try_selection_pass(target_text, snapshot, id);
+        let (sel_hit, mut sel_trace) = try_selection_pass(target_text, snapshot, id);
+        // B5: a re-locate must not re-accept a spot the user already rejected —
+        // selection is deterministic, so without this veto a retry would resolve
+        // the same element again. Falls through to the four-pass pipeline.
+        let sel_hit = match sel_hit {
+            Some(r) if rejected_by_avoid(&r.bbox, &opts.avoid_bboxes) => {
+                sel_trace.detail = format!("{} — vetoed: user rejected this spot", sel_trace.detail);
+                None
+            }
+            other => other,
+        };
         trace.selection = Some(sel_trace);
         if let Some(result) = sel_hit {
             trace.final_decision = FinalDecision::HitSelection;
@@ -281,7 +304,8 @@ pub fn locate(
         (x, y, w, h)
     };
     let ai_bbox_img: Option<(i32, i32, u32, u32)> = opts.ai_bbox.map(to_img_space);
-    let avoid_bbox_img: Option<(i32, i32, u32, u32)> = opts.avoid_bbox.map(to_img_space);
+    let avoid_bboxes_img: Vec<(i32, i32, u32, u32)> =
+        opts.avoid_bboxes.iter().map(|b| to_img_space(*b)).collect();
 
     let find_opts = ocr::FindOptions {
         role: opts.role.as_deref(),
@@ -289,7 +313,7 @@ pub fn locate(
         screen_width: img_w,
         screen_height: img_h,
         ai_bbox: ai_bbox_img,
-        avoid_bbox: avoid_bbox_img,
+        avoid_bboxes: avoid_bboxes_img,
         min_confidence: opts.min_confidence,
     };
 
@@ -330,7 +354,10 @@ pub fn locate(
         );
         trace.template = tmpl_trace;
         template_done = true;
-        if let Some(result) = tmpl_hit {
+        // B5 veto: don't re-accept a user-rejected spot; fall through to OCR.
+        if let Some(result) =
+            tmpl_hit.filter(|r| !rejected_by_avoid(&r.bbox, &opts.avoid_bboxes))
+        {
             trace.ocr = ocr_trace;
             trace.final_decision = FinalDecision::HitTemplate;
             trace.final_bbox = Some(result.bbox);
@@ -344,6 +371,8 @@ pub fn locate(
         // no AI bbox to crop to. A rescued hit sits in the bbox region, so it's corroborated.
         if !opts.icon_target {
             ocr_trace.region_ocr_attempted = ai_bbox_img.is_some();
+            // B5 veto on the rescue result too — it OCRs the same ai_bbox region, so a
+            // retry could otherwise re-find the exact rejected text.
             if let Some(result) = try_region_ocr(
                 &ocr_bytes,
                 target_text,
@@ -353,7 +382,9 @@ pub fn locate(
                 img_h,
                 opts.role.as_deref(),
                 opts.nearby_text.as_deref(),
-            ) {
+            )
+            .filter(|r| !rejected_by_avoid(&r.bbox, &opts.avoid_bboxes))
+            {
                 trace.ocr = ocr_trace;
                 trace.final_decision = FinalDecision::HitOcr;
                 trace.final_bbox = Some(result.bbox);
@@ -369,7 +400,9 @@ pub fn locate(
             let (tmpl_hit, tmpl_trace) =
                 try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates, opts.icon_authoring_scale, opts.bbox_decisive);
             trace.template = tmpl_trace;
-            if let Some(result) = tmpl_hit {
+            if let Some(result) =
+                tmpl_hit.filter(|r| !rejected_by_avoid(&r.bbox, &opts.avoid_bboxes))
+            {
                 trace.final_decision = FinalDecision::HitTemplate;
                 trace.final_bbox = Some(result.bbox);
                 trace.elapsed_ms = started.elapsed().as_millis() as u32;
@@ -500,7 +533,9 @@ pub fn locate(
         let (tmpl_hit, tmpl_trace) =
             try_template_pass(&ocr_bytes, &crop_rect, img_w, img_h, opts.icon_region, ai_bbox_img, &opts.icon_templates, opts.icon_authoring_scale, opts.bbox_decisive);
         trace.template = tmpl_trace;
-        if let Some(result) = tmpl_hit {
+        if let Some(result) =
+            tmpl_hit.filter(|r| !rejected_by_avoid(&r.bbox, &opts.avoid_bboxes))
+        {
             trace.ocr = ocr_trace;
             trace.final_decision = FinalDecision::HitTemplate;
             trace.final_bbox = Some(result.bbox);
@@ -735,7 +770,7 @@ fn try_region_ocr(
         screen_width: rw * UP,
         screen_height: rh * UP,
         ai_bbox: None,
-        avoid_bbox: None,
+        avoid_bboxes: Vec::new(),
         min_confidence: 0.5,
     };
     let outcome = ocr::find_text(target_text, &results, &find_opts);

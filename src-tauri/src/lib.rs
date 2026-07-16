@@ -315,10 +315,11 @@ fn execute_step(
     // a borderline OCR match (`ai::bbox::bbox_is_decisive`). Weak grounders' bboxes get
     // no corroboration vote.
     bbox_decisive: bool,
-    // "Wrong spot" memory: the bbox the previous pointer occupied, which the user
-    // explicitly rejected. The locator excludes candidates there (§ fix for the
-    // deterministic same-wrong-pick retry loop). Only the correction path sets it.
-    avoid_bbox: Option<capture::Rect>,
+    // "Wrong spot" memory: every bbox a pointer occupied that the user rejected
+    // this step (accumulates across B5 local retries). The locator excludes
+    // candidates there so a retry can't repeat a rejected pick. Empty for
+    // guide()/next_step; set by retry_locate and the correction path.
+    avoid_bboxes: Vec<capture::Rect>,
     capture_rect: Option<capture::Rect>,
     // Native-res OCR image captured at AI-capture time (overlay cleared, before the streamed
     // subtitle). When present the locator's OCR uses it instead of re-capturing — so it never
@@ -367,7 +368,7 @@ fn execute_step(
                     nearby_text: step.target_nearby_text.clone(),
                     ai_bbox,
                     bbox_decisive,
-                    avoid_bbox,
+                    avoid_bboxes,
                     a11y_timeout_ms: if icon_target { 150 } else { 500 },
                     min_confidence: 0.5,
                     target_hwnd,
@@ -395,7 +396,7 @@ fn execute_step(
                     text,
                     target_hwnd,
                     debug_ocr_path,
-                    avoid_bbox,
+                    avoid_bboxes,
                     &pre_ocr,
                     &context_elements,
                 );
@@ -1890,7 +1891,7 @@ async fn guide(
         &state.last_overlay,
         ai_bbox,
         bbox_decisive,
-        None,
+        Vec::new(),
         capture_rect_opt,
         pre_ocr,
         &state.packs,
@@ -2002,7 +2003,7 @@ async fn next_step(
         &state.last_overlay,
         ai_bbox,
         bbox_decisive,
-        None,
+        Vec::new(),
         capture_rect,
         None, // next_step reuses the prior capture; locator re-captures for OCR
         &state.packs,
@@ -2046,15 +2047,141 @@ async fn next_step(
     })
 }
 
+/// B5 (llm-finetuning-eval.md §5c): LOCAL re-locate of the current step after a
+/// ✗ Wrong — no AI call, no request consumed. The frontend routes here first when
+/// the failing layer was plausibly the locator (final_decision HitA11y/HitOcr/
+/// HitTemplate for "Wrong spot"; a Miss for "Can't find it" — where the lazy a11y
+/// tree has had seconds to warm since the original attempt), accumulating every
+/// rejected pointer bbox in `avoid_bboxes` so no rejected spot can be re-picked
+/// by ANY pass. Returns `located: None` when no new gate-passing candidate exists
+/// ("no pointer beats wrong pointer" holds for retries) — the frontend then falls
+/// through to `send_correction`, avoid list attached.
+#[tauri::command]
+async fn retry_locate(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    step_index: usize,
+    avoid_bboxes: Vec<capture::Rect>,
+) -> Result<GuideResponse, String> {
+    let (steps, session_id, needs_input, provider, capture_rect, context_elements, request_id) = {
+        let g = state.guidance.lock();
+        (
+            g.steps.clone(),
+            g.session_id.clone().unwrap_or_default(),
+            g.needs_input,
+            g.provider.clone(),
+            g.capture_rect,
+            g.context_elements.clone(),
+            // Attribute to the request whose response produced this step — same
+            // contract as next_step (LocateTrace doc comment).
+            g.request_id.clone(),
+        )
+    };
+
+    if step_index >= steps.len() {
+        return Err(format!(
+            "step_index {step_index} out of range ({})",
+            steps.len()
+        ));
+    }
+
+    let (log_trace, training_enabled, debug_screenshot_enabled, bbox_decisive, used_model) = {
+        let router = state.ai_router.lock().await;
+        let used_model = router
+            .get_managed_routed_model()
+            .unwrap_or_else(|| router.active_model());
+        (
+            router.config.debug_locate_log_file_enabled,
+            router.config.training_capture_enabled,
+            router.config.debug_screenshot_enabled,
+            ai::bbox::bbox_is_decisive(&used_model, &router.config.bbox_distrust_models),
+            used_model,
+        )
+    };
+    let stored_hwnd = {
+        let g = state.guidance.lock();
+        g.pinned_hwnd.or(g.target_hwnd)
+    };
+
+    // Clear the rejected pointer before the locator's fresh OCR capture — unlike
+    // next_step (whose old pointer sits at an unrelated spot), the retry's OCR
+    // would otherwise read our own ripple/brackets at exactly the region under
+    // scrutiny. Same clear + DWM-composite wait as guide().
+    state.tracker.clear();
+    if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
+        let _ = overlay::emit_update(&app, update);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(33)).await;
+
+    let debug_ocr_path = if debug_screenshot_enabled {
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+        app.path()
+            .app_local_data_dir()
+            .ok()
+            .map(|p| p.join("debug").join(format!("ocr_retry_{ts}.png")))
+    } else {
+        None
+    };
+    let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
+    let (located, mut locate_trace) = execute_step(
+        &app,
+        &steps[step_index],
+        stored_hwnd,
+        debug_ocr_path,
+        &state.tracker,
+        &state.last_overlay,
+        ai_bbox,
+        bbox_decisive,
+        avoid_bboxes,
+        capture_rect,
+        None, // fresh OCR re-capture — the screen may have changed since the AI saw it
+        &state.packs,
+        context_elements,
+    )
+    .unwrap_or((None, None));
+    if let Some(ref mut t) = locate_trace {
+        t.request_id = request_id.clone();
+        t.local_retry = true;
+        t.model = Some(used_model.clone());
+        t.provider = Some(provider.clone());
+        t.app_name = trace_app_name(stored_hwnd);
+        maybe_log_trace(&app, t, log_trace, training_enabled);
+    }
+
+    let _ = anchor_autopilot_baseline(&state).await;
+
+    Ok(GuideResponse {
+        ok: true,
+        session_id,
+        request_id,
+        steps: steps.clone(),
+        step_index,
+        instruction: steps[step_index].instruction.clone(),
+        located,
+        needs_input,
+        provider,
+        model: None, // no AI call — frontend keeps the prior routed model
+        input_tokens: None,
+        output_tokens: None,
+        error: None,
+        debug_screenshot_path: None,
+        chat_thumb_b64: None,
+        locate_trace,
+        ai_bbox,
+        suggested_tasks: Vec::new(),
+    })
+}
+
 #[tauri::command]
 async fn send_correction(
     app: AppHandle,
     state: State<'_, AppState>,
     note: Option<String>,
-    // "Wrong spot" memory: the bbox the rejected pointer occupied (virtual-desktop
-    // physical pixels). The frontend sends it only for the wrong_spot reason; the
-    // locator excludes candidates there so the retry can't repeat the same pick.
-    avoid_bbox: Option<capture::Rect>,
+    // "Wrong spot" memory: every bbox a rejected pointer occupied this step
+    // (virtual-desktop physical pixels) — the frontend accumulates them across B5
+    // local retries and sends the list for the wrong_spot reason; the locator
+    // excludes candidates there so the AI-retry can't repeat any rejected pick.
+    avoid_bboxes: Option<Vec<capture::Rect>>,
 ) -> Result<GuideResponse, String> {
     let session_id = {
         let g = state.guidance.lock();
@@ -2527,7 +2654,7 @@ async fn send_correction(
         &state.last_overlay,
         ai_bbox,
         bbox_decisive,
-        avoid_bbox,
+        avoid_bboxes.clone().unwrap_or_default(),
         new_capture_rect,
         pre_ocr,
         &state.packs,
@@ -2808,7 +2935,7 @@ async fn locate_a11y(
             nearby_text: None,
             ai_bbox: None,
             bbox_decisive: false,
-            avoid_bbox: None,
+            avoid_bboxes: Vec::new(),
             a11y_timeout_ms: timeout_ms.unwrap_or(1500),
             min_confidence: 0.5,
             target_hwnd: None,
@@ -2852,7 +2979,7 @@ async fn locate_element(
             nearby_text,
             ai_bbox: None,
             bbox_decisive: false,
-            avoid_bbox: None,
+            avoid_bboxes: Vec::new(),
             a11y_timeout_ms: timeout_ms.unwrap_or(500),
             min_confidence: 0.5,
             target_hwnd: None,
@@ -4025,6 +4152,7 @@ pub fn run() {
             locate_element,
             guide,
             next_step,
+            retry_locate,
             send_correction,
             check_screen_changed,
             clear_overlay,

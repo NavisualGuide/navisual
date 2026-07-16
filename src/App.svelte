@@ -220,6 +220,12 @@ See the LICENSE file in the root of this repository for complete details.
   let debugDrawerOpen = $state(false);
   // Test-user feedback (see logFeedback / submitWrong / correction).
   let wrongPickerOpen = $state(false);
+  // B5 "wrong spot" memory: every pointer bbox the user rejected for the CURRENT
+  // step attempt — grows across local retries so no rejected spot can be
+  // re-picked, and rides along to send_correction if the AI fallback runs.
+  // Reset on a new task and on step advance (capped: stale exclusions on a
+  // changed layout could veto a now-correct element).
+  let wrongSpotAvoid = $state<Rect[]>([]);
   const CATEGORY_LABEL: Record<string, string> = {
     wrong_instruction: "Wrong instruction",
     wrong_spot: "Wrong spot",
@@ -1262,6 +1268,7 @@ See the LICENSE file in the root of this repository for complete details.
     task = "";
     lastRequestHint = taskText;
     clearPrefill();
+    wrongSpotAvoid = []; // new request context — drop the old step's rejected spots
     // Keep session context when in the middle of a task; start fresh from idle/error.
     const isReply = phase === "guiding" || phase === "needs_input";
     const prevPhase = phase;
@@ -1306,6 +1313,9 @@ See the LICENSE file in the root of this repository for complete details.
     // rate (SDD §10; audit C3 + feedback-taxonomy split 2026-07-13). Dashboards
     // filter kind='worked' for success; worked_auto measures autopilot itself.
     if (phase === "guiding") logFeedback(viaAutopilot ? "worked_auto" : "worked", "");
+    // Step advance = new target — the rejected-spot memory is for the step it
+    // was rejected on (a stale exclusion could veto a now-correct element).
+    wrongSpotAvoid = [];
     const nextIdx = stepIndex + 1;
     const prevPhase = phase;
     if (nextIdx >= steps.length) {
@@ -1368,10 +1378,10 @@ See the LICENSE file in the root of this repository for complete details.
     // user's own text. (The logged note is the user's raw text only.)
     const hint = category ? (CATEGORY_HINT[category] ?? "") : "";
     const note = [hint, rawNote].filter(Boolean).join(" ").trim();
-    // Wrong spot: tell the locator where NOT to point again — the bbox the
-    // rejected pointer occupied. The retry then surfaces the second-best match
-    // instead of deterministically repeating the same pick.
-    const avoidBbox = category === "wrong_spot" && locateResult ? locateResult.bbox : null;
+    // Wrong spot: tell the locator where NOT to point again — every bbox the
+    // user rejected this step (accumulated across B5 local retries). The AI
+    // retry's locate then can't repeat any rejected pick.
+    const avoidBboxes = category === "wrong_spot" && wrongSpotAvoid.length ? wrongSpotAvoid : null;
     const label = (category && CATEGORY_LABEL[category]) || "Wrong";
     const prevPhase = phase;
     const corrEntryId = await addToHistory("correction", rawNote ? `${label} — ${rawNote}` : `${label} — re-analysing…`);
@@ -1383,7 +1393,7 @@ See the LICENSE file in the root of this repository for complete details.
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("send_correction", { note: note || null, avoidBbox });
+      const res = await invoke<GuideResponse>("send_correction", { note: note || null, avoidBboxes });
       stopTimer();
       if (token !== requestToken) return;
       if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64);
@@ -1429,11 +1439,65 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  // Wrong button → log the reason, then re-analyse with that reason as a hint.
+  // B5 — route the ✗ Wrong retry by the layer that actually failed. The AI cannot
+  // fix a locator mistake (its answer was often correct; the RANKING picked wrong),
+  // so for the ranking-prone decisions a LOCAL re-locate runs first — free and
+  // instant. Verified/deterministic decisions (selection/adapter) mean the locator
+  // provably did what the AI asked → only the AI can fix those.
+  function localRetryEligible(category: string): boolean {
+    const kind = locateTrace?.final_decision?.kind;
+    if (category === "wrong_spot") {
+      return kind === "hit_a11y" || kind === "hit_ocr" || kind === "hit_template";
+    }
+    // not_found: no pointer was drawn — by now the lazy a11y tree the original
+    // attempt raced has had seconds to build, so a second look often succeeds.
+    return category === "not_found" && !locateResult;
+  }
+
+  // Local re-locate, no AI call. Frank messaging per the user's design call:
+  // say plainly WHAT happened (our pointer's mistake, not the AI's answer)
+  // rather than silently hopping the pointer around.
+  async function tryLocalRetry(category: string): Promise<boolean> {
+    try {
+      const res = await invoke<GuideResponse>("retry_locate", {
+        stepIndex,
+        avoidBboxes: wrongSpotAvoid,
+      });
+      if (res.located) {
+        locateResult = res.located;
+        locateTrace = res.locate_trace;
+        addToHistory(
+          "system",
+          category === "wrong_spot"
+            ? "That was likely the pointer's mistake, not the AI's answer — moved to the next-best match (no AI request used). Still wrong? Press ✗ Wrong again to re-ask the AI."
+            : "Took a second look and found it this time (no AI request used). Not right? Press ✗ Wrong again to re-ask the AI.",
+        );
+        return true;
+      }
+      if (category === "wrong_spot") {
+        addToHistory("system", "No other match for that target on screen — asking the AI to reconsider…");
+      }
+    } catch (_) {
+      /* fall through to the AI correction */
+    }
+    return false;
+  }
+
+  // Wrong button → log the reason, then retry at the failing layer: local
+  // re-locate first when eligible (B5), else / on local failure the AI correction.
   async function submitWrong(category: string) {
     wrongPickerOpen = false;
     const note = task.trim();
     logFeedback(category, note);
+    if (category === "wrong_spot" && locateResult) {
+      // Remember the rejected spot regardless of which retry path runs.
+      wrongSpotAvoid = [...wrongSpotAvoid, locateResult.bbox];
+    }
+    // A typed note is intent FOR THE AI ("I meant the other Save") — don't
+    // intercept it with a local retry that can't read it.
+    if (!note && localRetryEligible(category)) {
+      if (await tryLocalRetry(category)) return;
+    }
     await correction(category);
   }
 
@@ -1935,11 +1999,18 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <div class="reason-chips">
                 <button class="reason-chip" onclick={() => submitWrong("wrong_instruction")}>Wrong instruction</button>
-                <button class="reason-chip" onclick={() => submitWrong("wrong_spot")}>Wrong spot</button>
-                <button class="reason-chip" onclick={() => submitWrong("not_found")}>Can't find it</button>
+                <!-- D2: "Wrong spot" needs a pointer to reject; "Can't find it" means no
+                     pointer was drawn. Showing both regardless made them overlap whenever
+                     no pointer existed — pick by the actual locate state instead. -->
+                {#if locateResult}
+                  <button class="reason-chip" onclick={() => submitWrong("wrong_spot")}>Wrong spot</button>
+                {:else}
+                  <button class="reason-chip" onclick={() => submitWrong("not_found")}>Can't find it</button>
+                {/if}
                 <button class="reason-chip" onclick={() => submitWrong("already_done")}>Already did that</button>
               </div>
               <p class="feedback-hint">Not one of these? Type what's wrong below, then ↩ Follow up.</p>
+              <p class="feedback-hint">Wrong app? Click the correct window first, then press ✗ Wrong.</p>
               <p class="feedback-note">Shared with the Navisual team to improve guidance — never your screen or request text.</p>
             {/if}
           </div>

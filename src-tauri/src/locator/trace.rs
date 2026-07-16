@@ -17,6 +17,11 @@ pub struct LocateTrace {
     /// ORIGINAL request whose response the advanced-to step came from, which is the
     /// correct attribution for training labels.
     pub request_id: Option<String>,
+    /// This trace came from `retry_locate` — a LOCAL re-locate after ✗ Wrong (B5),
+    /// no AI call. For curation: a `wrong_spot` feedback row followed by a
+    /// local_retry trace that the user then accepts = a locator-fault label; one
+    /// that fell through to a correction = a model-fault label.
+    pub local_retry: bool,
     pub target_text: String,
     pub target_role: Option<String>,
     pub nearby_text: Option<String>,

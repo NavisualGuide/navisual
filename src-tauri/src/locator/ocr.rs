@@ -281,11 +281,11 @@ pub struct FindOptions<'a> {
     /// side are kept. If none survive the filter, the matcher falls back to
     /// the full pool (see `nb-*` retry in `find_text`).
     pub ai_bbox: Option<(i32, i32, u32, u32)>,
-    /// "Wrong spot" memory, in OCR-image-pixel space: the bbox the locator
-    /// pointed at last time, which the user explicitly rejected. Candidates
-    /// whose centre falls inside it are excluded so the retry can surface the
-    /// second-best match instead of deterministically repeating the same pick.
-    pub avoid_bbox: Option<(i32, i32, u32, u32)>,
+    /// "Wrong spot" memory, in OCR-image-pixel space: every bbox the locator
+    /// pointed at that the user rejected this step (accumulates across retries —
+    /// B5). Candidates whose centre falls inside any of them are excluded so the
+    /// retry surfaces the next-best match instead of repeating a rejected pick.
+    pub avoid_bboxes: Vec<(i32, i32, u32, u32)>,
     pub min_confidence: f32,
 }
 
@@ -332,14 +332,14 @@ pub fn find_text<'a>(
         .filter(|r| r.confidence >= min_conf && r.text.trim().chars().count() <= MAX_LABEL_LEN)
         .collect();
 
-    // "Wrong spot" memory: hard-exclude candidates at the previously-rejected
-    // location so the retry can pick the second-best match (the user already
-    // told us this exact spot is wrong).
-    if let Some(av) = opts.avoid_bbox {
+    // "Wrong spot" memory: hard-exclude candidates at every previously-rejected
+    // location so the retry can pick the next-best match (the user already
+    // told us those exact spots are wrong).
+    if !opts.avoid_bboxes.is_empty() {
         candidates.retain(|r| {
             let cx = r.bbox.0 + r.bbox.2 as i32 / 2;
             let cy = r.bbox.1 + r.bbox.3 as i32 / 2;
-            !point_in_bbox(cx, cy, &av)
+            !opts.avoid_bboxes.iter().any(|av| point_in_bbox(cx, cy, av))
         });
     }
 
@@ -736,6 +736,7 @@ pub fn find_text<'a>(
     if outcome.winner.is_none() && opts.ai_bbox.is_some() {
         let no_bbox = FindOptions {
             ai_bbox: None,
+            avoid_bboxes: opts.avoid_bboxes.clone(),
             ..*opts
         };
         let mut fallback = find_text(target_text, results, &no_bbox);
@@ -1199,11 +1200,27 @@ mod tests {
         // retry surfaces the other duplicate instead of repeating the pick.
         let results = vec![word("OK", (10, 10, 20, 10)), word("OK", (300, 200, 20, 10))];
         let o = FindOptions {
-            avoid_bbox: Some((0, 0, 60, 40)), // where the first OK was pointed
+            avoid_bboxes: vec![(0, 0, 60, 40)], // where the first OK was pointed
             ..opts((1000, 600))
         };
         let out = find_text("OK", &results, &o);
         assert_eq!(out.strategy_used.as_deref(), Some("exact"));
         assert_eq!(out.winner.unwrap().bbox.0, 300);
+    }
+
+    #[test]
+    fn avoid_list_accumulates_across_retries() {
+        // B5: two rejected spots exclude BOTH duplicates; the third instance wins.
+        let results = vec![
+            word("OK", (10, 10, 20, 10)),
+            word("OK", (300, 200, 20, 10)),
+            word("OK", (600, 400, 20, 10)),
+        ];
+        let o = FindOptions {
+            avoid_bboxes: vec![(0, 0, 60, 40), (290, 190, 60, 40)],
+            ..opts((1000, 600))
+        };
+        let out = find_text("OK", &results, &o);
+        assert_eq!(out.winner.unwrap().bbox.0, 600);
     }
 }
