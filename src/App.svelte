@@ -1290,6 +1290,10 @@ See the LICENSE file in the root of this repository for complete details.
     lastRequestHint = taskText;
     clearPrefill();
     wrongSpotAvoid = []; // new request context — drop the old step's rejected spots
+    // Focus give-back on submit: typing gave the panel focus; by the time the
+    // response's pointer appears, the user's next act is clicking the TARGET —
+    // without this, that first click only re-focuses the target and is eaten.
+    invoke("focus_target_window").catch(() => {});
     // Keep session context when in the middle of a task; start fresh from idle/error.
     const isReply = phase === "guiding" || phase === "needs_input";
     const prevPhase = phase;
@@ -1327,6 +1331,12 @@ See the LICENSE file in the root of this repository for complete details.
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
     isOverlayCleared = false;
+    // Focus give-back: a mouse click on → Next focused the panel, so the user's
+    // next click on the target would be eaten by activation ("click once for
+    // focus, click again to act"). Hand focus straight back. No-op on the
+    // hotkey/autopilot paths — the backend only acts when the PANEL holds the
+    // foreground, which it doesn't there.
+    if (!viaAutopilot) invoke("focus_target_window").catch(() => {});
     // A HUMAN pressing Next is an implicit success signal for the current step;
     // an AUTOPILOT-triggered advance (a screen change fired the poll) is not —
     // it's automation, not confirmation, so it logs under a DISTINCT kind

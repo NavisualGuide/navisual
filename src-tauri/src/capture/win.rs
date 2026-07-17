@@ -28,10 +28,11 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, HWND_TOPMOST,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
+    GWL_EXSTYLE, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -1467,6 +1468,39 @@ fn first_target_in_z_order(our_pid: u32) -> Option<HWND> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
     state.result
+}
+
+/// Focus give-back (locator-testing.md 2026-07-17): hand OS focus to the target
+/// window, but ONLY when a window of OUR process currently holds the foreground.
+/// After the user types a task or clicks → Next, the panel has focus, so their
+/// first click on the target app is consumed by activation (WM_MOUSEACTIVATE
+/// activate-and-eat — user-confirmed daily behavior; the Ctrl+~ hotkey never had
+/// this problem because focus never leaves the target). Giving focus straight
+/// back makes the next physical click act immediately.
+///
+/// The own-foreground gate matters twice over: (1) Windows only *allows*
+/// SetForegroundWindow from the foreground process, so calling from any other
+/// state would fail anyway; (2) it makes the call intrinsically safe on the
+/// hotkey/autopilot paths — the target already has focus there, we're not
+/// foreground, no-op. Returns whether focus was handed over.
+pub fn focus_window_if_own_foreground(target_hwnd: usize) -> bool {
+    let our_pid = std::process::id();
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return false;
+        }
+        let mut fg_pid: u32 = 0;
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        if fg_pid != our_pid {
+            return false; // panel not focused — nothing to give back
+        }
+        let target = HWND(target_hwnd as *mut _);
+        if !IsWindow(Some(target)).as_bool() || IsIconic(target).as_bool() {
+            return false;
+        }
+        SetForegroundWindow(target).as_bool()
+    }
 }
 
 /// Returns the HWND and frame rect of the best capture target.

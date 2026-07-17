@@ -328,6 +328,21 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
     }
 }
 
+/// Focus give-back: hand OS focus to the target window when (and only when) our
+/// own panel currently holds the foreground — the activation-eat fix (see
+/// `win::focus_window_if_own_foreground`). No-op off-Windows.
+pub fn focus_window_if_own_foreground(hwnd_raw: usize) -> bool {
+    #[cfg(windows)]
+    {
+        win::focus_window_if_own_foreground(hwnd_raw)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd_raw;
+        false
+    }
+}
+
 /// True when the target window is fully hidden behind other apps — capturing it
 /// would leak the occluding app's pixels, so the caller should refuse. Never
 /// occluded off-Windows.

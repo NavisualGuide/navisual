@@ -2740,6 +2740,29 @@ fn speak(
     );
 }
 
+/// Focus give-back (locator-testing.md 2026-07-17): after the user interacts
+/// with the PANEL by mouse (task submit, → Next click), hand OS focus straight
+/// back to the target window so their next physical click on the target acts
+/// immediately instead of being consumed by activation (the "click once for
+/// focus, then click again" annoyance the Ctrl+~ hotkey never had). Safe to
+/// call unconditionally: `focus_window_if_own_foreground` is a no-op unless a
+/// window of our own process currently holds the foreground — so the hotkey
+/// and autopilot paths (target already focused) are untouched by construction.
+#[tauri::command]
+fn focus_target_window(state: State<'_, AppState>) {
+    let hwnd = {
+        let g = state.guidance.lock();
+        if g.full_screen_mode {
+            None // no single target to hand focus to
+        } else {
+            g.pinned_hwnd.or(g.target_hwnd)
+        }
+    };
+    if let Some(h) = hwnd {
+        let _ = capture::focus_window_if_own_foreground(h);
+    }
+}
+
 #[tauri::command]
 async fn clear_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     state.tracker.clear();
@@ -4176,6 +4199,7 @@ pub fn run() {
             next_step,
             retry_locate,
             send_correction,
+            focus_target_window,
             check_screen_changed,
             clear_overlay,
             restore_overlay,
