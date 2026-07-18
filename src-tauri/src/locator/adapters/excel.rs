@@ -17,7 +17,10 @@
 //!   - **Office COM** (`Window.PointsToScreenPixelsX`) is the bulletproof second cut for
 //!     frozen panes / precision — deferred (late-bound `IDispatch::Invoke` in Rust is painful).
 
-use super::{window_class_lower, window_exe_stem_lower, Adapter, AdapterHit};
+use super::{
+    rect_is_onscreen, window_class_lower, window_exe_stem_lower, Adapter, AdapterHit,
+    AdapterQuery,
+};
 use crate::capture::Rect;
 use crate::locator::a11y::{excel_pruned_walk, ClassRectSignature, SCROLLBAR_SCAN_DEPTH};
 use crate::locator::LocateResult;
@@ -55,15 +58,16 @@ impl Adapter for ExcelAdapter {
         "excel"
     }
 
-    fn matches(&self, hwnd: usize, target_text: &str) -> bool {
-        if parse_cell_ref(target_text).is_none() {
+    fn matches(&self, hwnd: usize, query: &AdapterQuery) -> bool {
+        if parse_cell_ref(query.target_text).is_none() {
             return false;
         }
         // Top-level Excel window class is XLMAIN; exe is EXCEL.EXE. Either gate is enough.
         window_class_lower(hwnd) == "xlmain" || window_exe_stem_lower(hwnd) == "excel"
     }
 
-    fn locate(&self, hwnd: usize, target_text: &str) -> Result<AdapterHit> {
+    fn locate(&self, hwnd: usize, query: &AdapterQuery) -> Result<AdapterHit> {
+        let target_text = query.target_text;
         let (row, col) = parse_cell_ref(target_text)
             .ok_or_else(|| anyhow!("not a cell ref: {target_text}"))?;
 
@@ -221,14 +225,6 @@ fn find_grid(
     best
 }
 
-/// Sanity-bound an absolute screen coordinate. A minimized Excel window places its elements
-/// at the Windows minimized sentinel (~-32000), and dragged-off / virtualized cells report
-/// absurd coords — reject both so we fall through instead of pointing into nowhere. (In the
-/// live flow the target window is visible, but this keeps the adapter honest if it isn't.)
-fn rect_is_onscreen(left: i32, top: i32) -> bool {
-    left > -30_000 && top > -30_000 && left.abs() <= 100_000 && top.abs() <= 100_000
-}
-
 /// Parse an A1-style cell ref into 1-based `(row, col)`. Rejects ranges ("A1:B2"), bare
 /// columns/rows, and refs beyond Excel's `XFD1048576` ceiling. Case-insensitive.
 fn parse_cell_ref(target: &str) -> Option<(i32, i32)> {
@@ -310,14 +306,19 @@ mod tests {
             .expect("NAVISUAL_TEST_HWND must be a decimal handle");
         let target = std::env::var("TARGET").unwrap_or_else(|_| "B2".to_string());
         let adapter = ExcelAdapter;
+        let query = AdapterQuery {
+            target_text: &target,
+            target_role: None,
+            nearby_text: None,
+        };
         assert!(
-            adapter.matches(hwnd, &target),
+            adapter.matches(hwnd, &query),
             "adapter should claim Excel + a cell ref (class={:?}, exe={:?})",
             window_class_lower(hwnd),
             window_exe_stem_lower(hwnd)
         );
         let started = std::time::Instant::now();
-        let hit = adapter.locate(hwnd, &target).expect("locate errored");
+        let hit = adapter.locate(hwnd, &query).expect("locate errored");
         eprintln!(
             "excel_cell_live: target={target} resolved_in={}ms detail={}",
             started.elapsed().as_millis(),

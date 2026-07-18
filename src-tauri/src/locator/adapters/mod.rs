@@ -21,6 +21,22 @@ use anyhow::Result;
 
 #[cfg(windows)]
 mod excel;
+#[cfg(windows)]
+mod office_com;
+#[cfg(windows)]
+mod powerpoint;
+#[cfg(windows)]
+mod word;
+
+/// Everything an adapter may gate or resolve on. `target_role`/`nearby_text` come from the
+/// AI response (both optional): the Office canvas adapters gate on role so they can never
+/// hijack a ribbon/control target, and Word uses `nearby_text` to disambiguate repeated
+/// occurrences of the target text (ground-truth analogue of the OCR anchor).
+pub struct AdapterQuery<'a> {
+    pub target_text: &'a str,
+    pub target_role: Option<&'a str>,
+    pub nearby_text: Option<&'a str>,
+}
 
 /// Outcome of an adapter's `locate`. `result: None` means "claimed but couldn't resolve"
 /// (caller falls through to A11y/OCR); `detail` is surfaced in the debug drawer either way.
@@ -44,11 +60,12 @@ pub trait Adapter {
     /// Stable identifier surfaced in the trace ("excel", …).
     fn name(&self) -> &'static str;
     /// True when this adapter recognises the focused app **and** the target shape.
-    /// Must be cheap — runs on every locate before the standard pipeline.
-    fn matches(&self, hwnd: usize, target_text: &str) -> bool;
+    /// Must be cheap — runs on every locate before the standard pipeline (window
+    /// class / exe / regex / role gates only — no UIA, no COM).
+    fn matches(&self, hwnd: usize, query: &AdapterQuery) -> bool;
     /// Resolve the target to exact pixels, or `AdapterHit::fell_through(..)` when it
     /// recognised the target but couldn't resolve it this time.
-    fn locate(&self, hwnd: usize, target_text: &str) -> Result<AdapterHit>;
+    fn locate(&self, hwnd: usize, query: &AdapterQuery) -> Result<AdapterHit>;
 }
 
 /// What the orchestrator's Pass 0 gets back when an adapter *claimed* the target.
@@ -62,7 +79,11 @@ pub struct AdapterOutcome {
 fn adapters() -> Vec<Box<dyn Adapter>> {
     #[cfg(windows)]
     {
-        vec![Box::new(excel::ExcelAdapter)]
+        vec![
+            Box::new(excel::ExcelAdapter),
+            Box::new(powerpoint::PowerPointAdapter),
+            Box::new(word::WordAdapter),
+        ]
     }
     #[cfg(not(windows))]
     {
@@ -74,13 +95,13 @@ fn adapters() -> Vec<Box<dyn Adapter>> {
 /// *claimed* the target (recognised the app + target shape); `None` means the standard
 /// A11y → OCR pipeline should run unchanged. A claimed-but-unresolved locate returns
 /// `Some` with `result: None` so the orchestrator can record it and still fall through.
-pub fn try_locate(target_hwnd: Option<usize>, target_text: &str) -> Option<AdapterOutcome> {
+pub fn try_locate(target_hwnd: Option<usize>, query: &AdapterQuery) -> Option<AdapterOutcome> {
     let hwnd = resolve_target_hwnd(target_hwnd)?;
     for adapter in adapters() {
-        if !adapter.matches(hwnd, target_text) {
+        if !adapter.matches(hwnd, query) {
             continue;
         }
-        return Some(match adapter.locate(hwnd, target_text) {
+        return Some(match adapter.locate(hwnd, query) {
             Ok(hit) => AdapterOutcome {
                 name: adapter.name().to_string(),
                 result: hit.result,
@@ -123,6 +144,15 @@ fn resolve_target_hwnd(target_hwnd: Option<usize>) -> Option<usize> {
 #[cfg(not(windows))]
 fn resolve_target_hwnd(target_hwnd: Option<usize>) -> Option<usize> {
     target_hwnd.filter(|h| *h != 0)
+}
+
+/// Sanity-bound an absolute screen coordinate. A minimized Office window places its
+/// elements at the Windows minimized sentinel (~-32000), and scrolled-out/virtualized
+/// content reports absurd coords — reject both so adapters fall through instead of
+/// pointing into nowhere. Shared by every Office adapter.
+#[cfg(windows)]
+pub(crate) fn rect_is_onscreen(left: i32, top: i32) -> bool {
+    left > -30_000 && top > -30_000 && left.abs() <= 100_000 && top.abs() <= 100_000
 }
 
 /// Lowercase class name of `hwnd` ("xlmain", …), or empty on failure. Windows-only helper

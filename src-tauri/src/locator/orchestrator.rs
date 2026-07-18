@@ -107,15 +107,31 @@ pub fn locate(
     trace.nearby_text = opts.nearby_text.clone();
     trace.ai_bbox = opts.ai_bbox;
 
-    // Pass 0 — app-specific adapters (Excel cells, …). Deterministic local geometry for
-    // targets where AI grounding is weakest. An adapter only runs when it recognises the
-    // focused app *and* the target shape; otherwise we fall straight through to A11y.
-    if let Some(outcome) = adapters::try_locate(opts.target_hwnd, target_text) {
-        let hit = outcome.result;
+    // Pass 0 — app-specific adapters (Excel cells, PowerPoint shapes, Word text).
+    // Deterministic local geometry for targets where AI grounding is weakest. An adapter
+    // only runs when it recognises the focused app *and* the target shape; otherwise we
+    // fall straight through to A11y.
+    let adapter_query = adapters::AdapterQuery {
+        target_text,
+        target_role: opts.role.as_deref(),
+        nearby_text: opts.nearby_text.as_deref(),
+    };
+    if let Some(outcome) = adapters::try_locate(opts.target_hwnd, &adapter_query) {
+        // B5: adapters are deterministic, so a re-locate would resolve the user's
+        // rejected spot again — veto it like the other deterministic passes and fall
+        // through (the same avoid-veto selection/template/probe already honor).
+        let (hit, mut detail) = (outcome.result, outcome.detail);
+        let hit = match hit {
+            Some(r) if rejected_by_avoid(&r.bbox, &opts.avoid_bboxes) => {
+                detail = format!("{detail} — vetoed: user rejected this spot");
+                None
+            }
+            other => other,
+        };
         trace.adapter = Some(AdapterTrace {
             name: outcome.name,
             hit: hit.is_some(),
-            detail: outcome.detail,
+            detail,
         });
         if let Some(result) = hit {
             trace.final_decision = FinalDecision::HitAdapter;
