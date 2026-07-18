@@ -2366,8 +2366,20 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(12);
+        // NAVISUAL_TEST_CAPTURE=1 replicates the real request flow: guide() BitBlt-captures
+        // the window (jpeg + raw OCR recapture) milliseconds before enumerating — a capture
+        // an idle probe never performs, and a candidate trigger for the transient collapse.
+        let capture_first = std::env::var("NAVISUAL_TEST_CAPTURE").as_deref() == Ok("1");
         let t0 = std::time::Instant::now();
         for i in 0..iterations {
+            if capture_first {
+                let cap = std::time::Instant::now();
+                let ok = crate::capture::recapture_window_raw(hwnd_raw, &[]).is_ok();
+                eprintln!(
+                    "      (capture ok={ok} in {} ms)",
+                    cap.elapsed().as_millis()
+                );
+            }
             let started = std::time::Instant::now();
             let result = super::enumerate_context_elements(hwnd_raw);
             let ms = started.elapsed().as_millis();
