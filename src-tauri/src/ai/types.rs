@@ -194,6 +194,65 @@ fn default_true() -> bool {
     true
 }
 
+/// Prompt-Rule-14 defense in depth (2026-07-18): models leak `[Screen Elements]`
+/// ids into user-facing instruction text despite the rule forbidding it — observed
+/// twice, from two Gemini models, in two formats ("(id 30)" flash-lite 2026-07-12,
+/// which prompted the rule; "(ID: 108)" 3.5-flash 2026-07-18, which ignored it).
+/// The instruction is rendered verbatim and read aloud by TTS, so the reliable
+/// layer must be deterministic, not prompted. Strips parenthesized/bracketed id
+/// references and markdown emphasis (`**…**`/`__…__` render as literal asterisks
+/// in the panel), then tidies the whitespace the removals leave behind.
+///
+/// RECOVERY: a leaked id is the model's element selection in the wrong slot — the
+/// 3.5-flash incident carried "(ID: 108)" in prose while `target_element_id` was
+/// null. When the field is empty and the prose ids are unambiguous (exactly one
+/// distinct value), move it there. Pass 0.5's live verification still gates every
+/// id (role-family + name agreement at the snapshot rect), so a wrong recovered id
+/// dies exactly like a wrong directly-emitted id always did — recovery adds
+/// signal, never risk.
+pub fn sanitize_steps(steps: &mut [GuidanceStep]) {
+    for step in steps.iter_mut() {
+        let (cleaned, ids) = sanitize_instruction_text(&step.instruction);
+        if cleaned != step.instruction {
+            log::info!("[sanitize] instruction cleaned (leaked ids: {ids:?})");
+            step.instruction = cleaned;
+        }
+        if step.target_element_id.is_none() {
+            let mut distinct = ids;
+            distinct.sort_unstable();
+            distinct.dedup();
+            if let [only] = distinct[..] {
+                log::info!("[sanitize] recovered target_element_id={only} from instruction prose");
+                step.target_element_id = Some(only);
+            }
+        }
+    }
+}
+
+fn sanitize_instruction_text(text: &str) -> (String, Vec<u32>) {
+    use std::sync::OnceLock;
+    static ID_REF: OnceLock<regex::Regex> = OnceLock::new();
+    static EMPHASIS: OnceLock<regex::Regex> = OnceLock::new();
+    static SPACES: OnceLock<regex::Regex> = OnceLock::new();
+    static SPACE_PUNCT: OnceLock<regex::Regex> = OnceLock::new();
+    let id_ref = ID_REF
+        .get_or_init(|| regex::Regex::new(r"(?i)[(\[]\s*id\s*[:#=]?\s*(\d{1,5})\s*[)\]]").unwrap());
+    let ids: Vec<u32> = id_ref
+        .captures_iter(text)
+        .filter_map(|c| c[1].parse().ok())
+        .collect();
+    let cleaned = id_ref.replace_all(text, "");
+    // One alternation group is always empty, so "$1$2" yields the surviving text.
+    let emphasis = EMPHASIS
+        .get_or_init(|| regex::Regex::new(r"\*\*([^*\n]+)\*\*|__([^_\n]+)__").unwrap());
+    let cleaned = emphasis.replace_all(&cleaned, "$1$2");
+    let spaces = SPACES.get_or_init(|| regex::Regex::new(r"[ \t]{2,}").unwrap());
+    let cleaned = spaces.replace_all(&cleaned, " ");
+    let space_punct = SPACE_PUNCT.get_or_init(|| regex::Regex::new(r" +([.,;:!?])").unwrap());
+    let cleaned = space_punct.replace_all(&cleaned, "$1");
+    (cleaned.trim().to_string(), ids)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NavigateStepResponse {
     pub steps: Vec<GuidanceStep>,
@@ -348,6 +407,80 @@ mod tests {
         // Absent → None.
         let s = step(r#"{"instruction": "x"}"#);
         assert!(s.target_element_id.is_none());
+    }
+
+    #[test]
+    fn sanitize_strips_id_ref_and_recovers_it() {
+        // The live 2026-07-18 gemini-3.5-flash incident: id in prose, field null.
+        let mut steps = vec![step(
+            r#"{"instruction": "Click the **More** drop-down (ID: 108) to open the list."}"#,
+        )];
+        sanitize_steps(&mut steps);
+        assert_eq!(
+            steps[0].instruction,
+            "Click the More drop-down to open the list."
+        );
+        assert_eq!(steps[0].target_element_id, Some(108));
+    }
+
+    #[test]
+    fn sanitize_handles_flash_lite_format() {
+        // The 2026-07-12 flash-lite incident format that prompted prompt Rule 14.
+        let mut steps = vec![step(r#"{"instruction": "click the Search box (id 30)"}"#)];
+        sanitize_steps(&mut steps);
+        assert_eq!(steps[0].instruction, "click the Search box");
+        assert_eq!(steps[0].target_element_id, Some(30));
+    }
+
+    #[test]
+    fn sanitize_never_overwrites_an_explicit_id() {
+        let mut steps = vec![step(
+            r#"{"instruction": "Click Save (ID: 5).", "target_element_id": 12}"#,
+        )];
+        sanitize_steps(&mut steps);
+        assert_eq!(steps[0].instruction, "Click Save.");
+        assert_eq!(steps[0].target_element_id, Some(12));
+    }
+
+    #[test]
+    fn sanitize_skips_recovery_when_ids_are_ambiguous() {
+        let mut steps = vec![step(
+            r#"{"instruction": "Click A (ID: 3) then B (ID: 9)."}"#,
+        )];
+        sanitize_steps(&mut steps);
+        assert_eq!(steps[0].instruction, "Click A then B.");
+        assert!(steps[0].target_element_id.is_none());
+        // The SAME id repeated is not ambiguous.
+        let mut steps = vec![step(
+            r#"{"instruction": "Click A (ID: 3). I mean A (id 3)."}"#,
+        )];
+        sanitize_steps(&mut steps);
+        assert_eq!(steps[0].target_element_id, Some(3));
+    }
+
+    #[test]
+    fn sanitize_leaves_clean_text_untouched() {
+        for clean in [
+            "Click the ruler icon near the bottom of the left toolbar.",
+            "Type 5 * 3 = 15 into the cell.",
+            "Wait for the (idle) indicator, then press Enter.",
+            "Open the ID card scanner (see the sidebar).",
+        ] {
+            let mut steps = vec![step(&format!(r#"{{"instruction": {clean:?}}}"#))];
+            sanitize_steps(&mut steps);
+            assert_eq!(steps[0].instruction, clean, "should be untouched: {clean}");
+            assert!(steps[0].target_element_id.is_none());
+        }
+    }
+
+    #[test]
+    fn sanitize_strips_bracketed_and_underscore_forms() {
+        let mut steps = vec![step(
+            r#"{"instruction": "Press __Insert__ [id #7] on the ribbon."}"#,
+        )];
+        sanitize_steps(&mut steps);
+        assert_eq!(steps[0].instruction, "Press Insert on the ribbon.");
+        assert_eq!(steps[0].target_element_id, Some(7));
     }
 
     #[test]

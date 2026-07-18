@@ -1792,7 +1792,12 @@ async fn guide(
         }
     };
 
-    let steps = response.steps;
+    let mut steps = response.steps;
+    // Rule-14 defense in depth: strip leaked element ids / markdown from the
+    // user-facing text; recover an unambiguous leaked id into an empty
+    // target_element_id (verification-gated). See ai::types::sanitize_steps.
+    ai::types::sanitize_steps(&mut steps);
+    let steps = steps;
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
     // Workstream P: the toggle gates the data at the source — when off, suggestions
@@ -2566,7 +2571,10 @@ async fn send_correction(
         }
     };
 
-    let steps = response.steps;
+    let mut steps = response.steps;
+    // Rule-14 defense in depth — same sanitation as guide().
+    ai::types::sanitize_steps(&mut steps);
+    let steps = steps;
     let state_summary = response.state_summary;
     let needs_input = response.needs_input;
     // Workstream P: same source-gating as guide().
