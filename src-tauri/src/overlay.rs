@@ -36,6 +36,11 @@ pub enum OverlayKind {
     /// `target_bbox`. Rendered as a soft diffuse highlight at the inflated
     /// AI bbox — a "look around here" cue, not a precise pointer.
     Hint,
+    /// Flow A (candidate hints): after "Wrong spot", 2–3 ranked possibilities
+    /// drawn as numbered boxes (`OverlayUpdate.candidates`, strongest first).
+    /// The user is never asked to choose — their next real click in the app
+    /// resolves it (state-readback labeling). `bbox` = the primary candidate.
+    Candidates,
     /// No draw — clears the overlay.
     None,
 }
@@ -59,6 +64,9 @@ pub struct OverlayUpdate {
     /// Drawn as a distinct cyan-dashed box alongside the production pointer
     /// when the developer "Show AI bbox" toggle is enabled.
     pub ai_bbox: Option<Rect>,
+    /// Candidate boxes for `OverlayKind::Candidates` (virtual-desktop physical
+    /// pixels, ranked strongest-first). Empty for every other kind.
+    pub candidates: Vec<Rect>,
 }
 
 /// Find which monitor contains the centre of `bbox`. When `bbox` is `None`
@@ -278,6 +286,18 @@ pub fn make_update_with_ai_bbox(
     text: Option<String>,
     ai_bbox: Option<Rect>,
 ) -> Result<OverlayUpdate> {
+    make_update_full(kind, bbox, text, ai_bbox, Vec::new())
+}
+
+/// Full-fat builder — additionally carries the ranked candidate boxes for
+/// `OverlayKind::Candidates` (Flow A).
+pub fn make_update_full(
+    kind: OverlayKind,
+    bbox: Option<Rect>,
+    text: Option<String>,
+    ai_bbox: Option<Rect>,
+    candidates: Vec<Rect>,
+) -> Result<OverlayUpdate> {
     let vd = virtual_desktop_rect()?;
     let active_screen = active_screen_for_bbox(bbox.as_ref().or(ai_bbox.as_ref()));
     Ok(OverlayUpdate {
@@ -288,5 +308,6 @@ pub fn make_update_with_ai_bbox(
         virtual_size: (vd.width, vd.height),
         active_screen,
         ai_bbox,
+        candidates,
     })
 }

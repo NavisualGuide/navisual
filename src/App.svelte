@@ -52,6 +52,10 @@ See the LICENSE file in the root of this repository for complete details.
     ai_bbox: Rect | null;
     suggested_tasks: string[];
     hint_shown: boolean;
+    // Flow A: ranked candidate boxes when a Wrong-spot retry found 2+ distinct
+    // possibilities (empty otherwise). Shown as numbered overlay boxes; never a
+    // picker — the user's next real click in the app resolves it.
+    candidates: Rect[];
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
@@ -227,6 +231,10 @@ See the LICENSE file in the root of this repository for complete details.
   // Reset on a new task and on step advance (capped: stale exclusions on a
   // changed layout could veto a now-correct element).
   let wrongSpotAvoid = $state<Rect[]>([]);
+  // Flow A: how many candidate boxes are currently on screen (0 = none). Gates
+  // the second-Wrong escalation (skip another local retry) and clears with the
+  // rejected-spot memory — same lifecycle, same reset sites.
+  let candidateCount = $state(0);
   // The diffuse AI-bbox hint ring was drawn for the current step (locator missed,
   // trusted bbox). Third picker state: the ring is visibly rejectable, so "Wrong
   // spot" shows alongside "Can't find it" — rejecting it is a model-grounding
@@ -1247,6 +1255,8 @@ See the LICENSE file in the root of this repository for complete details.
     locateResult = res.located;
     locateTrace = res.locate_trace;
     hintShown = res.hint_shown;
+    // Flow A: a fresh AI response redraws a single pointer — candidate boxes are gone.
+    candidateCount = 0;
     sessionId = res.session_id;
     // Training-data join key — echoed back on feedback rows so worked/wrong
     // signals join this request's prompt/response/screenshot records. next_step
@@ -1290,6 +1300,7 @@ See the LICENSE file in the root of this repository for complete details.
     lastRequestHint = taskText;
     clearPrefill();
     wrongSpotAvoid = []; // new request context — drop the old step's rejected spots
+    candidateCount = 0;
     // Focus give-back on submit: typing gave the panel focus; by the time the
     // response's pointer appears, the user's next act is clicking the TARGET —
     // without this, that first click only re-focuses the target and is eaten.
@@ -1349,6 +1360,7 @@ See the LICENSE file in the root of this repository for complete details.
     // Step advance = new target — the rejected-spot memory is for the step it
     // was rejected on (a stale exclusion could veto a now-correct element).
     wrongSpotAvoid = [];
+    candidateCount = 0;
     // Clear the previous step's warning banners. Without this, one genuine
     // stale/occlusion event early in a session re-surfaced its banner after
     // EVERY later → Next (the flag was only reset on the submit/correction
@@ -1486,6 +1498,10 @@ See the LICENSE file in the root of this repository for complete details.
   // instant. Verified/deterministic decisions (selection/adapter) mean the locator
   // provably did what the AI asked → only the AI can fix those.
   function localRetryEligible(category: string): boolean {
+    // Flow A: candidates were already shown and the user says Wrong again — every
+    // shown box is in the avoid list; another local retry would surface a 4th-best
+    // scrap. Escalate straight to the AI.
+    if (candidateCount >= 2) return false;
     const kind = locateTrace?.final_decision?.kind;
     if (category === "wrong_spot") {
       return kind === "hit_a11y" || kind === "hit_ocr" || kind === "hit_template";
@@ -1512,6 +1528,22 @@ See the LICENSE file in the root of this repository for complete details.
         // screen — leftover stale/occlusion banners no longer apply.
         staleResponse = false;
         pointerOccluded = false;
+        // Flow A: 2+ distinct possibilities → numbered boxes are on screen. The
+        // user is NOT asked to pick — they just click the right one in the app
+        // (the backend reads which from the app's own state). All shown boxes
+        // join the rejected-spot memory so another ✗ Wrong escalates to the AI
+        // avoiding every one of them.
+        const cands = res.candidates ?? [];
+        if (cands.length >= 2) {
+          candidateCount = cands.length;
+          wrongSpotAvoid = [...wrongSpotAvoid, ...cands];
+          addToHistory(
+            "system",
+            `That was likely the pointer's mistake, not the AI's answer — I've marked the ${cands.length} most likely spots (① is my best guess, no AI request used). Just click the one you meant. Still wrong? Press ✗ Wrong to ask the AI.`,
+          );
+          return true;
+        }
+        candidateCount = 0;
         addToHistory(
           "system",
           category === "wrong_spot"

@@ -9,6 +9,7 @@
 
 #[cfg(windows)]
 pub mod a11y;
+pub mod candidates;
 
 pub mod adapters;
 

@@ -22,11 +22,17 @@ use anyhow::Result;
 #[cfg(windows)]
 mod excel;
 #[cfg(windows)]
-mod office_com;
+pub(crate) mod office_com;
 #[cfg(windows)]
 mod powerpoint;
 #[cfg(windows)]
 mod word;
+
+/// Re-export for the Flow-A candidate readback (`locator/candidates.rs`), which
+/// resolves a PowerPoint shape selection to screen pixels through the same
+/// pane-quirk-aware conversion the adapter uses.
+#[cfg(windows)]
+pub(crate) use powerpoint::convert_rect_to_pixels as ppt_points_to_pixels;
 
 /// Everything an adapter may gate or resolve on. `target_role`/`nearby_text` come from the
 /// AI response (both optional): the Office canvas adapters gate on role so they can never

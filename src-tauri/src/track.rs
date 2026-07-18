@@ -44,6 +44,9 @@ struct TrackState {
     win_height: i32,
     /// Element bbox relative to the window's top-left corner.
     rel_bbox: Rect,
+    /// Flow A candidate boxes, window-relative like `rel_bbox` (empty for normal
+    /// pointers). All candidates live in the same window, so one delta moves all.
+    candidates_rel: Vec<Rect>,
     kind: OverlayKind,
     text: Option<String>,
     app: AppHandle,
@@ -237,6 +240,23 @@ impl WindowTracker {
         target_hwnd: Option<usize>,
         initially_shown: bool,
     ) {
+        self.start_with_candidates(abs_bbox, kind, text, app, target_hwnd, initially_shown, &[]);
+    }
+
+    /// `start` plus Flow-A candidate boxes (absolute virtual-desktop coords; the
+    /// primary candidate is `abs_bbox`). Stored window-relative so a window move
+    /// shifts every box by the same delta.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_candidates(
+        &self,
+        abs_bbox: &Rect,
+        kind: OverlayKind,
+        text: Option<String>,
+        app: AppHandle,
+        target_hwnd: Option<usize>,
+        initially_shown: bool,
+        candidates_abs: &[Rect],
+    ) {
         #[cfg(windows)]
         {
             let result = unsafe {
@@ -299,6 +319,15 @@ impl WindowTracker {
                 width: abs_bbox.width,
                 height: abs_bbox.height,
             };
+            let candidates_rel: Vec<Rect> = candidates_abs
+                .iter()
+                .map(|c| Rect {
+                    x: c.x - win_left,
+                    y: c.y - win_top,
+                    width: c.width,
+                    height: c.height,
+                })
+                .collect();
 
             *self.state.lock().unwrap() = Some(TrackState {
                 hwnd,
@@ -307,6 +336,7 @@ impl WindowTracker {
                 win_width,
                 win_height,
                 rel_bbox,
+                candidates_rel,
                 kind,
                 text,
                 app,
@@ -320,7 +350,15 @@ impl WindowTracker {
         }
         #[cfg(not(windows))]
         {
-            let _ = (abs_bbox, kind, text, app, target_hwnd, initially_shown);
+            let _ = (
+                abs_bbox,
+                kind,
+                text,
+                app,
+                target_hwnd,
+                initially_shown,
+                candidates_abs,
+            );
         }
     }
 
@@ -681,7 +719,24 @@ unsafe fn recompute(force: bool) {
         // tooltip) the user just opened, which Windows would otherwise stack on top.
         crate::capture::raise_overlay_topmost();
         if !s.shown || moved || resized || force {
-            match overlay::make_update(s.kind, Some(abs_bbox), s.text.clone()) {
+            // Flow A: candidate boxes shift with the window like the primary bbox.
+            let candidates_abs: Vec<Rect> = s
+                .candidates_rel
+                .iter()
+                .map(|c| Rect {
+                    x: wr.left + c.x,
+                    y: wr.top + c.y,
+                    width: c.width,
+                    height: c.height,
+                })
+                .collect();
+            match overlay::make_update_full(
+                s.kind,
+                Some(abs_bbox),
+                s.text.clone(),
+                None,
+                candidates_abs,
+            ) {
                 Ok(u) => {
                     if log_this {
                         log::info!(

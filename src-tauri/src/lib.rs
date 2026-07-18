@@ -84,6 +84,11 @@ struct GuidanceState {
     /// guide/correction request reads it as `prev_request_id` (chaining
     /// rejected→chosen correction pairs) before replacing it with its own.
     request_id: Option<String>,
+    /// Flow A: candidate boxes currently on screen awaiting state-readback
+    /// resolution (the user's next click in the app is the answer). Armed by
+    /// `retry_locate` when it shows 2+ candidates; resolved (label banked to the
+    /// local training mirror) or expired at the next backend event.
+    pending_candidates: Option<locator::candidates::PendingCandidates>,
 }
 
 /// S.1 — enumerate the Structured-Context element snapshot for the captured window.
@@ -302,6 +307,91 @@ fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
     }
 }
 
+/// The locate half of `execute_step` — target-text validation, pack hints, option
+/// building, and the orchestrator call, with no drawing. Extracted (Flow A) so
+/// `retry_locate`'s candidate collection can run additional locates without
+/// re-drawing or duplicating the primary's work.
+#[allow(clippy::too_many_arguments)]
+fn locate_for_step(
+    step: &GuidanceStep,
+    target_hwnd: Option<usize>,
+    debug_ocr_path: Option<std::path::PathBuf>,
+    ai_bbox: Option<capture::Rect>,
+    bbox_decisive: bool,
+    avoid_bboxes: Vec<capture::Rect>,
+    packs: &packs::PackRegistry,
+    context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>>,
+    pre_ocr: Option<(&[u8], capture::Rect)>,
+) -> (
+    Option<locator::LocateResult>,
+    Option<locator::trace::LocateTrace>,
+) {
+    // Treat an empty/whitespace target_text as "no target". The Ollama schema now
+    // *requires* target_text (so small local models can't silently omit it and leave
+    // the locator with nothing), and genuine no-target steps (scroll, press a key)
+    // emit an empty string — those must not trigger a bogus locate.
+    if let Some(text) = step.target_text.as_ref().filter(|t| !t.trim().is_empty()) {
+        #[cfg(windows)]
+        {
+            let (icon_templates, icon_region, icon_authoring_scale) =
+                pack_locate_hints(packs, target_hwnd, text);
+            // A pack icon for this target ⇒ a known icon-only element → A11y skips its
+            // expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
+            // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms.
+            let icon_target = !icon_templates.is_empty();
+            // S.4 skip condition: an icon target with a pack template never uses
+            // selection — the template is already the authority for glyphs.
+            let selected_element_id = if icon_target {
+                None
+            } else {
+                step.target_element_id
+            };
+            let opts = locator::orchestrator::LocateOptions {
+                role: step
+                    .target_role
+                    .as_ref()
+                    .map(|r| format!("{:?}", r).to_lowercase()),
+                nearby_text: step.target_nearby_text.clone(),
+                ai_bbox,
+                bbox_decisive,
+                avoid_bboxes,
+                a11y_timeout_ms: if icon_target { 150 } else { 500 },
+                min_confidence: 0.5,
+                target_hwnd,
+                debug_ocr_image_path: debug_ocr_path,
+                icon_templates,
+                icon_region,
+                icon_target,
+                icon_authoring_scale,
+                context_elements: context_elements.clone(),
+                selected_element_id,
+            };
+            let text_owned = text.clone();
+            match locator::orchestrator::locate(&text_owned, &opts, pre_ocr) {
+                Ok((result, trace)) => (result, Some(trace)),
+                Err(e) => {
+                    log::warn!("locate failed for {:?}: {e}", text);
+                    (None, None)
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (
+                text,
+                target_hwnd,
+                debug_ocr_path,
+                avoid_bboxes,
+                &pre_ocr,
+                &context_elements,
+            );
+            (None, None)
+        }
+    } else {
+        (None, None)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_step(
     app: &AppHandle,
@@ -332,6 +422,15 @@ fn execute_step(
     // capture (the [Screen Elements] list the AI saw). With the step's
     // target_element_id it drives Pass 0.5; None → byte-identical v0.6 behaviour.
     context_elements: Option<std::sync::Arc<Vec<locator::ContextElement>>>,
+    // Flow A: a locate result the caller already computed (retry_locate's candidate
+    // collection runs the locator itself) — Some(..) skips the locate here entirely.
+    precomputed: Option<(
+        Option<locator::LocateResult>,
+        Option<locator::trace::LocateTrace>,
+    )>,
+    // Flow A: ranked candidate boxes to draw INSTEAD of the single pointer when 2+
+    // (the primary must equal `located`'s bbox). Empty for every normal call.
+    candidates_abs: &[capture::Rect],
 ) -> Result<
     (
         Option<locator::LocateResult>,
@@ -344,72 +443,20 @@ fn execute_step(
     ),
     String,
 > {
-    // Treat an empty/whitespace target_text as "no target". The Ollama schema now
-    // *requires* target_text (so small local models can't silently omit it and leave
-    // the locator with nothing), and genuine no-target steps (scroll, press a key)
-    // emit an empty string — those must not trigger a bogus locate.
-    let (located, trace) =
-        if let Some(text) = step.target_text.as_ref().filter(|t| !t.trim().is_empty()) {
-            #[cfg(windows)]
-            {
-                let (icon_templates, icon_region, icon_authoring_scale) =
-                    pack_locate_hints(packs, target_hwnd, text);
-                // A pack icon for this target ⇒ a known icon-only element → A11y skips its
-                // expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
-                // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms.
-                let icon_target = !icon_templates.is_empty();
-                // S.4 skip condition: an icon target with a pack template never uses
-                // selection — the template is already the authority for glyphs.
-                let selected_element_id = if icon_target {
-                    None
-                } else {
-                    step.target_element_id
-                };
-                let opts = locator::orchestrator::LocateOptions {
-                    role: step
-                        .target_role
-                        .as_ref()
-                        .map(|r| format!("{:?}", r).to_lowercase()),
-                    nearby_text: step.target_nearby_text.clone(),
-                    ai_bbox,
-                    bbox_decisive,
-                    avoid_bboxes,
-                    a11y_timeout_ms: if icon_target { 150 } else { 500 },
-                    min_confidence: 0.5,
-                    target_hwnd,
-                    debug_ocr_image_path: debug_ocr_path,
-                    icon_templates,
-                    icon_region,
-                    icon_target,
-                    icon_authoring_scale,
-                    context_elements: context_elements.clone(),
-                    selected_element_id,
-                };
-                let text_owned = text.clone();
-                let pre = pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r));
-                match locator::orchestrator::locate(&text_owned, &opts, pre) {
-                    Ok((result, trace)) => (result, Some(trace)),
-                    Err(e) => {
-                        log::warn!("locate failed for {:?}: {e}", text);
-                        (None, None)
-                    }
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = (
-                    text,
-                    target_hwnd,
-                    debug_ocr_path,
-                    avoid_bboxes,
-                    &pre_ocr,
-                    &context_elements,
-                );
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
+    let (located, trace) = match precomputed {
+        Some(pre) => pre,
+        None => locate_for_step(
+            step,
+            target_hwnd,
+            debug_ocr_path,
+            ai_bbox,
+            bbox_decisive,
+            avoid_bboxes,
+            packs,
+            context_elements,
+            pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r)),
+        ),
+    };
 
     let mut kind = overlay_kind_for_step(&step.overlay_type);
     let mut bbox = located.as_ref().map(|r| r.bbox);
@@ -449,6 +496,14 @@ fn execute_step(
         }
     }
 
+    // Flow A: 2+ distinct candidates replace the single pointer with ranked numbered
+    // boxes (the primary is candidates[0] == located's bbox). The user is never asked
+    // to choose — their next real click in the app resolves it (state readback).
+    let candidate_mode = candidates_abs.len() >= 2 && bbox.is_some();
+    if candidate_mode {
+        kind = overlay::OverlayKind::Candidates;
+    }
+
     let text_for_overlay = Some(step.instruction.clone());
 
     // Is the target area visible right now? Drives the initial draw; the window tracker
@@ -463,10 +518,16 @@ fn execute_step(
         _ => true,
     };
 
-    // Persist for restore_overlay — the AI bbox alone is a valid state too.
+    // Persist for restore_overlay — the AI bbox alone is a valid state too. Candidate
+    // boxes are transient by design (resolved by the user's next click), so a later
+    // restore brings back only the primary as a plain box, not the whole set.
     if !matches!(kind, overlay::OverlayKind::None) || ai_bbox.is_some() {
         *last_overlay.lock() = Some(LastOverlay {
-            kind,
+            kind: if candidate_mode {
+                overlay::OverlayKind::Box
+            } else {
+                kind
+            },
             bbox,
             text: text_for_overlay.clone(),
             ai_bbox,
@@ -474,7 +535,17 @@ fn execute_step(
         });
     }
     if visible {
-        match overlay::make_update_with_ai_bbox(kind, bbox, text_for_overlay.clone(), ai_bbox) {
+        match overlay::make_update_full(
+            kind,
+            bbox,
+            text_for_overlay.clone(),
+            ai_bbox,
+            if candidate_mode {
+                candidates_abs.to_vec()
+            } else {
+                Vec::new()
+            },
+        ) {
             Ok(update) => {
                 if let Err(e) = overlay::emit_update(app, update) {
                     log::warn!("overlay emit failed: {e}");
@@ -512,7 +583,15 @@ fn execute_step(
     // the target's visibility — anchored to the target app (target_hwnd) so the pointer
     // only ever moves with the right window, never another app overlapping the spot.
     if let Some(ref b) = bbox {
-        tracker.start(b, kind, text_for_overlay, app.clone(), target_hwnd, visible);
+        tracker.start_with_candidates(
+            b,
+            kind,
+            text_for_overlay,
+            app.clone(),
+            target_hwnd,
+            visible,
+            if candidate_mode { candidates_abs } else { &[] },
+        );
     } else {
         tracker.clear();
     }
@@ -704,6 +783,70 @@ fn maybe_log_trace(
         let path = dir.join("locate_log.jsonl");
         if let Err(e) = locator::trace::append_jsonl(&path, trace, training) {
             log::warn!("locate_log.jsonl write failed: {e}");
+        }
+    }
+}
+
+/// Flow A — resolve any pending candidate boxes via state readback: which candidate
+/// did the user's real click land on? Called at the start of every backend guidance
+/// entry (guide / next_step / send_correction / retry_locate) — by then the user has
+/// acted, and the app's own state (Word caret, PowerPoint shape selection, UIA focus)
+/// still carries the answer. The resolved pick is banked to the local training mirror
+/// as a ground-truth label; an unresolvable or expired pending is dropped honestly.
+async fn resolve_pending_candidates(app: &AppHandle, state: &AppState) {
+    let Some(pending) = state.guidance.lock().pending_candidates.take() else {
+        return;
+    };
+    let age_ms = chrono::Utc::now().timestamp_millis() - pending.armed_ms;
+    if age_ms > locator::candidates::PENDING_EXPIRY_MS {
+        log::info!("[candidates] pending expired unresolved ({age_ms} ms old)");
+        return;
+    }
+    let training_enabled = state
+        .ai_router
+        .lock()
+        .await
+        .config
+        .training_capture_enabled;
+    let hwnd = pending.target_hwnd;
+    let resolved = tokio::task::spawn_blocking(move || {
+        locator::candidates::read_acted_rect(hwnd)
+    })
+    .await
+    .ok()
+    .flatten();
+    let (chosen, method, resolved_bbox) = match resolved {
+        Some((rect, method)) => (
+            locator::candidates::match_candidate(&rect, &pending.boxes),
+            method,
+            Some(rect),
+        ),
+        None => (None, "no-readback", None),
+    };
+    log::info!(
+        "[candidates] resolution: shown={} chosen={:?} method={} age={}ms",
+        pending.boxes.len(),
+        chosen,
+        method,
+        age_ms
+    );
+    if training_enabled {
+        if let Ok(dir) = app.path().app_local_data_dir() {
+            let row = serde_json::json!({
+                "kind": "candidate_resolved",
+                "ts_ms": chrono::Utc::now().timestamp_millis(),
+                "request_id": pending.request_id,
+                "target_text": pending.target_text,
+                "shown": pending.boxes.len(),
+                "boxes": pending.boxes,
+                "chosen_index": chosen,
+                "method": method,
+                "resolved_bbox": resolved_bbox,
+            });
+            let path = dir.join("training").join("feedback.jsonl");
+            if let Err(e) = jsonl_log::append_line(&path, &row.to_string(), true) {
+                log::warn!("training candidate row write failed: {e}");
+            }
         }
     }
 }
@@ -961,6 +1104,12 @@ struct GuideResponse {
     /// distinguishes it from a real-pointer rejection), routed straight to the AI
     /// (the locator already ran everything and missed — nothing local to retry).
     hint_shown: bool,
+    /// Flow A (candidate hints): the ranked candidate boxes shown after a "Wrong
+    /// spot" local retry found 2+ distinct possibilities (virtual-desktop pixels,
+    /// strongest first; `located` is the primary). Empty everywhere else. The
+    /// frontend adjusts its copy and adds ALL boxes to the rejected-spot memory
+    /// so a further "Wrong spot" escalates to the AI avoiding every shown box.
+    candidates: Vec<capture::Rect>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1242,6 +1391,9 @@ async fn guide(
     task: String,
     is_reply: bool,
 ) -> Result<GuideResponse, String> {
+    // Flow A: any candidate boxes on screen are resolved by the state the user's
+    // click left behind — read it before this request changes anything.
+    resolve_pending_candidates(&app, &state).await;
     let is_next_requery = task.starts_with("[User completed:");
     // Only reset session state for a genuine new task (not resume, not reply, not next-requery).
     // target_hwnd is intentionally NOT reset here — it persists across new sub-tasks in the same
@@ -1338,6 +1490,7 @@ async fn guide(
                     ai_bbox: None,
                     suggested_tasks: Vec::new(),
         hint_shown: false,
+        candidates: Vec::new(),
                 });
             }
         }
@@ -1504,6 +1657,7 @@ async fn guide(
                 ai_bbox: None,
                 suggested_tasks: Vec::new(),
         hint_shown: false,
+        candidates: Vec::new(),
             });
         }
     };
@@ -1788,6 +1942,7 @@ async fn guide(
                 ai_bbox: None,
                 suggested_tasks: Vec::new(),
         hint_shown: false,
+        candidates: Vec::new(),
             });
         }
     };
@@ -1876,6 +2031,7 @@ async fn guide(
             // A no-step "looks complete" reply is exactly where suggestions matter.
             suggested_tasks,
             hint_shown: false,
+            candidates: Vec::new(),
         });
     }
 
@@ -1925,6 +2081,8 @@ async fn guide(
         pre_ocr,
         &state.packs,
         context_elements,
+        None,
+        &[],
     )
     .unwrap_or((None, None, false));
     if let Some(ref mut t) = locate_trace {
@@ -1962,6 +2120,7 @@ async fn guide(
         ai_bbox,
         suggested_tasks,
         hint_shown,
+        candidates: Vec::new(),
     })
 }
 
@@ -1971,6 +2130,8 @@ async fn next_step(
     state: State<'_, AppState>,
     step_index: usize,
 ) -> Result<GuideResponse, String> {
+    // Flow A: resolve candidate boxes from the app state the user's click produced.
+    resolve_pending_candidates(&app, &state).await;
     let (steps, session_id, needs_input, provider, capture_rect, context_elements, request_id) = {
         let g = state.guidance.lock();
         (
@@ -2038,6 +2199,8 @@ async fn next_step(
         None, // next_step reuses the prior capture; locator re-captures for OCR
         &state.packs,
         context_elements,
+        None,
+        &[],
     )
     .unwrap_or((None, None, false));
     if let Some(ref mut t) = locate_trace {
@@ -2075,6 +2238,7 @@ async fn next_step(
         ai_bbox,
         suggested_tasks: Vec::new(), // local advance — no AI call, no new guesses
         hint_shown,
+        candidates: Vec::new(),
     })
 }
 
@@ -2094,6 +2258,9 @@ async fn retry_locate(
     step_index: usize,
     avoid_bboxes: Vec<capture::Rect>,
 ) -> Result<GuideResponse, String> {
+    // Flow A: a second "Wrong spot" while candidates are showing means the user did
+    // NOT click any of them — resolve (likely unresolved, honest) before re-arming.
+    resolve_pending_candidates(&app, &state).await;
     let (steps, session_id, needs_input, provider, capture_rect, context_elements, request_id) = {
         let g = state.guidance.lock();
         (
@@ -2154,22 +2321,84 @@ async fn retry_locate(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
+
+    // Flow A — candidate collection. Run the primary locate, then up to 2 more with
+    // the previous winners added to the avoid list: each pass's own ranking yields the
+    // "next-best distinct match", exactly the sequence repeated Wrong-spot presses
+    // would have walked one rejection at a time. IoU-dedupe (a large overlapper can
+    // survive the centre-based avoid veto), then show ALL of them at once — the user
+    // is never asked to choose; their next real click in the app resolves it.
+    let (primary, primary_trace) = locate_for_step(
+        &steps[step_index],
+        stored_hwnd,
+        debug_ocr_path,
+        ai_bbox,
+        bbox_decisive,
+        avoid_bboxes.clone(),
+        &state.packs,
+        context_elements.clone(),
+        None, // fresh OCR re-capture — the screen may have changed since the AI saw it
+    );
+    let mut candidate_boxes: Vec<capture::Rect> = Vec::new();
+    if let Some(ref w1) = primary {
+        candidate_boxes.push(w1.bbox);
+        let mut extra_avoid = avoid_bboxes.clone();
+        for _ in 0..2 {
+            extra_avoid.extend(candidate_boxes.iter().copied());
+            let (next, _t) = locate_for_step(
+                &steps[step_index],
+                stored_hwnd,
+                None, // debug OCR image only for the primary run
+                ai_bbox,
+                bbox_decisive,
+                extra_avoid.clone(),
+                &state.packs,
+                context_elements.clone(),
+                None,
+            );
+            match next {
+                Some(r) => candidate_boxes.push(r.bbox),
+                None => break,
+            }
+        }
+        candidate_boxes = locator::candidates::dedupe_candidates(candidate_boxes);
+    }
+
     let (located, mut locate_trace, hint_shown) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
-        debug_ocr_path,
+        None, // locate already ran above (precomputed) — no second OCR debug image
         &state.tracker,
         &state.last_overlay,
         ai_bbox,
         bbox_decisive,
         avoid_bboxes,
         capture_rect,
-        None, // fresh OCR re-capture — the screen may have changed since the AI saw it
+        None,
         &state.packs,
         context_elements,
+        Some((primary, primary_trace)),
+        &candidate_boxes,
     )
     .unwrap_or((None, None, false));
+
+    // Arm the state-readback: the next backend event reads which candidate the
+    // user's click landed on from the app's own state (candidates.rs) and banks
+    // the label to the local training mirror.
+    if candidate_boxes.len() >= 2 {
+        let mut g = state.guidance.lock();
+        g.pending_candidates = Some(locator::candidates::PendingCandidates {
+            request_id: request_id.clone(),
+            target_text: steps[step_index]
+                .target_text
+                .clone()
+                .unwrap_or_default(),
+            boxes: candidate_boxes.clone(),
+            target_hwnd: stored_hwnd,
+            armed_ms: chrono::Utc::now().timestamp_millis(),
+        });
+    }
     if let Some(ref mut t) = locate_trace {
         t.request_id = request_id.clone();
         t.local_retry = true;
@@ -2201,6 +2430,7 @@ async fn retry_locate(
         ai_bbox,
         suggested_tasks: Vec::new(),
         hint_shown,
+        candidates: candidate_boxes,
     })
 }
 
@@ -2215,6 +2445,9 @@ async fn send_correction(
     // excludes candidates there so the AI-retry can't repeat any rejected pick.
     avoid_bboxes: Option<Vec<capture::Rect>>,
 ) -> Result<GuideResponse, String> {
+    // Flow A: resolve any on-screen candidate boxes before the correction reshapes
+    // the step (a "None of these" Wrong press lands here — resolves unresolved).
+    resolve_pending_candidates(&app, &state).await;
     let session_id = {
         let g = state.guidance.lock();
         g.session_id.clone()
@@ -2640,6 +2873,7 @@ async fn send_correction(
             ai_bbox: None,
             suggested_tasks,
             hint_shown: false,
+            candidates: Vec::new(),
         });
     }
 
@@ -2685,6 +2919,8 @@ async fn send_correction(
         pre_ocr,
         &state.packs,
         context_elements,
+        None,
+        &[],
     )
     .unwrap_or((None, None, false));
     if let Some(ref mut t) = locate_trace {
@@ -2721,6 +2957,7 @@ async fn send_correction(
         ai_bbox,
         suggested_tasks,
         hint_shown,
+        candidates: Vec::new(),
     })
 }
 
