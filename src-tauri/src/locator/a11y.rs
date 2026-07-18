@@ -2370,6 +2370,15 @@ mod tests {
         // the window (jpeg + raw OCR recapture) milliseconds before enumerating — a capture
         // an idle probe never performs, and a candidate trigger for the transient collapse.
         let capture_first = std::env::var("NAVISUAL_TEST_CAPTURE").as_deref() == Ok("1");
+        // NAVISUAL_TEST_KEEPWARM=1 attaches the keep-warm StructureChanged subscription
+        // first (the app does this after the first AI response) — testing whether OUR OWN
+        // subscription is what slows a busy provider's enumeration (Word hypothesis
+        // 2026-07-18: the session's only fast enum was the one BEFORE keep-warm attached).
+        if std::env::var("NAVISUAL_TEST_KEEPWARM").as_deref() == Ok("1") {
+            crate::locator::keepwarm::warm(hwnd_raw);
+            eprintln!("keep-warm subscribed; settling 2 s");
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
         let t0 = std::time::Instant::now();
         for i in 0..iterations {
             if capture_first {
