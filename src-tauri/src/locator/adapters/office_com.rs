@@ -20,7 +20,7 @@
 use anyhow::{anyhow, Context, Result};
 use windows::core::{Interface, BSTR, GUID, PCWSTR};
 use windows::Win32::System::Com::{
-    CLSIDFromProgID, CoInitializeEx, IDispatch, COINIT_APARTMENTTHREADED, DISPATCH_METHOD,
+    CLSIDFromProgID, CoInitializeEx, IDispatch, COINIT_MULTITHREADED, DISPATCH_METHOD,
     DISPATCH_PROPERTYGET, DISPPARAMS,
 };
 use windows::Win32::System::Ole::GetActiveObject;
@@ -29,12 +29,17 @@ use windows::Win32::System::Variant::{VariantClear, VARIANT};
 /// Locale for `GetIDsOfNames`/`Invoke` — Office object-model member names are invariant.
 const LOCALE_USER_DEFAULT: u32 = 0x0400;
 
-/// Best-effort per-thread COM init. The locator's blocking threads usually already have
-/// COM initialised (the `uiautomation` crate does it); a "wrong mode" failure here just
-/// means that — safe to ignore, the thread is usable either way.
+/// Best-effort per-thread COM init — **must be MTA**. The locate runs on tokio's POOLED
+/// blocking threads, and `UIAutomation::new()` (the rest of the pipeline) requires MTA:
+/// an STA init here would poison the pool thread for every later pass on it — and did,
+/// live 2026-07-18: after one adapter run, subsequent locates on the same pooled thread
+/// (even ones the adapter never claimed) failed with "UIAutomation init failed" /
+/// A11y 0-candidates-in-0ms until app restart. Out-of-proc Office IDispatch automation
+/// works fine from an MTA. A "wrong mode" result just means the thread already has an
+/// apartment — usable either way, safe to ignore.
 fn ensure_com() {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 }
 

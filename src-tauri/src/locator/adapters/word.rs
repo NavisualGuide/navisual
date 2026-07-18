@@ -36,7 +36,9 @@ const MAX_OCCURRENCES: usize = 30;
 const WD_FIND_STOP: i32 = 0;
 
 fn role_is_prose_like(role: Option<&str>) -> bool {
-    matches!(role, Some("text") | Some("other"))
+    // "heading" observed live 2026-07-18: the AI labels Word document headings
+    // ("Count on Word to count your words") role=heading — document prose too.
+    matches!(role, Some("text") | Some("other") | Some("heading"))
 }
 
 impl Adapter for WordAdapter {
@@ -297,6 +299,7 @@ mod tests {
     fn role_gate_blocks_control_roles() {
         assert!(role_is_prose_like(Some("text")));
         assert!(role_is_prose_like(Some("other")));
+        assert!(role_is_prose_like(Some("heading")));
         assert!(!role_is_prose_like(Some("button")));
         assert!(!role_is_prose_like(Some("textbox")));
         assert!(!role_is_prose_like(None));
@@ -349,5 +352,10 @@ mod tests {
             Some(r) => eprintln!("  HIT name={:?} role={} bbox={:?}", r.name, r.role, r.bbox),
             None => eprintln!("  fell through (no pointer)"),
         }
+        // Apartment regression guard — see ppt_shape_live's matching assertion.
+        assert!(
+            uiautomation::UIAutomation::new().is_ok(),
+            "UIAutomation must still initialise on this thread after the adapter ran"
+        );
     }
 }

@@ -30,8 +30,12 @@ pub struct PowerPointAdapter;
 /// Roles this adapter may claim. Control roles (button/tab/menuitem/…) are excluded so a
 /// ribbon target can never be hijacked by a same-named shape on the slide. A missing role
 /// is also excluded — weak models omit it too casually to treat as "content".
+/// "heading" observed live on Word same-day (slide titles are the same class of target).
 fn role_is_content_like(role: Option<&str>) -> bool {
-    matches!(role, Some("textbox") | Some("text") | Some("other"))
+    matches!(
+        role,
+        Some("textbox") | Some("text") | Some("other") | Some("heading")
+    )
 }
 
 impl Adapter for PowerPointAdapter {
@@ -439,6 +443,7 @@ mod tests {
     fn role_gate_blocks_control_roles() {
         assert!(role_is_content_like(Some("textbox")));
         assert!(role_is_content_like(Some("other")));
+        assert!(role_is_content_like(Some("heading")));
         assert!(!role_is_content_like(Some("button")));
         assert!(!role_is_content_like(Some("tab")));
         assert!(!role_is_content_like(None));
@@ -519,5 +524,12 @@ mod tests {
             Some(r) => eprintln!("  HIT name={:?} role={} bbox={:?}", r.name, r.role, r.bbox),
             None => eprintln!("  fell through (no pointer)"),
         }
+        // Apartment regression guard: the adapter's COM init must leave this thread
+        // usable by the rest of the pipeline. The 2026-07-18 STA bug poisoned pooled
+        // locate threads — every later pass failed "UIAutomation init failed".
+        assert!(
+            uiautomation::UIAutomation::new().is_ok(),
+            "UIAutomation must still initialise on this thread after the adapter ran"
+        );
     }
 }
