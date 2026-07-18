@@ -1349,6 +1349,14 @@ See the LICENSE file in the root of this repository for complete details.
     // Step advance = new target — the rejected-spot memory is for the step it
     // was rejected on (a stale exclusion could veto a now-correct element).
     wrongSpotAvoid = [];
+    // Clear the previous step's warning banners. Without this, one genuine
+    // stale/occlusion event early in a session re-surfaced its banner after
+    // EVERY later → Next (the flag was only reset on the submit/correction
+    // paths), reading as "screen changed while I was thinking" on steps where
+    // nothing drifted at all — live-observed in the 2026-07-17 PowerPoint
+    // session, where one Designer-pane pop armed the banner for good.
+    staleResponse = false;
+    pointerOccluded = false;
     const nextIdx = stepIndex + 1;
     const prevPhase = phase;
     if (nextIdx >= steps.length) {
@@ -1500,6 +1508,10 @@ See the LICENSE file in the root of this repository for complete details.
         locateResult = res.located;
         locateTrace = res.locate_trace;
         hintShown = res.hint_shown;
+        // A successful local re-locate just verified the target on the LIVE
+        // screen — leftover stale/occlusion banners no longer apply.
+        staleResponse = false;
+        pointerOccluded = false;
         addToHistory(
           "system",
           category === "wrong_spot"

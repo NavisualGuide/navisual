@@ -593,6 +593,23 @@ fn hamming64(a: u64, b: u64) -> u32 {
     (a ^ b).count_ones()
 }
 
+/// Stale-response check: compare the pre-AI-call screen hash against the
+/// post-response one and emit `ai_response_stale` when the drift crosses the
+/// threshold. The drift is ALWAYS logged (hits and near-misses) so a "banner
+/// shows every time" report is diagnosable from the log — the 2026-07-17
+/// PowerPoint session needed offline image forensics because nothing recorded
+/// the measured drift.
+fn emit_stale_if_drifted(app: &tauri::AppHandle, pre_hash: Option<u64>, post_hash: Option<u64>) {
+    if let (Some(p), Some(q)) = (pre_hash, post_hash) {
+        let drift = hamming64(p, q);
+        let stale = drift >= STALE_RESPONSE_THRESHOLD;
+        log::info!("[stale] drift={drift}/64 threshold={STALE_RESPONSE_THRESHOLD} emitting={stale}");
+        if stale {
+            let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
+        }
+    }
+}
+
 /// Capture a fresh active-window hash off the blocking pool and store it as
 /// the Autopilot baseline. Called at the end of every AI/local guidance event
 /// (`guide`, `next_step`, `send_correction`) so the baseline always reflects
@@ -1832,12 +1849,7 @@ async fn guide(
         // Still anchor the autopilot baseline + run stale detection so that the
         // needs_input branch behaves the same as a normal response.
         let post_hash = anchor_autopilot_baseline(&state).await;
-        if let (Some(p), Some(q)) = (pre_hash, post_hash) {
-            let drift = hamming64(p, q);
-            if drift >= STALE_RESPONSE_THRESHOLD {
-                let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
-            }
-        }
+        emit_stale_if_drifted(&app, pre_hash, post_hash);
         return Ok(GuideResponse {
             ok: true,
             session_id,
@@ -1892,12 +1904,7 @@ async fn guide(
         .await
         .ok()
         .flatten();
-    if let (Some(p), Some(q)) = (pre_hash, stale_hash) {
-        let drift = hamming64(p, q);
-        if drift >= STALE_RESPONSE_THRESHOLD {
-            let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
-        }
-    }
+    emit_stale_if_drifted(&app, pre_hash, stale_hash);
 
     let (located, mut locate_trace, hint_shown) = execute_step(
         &app,
@@ -2604,12 +2611,7 @@ async fn send_correction(
 
     if steps.is_empty() {
         let post_hash = anchor_autopilot_baseline(&state).await;
-        if let (Some(p), Some(q)) = (pre_hash, post_hash) {
-            let drift = hamming64(p, q);
-            if drift >= STALE_RESPONSE_THRESHOLD {
-                let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
-            }
-        }
+        emit_stale_if_drifted(&app, pre_hash, post_hash);
         return Ok(GuideResponse {
             ok: true,
             session_id,
@@ -2659,12 +2661,7 @@ async fn send_correction(
         .await
         .ok()
         .flatten();
-    if let (Some(p), Some(q)) = (pre_hash, stale_hash) {
-        let drift = hamming64(p, q);
-        if drift >= STALE_RESPONSE_THRESHOLD {
-            let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
-        }
-    }
+    emit_stale_if_drifted(&app, pre_hash, stale_hash);
 
     let (located, mut locate_trace, hint_shown) = execute_step(
         &app,
