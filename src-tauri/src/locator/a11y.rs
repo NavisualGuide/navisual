@@ -2347,6 +2347,56 @@ mod tests {
         }
     }
 
+    // Live probe for the PowerPoint enumeration-instability signature (2026-07-18): a real
+    // session logged 143 → 11 → 8 → 156 → 150 → 72 → 9 elements across 7 requests on the
+    // same PPTFrameClass window — deflation/partial returns, NOT Excel's duplicate
+    // explosion. Loops the enumeration to distinguish (a) transient busy-thread partiality
+    // (counts bounce even idle), (b) deterministic state-dependence (edit mode reliably
+    // small), and (c) which subtree survives a small run (ribbon missing = walk died
+    // early). Run in different app states via NAVISUAL_TEST_HWND:
+    // $env:NAVISUAL_TEST_HWND=<hwnd>; cargo test --lib context_enumeration_stability_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn context_enumeration_stability_live() {
+        let hwnd_raw: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+        let iterations: usize = std::env::var("NAVISUAL_TEST_ITER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+        let t0 = std::time::Instant::now();
+        for i in 0..iterations {
+            let started = std::time::Instant::now();
+            let result = super::enumerate_context_elements(hwnd_raw);
+            let ms = started.elapsed().as_millis();
+            let at = t0.elapsed().as_millis();
+            match result {
+                Ok(els) => {
+                    // Role histogram — a missing role class (e.g. zero ribbon buttons)
+                    // pinpoints which subtree the walk lost.
+                    let mut hist: std::collections::BTreeMap<&str, usize> =
+                        std::collections::BTreeMap::new();
+                    for e in &els {
+                        *hist.entry(e.role.as_str()).or_default() += 1;
+                    }
+                    eprintln!("[{at:>6} ms] iter {i:>2}: {} elements in {ms} ms  {hist:?}", els.len());
+                    if els.len() < 30 {
+                        for e in &els {
+                            eprintln!(
+                                "      {:>3} | {:<12} | {:?} @ ({}, {}) {}x{}",
+                                e.id, e.role, e.name, e.rect.x, e.rect.y, e.rect.width, e.rect.height
+                            );
+                        }
+                    }
+                }
+                Err(reason) => eprintln!("[{at:>6} ms] iter {i:>2}: SKIPPED in {ms} ms: {reason}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+    }
+
     // Diagnose WHAT the Excel ExcelGrid-Descendants search returns (2026-07-13). A live log
     // showed a plain 209-cell data sheet (no PivotTable) yielding 559 context-type candidates
     // in ~7 s; this probe auto-finds the open Excel window and prints a (control_type,
