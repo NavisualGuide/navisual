@@ -41,6 +41,11 @@ pub struct LocateTrace {
     pub template: Option<TemplateTrace>,
     pub final_decision: FinalDecision,
     pub final_bbox: Option<Rect>,
+    /// Flow B: a pass fell through on a KNOWN ambiguity (2+ equally-good answers) and
+    /// recorded the set. Doubles as the measurement instrumentation for Flow B's fire
+    /// rate — present on hits too (the set is recorded whenever a pass declares a tie,
+    /// even if a later pass then resolved the locate).
+    pub ambiguity_set: Option<AmbiguitySet>,
     /// LOCATE latency only (A11y/OCR/template/etc. inside `orchestrator::locate`) — does
     /// NOT include the AI round-trip that produced `target_text`/`ai_bbox` in the first
     /// place. See `ai_elapsed_ms` for that.
@@ -71,6 +76,17 @@ pub struct LocateTrace {
     /// `elapsed_ms`/grounding accuracy). `None` for `next_step` — same reason as the token
     /// fields: it reuses a prior response, no new AI call happens.
     pub ai_elapsed_ms: Option<u32>,
+}
+
+/// Flow B — a pass's declared tie: 2+ equally-good answers it refused to pick among
+/// ("no wrong pointer"), with their screen rects. Shown as candidate boxes only when the
+/// whole pipeline then misses (never pre-empting a later pass — the Save/QAT case).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AmbiguitySet {
+    /// Which pass declared the tie ("word", "powerpoint", …).
+    pub source: String,
+    /// The tying rects, the pass's own order, visible-resolvable only.
+    pub boxes: Vec<Rect>,
 }
 
 /// Pass-0 adapter outcome. An adapter "claims" a locate when it recognises the focused app

@@ -1258,8 +1258,25 @@ See the LICENSE file in the root of this repository for complete details.
     locateResult = res.located;
     locateTrace = res.locate_trace;
     hintShown = res.hint_shown;
-    // Flow A: a fresh AI response redraws a single pointer — candidate boxes are gone.
-    candidateCount = 0;
+    // A fresh response clears any previous candidate boxes — unless THIS response
+    // drew a new set (Flow B: a first-locate ambiguity — e.g. a repeated word with
+    // no distinguishing anchor — shows the known possibilities instead of a hint
+    // ring; nobody is asked to choose, the user's next click resolves it).
+    const cands = res.candidates ?? [];
+    if (cands.length >= 2) {
+      candidateCount = cands.length;
+      const tgt = res.steps[idx]?.target_text ?? "";
+      wrongSpotAvoid = [
+        ...wrongSpotAvoid,
+        ...cands.map((bbox) => ({ bbox, target: tgt })),
+      ];
+      addToHistory(
+        "system",
+        `That appears in several places — I've marked the ${cands.length} most likely (① is my best guess). Just click the one you meant. None of them? Press ✗ Wrong.`,
+      );
+    } else {
+      candidateCount = 0;
+    }
     sessionId = res.session_id;
     // Training-data join key — echoed back on feedback rows so worked/wrong
     // signals join this request's prompt/response/screenshot records. next_step
@@ -2094,8 +2111,10 @@ See the LICENSE file in the root of this repository for complete details.
           </div>
         {/if}
 
-        <!-- D6: subtle miss note — only when a target was expected but genuinely not found -->
-        {#if !locateResult && !pointerOccluded && steps[stepIndex]?.target_text && phase === "guiding"}
+        <!-- D6: subtle miss note — only when a target was expected but genuinely not
+             found. Suppressed when Flow-B candidate boxes are on screen (boxes ARE
+             the pointer's answer; "unavailable" would contradict them). -->
+        {#if !locateResult && !pointerOccluded && candidateCount < 2 && steps[stepIndex]?.target_text && phase === "guiding"}
           <p class="miss-note">⊘ Pointer unavailable — follow the instruction above</p>
         {/if}
 
@@ -2116,7 +2135,7 @@ See the LICENSE file in the root of this repository for complete details.
                      (locator missed, trusted AI bbox drawn) shows BOTH — the ring is
                      visibly rejectable ("Wrong spot" on it = a model-grounding-fault
                      label, located=false on the row), and "Can't find it" stays valid. -->
-                {#if locateResult || hintShown}
+                {#if locateResult || hintShown || candidateCount >= 2}
                   <button class="reason-chip" onclick={() => submitWrong("wrong_spot")}>Wrong spot</button>
                 {/if}
                 {#if !locateResult}

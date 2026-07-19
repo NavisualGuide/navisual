@@ -32,6 +32,9 @@ pub struct WordAdapter;
 const CONTEXT_CHARS: i32 = 80;
 /// Occurrence scan cap — a common word in a long document is ambiguous long before this.
 const MAX_OCCURRENCES: usize = 30;
+/// Flow B: rects resolved into an ambiguity set (the UI caps at 3; a couple spare
+/// survive IoU-dedupe).
+const AMBIGUITY_SET_CAP: usize = 5;
 /// wdFindStop — Find must not wrap back to the start (would loop the scan).
 const WD_FIND_STOP: i32 = 0;
 
@@ -84,9 +87,21 @@ impl Adapter for WordAdapter {
         // The no-avoid path is unchanged (choose first, one GetPoint).
         let (chosen, chosen_rect, avoided_note) = if query.avoid_bboxes.is_empty() {
             let Some(chosen) = choose_occurrence(&occurrences, query.nearby_text) else {
-                return Ok(AdapterHit::fell_through(format!(
-                    "{total} occurrences of {target:?}, none singled out by nearby_text — ambiguous"
-                )));
+                // Flow B: the ambiguity is KNOWN — resolve the visible occurrences'
+                // rects (document order, capped) and hand them up as the candidate
+                // set. Only shown if the whole pipeline then misses.
+                let rects: Vec<Rect> = occurrences
+                    .iter()
+                    .filter_map(|o| range_screen_rect(&window, &doc, o.start, o.end))
+                    .take(AMBIGUITY_SET_CAP)
+                    .collect();
+                return Ok(AdapterHit::ambiguous(
+                    format!(
+                        "{total} occurrences of {target:?}, none singled out by nearby_text — ambiguous ({} visible)",
+                        rects.len()
+                    ),
+                    rects,
+                ));
             };
             (chosen.clone(), None, String::new())
         } else {
@@ -110,10 +125,19 @@ impl Adapter for WordAdapter {
             let survivors: Vec<Occurrence> =
                 surviving.iter().map(|(o, _)| o.clone()).collect();
             let Some(chosen) = choose_occurrence(&survivors, query.nearby_text) else {
-                return Ok(AdapterHit::fell_through(format!(
-                    "{} non-rejected occurrences of {target:?} remain — ambiguous",
-                    survivors.len()
-                )));
+                // Flow B: survivors' rects are already resolved — the candidate set.
+                let rects: Vec<Rect> = surviving
+                    .iter()
+                    .map(|(_, r)| *r)
+                    .take(AMBIGUITY_SET_CAP)
+                    .collect();
+                return Ok(AdapterHit::ambiguous(
+                    format!(
+                        "{} non-rejected occurrences of {target:?} remain — ambiguous",
+                        survivors.len()
+                    ),
+                    rects,
+                ));
             };
             let rect = surviving
                 .iter()
@@ -141,6 +165,7 @@ impl Adapter for WordAdapter {
                 role: "WordText".to_string(),
                 confidence: 1.0,
             }),
+            ambiguous: Vec::new(),
             detail: format!(
                 "Find hit {} of {total} at chars {}..{} ({}{avoided_note})",
                 chosen.ordinal,
