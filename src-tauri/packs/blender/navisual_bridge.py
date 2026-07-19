@@ -62,7 +62,68 @@ def _q_layout(_req):
     return out
 
 
+BRIDGE_VERSION = 2
+
+# Essentials brush libraries per paint mode — the asset shelf's contents are NOT in
+# bpy.data (they're library assets), so brush names come from the shipped blends.
+# Loaded lazily and cached: a library load is ~10s of ms, and the set never changes
+# within a session.
+_BRUSH_BLENDS = {
+    "SCULPT": "essentials_brushes-mesh_sculpt.blend",
+    "PAINT_TEXTURE": "essentials_brushes-mesh_texture.blend",
+    "PAINT_VERTEX": "essentials_brushes-mesh_vertex.blend",
+    "PAINT_WEIGHT": "essentials_brushes-mesh_weight.blend",
+    "SCULPT_CURVES": "essentials_brushes-curve_sculpt.blend",
+    "PAINT_GPENCIL": "essentials_brushes-gp_draw.blend",
+    "SCULPT_GPENCIL": "essentials_brushes-gp_sculpt.blend",
+}
+_brush_cache = {}
+
+
+def _brush_names(mode):
+    """Available brush names for a paint/sculpt mode (cached). Empty for other modes."""
+    import os
+
+    fname = _BRUSH_BLENDS.get(mode)
+    if not fname:
+        return []
+    if mode in _brush_cache:
+        return _brush_cache[mode]
+    names = []
+    try:
+        ver = ".".join(bpy.app.version_string.split(".")[:2])
+        path = os.path.join(
+            os.path.dirname(bpy.app.binary_path), ver, "datafiles", "assets", "brushes", fname
+        )
+        if os.path.exists(path):
+            with bpy.data.libraries.load(path, assets_only=True, link=True) as (src, _dst):
+                names = sorted(src.brushes)
+    except Exception:
+        names = []
+    _brush_cache[mode] = names
+    return names
+
+
+def _active_brush(ctx, mode):
+    paints = {
+        "SCULPT": "sculpt",
+        "PAINT_TEXTURE": "image_paint",
+        "PAINT_VERTEX": "vertex_paint",
+        "PAINT_WEIGHT": "weight_paint",
+        "SCULPT_CURVES": "curves_sculpt",
+    }
+    attr = paints.get(mode)
+    if not attr:
+        return None
+    try:
+        paint = getattr(ctx.tool_settings, attr, None)
+        return paint.brush.name if paint and paint.brush else None
+    except Exception:
+        return None
+
+
 def _q_state(_req):
+    """L1 state grounding: facts the AI cannot reliably read off a screenshot."""
     ctx = bpy.context
     tool = None
     try:
@@ -71,11 +132,32 @@ def _q_state(_req):
         tool = t.idname if t else None
     except Exception:
         pass
+    mode = getattr(ctx, "mode", None)
+    obj = ctx.active_object
+    win = _window()
+    shading = None
+    shelf_open = None
+    if win is not None:
+        area = next((a for a in win.screen.areas if a.type == "VIEW_3D"), None)
+        if area is not None:
+            space = next((s for s in area.spaces if s.type == "VIEW_3D"), None)
+            if space is not None:
+                shading = getattr(space.shading, "type", None)
+            shelf = next((r for r in area.regions if r.type == "ASSET_SHELF"), None)
+            shelf_open = bool(shelf and shelf.width > 1 and shelf.height > 1)
     return {
+        "bridge_version": BRIDGE_VERSION,
         "blender": bpy.app.version_string,
         "workspace": ctx.workspace.name if ctx.workspace else None,
-        "mode": getattr(ctx, "mode", None),
+        "mode": mode,
         "active_tool": tool,
+        "active_object": ({"name": obj.name, "type": obj.type} if obj else None),
+        "selected_count": len(getattr(ctx, "selected_objects", []) or []),
+        "objects": [o.name for o in bpy.data.objects][:20],
+        "viewport_shading": shading,
+        "brush_shelf_open": shelf_open,
+        "active_brush": _active_brush(ctx, mode),
+        "brushes": _brush_names(mode),
         "ui_scale": ctx.preferences.system.ui_scale,
     }
 

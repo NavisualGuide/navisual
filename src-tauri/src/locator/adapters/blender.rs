@@ -363,6 +363,105 @@ impl BlenderAdapter {
     }
 }
 
+/// The bridge protocol version this build expects. A bridge reporting less than this
+/// is a STALE ADDON COPY — Blender's "Install…" copies the file into its own addons
+/// folder, so a pack update never reaches an already-installed bridge (live papercut
+/// 2026-07-19: three separate sessions ran against stale constants). The state block
+/// surfaces the mismatch to the AI, and the log line tells the developer.
+const EXPECTED_BRIDGE_VERSION: i64 = 2;
+
+/// L1 state grounding for Blender (script-adapters-plan.md §2): app facts a screenshot
+/// can't convey — mode, active tool, the ACTIVE BRUSH and the real brush names for the
+/// current paint mode (the asset shelf is usually collapsed and its contents aren't in
+/// `bpy.data` at all), viewport shading, selection. Returns a prompt block, or `None`
+/// when the target isn't Blender / the bridge isn't running (silent no-op — absence
+/// degrades to exactly today's behaviour).
+///
+/// Snapshotted at AI-capture time alongside the screenshot, same atomicity rule as
+/// `[Screen Elements]`, so state and pixels can never disagree.
+pub fn app_state_block(hwnd: usize) -> Option<String> {
+    if window_exe_stem_lower(hwnd) != "blender" {
+        return None;
+    }
+    let v = bridge_query(r#"{"q":"state"}"#).ok()?;
+    if v.get("error").is_some() {
+        return None;
+    }
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str());
+    let mut b = String::from(
+        "\n[App State — Blender] authoritative for the fields listed here; the screenshot \
+         remains authoritative for layout and anything not listed.\n",
+    );
+    if let Some(ver) = s("blender") {
+        b.push_str(&format!("blender: {ver}\n"));
+    }
+    if let Some(m) = s("mode") {
+        b.push_str(&format!("mode: {m}\n"));
+    }
+    if let Some(w) = s("workspace") {
+        b.push_str(&format!("workspace_tab: {w}\n"));
+    }
+    if let Some(t) = s("active_tool") {
+        b.push_str(&format!("active_tool: {t}\n"));
+    }
+    if let Some(sh) = s("viewport_shading") {
+        b.push_str(&format!("viewport_shading: {sh}\n"));
+    }
+    if let Some(obj) = v.get("active_object").filter(|o| !o.is_null()) {
+        let name = obj.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+        let ty = obj.get("type").and_then(|x| x.as_str()).unwrap_or("?");
+        b.push_str(&format!("active_object: \"{name}\" ({ty})\n"));
+    } else {
+        b.push_str("active_object: none\n");
+    }
+    if let Some(n) = v.get("selected_count").and_then(|x| x.as_i64()) {
+        b.push_str(&format!("selected_objects: {n}\n"));
+    }
+    if let Some(objs) = v.get("objects").and_then(|x| x.as_array()) {
+        let names: Vec<&str> = objs.iter().filter_map(|o| o.as_str()).collect();
+        if !names.is_empty() {
+            b.push_str(&format!("scene_objects: {}\n", names.join(", ")));
+        }
+    }
+    // Brush facts — the reason this block exists for sculpt/paint work.
+    if let Some(active) = s("active_brush") {
+        b.push_str(&format!("active_brush: \"{active}\"\n"));
+    }
+    if let Some(brushes) = v.get("brushes").and_then(|x| x.as_array()) {
+        let names: Vec<&str> = brushes.iter().filter_map(|x| x.as_str()).collect();
+        if !names.is_empty() {
+            let shelf_open = v
+                .get("brush_shelf_open")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            b.push_str(&format!(
+                "brush_shelf_visible: {}\n",
+                if shelf_open { "yes" } else { "no (collapsed)" }
+            ));
+            b.push_str(&format!(
+                "available_brushes ({}): {}\n\
+                 Use these EXACT brush names; do not invent others. When the shelf is \
+                 collapsed the brush is chosen from the brush selector in the tool header \
+                 (it shows the active brush's name).\n",
+                names.len(),
+                names.join(", ")
+            ));
+        }
+    }
+    if let Some(bv) = v.get("bridge_version").and_then(|x| x.as_i64()) {
+        if bv < EXPECTED_BRIDGE_VERSION {
+            log::warn!(
+                "[blender] stale bridge addon: v{bv} < expected v{EXPECTED_BRIDGE_VERSION} \
+                 — reinstall navisual_bridge.py from the pack and restart Blender"
+            );
+            b.push_str(
+                "note: the Navisual Blender add-on is out of date; some facts may be missing.\n",
+            );
+        }
+    }
+    Some(b)
+}
+
 /// One newline-delimited JSON round trip to the bridge.
 fn bridge_query(payload: &str) -> Result<serde_json::Value> {
     let addr = BRIDGE_ADDR.parse().context("bridge addr")?;
@@ -468,6 +567,26 @@ mod tests {
         // Move slot rect [2,765,56,32] → client top-down y = 950−(765+32) = 153.
         let r = to_screen_rect((100, 50), 950, 2, 765, 56, 32);
         assert_eq!((r.x, r.y, r.width, r.height), (102, 203, 56, 32));
+    }
+
+    // Live: print the L1 [App State] block exactly as the AI would receive it.
+    // Run: $env:NAVISUAL_TEST_HWND=<hwnd>; cargo test --lib blender_state_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn blender_state_live() {
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+        let started = std::time::Instant::now();
+        match super::app_state_block(hwnd) {
+            Some(b) => eprintln!(
+                "--- block ({} chars, {} ms) ---\n{b}--- end ---",
+                b.len(),
+                started.elapsed().as_millis()
+            ),
+            None => eprintln!("no block (not Blender / bridge down)"),
+        }
     }
 
     // Live: Blender running with the navisual_bridge addon enabled. Resolves TARGET

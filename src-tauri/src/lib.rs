@@ -936,6 +936,20 @@ async fn arm_candidates_if_shown(
     });
 }
 
+/// L1 app-state block for the prompt, bounded so a wedged script channel can never
+/// stall a capture (the channel's own connect/read timeouts are ~200/700 ms; this is
+/// the outer safety net, mirroring `enumerate_context_snapshot_bounded`'s contract).
+fn app_state_snapshot(hwnd: Option<usize>) -> Option<String> {
+    let started = std::time::Instant::now();
+    let block = locator::adapters::app_state_block(hwnd)?;
+    log::info!(
+        "[app_state] block collected in {} ms ({} chars)",
+        started.elapsed().as_millis(),
+        block.len()
+    );
+    Some(block)
+}
+
 /// Exe filename stem for `LocateTrace.app_name` — PII-free app identity (see the field's
 /// doc comment for why this is the exe stem and not the resolved display title).
 fn trace_app_name(hwnd_opt: Option<usize>) -> Option<String> {
@@ -1785,6 +1799,12 @@ async fn guide(
     }
     if let (Some(els), Some(rect)) = (context_elements.as_deref(), capture_rect_opt) {
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
+    }
+    // L1 app state from a script channel (Blender bridge today) — facts the screenshot
+    // can't convey. Same capture-time atomicity as [Screen Elements]; absent when no
+    // channel applies.
+    if let Some(block) = app_state_snapshot(new_hwnd_opt) {
+        window_context.push_str(&block);
     }
 
     // Append window context to the prompt (no grid suffix any more — AI returns
@@ -2772,6 +2792,10 @@ async fn send_correction(
     }
     if let (Some(els), Some(rect)) = (context_elements.as_deref(), new_capture_rect) {
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
+    }
+    // L1 app state — same as guide()'s capture path.
+    if let Some(block) = app_state_snapshot(new_hwnd) {
+        window_context.push_str(&block);
     }
 
     // Same language + goal anchor as guide()'s continuation turns — a correction is a

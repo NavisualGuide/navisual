@@ -36,6 +36,22 @@ mod word;
 #[cfg(windows)]
 pub(crate) use powerpoint::convert_rect_to_pixels as ppt_points_to_pixels;
 
+/// L1 app-state prompt block for the focused window, when a script channel offers one
+/// (script-adapters-plan.md §2: state grounding, consumed by the AI — distinct from the
+/// L2 geometry the adapters feed the locator). Snapshotted at AI-capture time alongside
+/// the screenshot. `None` when no channel applies — the prompt is then unchanged.
+pub fn app_state_block(hwnd: Option<usize>) -> Option<String> {
+    #[cfg(windows)]
+    {
+        blender::app_state_block(hwnd.filter(|h| *h != 0)?)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        None
+    }
+}
+
 /// Everything an adapter may gate or resolve on. `target_role`/`nearby_text` come from the
 /// AI response (both optional): the Office canvas adapters gate on role so they can never
 /// hijack a ribbon/control target, and Word uses `nearby_text` to disambiguate repeated
