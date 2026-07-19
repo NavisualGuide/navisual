@@ -1077,6 +1077,32 @@ fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
     }
 }
 
+/// Deployment status of the pack-shipped Blender add-on (the script-channel bridge):
+/// which Blender installs exist, whether each has the add-on, and whether any is older
+/// than the version the pack ships. Drives the panel's install prompt.
+#[tauri::command]
+fn blender_addon_status(state: State<'_, AppState>) -> packs::addon_install::AddonStatus {
+    let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
+    packs::addon_install::status(dir.as_deref())
+}
+
+/// Copy the pack's add-on into every detected Blender config directory. Explicitly
+/// user-initiated (writing into another application's config dir is not something to do
+/// silently), and deliberately does NOT enable it — the Add-ons checkbox stays the
+/// consent gate. Returns what the user must do next.
+#[tauri::command]
+fn install_blender_addon(state: State<'_, AppState>) -> packs::addon_install::InstallResult {
+    let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
+    let result = packs::addon_install::install(dir.as_deref());
+    log::info!(
+        "[blender-addon] install → {:?} (errors: {:?}, needs_enable={})",
+        result.installed,
+        result.errors,
+        result.needs_enable
+    );
+    result
+}
+
 /// Must match Overlay.svelte's `APP_BOUNDARY_DURATION_MS` — no constant is
 /// shared across the Rust/Svelte boundary, so keep the two in sync by hand.
 #[cfg(windows)]
@@ -4589,6 +4615,8 @@ pub fn run() {
             restore_overlay,
             get_shared_app_info,
             get_pack_starters,
+            blender_addon_status,
+            install_blender_addon,
             speak,
             get_settings,
             save_settings,

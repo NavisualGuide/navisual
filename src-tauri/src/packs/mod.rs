@@ -19,6 +19,8 @@
 //! the same `id` shadows a bundled one. `get_active_pack(window_title)` returns the first
 //! pack whose `window_title_pattern` matches — user packs win ties.
 
+pub mod addon_install;
+
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -262,6 +264,13 @@ impl PackRegistry {
     /// The first pack whose `window_title_pattern` matches `window_title`, or `None`.
     pub fn get_active_pack(&self, window_title: &str) -> Option<&Pack> {
         self.packs.iter().find(|p| p.title_re.is_match(window_title))
+    }
+
+    /// A loaded pack by manifest id — used by add-on deployment to find the pack
+    /// directory that ships `navisual_bridge.py` (a user pack shadowing the bundled
+    /// Blender pack correctly wins here too, since it was loaded first).
+    pub fn get_by_id(&self, id: &str) -> Option<&Pack> {
+        self.packs.iter().find(|p| p.manifest.id == id)
     }
 
     pub fn len(&self) -> usize {
