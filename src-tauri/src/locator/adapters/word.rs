@@ -74,58 +74,76 @@ impl Adapter for WordAdapter {
                 "Find: {target:?} not present in the document text"
             )));
         }
+        let total = occurrences.len();
 
-        let Some(chosen) = choose_occurrence(&occurrences, query.nearby_text) else {
-            return Ok(AdapterHit::fell_through(format!(
-                "{} occurrences of {target:?}, none singled out by nearby_text — ambiguous",
-                occurrences.len()
-            )));
+        // Flow A — occurrence-level avoid awareness: with rejected spots on record,
+        // resolve every occurrence's screen rect first, drop the rejected (and the
+        // unresolvable — can't be pointed at anyway), then choose among survivors.
+        // This is what makes the adapter yield "the NEXT occurrence" on a Wrong-spot
+        // retry instead of re-hitting the rejected one and dying at the Pass-0 veto.
+        // The no-avoid path is unchanged (choose first, one GetPoint).
+        let (chosen, chosen_rect, avoided_note) = if query.avoid_bboxes.is_empty() {
+            let Some(chosen) = choose_occurrence(&occurrences, query.nearby_text) else {
+                return Ok(AdapterHit::fell_through(format!(
+                    "{total} occurrences of {target:?}, none singled out by nearby_text — ambiguous"
+                )));
+            };
+            (chosen.clone(), None, String::new())
+        } else {
+            let resolved: Vec<(Occurrence, Rect)> = occurrences
+                .iter()
+                .filter_map(|o| {
+                    range_screen_rect(&window, &doc, o.start, o.end).map(|r| (o.clone(), r))
+                })
+                .collect();
+            let surviving: Vec<(Occurrence, Rect)> = resolved
+                .into_iter()
+                .filter(|(_, r)| {
+                    !crate::locator::orchestrator::rejected_by_avoid(r, query.avoid_bboxes)
+                })
+                .collect();
+            if surviving.is_empty() {
+                return Ok(AdapterHit::fell_through(format!(
+                    "all resolvable occurrences of {target:?} were already rejected"
+                )));
+            }
+            let survivors: Vec<Occurrence> =
+                surviving.iter().map(|(o, _)| o.clone()).collect();
+            let Some(chosen) = choose_occurrence(&survivors, query.nearby_text) else {
+                return Ok(AdapterHit::fell_through(format!(
+                    "{} non-rejected occurrences of {target:?} remain — ambiguous",
+                    survivors.len()
+                )));
+            };
+            let rect = surviving
+                .iter()
+                .find(|(o, _)| o.start == chosen.start)
+                .map(|(_, r)| *r);
+            (chosen.clone(), rect, ", after avoid filtering".to_string())
         };
 
-        // Re-materialise the chosen range and ask Word for its screen-pixel rect.
-        let range_v = get_indexed(
-            &doc,
-            "Range",
-            vec![v_i32(chosen.start), v_i32(chosen.end)],
-        )?;
-        let range = as_dispatch(&range_v)?;
-        let (mut left, mut top, mut width, mut height) = (0i32, 0i32, 0i32, 0i32);
-        let mut args = [
-            v_byref_i32(&mut left),
-            v_byref_i32(&mut top),
-            v_byref_i32(&mut width),
-            v_byref_i32(&mut height),
-            v_dispatch(&range),
-        ];
-        if let Err(e) = call_byref(&window, "GetPoint", &mut args) {
-            // GetPoint raises when the range isn't in the rendered/visible area.
-            return Ok(AdapterHit::fell_through(format!(
-                "found {target:?} but GetPoint failed (scrolled out of view?): {e}"
-            )));
-        }
-        drop(args);
-        if width <= 0 || height <= 0 || !super::rect_is_onscreen(left, top) {
-            return Ok(AdapterHit::fell_through(format!(
-                "found {target:?} but rect off-screen ({left},{top} {width}×{height})"
-            )));
-        }
+        let rect = match chosen_rect {
+            Some(r) => r,
+            None => match range_screen_rect(&window, &doc, chosen.start, chosen.end) {
+                Some(r) => r,
+                None => {
+                    return Ok(AdapterHit::fell_through(format!(
+                        "found {target:?} but its rect is unavailable (scrolled out of view?)"
+                    )))
+                }
+            },
+        };
 
         Ok(AdapterHit {
             result: Some(LocateResult {
-                bbox: Rect {
-                    x: left,
-                    y: top,
-                    width: width as u32,
-                    height: height as u32,
-                },
+                bbox: rect,
                 name: target.to_string(),
                 role: "WordText".to_string(),
                 confidence: 1.0,
             }),
             detail: format!(
-                "Find hit {} of {} at chars {}..{} ({})",
+                "Find hit {} of {total} at chars {}..{} ({}{avoided_note})",
                 chosen.ordinal,
-                occurrences.len(),
                 chosen.start,
                 chosen.end,
                 if query.nearby_text.is_some() {
@@ -138,6 +156,37 @@ impl Adapter for WordAdapter {
     }
 }
 
+/// Screen-pixel rect of a document char range via `Window.GetPoint`, or None when the
+/// range isn't rendered (scrolled out) or reports a degenerate/off-screen rect.
+fn range_screen_rect(
+    window: &IDispatch,
+    doc: &IDispatch,
+    start: i32,
+    end: i32,
+) -> Option<Rect> {
+    let range = as_dispatch(&get_indexed(doc, "Range", vec![v_i32(start), v_i32(end)]).ok()?).ok()?;
+    let (mut left, mut top, mut width, mut height) = (0i32, 0i32, 0i32, 0i32);
+    let mut args = [
+        v_byref_i32(&mut left),
+        v_byref_i32(&mut top),
+        v_byref_i32(&mut width),
+        v_byref_i32(&mut height),
+        v_dispatch(&range),
+    ];
+    call_byref(window, "GetPoint", &mut args).ok()?;
+    drop(args);
+    if width <= 0 || height <= 0 || !super::rect_is_onscreen(left, top) {
+        return None;
+    }
+    Some(Rect {
+        x: left,
+        y: top,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
+#[derive(Clone)]
 pub(crate) struct Occurrence {
     /// 1-based position in document order (for the trace).
     pub ordinal: usize,
@@ -334,11 +383,27 @@ mod tests {
                 }
             }
         }
+        // AVOID="x,y,w,h" simulates a rejected spot (Flow A) — the adapter should
+        // resolve the NEXT non-rejected occurrence instead of the avoided one.
+        let avoid: Vec<Rect> = std::env::var("AVOID")
+            .ok()
+            .and_then(|s| {
+                let v: Vec<i32> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                (v.len() == 4).then(|| Rect {
+                    x: v[0],
+                    y: v[1],
+                    width: v[2] as u32,
+                    height: v[3] as u32,
+                })
+            })
+            .into_iter()
+            .collect();
         let adapter = WordAdapter;
         let query = AdapterQuery {
             target_text: &target,
             target_role: Some("other"),
             nearby_text: nearby.as_deref(),
+            avoid_bboxes: &avoid,
         };
         assert!(adapter.matches(hwnd, &query), "adapter should claim Word");
         let started = std::time::Instant::now();

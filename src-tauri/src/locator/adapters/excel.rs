@@ -310,6 +310,7 @@ mod tests {
             target_text: &target,
             target_role: None,
             nearby_text: None,
+            avoid_bboxes: &[],
         };
         assert!(
             adapter.matches(hwnd, &query),

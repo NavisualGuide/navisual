@@ -4,13 +4,15 @@
 
   type Rect = { x: number; y: number; width: number; height: number };
   type OverlayUpdate = {
-    kind: "arrow" | "box" | "subtitle" | "app_boundary" | "hint" | "none";
+    kind: "arrow" | "box" | "subtitle" | "app_boundary" | "hint" | "candidates" | "none";
     bbox: Rect | null;
     text: string | null;
     virtual_origin: [number, number];
     virtual_size: [number, number];
     active_screen: Rect | null;
     ai_bbox: Rect | null;
+    // Flow A: ranked candidate boxes (strongest first) for kind === "candidates".
+    candidates: Rect[];
   };
   type OverlayTheme = {
     color: string;
@@ -374,6 +376,74 @@
    * No label/tag — the user shouldn't need to know whether the pointer came
    * from the local locator or from the AI fallback.
    */
+  // Flow A — ranked candidate boxes (kind "candidates"). Deliberately NOT the
+  // confident-pointer language: no ripple rings, dashed outlines, a number chip
+  // per box, opacity fading with rank (① strongest). The user is never asked to
+  // click these — they act in the app as usual and the backend reads the result.
+  function drawCandidates(
+    ctx: CanvasRenderingContext2D,
+    candidates: Rect[],
+    ox: number, oy: number,
+    t: number,
+  ) {
+    const scale = dprOf(ctx);
+    const [r, g, b] = hexToRgb(theme.color);
+    const pulse = (Math.sin(t / 600) + 1) / 2;
+    candidates.forEach((c, i) => {
+      const pad = 8;
+      ctx.save();
+      ctx.scale(scale, scale);
+      const bx = (c.x - ox - pad) / scale;
+      const by = (c.y - oy - pad) / scale;
+      const bw = (c.width + pad * 2) / scale;
+      const bh = (c.height + pad * 2) / scale;
+      // Rank styling: ① near-solid + gentle pulse, later ranks dimmer.
+      const alpha = i === 0 ? 0.85 + pulse * 0.15 : Math.max(0.35, 0.65 - i * 0.15);
+      ctx.setLineDash(i === 0 ? [] : [6, 5]);
+      // Shadow pass for contrast on any background.
+      ctx.strokeStyle = `rgba(0,0,0,${alpha * 0.6})`;
+      ctx.lineWidth = 4;
+      roundRectPath(ctx, bx, by, bw, bh, 6);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      ctx.lineWidth = 2.2;
+      roundRectPath(ctx, bx, by, bw, bh, 6);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Number chip at the top-left corner.
+      const chipR = 11;
+      const chipX = bx + 2;
+      const chipY = by + 2;
+      ctx.beginPath();
+      ctx.arc(chipX, chipY, chipR, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${Math.min(1, alpha + 0.1)})`;
+      ctx.shadowColor = "rgba(0,0,0,0.5)";
+      ctx.shadowBlur = 4;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#fff";
+      ctx.font = `bold ${chipR + 2}px 'Segoe UI', sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(i + 1), chipX, chipY + 0.5);
+      ctx.restore();
+    });
+  }
+
+  function roundRectPath(
+    ctx: CanvasRenderingContext2D,
+    x: number, y: number, w: number, h: number, radius: number,
+  ) {
+    const rr = Math.min(radius, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
   function drawHint(
     ctx: CanvasRenderingContext2D,
     bx: number, by: number, bw: number, bh: number,
@@ -607,7 +677,11 @@
         return;
       }
 
-      if (u.bbox) {
+      if (u.kind === "candidates" && u.candidates && u.candidates.length >= 2) {
+        // Flow A: every ranked candidate gets a numbered dashed box; the user's
+        // next real click in the app resolves the ambiguity — no picker UI.
+        drawCandidates(ctx, u.candidates, ox, oy, t);
+      } else if (u.bbox) {
         const padding = 12;
         const bx = u.bbox.x - ox - padding;
         const by = u.bbox.y - oy - padding;

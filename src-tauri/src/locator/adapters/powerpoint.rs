@@ -166,7 +166,7 @@ impl Adapter for PowerPointAdapter {
 /// slide pane (Panes(2) in normal view), convert, then restore the original pane — net
 /// zero state change. The direct attempt runs first so the common case (slide pane
 /// already active) has no side effects at all.
-fn convert_rect_to_pixels(
+pub(crate) fn convert_rect_to_pixels(
     window: &windows::Win32::System::Com::IDispatch,
     left: f64,
     top: f64,
@@ -511,6 +511,7 @@ mod tests {
             target_text: &target,
             target_role: Some("textbox"),
             nearby_text: None,
+            avoid_bboxes: &[],
         };
         assert!(adapter.matches(hwnd, &query), "adapter should claim PowerPoint");
         let started = std::time::Instant::now();

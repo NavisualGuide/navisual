@@ -22,20 +22,30 @@ use anyhow::Result;
 #[cfg(windows)]
 mod excel;
 #[cfg(windows)]
-mod office_com;
+pub(crate) mod office_com;
 #[cfg(windows)]
 mod powerpoint;
 #[cfg(windows)]
 mod word;
 
+/// Re-export for the Flow-A candidate readback (`locator/candidates.rs`), which
+/// resolves a PowerPoint shape selection to screen pixels through the same
+/// pane-quirk-aware conversion the adapter uses.
+#[cfg(windows)]
+pub(crate) use powerpoint::convert_rect_to_pixels as ppt_points_to_pixels;
+
 /// Everything an adapter may gate or resolve on. `target_role`/`nearby_text` come from the
 /// AI response (both optional): the Office canvas adapters gate on role so they can never
 /// hijack a ribbon/control target, and Word uses `nearby_text` to disambiguate repeated
 /// occurrences of the target text (ground-truth analogue of the OCR anchor).
+/// `avoid_bboxes` (Flow A): spots the user rejected this step — an avoid-aware adapter
+/// resolves to the next-best NON-rejected answer (Word: the next occurrence) instead of
+/// re-hitting the rejected one and getting vetoed at Pass 0.
 pub struct AdapterQuery<'a> {
     pub target_text: &'a str,
     pub target_role: Option<&'a str>,
     pub nearby_text: Option<&'a str>,
+    pub avoid_bboxes: &'a [crate::capture::Rect],
 }
 
 /// Outcome of an adapter's `locate`. `result: None` means "claimed but couldn't resolve"
