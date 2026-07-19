@@ -2270,7 +2270,9 @@ async fn retry_locate(
     app: AppHandle,
     state: State<'_, AppState>,
     step_index: usize,
-    avoid_bboxes: Vec<capture::Rect>,
+    // Target-tagged rejections (locator::candidates::AvoidEntry) — filtered to the
+    // entries recorded for THIS step's target below (scoped_avoid doc comment).
+    avoid_bboxes: Vec<locator::candidates::AvoidEntry>,
 ) -> Result<GuideResponse, String> {
     // Flow A: a second "Wrong spot" while candidates are showing means the user did
     // NOT click any of them — resolve (likely unresolved, honest) before re-arming.
@@ -2296,6 +2298,10 @@ async fn retry_locate(
             steps.len()
         ));
     }
+    let avoid_bboxes = locator::candidates::scoped_avoid(
+        &avoid_bboxes,
+        steps[step_index].target_text.as_deref(),
+    );
 
     let (log_trace, training_enabled, debug_screenshot_enabled, bbox_decisive, used_model) = {
         let router = state.ai_router.lock().await;
@@ -2462,11 +2468,12 @@ async fn send_correction(
     app: AppHandle,
     state: State<'_, AppState>,
     note: Option<String>,
-    // "Wrong spot" memory: every bbox a rejected pointer occupied this step
-    // (virtual-desktop physical pixels) — the frontend accumulates them across B5
-    // local retries and sends the list for the wrong_spot reason; the locator
-    // excludes candidates there so the AI-retry can't repeat any rejected pick.
-    avoid_bboxes: Option<Vec<capture::Rect>>,
+    // "Wrong spot" memory: every bbox a rejected pointer occupied this step,
+    // TAGGED with the target it was rejected for. The correction's AI response may
+    // re-target, so the filter runs AFTER the response arrives, against the new
+    // step's own target_text — a rejection of "the heading" must not blanket-veto
+    // a later 'Save' whose best answer sits inside that heading (live 2026-07-18).
+    avoid_bboxes: Option<Vec<locator::candidates::AvoidEntry>>,
 ) -> Result<GuideResponse, String> {
     // Flow A: resolve any on-screen candidate boxes before the correction reshapes
     // the step (a "None of these" Wrong press lands here — resolves unresolved).
@@ -2928,6 +2935,12 @@ async fn send_correction(
         .flatten();
     emit_stale_if_drifted(&app, pre_hash, stale_hash);
 
+    // Scope the rejections to the NEW step's target — the AI may have re-targeted,
+    // and only rejections recorded against this exact target still apply.
+    let scoped = locator::candidates::scoped_avoid(
+        avoid_bboxes.as_deref().unwrap_or(&[]),
+        steps[0].target_text.as_deref(),
+    );
     let (located, mut locate_trace, hint_shown) = execute_step(
         &app,
         &steps[0],
@@ -2937,7 +2950,7 @@ async fn send_correction(
         &state.last_overlay,
         ai_bbox,
         bbox_decisive,
-        avoid_bboxes.clone().unwrap_or_default(),
+        scoped,
         new_capture_rect,
         pre_ocr,
         &state.packs,

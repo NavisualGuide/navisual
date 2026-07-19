@@ -17,6 +17,36 @@
 
 use crate::capture::Rect;
 
+/// A user-rejected spot, SCOPED to the target it was rejected for. A "wrong spot" is
+/// the statement "this rect is not `target`" — not "never point anywhere in this rect
+/// again for anything". Live incident (2026-07-18 Word 'Save' test): the rejection of a
+/// whole-heading rect (586×100) for target "Save this for later…" blanket-excluded the
+/// heading's own "Save" when the AI re-targeted to just 'Save' — the pointer then
+/// contradicted the instruction ("the very first word in the large heading") by sliding
+/// to a body-text occurrence. Entries are filtered by [`scoped_avoid`] against the
+/// CURRENT step's target before any locate; when the AI renames the same spot ("I meant
+/// the Save button"), the pointer may legitimately return to a rejected rect — correct,
+/// because the claim about it changed.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AvoidEntry {
+    pub bbox: Rect,
+    pub target: String,
+}
+
+/// The avoid rects that apply to a locate for `target_text`: entries whose recorded
+/// target matches (trimmed, case-insensitive). No target → nothing applies.
+pub fn scoped_avoid(entries: &[AvoidEntry], target_text: Option<&str>) -> Vec<Rect> {
+    let Some(t) = target_text.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty())
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|e| e.target.trim().to_lowercase() == t)
+        .map(|e| e.bbox)
+        .collect()
+}
+
 /// Pending state armed when candidate boxes are shown; resolved (or expired) at the
 /// next backend event. Lives in `GuidanceState`.
 #[derive(Clone, Debug)]
@@ -279,6 +309,35 @@ mod tests {
         // Caret (collapsed range → tiny rect) inside candidate 1.
         assert_eq!(match_candidate(&r(410, 105, 2, 14), &candidates), Some(1));
         assert_eq!(match_candidate(&r(120, 110, 0, 14), &candidates), Some(0));
+    }
+
+    #[test]
+    fn scoped_avoid_filters_by_target() {
+        let entries = vec![
+            AvoidEntry {
+                bbox: r(100, 100, 586, 100),
+                target: "Save this for later, access it anywhere".into(),
+            },
+            AvoidEntry {
+                bbox: r(400, 300, 32, 23),
+                target: "Save".into(),
+            },
+        ];
+        // The live incident: re-targeting to 'Save' must NOT inherit the heading
+        // rejection — only the entry recorded for 'Save' applies.
+        let applied = scoped_avoid(&entries, Some("Save"));
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].x, 400);
+        // Case/whitespace-insensitive.
+        assert_eq!(scoped_avoid(&entries, Some(" save ")).len(), 1);
+        // The original target still sees its own rejection.
+        assert_eq!(
+            scoped_avoid(&entries, Some("Save this for later, access it anywhere")).len(),
+            1
+        );
+        // No target / unknown target → nothing applies.
+        assert!(scoped_avoid(&entries, None).is_empty());
+        assert!(scoped_avoid(&entries, Some("Bold")).is_empty());
     }
 
     #[test]

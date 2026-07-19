@@ -229,8 +229,11 @@ See the LICENSE file in the root of this repository for complete details.
   // step attempt — grows across local retries so no rejected spot can be
   // re-picked, and rides along to send_correction if the AI fallback runs.
   // Reset on a new task and on step advance (capped: stale exclusions on a
-  // changed layout could veto a now-correct element).
-  let wrongSpotAvoid = $state<Rect[]>([]);
+  // changed layout could veto a now-correct element). Each entry is TAGGED with
+  // the target_text it was rejected for — the backend only applies entries whose
+  // target matches the step being located ("this rect is not <target>", not
+  // "never point here again for anything"; see candidates::AvoidEntry).
+  let wrongSpotAvoid = $state<{ bbox: Rect; target: string }[]>([]);
   // Flow A: how many candidate boxes are currently on screen (0 = none). Gates
   // the second-Wrong escalation (skip another local retry) and clears with the
   // rejected-spot memory — same lifecycle, same reset sites.
@@ -1549,7 +1552,11 @@ See the LICENSE file in the root of this repository for complete details.
         const cands = res.candidates ?? [];
         if (cands.length >= 2) {
           candidateCount = cands.length;
-          wrongSpotAvoid = [...wrongSpotAvoid, ...cands];
+          const tgt = steps[stepIndex]?.target_text ?? "";
+          wrongSpotAvoid = [
+            ...wrongSpotAvoid,
+            ...cands.map((bbox) => ({ bbox, target: tgt })),
+          ];
           addToHistory(
             "system",
             `That was likely the pointer's mistake, not the AI's answer — I've marked the ${cands.length} most likely spots (① is my best guess, no AI request used). Just click the one you meant. Still wrong? Press ✗ Wrong to ask the AI.`,
@@ -1591,8 +1598,12 @@ See the LICENSE file in the root of this repository for complete details.
       return;
     }
     if (category === "wrong_spot" && locateResult) {
-      // Remember the rejected spot regardless of which retry path runs.
-      wrongSpotAvoid = [...wrongSpotAvoid, locateResult.bbox];
+      // Remember the rejected spot regardless of which retry path runs, tagged
+      // with the target it was rejected FOR (scoped avoid).
+      wrongSpotAvoid = [
+        ...wrongSpotAvoid,
+        { bbox: locateResult.bbox, target: steps[stepIndex]?.target_text ?? "" },
+      ];
     }
     // A typed note is intent FOR THE AI ("I meant the other Save") — don't
     // intercept it with a local retry that can't read it.
