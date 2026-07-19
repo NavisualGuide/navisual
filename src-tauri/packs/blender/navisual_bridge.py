@@ -265,13 +265,13 @@ def _q_tabs(_req):
 # header region's right edge, scale-multiplicative like everything else).
 # (right_offset_u = distance from right edge to the item's RIGHT side, width_u).
 HEADER_ITEMS = [
-    ("shading_dropdown", ["Viewport Shading", "Shading"], 1.1, 0.5),
-    ("rendered", ["Rendered", "Rendered Viewport Shading", "Viewport Shading Rendered"], 2.35, 0.875),
-    ("material_preview", ["Material Preview", "Material Preview Viewport Shading", "Viewport Shading Material Preview"], 3.3, 0.875),
-    ("solid", ["Solid", "Solid Viewport Shading", "Viewport Shading Solid"], 4.25, 0.875),
-    ("wireframe", ["Wireframe", "Wireframe Viewport Shading", "Viewport Shading Wireframe"], 5.2, 0.875),
-    ("xray", ["X-Ray", "Toggle X-Ray", "XRay"], 6.45, 0.875),
-    ("overlays", ["Show Overlays", "Overlays", "Overlay"], 8.7, 0.875),
+    ("shading_dropdown", ["Viewport Shading", "Shading"], 0.25, 0.55),
+    ("rendered", ["Rendered", "Rendered Viewport Shading", "Viewport Shading Rendered"], 1.15, 0.9),
+    ("material_preview", ["Material Preview", "Material Preview Viewport Shading", "Viewport Shading Material Preview"], 2.05, 0.9),
+    ("solid", ["Solid", "Solid Viewport Shading", "Viewport Shading Solid"], 2.95, 0.9),
+    ("wireframe", ["Wireframe", "Wireframe Viewport Shading", "Viewport Shading Wireframe"], 3.85, 0.9),
+    ("xray", ["X-Ray", "Toggle X-Ray", "XRay"], 5.25, 0.9),
+    ("overlays", ["Show Overlays", "Overlays", "Overlay"], 7.5, 0.9),
 ]
 
 
