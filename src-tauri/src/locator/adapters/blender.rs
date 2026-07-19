@@ -133,6 +133,14 @@ impl BlenderAdapter {
     /// `Ok(None)` when tabs aren't available/matching (caller reports its own
     /// fall-through); `Some(hit)` on a match (unique or ambiguous).
     fn try_tabs(&self, hwnd: usize, query: &AdapterQuery) -> Result<Option<AdapterHit>> {
+        // Role gate (live 2026-07-19): the AI marks top-bar menu entries role=menuitem
+        // ("Render" → Render menu, "Render Image" inside it) — the tab matcher's
+        // subset rule would hijack those onto the Render Properties TAB (it did, twice;
+        // both needed a ✗ Wrong retry to recover via OCR). Tabs may claim tab-ish and
+        // unspecified roles only.
+        if matches!(query.target_role, Some("menuitem")) {
+            return Ok(None);
+        }
         let Ok(tabs) = bridge_query(r#"{"q":"tabs"}"#) else {
             return Ok(None);
         };
