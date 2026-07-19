@@ -165,7 +165,7 @@ def _q_tools(_req):
 
 
 # Calibration constants (units of the 20px widget unit). Tuned live on 5.1.2.
-BUTTON_UNITS = 1.7
+BUTTON_UNITS = 1.65
 SEP_UNITS = 0.6
 TOP_PAD_UNITS = 0.45
 
