@@ -133,6 +133,7 @@ impl Adapter for ExcelAdapter {
                 confidence: 1.0,
             }),
             detail: format!("{target_text} → GridPattern.GetItem({row},{col})"),
+            ambiguous: Vec::new(),
         })
     }
 }

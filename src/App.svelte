@@ -198,6 +198,9 @@ See the LICENSE file in the root of this repository for complete details.
     target_role: string | null;
     nearby_text: string | null;
     ai_bbox: { x: number; y: number; width: number; height: number } | null;
+    // Flow B: a pass declared a ground-truth tie during this locate (recorded even
+    // when the boxes weren't shown — that's the fire-rate instrumentation).
+    ambiguity_set: { source: string; boxes: Rect[] } | null;
     selection: SelectionTrace | null;
     a11y: A11yTrace;
     ocr: OcrTrace;
@@ -1258,8 +1261,25 @@ See the LICENSE file in the root of this repository for complete details.
     locateResult = res.located;
     locateTrace = res.locate_trace;
     hintShown = res.hint_shown;
-    // Flow A: a fresh AI response redraws a single pointer — candidate boxes are gone.
-    candidateCount = 0;
+    // A fresh response clears any previous candidate boxes — unless THIS response
+    // drew a new set (Flow B: a first-locate ambiguity — e.g. a repeated word with
+    // no distinguishing anchor — shows the known possibilities instead of a hint
+    // ring; nobody is asked to choose, the user's next click resolves it).
+    const cands = res.candidates ?? [];
+    if (cands.length >= 2) {
+      candidateCount = cands.length;
+      const tgt = res.steps[idx]?.target_text ?? "";
+      wrongSpotAvoid = [
+        ...wrongSpotAvoid,
+        ...cands.map((bbox) => ({ bbox, target: tgt })),
+      ];
+      addToHistory(
+        "system",
+        `That appears in several places — I've marked the ${cands.length} most likely (① is my best guess). Just click the one you meant. None of them? Press ✗ Wrong.`,
+      );
+    } else {
+      candidateCount = 0;
+    }
     sessionId = res.session_id;
     // Training-data join key — echoed back on feedback rows so worked/wrong
     // signals join this request's prompt/response/screenshot records. next_step
@@ -2094,8 +2114,10 @@ See the LICENSE file in the root of this repository for complete details.
           </div>
         {/if}
 
-        <!-- D6: subtle miss note — only when a target was expected but genuinely not found -->
-        {#if !locateResult && !pointerOccluded && steps[stepIndex]?.target_text && phase === "guiding"}
+        <!-- D6: subtle miss note — only when a target was expected but genuinely not
+             found. Suppressed when Flow-B candidate boxes are on screen (boxes ARE
+             the pointer's answer; "unavailable" would contradict them). -->
+        {#if !locateResult && !pointerOccluded && candidateCount < 2 && steps[stepIndex]?.target_text && phase === "guiding"}
           <p class="miss-note">⊘ Pointer unavailable — follow the instruction above</p>
         {/if}
 
@@ -2116,7 +2138,7 @@ See the LICENSE file in the root of this repository for complete details.
                      (locator missed, trusted AI bbox drawn) shows BOTH — the ring is
                      visibly rejectable ("Wrong spot" on it = a model-grounding-fault
                      label, located=false on the row), and "Can't find it" stays valid. -->
-                {#if locateResult || hintShown}
+                {#if locateResult || hintShown || candidateCount >= 2}
                   <button class="reason-chip" onclick={() => submitWrong("wrong_spot")}>Wrong spot</button>
                 {/if}
                 {#if !locateResult}
@@ -2171,6 +2193,24 @@ See the LICENSE file in the root of this repository for complete details.
                   <div class="debug-row">
                     <span class="debug-key">ai_bbox</span>
                     <span class="debug-val">{locateTrace.ai_bbox.x}, {locateTrace.ai_bbox.y} · {locateTrace.ai_bbox.width}×{locateTrace.ai_bbox.height}</span>
+                  </div>
+                {/if}
+                <!-- Flow B: a pass declared a ground-truth tie. Boxes drawn = the set
+                     fired (miss) or was PROMOTED over an inside-set OCR hit — without
+                     this line the drawer reads "hit_ocr" while the overlay shows the
+                     adapter's full-element boxes (user-reported confusion, 2026-07-19). -->
+                {#if locateTrace.ambiguity_set}
+                  {@const amb = locateTrace.ambiguity_set}
+                  <div class="debug-row">
+                    <span class="debug-key">candidates</span>
+                    <span class="debug-val">
+                      {amb.source} tie · {amb.boxes.length} known
+                      {#if candidateCount >= 2}
+                        · {candidateCount} boxes shown{locateResult ? " (promoted over the hit — ① is its spot)" : " (pipeline missed)"}
+                      {:else}
+                        · not shown (a stronger answer stood alone)
+                      {/if}
+                    </span>
                   </div>
                 {/if}
 

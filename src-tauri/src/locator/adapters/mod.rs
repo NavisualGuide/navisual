@@ -53,6 +53,12 @@ pub struct AdapterQuery<'a> {
 pub struct AdapterHit {
     pub result: Option<LocateResult>,
     pub detail: String,
+    /// Flow B: when the adapter fell through because it KNEW 2+ equally-good answers
+    /// (occurrence/shape-tier ambiguity), the known rects — screen coords, the pass's
+    /// own order. Recorded into the trace; if the WHOLE pipeline then misses, they're
+    /// shown as candidate boxes instead of a hint ring (never pre-empting later passes
+    /// — the Save/QAT case). Empty everywhere else.
+    pub ambiguous: Vec<crate::capture::Rect>,
 }
 
 impl AdapterHit {
@@ -61,6 +67,16 @@ impl AdapterHit {
         Self {
             result: None,
             detail: detail.into(),
+            ambiguous: Vec::new(),
+        }
+    }
+
+    /// Fell through on a KNOWN ambiguity — the candidate rects ride along (Flow B).
+    pub fn ambiguous(detail: impl Into<String>, rects: Vec<crate::capture::Rect>) -> Self {
+        Self {
+            result: None,
+            detail: detail.into(),
+            ambiguous: rects,
         }
     }
 }
@@ -83,6 +99,8 @@ pub struct AdapterOutcome {
     pub name: String,
     pub result: Option<LocateResult>,
     pub detail: String,
+    /// Flow B ambiguity set (see [`AdapterHit::ambiguous`]).
+    pub ambiguous: Vec<crate::capture::Rect>,
 }
 
 /// The registered adapters, in priority order. The first whose `matches` returns true wins.
@@ -116,11 +134,13 @@ pub fn try_locate(target_hwnd: Option<usize>, query: &AdapterQuery) -> Option<Ad
                 name: adapter.name().to_string(),
                 result: hit.result,
                 detail: hit.detail,
+                ambiguous: hit.ambiguous,
             },
             Err(e) => AdapterOutcome {
                 name: adapter.name().to_string(),
                 result: None,
                 detail: format!("error: {e}"),
+                ambiguous: Vec::new(),
             },
         });
     }

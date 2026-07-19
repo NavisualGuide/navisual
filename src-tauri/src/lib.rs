@@ -392,6 +392,19 @@ fn locate_for_step(
     }
 }
 
+/// What `execute_step` produced, in order: the verified locate result (None on a
+/// miss), the trace, whether the diffuse AI-bbox hint ring was drawn (the frontend's
+/// third ✗ Wrong picker state — a visible hint IS rejectable), and the candidate boxes
+/// actually drawn (Flow A collection, or a Flow B ambiguity set on a miss — callers
+/// populate `GuideResponse.candidates` and arm the state-readback from it; empty when
+/// a single pointer was drawn).
+type StepOutcome = (
+    Option<locator::LocateResult>,
+    Option<locator::trace::LocateTrace>,
+    bool,
+    Vec<capture::Rect>,
+);
+
 #[allow(clippy::too_many_arguments)]
 fn execute_step(
     app: &AppHandle,
@@ -431,18 +444,7 @@ fn execute_step(
     // Flow A: ranked candidate boxes to draw INSTEAD of the single pointer when 2+
     // (the primary must equal `located`'s bbox). Empty for every normal call.
     candidates_abs: &[capture::Rect],
-) -> Result<
-    (
-        Option<locator::LocateResult>,
-        Option<locator::trace::LocateTrace>,
-        // The diffuse AI-bbox hint ring was drawn (locator missed, trusted bbox
-        // present). The frontend needs this third state for the ✗ Wrong picker:
-        // a visible hint IS rejectable ("Wrong spot" on it = a model-grounding
-        // fault label), even though no verified pointer exists.
-        bool,
-    ),
-    String,
-> {
+) -> Result<StepOutcome, String> {
     let (located, trace) = match precomputed {
         Some(pre) => pre,
         None => locate_for_step(
@@ -479,8 +481,54 @@ fn execute_step(
     // model likely got wrong, which is worse than an honest "pointer unavailable"
     // with no region. Trusted grounders (the default for all but the weak free
     // chain) still get the hint.
+    // Flow B: a pass recorded a KNOWN tie during the run. The firing rule
+    // (candidates::flow_b_boxes) is information-based, not miss-based: the set fires
+    // on a miss, AND on an OCR hit that lands INSIDE a set member — such a hit isn't
+    // new information, it merely resolved the recorded ground-truth tie with weaker
+    // evidence (live: PPT's two "Click to add text" placeholders — OCR picked one by
+    // AI-bbox proximity; the honest outcome is both boxes with that pick as ①). A hit
+    // OUTSIDE the set, or from any stronger pass, is new information and stands alone
+    // (the Save/QAT case — A11y's button beat the adapter's 4 prose occurrences).
+    let flow_b_set: Vec<capture::Rect> = if candidates_abs.is_empty() {
+        let final_is_hit_ocr = trace
+            .as_ref()
+            .map(|t| {
+                matches!(
+                    t.final_decision,
+                    locator::trace::FinalDecision::HitOcr
+                )
+            })
+            .unwrap_or(false);
+        locator::candidates::flow_b_boxes(
+            located.as_ref().map(|r| &r.bbox),
+            final_is_hit_ocr,
+            trace
+                .as_ref()
+                .and_then(|t| t.ambiguity_set.as_ref())
+                .map(|s| s.boxes.as_slice()),
+        )
+    } else {
+        Vec::new()
+    };
+    // Flow A (explicit collection from retry_locate) takes precedence; either way the
+    // user is never asked to choose — their next real click resolves it (readback).
+    let shown_candidates: Vec<capture::Rect> = if candidates_abs.len() >= 2 {
+        candidates_abs.to_vec()
+    } else {
+        flow_b_set
+    };
+    let candidate_mode = shown_candidates.len() >= 2;
+    if candidate_mode {
+        kind = overlay::OverlayKind::Candidates;
+        // Flow B has no verified primary — ① anchors the overlay/tracker instead.
+        if bbox.is_none() {
+            bbox = Some(shown_candidates[0]);
+        }
+    }
+
     let mut hint_shown = false;
-    if located.is_none()
+    if !candidate_mode
+        && located.is_none()
         && bbox_decisive
         && step
             .target_text
@@ -494,14 +542,6 @@ fn execute_step(
                 hint_shown = true;
             }
         }
-    }
-
-    // Flow A: 2+ distinct candidates replace the single pointer with ranked numbered
-    // boxes (the primary is candidates[0] == located's bbox). The user is never asked
-    // to choose — their next real click in the app resolves it (state readback).
-    let candidate_mode = candidates_abs.len() >= 2 && bbox.is_some();
-    if candidate_mode {
-        kind = overlay::OverlayKind::Candidates;
     }
 
     let text_for_overlay = Some(step.instruction.clone());
@@ -541,7 +581,7 @@ fn execute_step(
             text_for_overlay.clone(),
             ai_bbox,
             if candidate_mode {
-                candidates_abs.to_vec()
+                shown_candidates.clone()
             } else {
                 Vec::new()
             },
@@ -590,13 +630,13 @@ fn execute_step(
             app.clone(),
             target_hwnd,
             visible,
-            if candidate_mode { candidates_abs } else { &[] },
+            if candidate_mode { &shown_candidates } else { &[] },
         );
     } else {
         tracker.clear();
     }
 
-    Ok((located, trace, hint_shown))
+    Ok((located, trace, hint_shown, shown_candidates))
 }
 
 // ---------- Autopilot screen-change polling + stale-response detection ----------
@@ -863,6 +903,37 @@ async fn resolve_pending_candidates(app: &AppHandle, state: &AppState, escalatio
             }
         }
     }
+}
+
+/// Arm the candidate state-readback after boxes were shown (Flow A collection or a
+/// Flow B ambiguity set): take the app-state baseline NOW so resolution can tell a
+/// genuine post-arm click from stale state. No-op under 2 boxes.
+async fn arm_candidates_if_shown(
+    state: &AppState,
+    request_id: Option<String>,
+    target_text: Option<&str>,
+    boxes: &[capture::Rect],
+    hwnd: Option<usize>,
+) {
+    if boxes.len() < 2 {
+        return;
+    }
+    let baseline_hwnd = hwnd;
+    let baseline = tokio::task::spawn_blocking(move || {
+        locator::candidates::read_acted_rect(baseline_hwnd).map(|(r, _)| r)
+    })
+    .await
+    .ok()
+    .flatten();
+    let mut g = state.guidance.lock();
+    g.pending_candidates = Some(locator::candidates::PendingCandidates {
+        request_id,
+        target_text: target_text.unwrap_or_default().to_string(),
+        boxes: boxes.to_vec(),
+        target_hwnd: hwnd,
+        armed_ms: chrono::Utc::now().timestamp_millis(),
+        baseline,
+    });
 }
 
 /// Exe filename stem for `LocateTrace.app_name` — PII-free app identity (see the field's
@@ -2081,7 +2152,7 @@ async fn guide(
         .flatten();
     emit_stale_if_drifted(&app, pre_hash, stale_hash);
 
-    let (located, mut locate_trace, hint_shown) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
         &app,
         &steps[0],
         new_hwnd_opt,
@@ -2098,7 +2169,16 @@ async fn guide(
         None,
         &[],
     )
-    .unwrap_or((None, None, false));
+    .unwrap_or((None, None, false, Vec::new()));
+    // Flow B: a first-locate ambiguity set was drawn — arm the state readback.
+    arm_candidates_if_shown(
+        &state,
+        Some(request_id.clone()),
+        steps[0].target_text.as_deref(),
+        &shown_candidates,
+        new_hwnd_opt,
+    )
+    .await;
     if let Some(ref mut t) = locate_trace {
         t.request_id = Some(request_id.clone());
         t.model = Some(used_model.clone());
@@ -2134,7 +2214,7 @@ async fn guide(
         ai_bbox,
         suggested_tasks,
         hint_shown,
-        candidates: Vec::new(),
+        candidates: shown_candidates,
     })
 }
 
@@ -2199,7 +2279,7 @@ async fn next_step(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
-    let (located, mut locate_trace, hint_shown) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -2216,7 +2296,15 @@ async fn next_step(
         None,
         &[],
     )
-    .unwrap_or((None, None, false));
+    .unwrap_or((None, None, false, Vec::new()));
+    arm_candidates_if_shown(
+        &state,
+        request_id.clone(),
+        steps[step_index].target_text.as_deref(),
+        &shown_candidates,
+        stored_hwnd,
+    )
+    .await;
     if let Some(ref mut t) = locate_trace {
         t.request_id = request_id.clone();
         t.model = Some(used_model.clone());
@@ -2252,7 +2340,7 @@ async fn next_step(
         ai_bbox,
         suggested_tasks: Vec::new(), // local advance — no AI call, no new guesses
         hint_shown,
-        candidates: Vec::new(),
+        candidates: shown_candidates,
     })
 }
 
@@ -2384,7 +2472,7 @@ async fn retry_locate(
         candidate_boxes = locator::candidates::dedupe_candidates(candidate_boxes);
     }
 
-    let (located, mut locate_trace, hint_shown) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -2401,33 +2489,19 @@ async fn retry_locate(
         Some((primary, primary_trace)),
         &candidate_boxes,
     )
-    .unwrap_or((None, None, false));
+    .unwrap_or((None, None, false, Vec::new()));
 
-    // Arm the state-readback: the next backend event reads which candidate the
-    // user's click landed on from the app's own state (candidates.rs) and banks
-    // the label to the local training mirror. The baseline readback taken NOW is
-    // what separates a genuine post-arm click from stale state at resolution.
-    if candidate_boxes.len() >= 2 {
-        let baseline_hwnd = stored_hwnd;
-        let baseline = tokio::task::spawn_blocking(move || {
-            locator::candidates::read_acted_rect(baseline_hwnd).map(|(r, _)| r)
-        })
-        .await
-        .ok()
-        .flatten();
-        let mut g = state.guidance.lock();
-        g.pending_candidates = Some(locator::candidates::PendingCandidates {
-            request_id: request_id.clone(),
-            target_text: steps[step_index]
-                .target_text
-                .clone()
-                .unwrap_or_default(),
-            boxes: candidate_boxes.clone(),
-            target_hwnd: stored_hwnd,
-            armed_ms: chrono::Utc::now().timestamp_millis(),
-            baseline,
-        });
-    }
+    // Arm the state-readback on whatever was actually drawn — the Flow A collection,
+    // or (when the collection came up short and the retry's own locate missed on a
+    // recorded tie) a Flow B ambiguity set.
+    arm_candidates_if_shown(
+        &state,
+        request_id.clone(),
+        steps[step_index].target_text.as_deref(),
+        &shown_candidates,
+        stored_hwnd,
+    )
+    .await;
     if let Some(ref mut t) = locate_trace {
         t.request_id = request_id.clone();
         t.local_retry = true;
@@ -2459,7 +2533,7 @@ async fn retry_locate(
         ai_bbox,
         suggested_tasks: Vec::new(),
         hint_shown,
-        candidates: candidate_boxes,
+        candidates: shown_candidates,
     })
 }
 
@@ -2941,7 +3015,7 @@ async fn send_correction(
         avoid_bboxes.as_deref().unwrap_or(&[]),
         steps[0].target_text.as_deref(),
     );
-    let (located, mut locate_trace, hint_shown) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
         &app,
         &steps[0],
         new_hwnd,
@@ -2958,7 +3032,15 @@ async fn send_correction(
         None,
         &[],
     )
-    .unwrap_or((None, None, false));
+    .unwrap_or((None, None, false, Vec::new()));
+    arm_candidates_if_shown(
+        &state,
+        Some(request_id.clone()),
+        steps[0].target_text.as_deref(),
+        &shown_candidates,
+        new_hwnd,
+    )
+    .await;
     if let Some(ref mut t) = locate_trace {
         t.request_id = Some(request_id.clone());
         t.model = Some(used_model.clone());
@@ -2993,7 +3075,7 @@ async fn send_correction(
         ai_bbox,
         suggested_tasks,
         hint_shown,
-        candidates: Vec::new(),
+        candidates: shown_candidates,
     })
 }
 

@@ -106,11 +106,58 @@ impl Adapter for PowerPointAdapter {
             });
         }
 
-        let Some(pick) = pick_shape(query.target_text, &candidates) else {
-            return Ok(AdapterHit::fell_through(format!(
-                "no unique shape match among {} shapes",
-                candidates.len()
-            )));
+        let pick = match pick_shape(query.target_text, &candidates) {
+            ShapePickOutcome::Picked(p) => p,
+            ShapePickOutcome::Ambiguous { indices, tier } => {
+                // Flow B: a KNOWN tie (e.g. two empty content placeholders both
+                // matching a "click to add text" prompt). Resolve the tying shapes'
+                // rects and hand them up as the candidate set.
+                let mut rects = Vec::new();
+                for &i in indices.iter().take(4) {
+                    let item = candidates[i].index;
+                    let Ok(shape) =
+                        get_indexed(&shapes, "Item", vec![v_i32(item)]).and_then(|v| as_dispatch(&v))
+                    else {
+                        continue;
+                    };
+                    let geom = (
+                        get(&shape, "Left").and_then(|v| as_f64(&v)),
+                        get(&shape, "Top").and_then(|v| as_f64(&v)),
+                        get(&shape, "Width").and_then(|v| as_f64(&v)),
+                        get(&shape, "Height").and_then(|v| as_f64(&v)),
+                    );
+                    let (Ok(l), Ok(t), Ok(w), Ok(h)) = geom else {
+                        continue;
+                    };
+                    let Ok((x1, y1, x2, y2)) = convert_rect_to_pixels(&window, l, t, l + w, t + h)
+                    else {
+                        continue;
+                    };
+                    let (pw, ph) = ((x2 - x1).max(0) as u32, (y2 - y1).max(0) as u32);
+                    if pw > 0 && ph > 0 && super::rect_is_onscreen(x1, y1) {
+                        rects.push(Rect {
+                            x: x1,
+                            y: y1,
+                            width: pw,
+                            height: ph,
+                        });
+                    }
+                }
+                return Ok(AdapterHit::ambiguous(
+                    format!(
+                        "{} shapes tie at the {tier} tier — ambiguous ({} resolvable)",
+                        indices.len(),
+                        rects.len()
+                    ),
+                    rects,
+                ));
+            }
+            ShapePickOutcome::NoMatch => {
+                return Ok(AdapterHit::fell_through(format!(
+                    "no unique shape match among {} shapes",
+                    candidates.len()
+                )));
+            }
         };
         let picked = &candidates[pick.index_in_candidates];
 
@@ -152,6 +199,7 @@ impl Adapter for PowerPointAdapter {
                 "shape {} ({:?}) via {}",
                 picked.index, picked.name, pick.tier
             ),
+            ambiguous: Vec::new(),
         })
     }
 }
@@ -237,6 +285,17 @@ pub(crate) struct ShapePick {
     pub tier: &'static str,
 }
 
+/// Outcome of [`pick_shape`]: a unique pick, a KNOWN tie (Flow B — the tying shapes'
+/// candidate-indices ride along), or no match at all.
+pub(crate) enum ShapePickOutcome {
+    Picked(ShapePick),
+    Ambiguous {
+        indices: Vec<usize>,
+        tier: &'static str,
+    },
+    NoMatch,
+}
+
 /// Normalise for matching: lowercase, collapse whitespace (PowerPoint text uses \r for
 /// paragraph breaks), trim.
 fn norm(s: &str) -> String {
@@ -266,17 +325,18 @@ fn prompt_keyword(target_norm: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// Pick the target shape, or None when nothing matches uniquely. Tiers, strongest first:
+/// Pick the target shape. Tiers, strongest first:
 /// 1. placeholder prompt ("click to add title" → empty shape named like a Title)
 /// 2. exact text (the shape's whole text equals the target)
 /// 3. containment (target within the shape text) — unique only
 /// 4. exact name ("Title 1")
 ///
-/// Any tier with 2+ candidates falls through — no wrong pointer.
-pub(crate) fn pick_shape(target: &str, shapes: &[ShapeInfo]) -> Option<ShapePick> {
+/// Any tier with 2+ candidates is a KNOWN tie ([`ShapePickOutcome::Ambiguous`]) — never
+/// a guess; the caller falls through, and Flow B may show the set if the pipeline misses.
+pub(crate) fn pick_shape(target: &str, shapes: &[ShapeInfo]) -> ShapePickOutcome {
     let t = norm(target);
     if t.is_empty() {
-        return None;
+        return ShapePickOutcome::NoMatch;
     }
 
     if let Some(keywords) = prompt_keyword(&t) {
@@ -295,13 +355,18 @@ pub(crate) fn pick_shape(target: &str, shapes: &[ShapeInfo]) -> Option<ShapePick
             .map(|(i, _)| i)
             .collect();
         if let [only] = matches[..] {
-            return Some(ShapePick {
+            return ShapePickOutcome::Picked(ShapePick {
                 index_in_candidates: only,
                 tier: "placeholder-prompt",
             });
         }
         if matches.len() > 1 {
-            return None;
+            // Two-Content layouts: two empty "Content Placeholder" shapes both match
+            // a "click to add text" prompt — the everyday Flow B case for PPT.
+            return ShapePickOutcome::Ambiguous {
+                indices: matches,
+                tier: "placeholder-prompt",
+            };
         }
         // No empty placeholder of that kind — fall through to the text tiers (the
         // model may be echoing stale prompt text for a now-filled placeholder).
@@ -314,13 +379,16 @@ pub(crate) fn pick_shape(target: &str, shapes: &[ShapeInfo]) -> Option<ShapePick
         .map(|(i, _)| i)
         .collect();
     if let [only] = exact[..] {
-        return Some(ShapePick {
+        return ShapePickOutcome::Picked(ShapePick {
             index_in_candidates: only,
             tier: "exact-text",
         });
     }
     if exact.len() > 1 {
-        return None;
+        return ShapePickOutcome::Ambiguous {
+            indices: exact,
+            tier: "exact-text",
+        };
     }
 
     let contains: Vec<usize> = shapes
@@ -330,13 +398,16 @@ pub(crate) fn pick_shape(target: &str, shapes: &[ShapeInfo]) -> Option<ShapePick
         .map(|(i, _)| i)
         .collect();
     if let [only] = contains[..] {
-        return Some(ShapePick {
+        return ShapePickOutcome::Picked(ShapePick {
             index_in_candidates: only,
             tier: "text-contains",
         });
     }
     if contains.len() > 1 {
-        return None;
+        return ShapePickOutcome::Ambiguous {
+            indices: contains,
+            tier: "text-contains",
+        };
     }
 
     let by_name: Vec<usize> = shapes
@@ -346,12 +417,18 @@ pub(crate) fn pick_shape(target: &str, shapes: &[ShapeInfo]) -> Option<ShapePick
         .map(|(i, _)| i)
         .collect();
     if let [only] = by_name[..] {
-        return Some(ShapePick {
+        return ShapePickOutcome::Picked(ShapePick {
             index_in_candidates: only,
             tier: "shape-name",
         });
     }
-    None
+    if by_name.len() > 1 {
+        return ShapePickOutcome::Ambiguous {
+            indices: by_name,
+            tier: "shape-name",
+        };
+    }
+    ShapePickOutcome::NoMatch
 }
 
 #[cfg(test)]
@@ -373,10 +450,20 @@ mod tests {
         ]
     }
 
+    fn picked(o: ShapePickOutcome) -> ShapePick {
+        match o {
+            ShapePickOutcome::Picked(p) => p,
+            ShapePickOutcome::Ambiguous { indices, tier } => {
+                panic!("expected a unique pick, got ambiguous {indices:?} at {tier}")
+            }
+            ShapePickOutcome::NoMatch => panic!("expected a unique pick, got NoMatch"),
+        }
+    }
+
     #[test]
     fn prompt_resolves_empty_title_placeholder() {
         let s = shapes();
-        let pick = pick_shape("Click to add title", &s).expect("should match");
+        let pick = picked(pick_shape("Click to add title", &s));
         assert_eq!(pick.index_in_candidates, 0);
         assert_eq!(pick.tier, "placeholder-prompt");
     }
@@ -386,9 +473,12 @@ mod tests {
         let mut s = shapes();
         // Filled content placeholder — the prompt text is gone on screen, and the
         // prompt tier must not claim it; the exact-text tier still can via its text.
-        assert!(pick_shape("Click to add text", &s).is_none());
+        assert!(matches!(
+            pick_shape("Click to add text", &s),
+            ShapePickOutcome::NoMatch
+        ));
         s[1].text = String::new();
-        let pick = pick_shape("Click to add text", &s).expect("empty body should match");
+        let pick = picked(pick_shape("Click to add text", &s));
         assert_eq!(pick.index_in_candidates, 1);
     }
 
@@ -406,24 +496,24 @@ mod tests {
                 text: "".into(),
             },
         ];
-        let pick = pick_shape("Click to add title", &s).expect("should match the title");
+        let pick = picked(pick_shape("Click to add title", &s));
         assert_eq!(pick.index_in_candidates, 1);
-        let sub = pick_shape("Click to add subtitle", &s).expect("should match the subtitle");
+        let sub = picked(pick_shape("Click to add subtitle", &s));
         assert_eq!(sub.index_in_candidates, 0);
     }
 
     #[test]
     fn exact_and_containment_text_tiers() {
         let s = shapes();
-        let pick = pick_shape("Day 1: know your friends", &s).expect("exact text");
+        let pick = picked(pick_shape("Day 1: know your friends", &s));
         assert_eq!(pick.index_in_candidates, 1);
         assert_eq!(pick.tier, "exact-text");
-        let pick = pick_shape("know your friends", &s).expect("containment");
+        let pick = picked(pick_shape("know your friends", &s));
         assert_eq!(pick.tier, "text-contains");
     }
 
     #[test]
-    fn ambiguity_falls_through() {
+    fn ambiguity_reports_the_tying_shapes() {
         let s = vec![
             ShapeInfo {
                 index: 1,
@@ -436,7 +526,35 @@ mod tests {
                 text: "Sales".into(),
             },
         ];
-        assert!(pick_shape("Sales", &s).is_none());
+        // Flow B: a tie is no longer a bare fall-through — the tying indices ride up.
+        match pick_shape("Sales", &s) {
+            ShapePickOutcome::Ambiguous { indices, tier } => {
+                assert_eq!(indices, vec![0, 1]);
+                assert_eq!(tier, "exact-text");
+            }
+            _ => panic!("expected Ambiguous"),
+        }
+        // The everyday PPT case: TWO empty content placeholders (Two-Content layout)
+        // both match the "click to add text" prompt.
+        let two_content = vec![
+            ShapeInfo {
+                index: 1,
+                name: "Content Placeholder 1".into(),
+                text: "".into(),
+            },
+            ShapeInfo {
+                index: 2,
+                name: "Content Placeholder 2".into(),
+                text: "".into(),
+            },
+        ];
+        match pick_shape("Click to add text", &two_content) {
+            ShapePickOutcome::Ambiguous { indices, tier } => {
+                assert_eq!(indices, vec![0, 1]);
+                assert_eq!(tier, "placeholder-prompt");
+            }
+            _ => panic!("expected Ambiguous"),
+        }
     }
 
     #[test]

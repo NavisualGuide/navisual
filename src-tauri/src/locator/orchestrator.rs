@@ -129,6 +129,14 @@ pub fn locate(
             }
             other => other,
         };
+        // Flow B: a declared tie rides in the trace — measurement always, candidate
+        // boxes only if the whole pipeline ends in a miss (execute_step decides).
+        if outcome.ambiguous.len() >= 2 {
+            trace.ambiguity_set = Some(crate::locator::trace::AmbiguitySet {
+                source: outcome.name.clone(),
+                boxes: outcome.ambiguous.clone(),
+            });
+        }
         trace.adapter = Some(AdapterTrace {
             name: outcome.name,
             hit: hit.is_some(),
