@@ -511,6 +511,7 @@ mod tests {
             target_text: &target,
             target_role: Some("textbox"),
             nearby_text: None,
+            avoid_bboxes: &[],
         };
         assert!(adapter.matches(hwnd, &query), "adapter should claim PowerPoint");
         let started = std::time::Instant::now();

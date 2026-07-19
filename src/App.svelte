@@ -1431,10 +1431,13 @@ See the LICENSE file in the root of this repository for complete details.
     // user's own text. (The logged note is the user's raw text only.)
     const hint = category ? (CATEGORY_HINT[category] ?? "") : "";
     const note = [hint, rawNote].filter(Boolean).join(" ").trim();
-    // Wrong spot: tell the locator where NOT to point again — every bbox the
-    // user rejected this step (accumulated across B5 local retries). The AI
-    // retry's locate then can't repeat any rejected pick.
-    const avoidBboxes = category === "wrong_spot" && wrongSpotAvoid.length ? wrongSpotAvoid : null;
+    // Tell the locator where NOT to point again — every bbox the user rejected
+    // this step (accumulated across B5 local retries + shown Flow-A candidates).
+    // Sent for EVERY correction category, not just wrong_spot: live 2026-07-18, a
+    // "Can't find it" correction after a wrong_spot rejection re-pointed at the
+    // very spot the user had just rejected (the not_found path dropped the list).
+    // Rejections stand for the whole step; the list resets on step advance.
+    const avoidBboxes = wrongSpotAvoid.length ? wrongSpotAvoid : null;
     const label = (category && CATEGORY_LABEL[category]) || "Wrong";
     const prevPhase = phase;
     const corrEntryId = await addToHistory("correction", rawNote ? `${label} — ${rawNote}` : `${label} — re-analysing…`);
@@ -1494,9 +1497,13 @@ See the LICENSE file in the root of this repository for complete details.
 
   // B5 — route the ✗ Wrong retry by the layer that actually failed. The AI cannot
   // fix a locator mistake (its answer was often correct; the RANKING picked wrong),
-  // so for the ranking-prone decisions a LOCAL re-locate runs first — free and
-  // instant. Verified/deterministic decisions (selection/adapter) mean the locator
-  // provably did what the AI asked → only the AI can fix those.
+  // so a LOCAL re-locate runs first — free and instant. Originally only the
+  // ranking-prone kinds were eligible ("a deterministic pass would return the same
+  // element"), but the avoid-veto now exists at EVERY deterministic pass (selection
+  // B5-era; adapter with Flow A, occurrence-aware in Word), so a local retry can
+  // never repeat the rejected spot for any kind: it surfaces alternatives
+  // (candidate boxes) or honestly misses into the AI path. First live Flow-A test
+  // (2026-07-18) hit exactly this gap — a hit_adapter Wrong went straight to the AI.
   function localRetryEligible(category: string): boolean {
     // Flow A: candidates were already shown and the user says Wrong again — every
     // shown box is in the avoid list; another local retry would surface a 4th-best
@@ -1504,7 +1511,13 @@ See the LICENSE file in the root of this repository for complete details.
     if (candidateCount >= 2) return false;
     const kind = locateTrace?.final_decision?.kind;
     if (category === "wrong_spot") {
-      return kind === "hit_a11y" || kind === "hit_ocr" || kind === "hit_template";
+      return (
+        kind === "hit_a11y" ||
+        kind === "hit_ocr" ||
+        kind === "hit_template" ||
+        kind === "hit_adapter" ||
+        kind === "hit_selection"
+      );
     }
     // not_found: no pointer was drawn — by now the lazy a11y tree the original
     // attempt raced has had seconds to build, so a second look often succeeds.

@@ -88,7 +88,7 @@ pub struct LocateOptions {
 /// inside a user-rejected bbox must not be accepted again — the pipeline falls
 /// through to the next pass instead. (The ranking passes, A11y/OCR, exclude
 /// per-candidate instead so their second-best can win outright.)
-fn rejected_by_avoid(bbox: &Rect, avoid: &[Rect]) -> bool {
+pub(crate) fn rejected_by_avoid(bbox: &Rect, avoid: &[Rect]) -> bool {
     let cx = bbox.x + bbox.width as i32 / 2;
     let cy = bbox.y + bbox.height as i32 / 2;
     avoid.iter().any(|a| {
@@ -115,6 +115,7 @@ pub fn locate(
         target_text,
         target_role: opts.role.as_deref(),
         nearby_text: opts.nearby_text.as_deref(),
+        avoid_bboxes: &opts.avoid_bboxes,
     };
     if let Some(outcome) = adapters::try_locate(opts.target_hwnd, &adapter_query) {
         // B5: adapters are deterministic, so a re-locate would resolve the user's
