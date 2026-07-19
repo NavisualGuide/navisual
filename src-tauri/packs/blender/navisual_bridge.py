@@ -169,7 +169,98 @@ BUTTON_UNITS = 1.65
 SEP_UNITS = 0.6
 TOP_PAD_UNITS = 0.45
 
-_HANDLERS = {"layout": _q_layout, "state": _q_state, "tools": _q_tools}
+# Properties nav-bar tab stack (calibrated 2026-07-19 on 5.1.2 @ ui_scale 1.0: pitch
+# 28px, +8px before a new section, first tab top ~8.5px; band-fit max error ~2px).
+TAB_PITCH_UNITS = 1.4
+TAB_SECTION_EXTRA_UNITS = 0.4
+TAB_TOP_PAD_UNITS = 0.425
+TAB_H_UNITS = 1.3
+
+# Visible tabs for a MESH active object, in nav-bar order, with Blender's canonical
+# tooltip names (what the AI most often echoes as target_text). Verified visually
+# against 5.1.2 factory (14 tabs incl. Collection; sections break before RENDER,
+# COLLECTION, OBJECT). Other object types change the OBJECT-section subset — they
+# return an error until verified, and the caller falls through to templates.
+TABS_MESH = [
+    ("TOOL", "Tool"),
+    ("RENDER", "Render Properties"),
+    ("OUTPUT", "Output Properties"),
+    ("VIEW_LAYER", "View Layer Properties"),
+    ("SCENE", "Scene Properties"),
+    ("WORLD", "World Properties"),
+    ("COLLECTION", "Collection Properties"),
+    ("OBJECT", "Object Properties"),
+    ("MODIFIER", "Modifier Properties"),
+    ("PARTICLES", "Particle Properties"),
+    ("PHYSICS", "Physics Properties"),
+    ("CONSTRAINT", "Object Constraint Properties"),
+    ("DATA", "Object Data Properties"),
+    ("MATERIAL", "Material Properties"),
+]
+TAB_SECTION_BREAK_BEFORE = {1, 6, 7}
+
+
+def _q_tabs(_req):
+    """Properties nav-bar tabs with DERIVED window-relative rects (bottom-up Y)."""
+    ctx = bpy.context
+    win = _window()
+    if win is None:
+        return {"error": "no window"}
+    obj = ctx.active_object
+    if obj is None or obj.type != "MESH":
+        return {
+            "error": f"tab layout only verified for MESH active object (have {obj.type if obj else 'none'})"
+        }
+    area = next((a for a in win.screen.areas if a.type == "PROPERTIES"), None)
+    if area is None:
+        return {"error": "no PROPERTIES area"}
+    region = next((r for r in area.regions if r.type == "NAVIGATION_BAR"), None)
+    if region is None or region.width <= 1:
+        return {"error": "nav bar hidden"}
+    space = next((s for s in area.spaces if s.type == "PROPERTIES"), None)
+    active = space.context if space else None
+
+    scale = ctx.preferences.system.ui_scale
+    unit = 20.0 * scale
+    pitch = TAB_PITCH_UNITS * unit
+    extra = TAB_SECTION_EXTRA_UNITS * unit
+    top_pad = TAB_TOP_PAD_UNITS * unit
+    tab_h = TAB_H_UNITS * unit
+    try:
+        scroll_top = region.view2d.region_to_view(0, region.height - 1)[1]
+    except Exception:
+        scroll_top = 0.0
+
+    tabs = []
+    sections = 0
+    for i, (ident, name) in enumerate(TABS_MESH):
+        if i in TAB_SECTION_BREAK_BEFORE:
+            sections += 1
+        top = top_pad + i * pitch + sections * extra
+        y_top_regionspace = region.height - (top - scroll_top)
+        tabs.append(
+            {
+                "id": ident,
+                "name": name,
+                "active": ident == active,
+                "rect": [
+                    region.x,
+                    region.y + int(y_top_regionspace - tab_h),
+                    region.width,
+                    int(tab_h),
+                ],
+            }
+        )
+    return {
+        "window": [win.width, win.height],
+        "region": [region.x, region.y, region.width, region.height],
+        "ui_scale": scale,
+        "active": active,
+        "tabs": tabs,
+    }
+
+
+_HANDLERS = {"layout": _q_layout, "state": _q_state, "tools": _q_tools, "tabs": _q_tabs}
 
 
 def _process_queue():

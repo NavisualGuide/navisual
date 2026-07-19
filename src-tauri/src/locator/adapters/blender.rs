@@ -94,11 +94,19 @@ impl Adapter for BlenderAdapter {
         }
 
         match matched.len() {
-            0 => Ok(AdapterHit::fell_through(format!(
-                "no tool-shelf slot matches {:?} ({} slots reported)",
-                query.target_text,
-                slots.len()
-            ))),
+            0 => {
+                // No tool-shelf slot — try the Properties nav-bar tabs (second derived
+                // surface; fixes the constraint/data wrong-icon class: the pack has no
+                // icon for every tab, and generic stems like `object` cross-match).
+                if let Some(hit) = self.try_tabs(hwnd, query)? {
+                    return Ok(hit);
+                }
+                Ok(AdapterHit::fell_through(format!(
+                    "no tool-shelf slot or nav-bar tab matches {:?} ({} slots reported)",
+                    query.target_text,
+                    slots.len()
+                )))
+            }
             1 => {
                 let (bbox, name) = matched.remove(0);
                 Ok(AdapterHit {
@@ -116,6 +124,107 @@ impl Adapter for BlenderAdapter {
                 format!("{n} tool-shelf slots match {:?} — ambiguous", query.target_text),
                 matched.into_iter().map(|(r, _)| r).collect(),
             )),
+        }
+    }
+}
+
+impl BlenderAdapter {
+    /// Properties nav-bar tab resolution via the bridge's `tabs` query. Returns
+    /// `Ok(None)` when tabs aren't available/matching (caller reports its own
+    /// fall-through); `Some(hit)` on a match (unique or ambiguous).
+    fn try_tabs(&self, hwnd: usize, query: &AdapterQuery) -> Result<Option<AdapterHit>> {
+        let Ok(tabs) = bridge_query(r#"{"q":"tabs"}"#) else {
+            return Ok(None);
+        };
+        if tabs.get("error").is_some() {
+            return Ok(None);
+        }
+        let win_h = tabs
+            .get("window")
+            .and_then(|w| w.get(1))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let Some(list) = tabs.get("tabs").and_then(|v| v.as_array()) else {
+            return Ok(None);
+        };
+        let Some(client) = client_origin(hwnd) else {
+            return Ok(None);
+        };
+        let target = tokens(query.target_text);
+        // "Properties"/"tab" are generic filler both sides use inconsistently —
+        // compare on the distinguishing tokens.
+        let strip = |ts: &[String]| -> Vec<String> {
+            ts.iter()
+                .filter(|t| t.as_str() != "properties" && t.as_str() != "tab")
+                .cloned()
+                .collect()
+        };
+        let target_core = strip(&target);
+        if target_core.is_empty() {
+            return Ok(None);
+        }
+        let plural_eq = |a: &str, b: &str| -> bool {
+            if a == b {
+                return true;
+            }
+            let (long, short) = if a.len() > b.len() { (a, b) } else { (b, a) };
+            long.len() > 3 && long.len() == short.len() + 1 && long.strip_suffix('s') == Some(short)
+        };
+        let set_contains = |set: &[String], t: &str| set.iter().any(|s| plural_eq(s, t));
+
+        // Tier 1: the tab's core tokens EQUAL the target's. Tier 2: unique
+        // subset either way (2+ → ambiguous, no guess).
+        let mut exact: Vec<(Rect, String)> = Vec::new();
+        let mut subset: Vec<(Rect, String)> = Vec::new();
+        for tab in list {
+            let name = tab.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let id = tab.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let mut name_core = strip(&tokens(name));
+            if name_core.is_empty() {
+                name_core = tokens(id);
+            }
+            let eq = name_core.len() == target_core.len()
+                && target_core.iter().all(|t| set_contains(&name_core, t));
+            let sub = target_core.iter().all(|t| set_contains(&name_core, t))
+                || name_core.iter().all(|t| set_contains(&target_core, t));
+            if !eq && !sub {
+                continue;
+            }
+            let Some(rect_arr) = tab.get("rect").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let vals: Vec<i32> = rect_arr.iter().filter_map(|v| v.as_i64()).map(|v| v as i32).collect();
+            let [x, y_bu, w, h] = vals[..] else { continue };
+            let rect = to_screen_rect(client, win_h, x, y_bu, w, h);
+            if crate::locator::orchestrator::rejected_by_avoid(&rect, query.avoid_bboxes) {
+                continue;
+            }
+            if eq {
+                exact.push((rect, name.to_string()));
+            } else {
+                subset.push((rect, name.to_string()));
+            }
+        }
+        let pool = if !exact.is_empty() { exact } else { subset };
+        match pool.len() {
+            0 => Ok(None),
+            1 => {
+                let (bbox, name) = pool.into_iter().next().unwrap();
+                Ok(Some(AdapterHit {
+                    result: Some(LocateResult {
+                        bbox,
+                        name,
+                        role: "BlenderTab".to_string(),
+                        confidence: 1.0,
+                    }),
+                    detail: format!("bridge tabs → derived rect for {:?}", query.target_text),
+                    ambiguous: Vec::new(),
+                }))
+            }
+            n => Ok(Some(AdapterHit::ambiguous(
+                format!("{n} nav-bar tabs match {:?} — ambiguous", query.target_text),
+                pool.into_iter().map(|(r, _)| r).collect(),
+            ))),
         }
     }
 }
