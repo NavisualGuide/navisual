@@ -198,6 +198,9 @@ See the LICENSE file in the root of this repository for complete details.
     target_role: string | null;
     nearby_text: string | null;
     ai_bbox: { x: number; y: number; width: number; height: number } | null;
+    // Flow B: a pass declared a ground-truth tie during this locate (recorded even
+    // when the boxes weren't shown — that's the fire-rate instrumentation).
+    ambiguity_set: { source: string; boxes: Rect[] } | null;
     selection: SelectionTrace | null;
     a11y: A11yTrace;
     ocr: OcrTrace;
@@ -2190,6 +2193,24 @@ See the LICENSE file in the root of this repository for complete details.
                   <div class="debug-row">
                     <span class="debug-key">ai_bbox</span>
                     <span class="debug-val">{locateTrace.ai_bbox.x}, {locateTrace.ai_bbox.y} · {locateTrace.ai_bbox.width}×{locateTrace.ai_bbox.height}</span>
+                  </div>
+                {/if}
+                <!-- Flow B: a pass declared a ground-truth tie. Boxes drawn = the set
+                     fired (miss) or was PROMOTED over an inside-set OCR hit — without
+                     this line the drawer reads "hit_ocr" while the overlay shows the
+                     adapter's full-element boxes (user-reported confusion, 2026-07-19). -->
+                {#if locateTrace.ambiguity_set}
+                  {@const amb = locateTrace.ambiguity_set}
+                  <div class="debug-row">
+                    <span class="debug-key">candidates</span>
+                    <span class="debug-val">
+                      {amb.source} tie · {amb.boxes.length} known
+                      {#if candidateCount >= 2}
+                        · {candidateCount} boxes shown{locateResult ? " (promoted over the hit — ① is its spot)" : " (pipeline missed)"}
+                      {:else}
+                        · not shown (a stronger answer stood alone)
+                      {/if}
+                    </span>
                   </div>
                 {/if}
 
