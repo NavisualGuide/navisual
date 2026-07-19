@@ -55,14 +55,20 @@ pub fn isolation_for(
 /// True when `anchor` text appears in the OCR results within ~1/4 image-diagonal of the
 /// winner — a soft corroborator (the AI's `nearby_text` label sits next to the real target).
 ///
-/// The winner itself and any line containing it are excluded: a result that contains the
-/// winner's centre also contains the winner's own text, so "anchoring" on it is the locator
-/// agreeing with itself (observed when a model sets nearby_text equal to target_text — the
-/// wrong "Auto" corroborated itself). A genuinely adjacent anchor word survives because OCR
-/// also emits word-level results, which sit beside — not around — the winner.
+/// Self-corroboration guard, SPAN-level (2026-07-19): the original v0.5.23 guard excluded
+/// any result containing the winner's centre — which silently made every MULTI-WORD anchor
+/// useless in prose: a phrase anchor ("fuzzy 0.75") can only match a line-level result, and
+/// the line containing the anchor is almost always the line containing the target (live:
+/// the VS Code "OCR" incident — a perfect adjacent anchor scored `near_anchor=false`). Now a
+/// containing-line match counts IF the anchor still matches after scrubbing every occurrence
+/// of the winner's own text from the line — i.e. the anchor is OTHER text in the line, not
+/// the winner confirming itself. The original incident class stays dead: an anchor whose
+/// only match overlaps the target's own characters (nearby "AutoSave" corroborating a
+/// winner matched inside "AutoSave") fails the scrubbed check.
 pub fn anchor_near(
     winner_bbox: &(i32, i32, u32, u32),
     anchor: &str,
+    target: &str,
     results: &[OcrResult],
     img_w: u32,
     img_h: u32,
@@ -71,17 +77,23 @@ pub fn anchor_near(
     if anchor_l.chars().count() < 2 {
         return false;
     }
+    let target_l = target.trim().to_ascii_lowercase();
     let wcx_i = winner_bbox.0 + winner_bbox.2 as i32 / 2;
     let wcy_i = winner_bbox.1 + winner_bbox.3 as i32 / 2;
     let wcx = wcx_i as f32;
     let wcy = wcy_i as f32;
     let thresh = ((img_w as f32).powi(2) + (img_h as f32).powi(2)).sqrt() * 0.25;
     results.iter().any(|r| {
-        if point_in_bbox(wcx_i, wcy_i, &r.bbox) {
-            return false; // the winner itself / its containing line — not independent evidence
-        }
-        if !r.text.to_ascii_lowercase().contains(&anchor_l) {
+        let text_l = r.text.to_ascii_lowercase();
+        if !text_l.contains(&anchor_l) {
             return false;
+        }
+        if point_in_bbox(wcx_i, wcy_i, &r.bbox) {
+            // The winner itself or its containing line. Independent evidence only if
+            // the anchor survives with the winner's own text scrubbed out.
+            if target_l.is_empty() || !text_l.replace(&target_l, " ").contains(&anchor_l) {
+                return false;
+            }
         }
         let acx = r.bbox.0 as f32 + r.bbox.2 as f32 / 2.0;
         let acy = r.bbox.1 as f32 + r.bbox.3 as f32 / 2.0;
@@ -1116,26 +1128,47 @@ mod tests {
         let winner = (100, 100, 50, 20);
         let near = vec![word("Run", (130, 100, 30, 20))];
         let far = vec![word("Run", (900, 560, 30, 20))];
-        assert!(anchor_near(&winner, "Run", &near, 1000, 600));
-        assert!(!anchor_near(&winner, "Run", &far, 1000, 600));
+        assert!(anchor_near(&winner, "Run", "Debug", &near, 1000, 600));
+        assert!(!anchor_near(&winner, "Run", "Debug", &far, 1000, 600));
         // Single-character anchors are ignored entirely.
-        assert!(!anchor_near(&winner, "R", &near, 1000, 600));
+        assert!(!anchor_near(&winner, "R", "Debug", &near, 1000, 600));
     }
 
     #[test]
     fn anchor_near_excludes_winner_and_containing_line() {
-        // The winner's own text and the line containing it must not corroborate
-        // the winner (self-anchoring — the Lightroom wrong-Auto case).
+        // An anchor whose only match OVERLAPS the winner's own text must not
+        // corroborate it (self-anchoring — the Lightroom wrong-Auto case: the
+        // target matched inside "Auto+:", and anchor "Auto" matched the same
+        // characters). Span-level since 2026-07-19: scrubbing the target's text
+        // from the containing line kills the anchor match → rejected.
         let winner_bbox = (100, 100, 50, 20);
         let results = vec![
             word("Auto+:", winner_bbox),                  // the winner itself
             line("WB: Auto+: Tint", (90, 95, 200, 30)),   // its containing line
         ];
-        assert!(!anchor_near(&winner_bbox, "Auto", &results, 1000, 600));
+        assert!(!anchor_near(&winner_bbox, "Auto", "Auto+:", &results, 1000, 600));
         // A genuinely separate nearby word still counts.
         let mut with_sibling = results.clone();
         with_sibling.push(word("Auto", (170, 100, 40, 20)));
-        assert!(anchor_near(&winner_bbox, "Auto", &with_sibling, 1000, 600));
+        assert!(anchor_near(&winner_bbox, "Auto", "Auto+:", &with_sibling, 1000, 600));
+    }
+
+    #[test]
+    fn anchor_near_same_line_phrase_anchor_counts() {
+        // The VS Code "OCR" incident (2026-07-19): target "OCR" in the prose line
+        // "an OCR fuzzy 0.75, and a template", anchor "fuzzy 0.75" — a multi-word
+        // anchor can ONLY match the line-level result, and the old line-level
+        // exclusion rejected it despite being genuinely adjacent, independent
+        // text. Span-level: scrubbing "ocr" from the line leaves "fuzzy 0.75"
+        // intact → the anchor corroborates.
+        let winner_bbox = (316, 222, 42, 14); // the word "OCR" inside the line
+        let results = vec![
+            word("OCR", winner_bbox),
+            line("an OCR fuzzy 0.75, and a template", (100, 218, 600, 22)),
+        ];
+        assert!(anchor_near(&winner_bbox, "fuzzy 0.75", "OCR", &results, 1000, 600));
+        // Sanity: an anchor that is NOT in the line still fails.
+        assert!(!anchor_near(&winner_bbox, "elsewhere", "OCR", &results, 1000, 600));
     }
 
     #[test]

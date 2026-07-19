@@ -483,7 +483,7 @@ pub fn locate(
         .nearby_text
         .as_deref()
         .filter(|a| !a.trim().eq_ignore_ascii_case(target_text.trim()))
-        .map(|a| ocr::anchor_near(&hit.bbox, a, &results, img_w, img_h))
+        .map(|a| ocr::anchor_near(&hit.bbox, a, target_text, &results, img_w, img_h))
         .unwrap_or(false);
     // (4) AI bbox region proximity (soft) — but only a corroboration vote when the
     // answering model is a strong grounder. A weak model's bbox is too unreliable to
@@ -512,19 +512,29 @@ pub fn locate(
         .as_deref()
         .map(|s| s.contains("fuzzy"))
         .unwrap_or(false);
-    let spatially_corroborated = near_anchor || near_ai_bbox;
 
     let role_kind = match &role {
         RoleHit::Interactive(_) => RoleKind::Interactive,
         RoleHit::Content(_) => RoleKind::Content,
         RoleHit::Unknown => RoleKind::Unknown,
     };
+    // The AI asked for a content-like target (prose/heading, not a control) — the
+    // precondition for the Content dual-corroboration rescue below. A control hunt
+    // (role=button/tab/…) never gets the rescue, which is what keeps the classic
+    // false-positive class ("Save" inside an email body while hunting the Save
+    // BUTTON) dead: the role gate fails before the rescue is even considered.
+    let content_role_requested = matches!(
+        opts.role.as_deref(),
+        Some("other") | Some("text") | Some("heading")
+    );
     let accept = corroboration_accept(
         role_kind,
         is_fuzzy,
         isolation_ok,
-        spatially_corroborated,
+        near_anchor,
+        near_ai_bbox,
         opts.icon_target,
+        content_role_requested,
     );
     ocr_trace.corroboration = Some(Corroboration {
         uia_control_type,
@@ -710,9 +720,12 @@ fn corroboration_accept(
     role: RoleKind,
     is_fuzzy: bool,
     isolation_ok: bool,
-    spatially_corroborated: bool,
+    near_anchor: bool,
+    near_ai_bbox: bool,
     icon_target: bool,
+    content_role_requested: bool,
 ) -> bool {
+    let spatially_corroborated = near_anchor || near_ai_bbox;
     // Icon targets are GLYPHS — they carry no on-screen text, so ANY OCR text hit is at best
     // the same word somewhere else (live: target "Rotate" → the status bar's "@Rotate" mouse
     // legend 1200 px away; target "Scale" → the Transform panel's "Scale" label). Isolation
@@ -724,7 +737,27 @@ fn corroboration_accept(
         RoleKind::Interactive => true,
         // Content (Document/Text/terminal): an isolated label only; a fuzzy guess there is
         // almost certainly content text unless it also agrees spatially.
-        RoleKind::Content => isolation_ok && ((!is_fuzzy && !icon_target) || spatially_corroborated),
+        //
+        // Dual-corroboration rescue (2026-07-19, two live incidents: Word "model"
+        // 2026-07-18, VS Code "OCR" 2026-07-19): when the target IS prose — the AI asked
+        // for a content-like role — isolation fails BY CONSTRUCTION (the word is 3-6% of
+        // its line), so requiring it structurally closes the "where does it say X" task
+        // class. An EXACT match is rescued without isolation when the evidence stacks:
+        // the AI says it's content (role), the anchor agrees (independent adjacent text,
+        // span-level checked), AND a trusted bbox agrees. Fuzzy/icon hits never rescue,
+        // and a control hunt (role=button/…) fails content_role_requested — the "'Save'
+        // in an email body while hunting the Save button" class stays rejected.
+        RoleKind::Content => {
+            if isolation_ok {
+                (!is_fuzzy && !icon_target) || spatially_corroborated
+            } else {
+                !is_fuzzy
+                    && !icon_target
+                    && content_role_requested
+                    && near_anchor
+                    && near_ai_bbox
+            }
+        }
         // Unknown (cold tree / non-UIA surface like an OpenGL app): exact/substring can pass on
         // isolation; a fuzzy guess — or any text hit for a glyph target — must agree spatially.
         RoleKind::Unknown => {
@@ -1253,21 +1286,45 @@ mod tests {
     #[test]
     fn fuzzy_match_needs_spatial_corroboration() {
         use super::{corroboration_accept, RoleKind};
+        // (role, is_fuzzy, isolation_ok, near_anchor, near_ai_bbox, icon_target,
+        //  content_role_requested)
         // The live Blender regression: target "Move" fuzzy-matched "Mode" (isolated label) on a
         // non-UIA (Unknown) surface, far from the AI bbox and with no anchor → must REJECT so
         // template matching gets a turn.
-        assert!(!corroboration_accept(RoleKind::Unknown, true, true, false, false));
+        assert!(!corroboration_accept(RoleKind::Unknown, true, true, false, false, false, false));
         // A fuzzy match that DOES agree spatially is accepted.
-        assert!(corroboration_accept(RoleKind::Unknown, true, true, true, false));
+        assert!(corroboration_accept(RoleKind::Unknown, true, true, true, false, false, false));
         // Exact/substring (not fuzzy) still passes on isolation alone — no regression.
-        assert!(corroboration_accept(RoleKind::Unknown, false, true, false, false));
+        assert!(corroboration_accept(RoleKind::Unknown, false, true, false, false, false, false));
         // Content surface: a fuzzy guess without spatial agreement is rejected even if isolated.
-        assert!(!corroboration_accept(RoleKind::Content, true, true, false, false));
-        assert!(corroboration_accept(RoleKind::Content, true, true, true, false));
+        assert!(!corroboration_accept(RoleKind::Content, true, true, false, false, false, false));
+        assert!(corroboration_accept(RoleKind::Content, true, true, true, false, false, false));
         // Interactive UIA hit is authoritative regardless.
-        assert!(corroboration_accept(RoleKind::Interactive, true, false, false, false));
+        assert!(corroboration_accept(RoleKind::Interactive, true, false, false, false, false, false));
         // Nothing corroborates a non-fuzzy Unknown match with no isolation → reject.
-        assert!(!corroboration_accept(RoleKind::Unknown, false, false, false, false));
+        assert!(!corroboration_accept(RoleKind::Unknown, false, false, false, false, false, false));
+    }
+
+    #[test]
+    fn content_prose_dual_corroboration_rescue() {
+        use super::{corroboration_accept, RoleKind};
+        // The two live incidents: an EXACT prose match (Word "model" 2026-07-18, VS Code
+        // "OCR" 2026-07-19) — content role requested, isolation fails by construction
+        // (word inside a 90-char line), anchor AND trusted bbox both agree → ACCEPT.
+        assert!(corroboration_accept(RoleKind::Content, false, false, true, true, false, true));
+        // Every missing leg kills the rescue:
+        // - control-role hunt ("Save" in an email body while hunting the Save BUTTON)
+        assert!(!corroboration_accept(RoleKind::Content, false, false, true, true, false, false));
+        // - anchor alone (no trusted bbox)
+        assert!(!corroboration_accept(RoleKind::Content, false, false, true, false, false, true));
+        // - bbox alone (no anchor)
+        assert!(!corroboration_accept(RoleKind::Content, false, false, false, true, false, true));
+        // - fuzzy never rescues (a guess about WHICH word)
+        assert!(!corroboration_accept(RoleKind::Content, true, false, true, true, false, true));
+        // - icon targets never rescue (glyphs have no prose)
+        assert!(!corroboration_accept(RoleKind::Content, false, false, true, true, true, true));
+        // Isolated content behaviour is unchanged by the new params.
+        assert!(corroboration_accept(RoleKind::Content, false, true, false, false, false, true));
     }
 
     #[test]
@@ -1277,16 +1334,16 @@ mod tests {
         // OCR exact-matched the status bar's "@Rotate" mouse legend 1200 px from the AI bbox —
         // Unknown surface, isolated, no anchor, bbox far. For an icon target that must REJECT
         // (no pointer beats a status-bar pointer).
-        assert!(!corroboration_accept(RoleKind::Unknown, false, true, false, true));
+        assert!(!corroboration_accept(RoleKind::Unknown, false, true, false, false, true, false));
         // Same shape on a Content surface (v0.6.2 live: "Scale" matched the Transform panel's
         // label on the right while the AI targeted the left-toolbar tool) → REJECT.
-        assert!(!corroboration_accept(RoleKind::Content, false, true, false, true));
+        assert!(!corroboration_accept(RoleKind::Content, false, true, false, false, true, false));
         // With spatial agreement (anchor or trusted bbox) the text hit is a legitimate rescue.
-        assert!(corroboration_accept(RoleKind::Unknown, false, true, true, true));
-        assert!(corroboration_accept(RoleKind::Content, false, true, true, true));
+        assert!(corroboration_accept(RoleKind::Unknown, false, true, true, false, true, false));
+        assert!(corroboration_accept(RoleKind::Content, false, true, false, true, true, false));
         // An interactive UIA control under the point stays authoritative for icon targets too
         // (a labelled toolbar button is a real hit even when the target was tagged as an icon).
-        assert!(corroboration_accept(RoleKind::Interactive, false, false, false, true));
+        assert!(corroboration_accept(RoleKind::Interactive, false, false, false, false, true, false));
     }
 
     #[test]
