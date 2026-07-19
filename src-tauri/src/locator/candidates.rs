@@ -124,6 +124,46 @@ pub fn resolution_outcome(
 /// certainly changed too much for the app-state readback to mean anything.
 pub const PENDING_EXPIRY_MS: i64 = 10 * 60 * 1000;
 
+/// Flow B firing rule (2026-07-19, refined from fire-on-miss after the PPT
+/// prompt-text session): which boxes, if any, replace/augment the pipeline's outcome
+/// when a pass recorded a ground-truth ambiguity set?
+///
+/// - Pipeline MISSED → the set fires as-is (nothing better exists).
+/// - The winning hit came from OCR **and its centre lands INSIDE a set member** → the
+///   hit is not new information — it merely resolved the recorded tie with weaker
+///   evidence (AI-bbox proximity between identical texts). Promote the set, reordered
+///   with the hit's member first (① = the AI's apparent intent, alternatives shown).
+/// - The winning hit lands OUTSIDE the set (Word "Save": the adapter tied on 4 prose
+///   occurrences, A11y found the QAT Save BUTTON), or came from a stronger pass
+///   (adapter/selection/a11y/template) → NEW information — the hit stands alone.
+pub fn flow_b_boxes(
+    located_bbox: Option<&Rect>,
+    final_is_hit_ocr: bool,
+    set: Option<&[Rect]>,
+) -> Vec<Rect> {
+    let Some(set) = set.filter(|s| s.len() >= 2) else {
+        return Vec::new();
+    };
+    let boxes = match located_bbox {
+        None => set.to_vec(),
+        Some(hit) if final_is_hit_ocr => match match_candidate(hit, set) {
+            Some(ix) => {
+                let mut reordered = vec![set[ix]];
+                reordered.extend(set.iter().enumerate().filter(|(i, _)| *i != ix).map(|(_, b)| *b));
+                reordered
+            }
+            None => return Vec::new(),
+        },
+        Some(_) => return Vec::new(),
+    };
+    let deduped: Vec<Rect> = dedupe_candidates(boxes).into_iter().take(3).collect();
+    if deduped.len() >= 2 {
+        deduped
+    } else {
+        Vec::new()
+    }
+}
+
 /// Intersection-over-union of two rects.
 pub fn iou(a: &Rect, b: &Rect) -> f64 {
     let ax2 = a.x + a.width as i32;
@@ -309,6 +349,27 @@ mod tests {
         // Caret (collapsed range → tiny rect) inside candidate 1.
         assert_eq!(match_candidate(&r(410, 105, 2, 14), &candidates), Some(1));
         assert_eq!(match_candidate(&r(120, 110, 0, 14), &candidates), Some(0));
+    }
+
+    #[test]
+    fn flow_b_firing_rule() {
+        let set = vec![r(100, 100, 300, 200), r(500, 100, 300, 200)];
+        // Miss → the set fires as-is.
+        assert_eq!(flow_b_boxes(None, false, Some(&set)).len(), 2);
+        // OCR hit INSIDE member 1 (the PPT prompt-text case): promoted, member 1 first.
+        let ocr_hit = r(520, 150, 120, 20); // "Click to add text" inside the 2nd placeholder
+        let boxes = flow_b_boxes(Some(&ocr_hit), true, Some(&set));
+        assert_eq!(boxes.len(), 2);
+        assert_eq!(boxes[0].x, 500, "the hit's member must rank ①");
+        assert_eq!(boxes[1].x, 100);
+        // OCR hit OUTSIDE the set → new information, hit stands alone.
+        assert!(flow_b_boxes(Some(&r(900, 500, 40, 20)), true, Some(&set)).is_empty());
+        // A stronger pass's hit inside the set (Save/QAT shape: final not hit_ocr) →
+        // the hit stands; the set stays recorded-only.
+        assert!(flow_b_boxes(Some(&ocr_hit), false, Some(&set)).is_empty());
+        // Degenerate sets never fire.
+        assert!(flow_b_boxes(None, false, Some(&set[..1])).is_empty());
+        assert!(flow_b_boxes(None, false, None).is_empty());
     }
 
     #[test]

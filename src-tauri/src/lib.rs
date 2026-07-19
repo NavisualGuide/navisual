@@ -481,26 +481,32 @@ fn execute_step(
     // model likely got wrong, which is worse than an honest "pointer unavailable"
     // with no region. Trusted grounders (the default for all but the weak free
     // chain) still get the hint.
-    // Flow B: the pipeline missed but a pass recorded a KNOWN tie during the run — its
-    // set becomes the candidate boxes (replacing the hint ring below). Never on a hit:
-    // a later pass's verified answer outranks a set an earlier pass refused to pick
-    // from (the Save/QAT case — A11y's button beat the adapter's 4 text occurrences).
-    let flow_b_set: Vec<capture::Rect> = if candidates_abs.is_empty() && located.is_none() {
-        let set: Vec<capture::Rect> = trace
+    // Flow B: a pass recorded a KNOWN tie during the run. The firing rule
+    // (candidates::flow_b_boxes) is information-based, not miss-based: the set fires
+    // on a miss, AND on an OCR hit that lands INSIDE a set member — such a hit isn't
+    // new information, it merely resolved the recorded ground-truth tie with weaker
+    // evidence (live: PPT's two "Click to add text" placeholders — OCR picked one by
+    // AI-bbox proximity; the honest outcome is both boxes with that pick as ①). A hit
+    // OUTSIDE the set, or from any stronger pass, is new information and stands alone
+    // (the Save/QAT case — A11y's button beat the adapter's 4 prose occurrences).
+    let flow_b_set: Vec<capture::Rect> = if candidates_abs.is_empty() {
+        let final_is_hit_ocr = trace
             .as_ref()
-            .and_then(|t| t.ambiguity_set.as_ref())
-            .map(|s| {
-                locator::candidates::dedupe_candidates(s.boxes.clone())
-                    .into_iter()
-                    .take(3)
-                    .collect()
+            .map(|t| {
+                matches!(
+                    t.final_decision,
+                    locator::trace::FinalDecision::HitOcr
+                )
             })
-            .unwrap_or_default();
-        if set.len() >= 2 {
-            set
-        } else {
-            Vec::new()
-        }
+            .unwrap_or(false);
+        locator::candidates::flow_b_boxes(
+            located.as_ref().map(|r| &r.bbox),
+            final_is_hit_ocr,
+            trace
+                .as_ref()
+                .and_then(|t| t.ambiguity_set.as_ref())
+                .map(|s| s.boxes.as_slice()),
+        )
     } else {
         Vec::new()
     };
