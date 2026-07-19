@@ -252,9 +252,10 @@ impl BlenderAdapter {
     /// ("Rendered", "Viewport Shading (Rendered)", "Viewport Shading"), and each
     /// item carries its known names, so no filler-token heuristics are needed.
     fn try_header(&self, hwnd: usize, query: &AdapterQuery) -> Result<Option<AdapterHit>> {
-        if matches!(query.target_role, Some("menuitem")) {
-            return Ok(None);
-        }
+        // NOTE: no menuitem role-gate here (unlike try_tabs). The AI labels these icon
+        // toggles inconsistently — live 2026-07-19 the SAME target "Rendered" arrived as
+        // role=button (adapter hit) and then role=menuitem (gate declined → template).
+        // The key-token rule below is specific enough to stand without a role gate.
         let Ok(header) = bridge_query(r#"{"q":"header"}"#) else {
             return Ok(None);
         };
@@ -283,29 +284,61 @@ impl BlenderAdapter {
             let (long, short) = if a.len() > b.len() { (a, b) } else { (b, a) };
             long.len() > 3 && long.len() == short.len() + 1 && long.strip_suffix('s') == Some(short)
         };
-        let set_eq = |a: &[String], b: &[String]| -> bool {
-            a.len() == b.len() && a.iter().all(|t| b.iter().any(|s| plural_eq(s, t)))
+        let rect_of = |item: &serde_json::Value| -> Option<Rect> {
+            let arr = item.get("rect")?.as_array()?;
+            let v: Vec<i32> = arr.iter().filter_map(|x| x.as_i64()).map(|x| x as i32).collect();
+            let [x, y_bu, w, h] = v[..] else { return None };
+            Some(to_screen_rect(client, win_h, x, y_bu, w, h))
         };
+        let name_of = |item: &serde_json::Value| -> String {
+            item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        };
+
+        // KEY-TOKEN matching: an item claims the target when the target contains one of
+        // its distinguishing words ("Wireframe Shading" → wireframe). Replaces alias
+        // set-equality, which required us to have guessed the exact phrasing.
         let mut matched: Vec<(Rect, String)> = Vec::new();
         for item in items {
-            let Some(names) = item.get("names").and_then(|v| v.as_array()) else {
+            let keys = item
+                .get("keys")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|k| k.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if keys.is_empty() {
+                continue; // the generic popover — handled below
+            }
+            if !keys.iter().any(|k| target.iter().any(|t| plural_eq(t, k))) {
                 continue;
-            };
-            let hit_name = names.iter().find_map(|n| {
-                let n = n.as_str()?;
-                set_eq(&tokens(n), &target).then(|| n.to_string())
-            });
-            let Some(name) = hit_name else { continue };
-            let Some(rect_arr) = item.get("rect").and_then(|v| v.as_array()) else {
-                continue;
-            };
-            let vals: Vec<i32> = rect_arr.iter().filter_map(|v| v.as_i64()).map(|v| v as i32).collect();
-            let [x, y_bu, w, h] = vals[..] else { continue };
-            let rect = to_screen_rect(client, win_h, x, y_bu, w, h);
+            }
+            let Some(rect) = rect_of(item) else { continue };
             if crate::locator::orchestrator::rejected_by_avoid(&rect, query.avoid_bboxes) {
                 continue;
             }
-            matched.push((rect, name));
+            matched.push((rect, name_of(item)));
+        }
+        // No specific mode named, but the target is generic shading language
+        // ("Viewport Shading", "the shading mode button") → the popover.
+        if matched.is_empty() {
+            let generic: Vec<&str> = header
+                .get("generic_tokens")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|g| g.as_str()).collect())
+                .unwrap_or_default();
+            let all_generic = !generic.is_empty()
+                && target.iter().all(|t| generic.iter().any(|g| plural_eq(t, g)))
+                && target.iter().any(|t| t == "shading" || t == "shade");
+            if all_generic {
+                if let Some(item) = items.iter().find(|i| {
+                    i.get("keys").and_then(|v| v.as_array()).is_some_and(|a| a.is_empty())
+                }) {
+                    if let Some(rect) = rect_of(item) {
+                        if !crate::locator::orchestrator::rejected_by_avoid(&rect, query.avoid_bboxes)
+                        {
+                            matched.push((rect, name_of(item)));
+                        }
+                    }
+                }
+            }
         }
         match matched.len() {
             0 => Ok(None),

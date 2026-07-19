@@ -264,15 +264,25 @@ def _q_tabs(_req):
 # 2026-07-19 on 5.1.2 @ ui_scale 2.0, maximized area; offsets in widget units from the
 # header region's right edge, scale-multiplicative like everything else).
 # (right_offset_u = distance from right edge to the item's RIGHT side, width_u).
+# (stem, display name, KEY tokens, right_offset_u of the LEFT edge, width_u).
+# Key tokens are the DISTINGUISHING words: the adapter matches an item when the AI's
+# target contains one of its keys, rather than requiring a phrasing to appear in a
+# hardcoded alias list. Live 2026-07-19: "Wireframe Shading" matched no alias and fell
+# to templates — the header cluster is the one surface whose names we GUESS (there is no
+# enumerable widget list, unlike the tool shelf), so matching must be key-based.
+# An item with no keys is the generic fallback (the shading popover).
 HEADER_ITEMS = [
-    ("shading_dropdown", ["Viewport Shading", "Shading"], 1.45, 0.9),
-    ("rendered", ["Rendered", "Rendered Viewport Shading", "Viewport Shading Rendered"], 2.35, 0.9),
-    ("material_preview", ["Material Preview", "Material Preview Viewport Shading", "Viewport Shading Material Preview"], 3.3, 0.9),
-    ("solid", ["Solid", "Solid Viewport Shading", "Viewport Shading Solid"], 4.25, 0.9),
-    ("wireframe", ["Wireframe", "Wireframe Viewport Shading", "Viewport Shading Wireframe"], 5.2, 0.9),
-    ("xray", ["X-Ray", "Toggle X-Ray", "XRay"], 6.45, 0.9),
-    ("overlays", ["Show Overlays", "Overlays", "Overlay"], 8.7, 0.9),
+    ("shading_dropdown", "Viewport Shading", [], 1.45, 0.9),
+    ("rendered", "Rendered", ["rendered", "render"], 2.35, 0.9),
+    ("material_preview", "Material Preview", ["material"], 3.3, 0.9),
+    ("solid", "Solid", ["solid"], 4.25, 0.9),
+    ("wireframe", "Wireframe", ["wireframe"], 5.2, 0.9),
+    ("xray", "X-Ray", ["xray", "ray"], 6.45, 0.9),
+    ("overlays", "Show Overlays", ["overlay"], 8.7, 0.9),
 ]
+# Words that describe the shading widget generally — a target made only of these
+# (plus filler) means the popover, not a specific mode.
+HEADER_GENERIC_TOKENS = ["viewport", "shading", "shade", "mode", "view", "the", "button", "icon"]
 
 
 def _q_header(_req):
@@ -290,13 +300,14 @@ def _q_header(_req):
     unit = 20.0 * ctx.preferences.system.ui_scale
     right = region.x + region.width
     items = []
-    for stem, names, right_off_u, w_u in HEADER_ITEMS:
+    for stem, name, keys, right_off_u, w_u in HEADER_ITEMS:
         w = int(w_u * unit)
         x0 = int(right - right_off_u * unit)
         items.append(
             {
                 "stem": stem,
-                "names": names,
+                "name": name,
+                "keys": keys,
                 # Full header height vertically — the click target is the button row.
                 "rect": [x0, region.y, w, region.height],
             }
@@ -305,6 +316,7 @@ def _q_header(_req):
         "window": [win.width, win.height],
         "region": [region.x, region.y, region.width, region.height],
         "ui_scale": ctx.preferences.system.ui_scale,
+        "generic_tokens": HEADER_GENERIC_TOKENS,
         "items": items,
     }
 
