@@ -28,6 +28,66 @@ pub struct PendingCandidates {
     pub boxes: Vec<Rect>,
     pub target_hwnd: Option<usize>,
     pub armed_ms: i64,
+    /// App-state readback taken AT ARM TIME. Without it, stale state produces false
+    /// labels: e.g. the user clicked the (wrong) pointed spot earlier, pressed
+    /// ✗ Wrong, then ignored the boxes and typed a new task — the caret still sits
+    /// inside a candidate, and a naive readback would record a "chosen" that never
+    /// happened. Resolution only trusts a readback that CHANGED from this baseline.
+    pub baseline: Option<Rect>,
+}
+
+/// What actually happened to a shown candidate set, decided by [`resolution_outcome`].
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Outcome {
+    /// The readback changed from baseline and landed on a candidate.
+    Chosen(usize),
+    /// The user pressed ✗ Wrong again (correction/retry trigger) — an explicit
+    /// rejection of the whole shown set; any readback is disregarded as a label.
+    Escalated,
+    /// The readback changed from baseline but matches no candidate — the user acted
+    /// somewhere else. The resolved rect is the gold negative label: the TRUE target,
+    /// never shown.
+    ActedElsewhere,
+    /// The readback is identical to the arm-time baseline — the user never acted in
+    /// the app (typed in the panel, moved on). No label.
+    NoAction,
+    /// No readback channel produced a rect.
+    NoReadback,
+}
+
+impl Outcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Outcome::Chosen(_) => "chosen",
+            Outcome::Escalated => "escalated",
+            Outcome::ActedElsewhere => "acted_elsewhere",
+            Outcome::NoAction => "no_action",
+            Outcome::NoReadback => "no_readback",
+        }
+    }
+}
+
+/// Pure resolution decision. `escalation` = the resolving event is itself a rejection
+/// (another ✗ Wrong → correction/retry) rather than neutral progress (guide/next_step).
+pub fn resolution_outcome(
+    escalation: bool,
+    baseline: Option<&Rect>,
+    readback: Option<&Rect>,
+    candidates: &[Rect],
+) -> Outcome {
+    if escalation {
+        return Outcome::Escalated;
+    }
+    let Some(rect) = readback else {
+        return Outcome::NoReadback;
+    };
+    if baseline.is_some_and(|b| b == rect) {
+        return Outcome::NoAction;
+    }
+    match match_candidate(rect, candidates) {
+        Some(i) => Outcome::Chosen(i),
+        None => Outcome::ActedElsewhere,
+    }
 }
 
 /// Candidates older than this are dropped unresolved — the screen has almost
@@ -219,6 +279,39 @@ mod tests {
         // Caret (collapsed range → tiny rect) inside candidate 1.
         assert_eq!(match_candidate(&r(410, 105, 2, 14), &candidates), Some(1));
         assert_eq!(match_candidate(&r(120, 110, 0, 14), &candidates), Some(0));
+    }
+
+    #[test]
+    fn outcome_decision_table() {
+        let candidates = vec![r(100, 100, 50, 20), r(400, 100, 50, 20)];
+        let baseline = r(700, 300, 60, 20);
+        // Escalation (another Wrong press) disregards even a candidate-matching readback.
+        assert_eq!(
+            resolution_outcome(true, Some(&baseline), Some(&r(410, 105, 2, 14)), &candidates),
+            Outcome::Escalated
+        );
+        // Readback unchanged from baseline → the user never acted → no label. This is
+        // the stale-caret false positive: baseline INSIDE candidate 0, untouched.
+        let stale = r(120, 110, 2, 14);
+        assert_eq!(
+            resolution_outcome(false, Some(&stale), Some(&stale), &candidates),
+            Outcome::NoAction
+        );
+        // Readback moved into a candidate → genuine pick.
+        assert_eq!(
+            resolution_outcome(false, Some(&baseline), Some(&r(410, 105, 2, 14)), &candidates),
+            Outcome::Chosen(1)
+        );
+        // Readback moved somewhere that matches nothing → the true target was elsewhere.
+        assert_eq!(
+            resolution_outcome(false, Some(&baseline), Some(&r(900, 500, 40, 20)), &candidates),
+            Outcome::ActedElsewhere
+        );
+        // No readback channel.
+        assert_eq!(
+            resolution_outcome(false, Some(&baseline), None, &candidates),
+            Outcome::NoReadback
+        );
     }
 
     #[test]

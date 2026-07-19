@@ -793,7 +793,12 @@ fn maybe_log_trace(
 /// acted, and the app's own state (Word caret, PowerPoint shape selection, UIA focus)
 /// still carries the answer. The resolved pick is banked to the local training mirror
 /// as a ground-truth label; an unresolvable or expired pending is dropped honestly.
-async fn resolve_pending_candidates(app: &AppHandle, state: &AppState) {
+/// `escalation`: the resolving event is itself another ✗ Wrong (correction /
+/// retry_locate) — an explicit rejection of the shown set, so the readback is never
+/// trusted as a "chosen" label (the caret may sit in a candidate the user clicked
+/// BEFORE deciding it was wrong). Neutral progress events (guide / next_step) pass
+/// false and let the baseline comparison separate a real pick from stale state.
+async fn resolve_pending_candidates(app: &AppHandle, state: &AppState, escalation: bool) {
     let Some(pending) = state.guidance.lock().pending_candidates.take() else {
         return;
     };
@@ -815,17 +820,24 @@ async fn resolve_pending_candidates(app: &AppHandle, state: &AppState) {
     .await
     .ok()
     .flatten();
-    let (chosen, method, resolved_bbox) = match resolved {
-        Some((rect, method)) => (
-            locator::candidates::match_candidate(&rect, &pending.boxes),
-            method,
-            Some(rect),
-        ),
-        None => (None, "no-readback", None),
+    let (resolved_bbox, method) = match &resolved {
+        Some((rect, method)) => (Some(*rect), *method),
+        None => (None, "no-readback"),
+    };
+    let outcome = locator::candidates::resolution_outcome(
+        escalation,
+        pending.baseline.as_ref(),
+        resolved_bbox.as_ref(),
+        &pending.boxes,
+    );
+    let chosen = match outcome {
+        locator::candidates::Outcome::Chosen(i) => Some(i),
+        _ => None,
     };
     log::info!(
-        "[candidates] resolution: shown={} chosen={:?} method={} age={}ms",
+        "[candidates] resolution: shown={} outcome={} chosen={:?} method={} age={}ms",
         pending.boxes.len(),
+        outcome.as_str(),
         chosen,
         method,
         age_ms
@@ -839,8 +851,10 @@ async fn resolve_pending_candidates(app: &AppHandle, state: &AppState) {
                 "target_text": pending.target_text,
                 "shown": pending.boxes.len(),
                 "boxes": pending.boxes,
+                "outcome": outcome.as_str(),
                 "chosen_index": chosen,
                 "method": method,
+                "baseline_bbox": pending.baseline,
                 "resolved_bbox": resolved_bbox,
             });
             let path = dir.join("training").join("feedback.jsonl");
@@ -1393,7 +1407,7 @@ async fn guide(
 ) -> Result<GuideResponse, String> {
     // Flow A: any candidate boxes on screen are resolved by the state the user's
     // click left behind — read it before this request changes anything.
-    resolve_pending_candidates(&app, &state).await;
+    resolve_pending_candidates(&app, &state, false).await;
     let is_next_requery = task.starts_with("[User completed:");
     // Only reset session state for a genuine new task (not resume, not reply, not next-requery).
     // target_hwnd is intentionally NOT reset here — it persists across new sub-tasks in the same
@@ -2131,7 +2145,7 @@ async fn next_step(
     step_index: usize,
 ) -> Result<GuideResponse, String> {
     // Flow A: resolve candidate boxes from the app state the user's click produced.
-    resolve_pending_candidates(&app, &state).await;
+    resolve_pending_candidates(&app, &state, false).await;
     let (steps, session_id, needs_input, provider, capture_rect, context_elements, request_id) = {
         let g = state.guidance.lock();
         (
@@ -2260,7 +2274,7 @@ async fn retry_locate(
 ) -> Result<GuideResponse, String> {
     // Flow A: a second "Wrong spot" while candidates are showing means the user did
     // NOT click any of them — resolve (likely unresolved, honest) before re-arming.
-    resolve_pending_candidates(&app, &state).await;
+    resolve_pending_candidates(&app, &state, true).await;
     let (steps, session_id, needs_input, provider, capture_rect, context_elements, request_id) = {
         let g = state.guidance.lock();
         (
@@ -2385,8 +2399,16 @@ async fn retry_locate(
 
     // Arm the state-readback: the next backend event reads which candidate the
     // user's click landed on from the app's own state (candidates.rs) and banks
-    // the label to the local training mirror.
+    // the label to the local training mirror. The baseline readback taken NOW is
+    // what separates a genuine post-arm click from stale state at resolution.
     if candidate_boxes.len() >= 2 {
+        let baseline_hwnd = stored_hwnd;
+        let baseline = tokio::task::spawn_blocking(move || {
+            locator::candidates::read_acted_rect(baseline_hwnd).map(|(r, _)| r)
+        })
+        .await
+        .ok()
+        .flatten();
         let mut g = state.guidance.lock();
         g.pending_candidates = Some(locator::candidates::PendingCandidates {
             request_id: request_id.clone(),
@@ -2397,6 +2419,7 @@ async fn retry_locate(
             boxes: candidate_boxes.clone(),
             target_hwnd: stored_hwnd,
             armed_ms: chrono::Utc::now().timestamp_millis(),
+            baseline,
         });
     }
     if let Some(ref mut t) = locate_trace {
@@ -2447,7 +2470,7 @@ async fn send_correction(
 ) -> Result<GuideResponse, String> {
     // Flow A: resolve any on-screen candidate boxes before the correction reshapes
     // the step (a "None of these" Wrong press lands here — resolves unresolved).
-    resolve_pending_candidates(&app, &state).await;
+    resolve_pending_candidates(&app, &state, true).await;
     let session_id = {
         let g = state.guidance.lock();
         g.session_id.clone()
