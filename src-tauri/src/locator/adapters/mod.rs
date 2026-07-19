@@ -20,6 +20,8 @@ use super::LocateResult;
 use anyhow::Result;
 
 #[cfg(windows)]
+mod blender;
+#[cfg(windows)]
 mod excel;
 #[cfg(windows)]
 pub(crate) mod office_com;
@@ -111,6 +113,7 @@ fn adapters() -> Vec<Box<dyn Adapter>> {
             Box::new(excel::ExcelAdapter),
             Box::new(powerpoint::PowerPointAdapter),
             Box::new(word::WordAdapter),
+            Box::new(blender::BlenderAdapter),
         ]
     }
     #[cfg(not(windows))]
