@@ -95,14 +95,20 @@ impl Adapter for BlenderAdapter {
 
         match matched.len() {
             0 => {
-                // No tool-shelf slot — try the Properties nav-bar tabs (second derived
-                // surface; fixes the constraint/data wrong-icon class: the pack has no
-                // icon for every tab, and generic stems like `object` cross-match).
+                // No tool-shelf slot. Header toggles BEFORE tabs: their alias names are
+                // exact set-matches, while the tab matcher has a subset tier that can
+                // hijack shading names (live: "Material Preview" ⊇ the Material
+                // Properties tab's core {material} — tab won, wrong surface). The
+                // header pass also kills the template circle-glyph false-positive
+                // class ("Material Preview" matched a status-bar circle at 0.968).
+                if let Some(hit) = self.try_header(hwnd, query)? {
+                    return Ok(hit);
+                }
                 if let Some(hit) = self.try_tabs(hwnd, query)? {
                     return Ok(hit);
                 }
                 Ok(AdapterHit::fell_through(format!(
-                    "no tool-shelf slot or nav-bar tab matches {:?} ({} slots reported)",
+                    "no tool-shelf slot, header toggle, or nav-bar tab matches {:?} ({} slots reported)",
                     query.target_text,
                     slots.len()
                 )))
@@ -193,8 +199,11 @@ impl BlenderAdapter {
             }
             let eq = name_core.len() == target_core.len()
                 && target_core.iter().all(|t| set_contains(&name_core, t));
-            let sub = target_core.iter().all(|t| set_contains(&name_core, t))
-                || name_core.iter().all(|t| set_contains(&target_core, t));
+            // Subset ONE direction only (target ⊆ tab name — "Constraints" finds
+            // "Object Constraint Properties"). The reverse direction let generic tab
+            // cores swallow more specific non-tab targets (live: {material} ⊆
+            // "Material Preview" pulled a shading request onto the Material tab).
+            let sub = target_core.iter().all(|t| set_contains(&name_core, t));
             if !eq && !sub {
                 continue;
             }
@@ -232,6 +241,90 @@ impl BlenderAdapter {
             n => Ok(Some(AdapterHit::ambiguous(
                 format!("{n} nav-bar tabs match {:?} — ambiguous", query.target_text),
                 pool.into_iter().map(|(r, _)| r).collect(),
+            ))),
+        }
+    }
+}
+
+impl BlenderAdapter {
+    /// VIEW_3D header toggle cluster via the bridge's `header` query. Alias-name
+    /// SET-EQUALITY matching (plural-tolerant) — the AI phrases these many ways
+    /// ("Rendered", "Viewport Shading (Rendered)", "Viewport Shading"), and each
+    /// item carries its known names, so no filler-token heuristics are needed.
+    fn try_header(&self, hwnd: usize, query: &AdapterQuery) -> Result<Option<AdapterHit>> {
+        if matches!(query.target_role, Some("menuitem")) {
+            return Ok(None);
+        }
+        let Ok(header) = bridge_query(r#"{"q":"header"}"#) else {
+            return Ok(None);
+        };
+        if header.get("error").is_some() {
+            return Ok(None);
+        }
+        let win_h = header
+            .get("window")
+            .and_then(|w| w.get(1))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let Some(items) = header.get("items").and_then(|v| v.as_array()) else {
+            return Ok(None);
+        };
+        let Some(client) = client_origin(hwnd) else {
+            return Ok(None);
+        };
+        let target = tokens(query.target_text);
+        if target.is_empty() {
+            return Ok(None);
+        }
+        let plural_eq = |a: &str, b: &str| -> bool {
+            if a == b {
+                return true;
+            }
+            let (long, short) = if a.len() > b.len() { (a, b) } else { (b, a) };
+            long.len() > 3 && long.len() == short.len() + 1 && long.strip_suffix('s') == Some(short)
+        };
+        let set_eq = |a: &[String], b: &[String]| -> bool {
+            a.len() == b.len() && a.iter().all(|t| b.iter().any(|s| plural_eq(s, t)))
+        };
+        let mut matched: Vec<(Rect, String)> = Vec::new();
+        for item in items {
+            let Some(names) = item.get("names").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let hit_name = names.iter().find_map(|n| {
+                let n = n.as_str()?;
+                set_eq(&tokens(n), &target).then(|| n.to_string())
+            });
+            let Some(name) = hit_name else { continue };
+            let Some(rect_arr) = item.get("rect").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let vals: Vec<i32> = rect_arr.iter().filter_map(|v| v.as_i64()).map(|v| v as i32).collect();
+            let [x, y_bu, w, h] = vals[..] else { continue };
+            let rect = to_screen_rect(client, win_h, x, y_bu, w, h);
+            if crate::locator::orchestrator::rejected_by_avoid(&rect, query.avoid_bboxes) {
+                continue;
+            }
+            matched.push((rect, name));
+        }
+        match matched.len() {
+            0 => Ok(None),
+            1 => {
+                let (bbox, name) = matched.into_iter().next().unwrap();
+                Ok(Some(AdapterHit {
+                    result: Some(LocateResult {
+                        bbox,
+                        name,
+                        role: "BlenderHeaderToggle".to_string(),
+                        confidence: 1.0,
+                    }),
+                    detail: format!("bridge header → derived rect for {:?}", query.target_text),
+                    ambiguous: Vec::new(),
+                }))
+            }
+            n => Ok(Some(AdapterHit::ambiguous(
+                format!("{n} header toggles match {:?} — ambiguous", query.target_text),
+                matched.into_iter().map(|(r, _)| r).collect(),
             ))),
         }
     }

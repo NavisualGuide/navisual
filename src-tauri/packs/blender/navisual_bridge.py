@@ -260,7 +260,62 @@ def _q_tabs(_req):
     }
 
 
-_HANDLERS = {"layout": _q_layout, "state": _q_state, "tools": _q_tools, "tabs": _q_tabs}
+# VIEW_3D header right-side toggle cluster — RIGHT-ANCHORED fixed items (calibrated
+# 2026-07-19 on 5.1.2 @ ui_scale 2.0, maximized area; offsets in widget units from the
+# header region's right edge, scale-multiplicative like everything else).
+# (right_offset_u = distance from right edge to the item's RIGHT side, width_u).
+HEADER_ITEMS = [
+    ("shading_dropdown", ["Viewport Shading", "Shading"], 1.1, 0.5),
+    ("rendered", ["Rendered", "Rendered Viewport Shading", "Viewport Shading Rendered"], 2.35, 0.875),
+    ("material_preview", ["Material Preview", "Material Preview Viewport Shading", "Viewport Shading Material Preview"], 3.3, 0.875),
+    ("solid", ["Solid", "Solid Viewport Shading", "Viewport Shading Solid"], 4.25, 0.875),
+    ("wireframe", ["Wireframe", "Wireframe Viewport Shading", "Viewport Shading Wireframe"], 5.2, 0.875),
+    ("xray", ["X-Ray", "Toggle X-Ray", "XRay"], 6.45, 0.875),
+    ("overlays", ["Show Overlays", "Overlays", "Overlay"], 8.7, 0.875),
+]
+
+
+def _q_header(_req):
+    """VIEW_3D header toggles with DERIVED window-relative rects (bottom-up Y)."""
+    ctx = bpy.context
+    win = _window()
+    if win is None:
+        return {"error": "no window"}
+    area = next((a for a in win.screen.areas if a.type == "VIEW_3D"), None)
+    if area is None:
+        return {"error": "no VIEW_3D area"}
+    region = next((r for r in area.regions if r.type == "HEADER"), None)
+    if region is None or region.width <= 1:
+        return {"error": "header hidden"}
+    unit = 20.0 * ctx.preferences.system.ui_scale
+    right = region.x + region.width
+    items = []
+    for stem, names, right_off_u, w_u in HEADER_ITEMS:
+        w = int(w_u * unit)
+        x0 = int(right - right_off_u * unit)
+        items.append(
+            {
+                "stem": stem,
+                "names": names,
+                # Full header height vertically — the click target is the button row.
+                "rect": [x0, region.y, w, region.height],
+            }
+        )
+    return {
+        "window": [win.width, win.height],
+        "region": [region.x, region.y, region.width, region.height],
+        "ui_scale": ctx.preferences.system.ui_scale,
+        "items": items,
+    }
+
+
+_HANDLERS = {
+    "layout": _q_layout,
+    "state": _q_state,
+    "tools": _q_tools,
+    "tabs": _q_tabs,
+    "header": _q_header,
+}
 
 
 def _process_queue():
