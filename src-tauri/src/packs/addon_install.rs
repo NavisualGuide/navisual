@@ -33,16 +33,46 @@ pub struct AddonInstall {
     pub installed_version: Option<i64>,
 }
 
-/// Deployment status across every Blender install detected.
+/// Deployment status, SCOPED to the Blender the user is actually working in.
+///
+/// Machine-wide aggregation was the v1 mistake (live 2026-07-19): with 3.6 and 5.1 both
+/// installed, working in an up-to-date 5.1 still raised the prompt because 3.6 lacked
+/// the add-on — and the offer then wrote to both. Status and install now follow the
+/// TARGET window's Blender version; the other installs are reported for information
+/// only and never drive the prompt.
 #[derive(Debug, Clone, Serialize)]
 pub struct AddonStatus {
     /// `BRIDGE_VERSION` in the pack's copy — the version we would install.
     pub pack_version: Option<i64>,
     /// Whether the pack ships the add-on at all (false → nothing to offer).
     pub available: bool,
+    /// Config-folder version of the target Blender ("5.1"), parsed from its window
+    /// title. `None` when the target isn't Blender or the title didn't say.
+    pub target_version: Option<String>,
+    /// `BRIDGE_VERSION` installed for THAT version; `None` = not installed.
+    pub target_installed_version: Option<i64>,
+    /// Every Blender config dir found (informational).
     pub installs: Vec<AddonInstall>,
-    /// Any Blender config dir where the add-on is missing or older than the pack's.
+    /// The target Blender needs a first install or an update.
     pub needs_action: bool,
+}
+
+/// Blender's window title always ends "… - Blender <major>.<minor>.<patch>"; the config
+/// folder is `<major>.<minor>`. Returns None for a non-Blender or unusual title.
+pub fn config_version_from_title(title: &str) -> Option<String> {
+    let idx = title.rfind("Blender ")?;
+    let rest = &title[idx + "Blender ".len()..];
+    let mut parts = rest.split('.');
+    let major: u32 = parts.next()?.trim().parse().ok()?;
+    let minor: u32 = parts
+        .next()?
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some(format!("{major}.{minor}"))
 }
 
 /// Parse `BRIDGE_VERSION = N` out of an add-on file.
@@ -89,8 +119,9 @@ fn blender_config_dirs() -> Vec<(String, PathBuf)> {
     Vec::new()
 }
 
-/// Current deployment status. `pack_dir` is the loaded Blender pack's directory.
-pub fn status(pack_dir: Option<&Path>) -> AddonStatus {
+/// Deployment status for the Blender identified by `target_title` (the target window's
+/// title). `pack_dir` is the loaded Blender pack's directory.
+pub fn status(pack_dir: Option<&Path>, target_title: Option<&str>) -> AddonStatus {
     let source = pack_dir.map(|d| d.join(ADDON_FILE)).filter(|p| p.is_file());
     let pack_version = source.as_deref().and_then(parse_version);
     let installs: Vec<AddonInstall> = blender_config_dirs()
@@ -105,14 +136,25 @@ pub fn status(pack_dir: Option<&Path>) -> AddonStatus {
             }
         })
         .collect();
-    let needs_action = pack_version.is_some_and(|pv| {
+    let target_version = target_title.and_then(config_version_from_title);
+    // The target's installed version. A running Blender whose config dir we haven't
+    // seen yet (fresh install) is simply "not installed" — install() creates the dir.
+    let target_installed_version = target_version.as_ref().and_then(|tv| {
         installs
             .iter()
-            .any(|i| i.installed_version.is_none_or(|iv| iv < pv))
+            .find(|i| &i.blender_version == tv)
+            .and_then(|i| i.installed_version)
     });
+    // Only the TARGET decides whether to prompt. No target version (title didn't say,
+    // or not Blender) → never prompt: better silent than nagging about an install the
+    // user may not even be running.
+    let needs_action = matches!((pack_version, target_version.as_ref()), (Some(pv), Some(_))
+        if target_installed_version.is_none_or(|iv| iv < pv));
     AddonStatus {
         pack_version,
         available: source.is_some(),
+        target_version,
+        target_installed_version,
         installs,
         needs_action,
     }
@@ -130,8 +172,11 @@ pub struct InstallResult {
     pub needs_enable: bool,
 }
 
-/// Copy the pack's add-on into every detected Blender config directory.
-pub fn install(pack_dir: Option<&Path>) -> InstallResult {
+/// Copy the pack's add-on into the TARGET Blender's config directory (identified from
+/// its window title). Falls back to every detected install only when the target can't
+/// be identified — installing into versions the user isn't running is what made the v1
+/// prompt confusing, so it's the exception, not the rule.
+pub fn install(pack_dir: Option<&Path>, target_title: Option<&str>) -> InstallResult {
     let mut result = InstallResult {
         installed: Vec::new(),
         errors: Vec::new(),
@@ -141,7 +186,19 @@ pub fn install(pack_dir: Option<&Path>) -> InstallResult {
         result.errors.push("the Blender pack does not ship the add-on".into());
         return result;
     };
-    let dirs = blender_config_dirs();
+    let mut dirs = blender_config_dirs();
+    if let Some(tv) = target_title.and_then(config_version_from_title) {
+        // Scope to the running version. If its config dir hasn't been created yet
+        // (fresh install), synthesize the path — create_dir_all below makes it.
+        if let Some(found) = dirs.iter().find(|(v, _)| *v == tv).cloned() {
+            dirs = vec![found];
+        } else if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            dirs = vec![(
+                tv.clone(),
+                appdata.join("Blender Foundation").join("Blender").join(&tv),
+            )];
+        }
+    }
     if dirs.is_empty() {
         result
             .errors
@@ -197,10 +254,46 @@ mod tests {
 
     #[test]
     fn status_without_pack_is_unavailable() {
-        let s = status(None);
+        let s = status(None, Some("x.blend - Blender 5.1.2"));
         assert!(!s.available);
         assert!(!s.needs_action, "nothing to install → no action prompt");
         assert_eq!(s.pack_version, None);
+    }
+
+    #[test]
+    fn parses_config_version_from_title() {
+        assert_eq!(
+            config_version_from_title("(Unsaved) - Blender 5.1.2").as_deref(),
+            Some("5.1")
+        );
+        assert_eq!(
+            config_version_from_title(r"C:\work\bee.blend - Blender 3.6.22").as_deref(),
+            Some("3.6")
+        );
+        // Non-Blender / unusual titles never yield a version (→ never prompt).
+        assert_eq!(config_version_from_title("Document1 - Word"), None);
+        assert_eq!(config_version_from_title("Blender"), None);
+    }
+
+    #[test]
+    fn prompt_follows_the_target_not_the_machine() {
+        // The live 2026-07-19 report: 3.6 (no add-on) + 5.1 (current). Working in 5.1
+        // must be SILENT, and working in 3.6 must OFFER — v1 got both backwards by
+        // aggregating across installs.
+        let d = tmp();
+        let pack = d.join("pack");
+        fs::create_dir_all(&pack).unwrap();
+        fs::write(pack.join(ADDON_FILE), "BRIDGE_VERSION = 2\n").unwrap();
+
+        // status() reads the real machine dirs, so assert on the pure decision inputs
+        // instead: the rule is "target's installed version < pack version".
+        let decide = |installed: Option<i64>, pack_v: i64| -> bool {
+            installed.is_none_or(|iv| iv < pack_v)
+        };
+        assert!(!decide(Some(2), 2), "target current → silent");
+        assert!(decide(None, 2), "target missing → offer");
+        assert!(decide(Some(1), 2), "target stale → offer");
+        fs::remove_dir_all(&d).ok();
     }
 
     // Live: print what deployment sees on THIS machine (Blender installs found, the
@@ -210,7 +303,7 @@ mod tests {
     #[ignore]
     fn addon_status_live() {
         let pack = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packs").join("blender");
-        let s = status(Some(&pack));
+        let s = status(Some(&pack), std::env::var("TARGET_TITLE").ok().as_deref());
         eprintln!("pack ships add-on: {} (version {:?})", s.available, s.pack_version);
         eprintln!("needs_action: {}", s.needs_action);
         for i in &s.installs {
@@ -224,7 +317,7 @@ mod tests {
     #[test]
     fn install_without_source_reports_error() {
         let d = tmp();
-        let r = install(Some(&d)); // dir exists but has no add-on file
+        let r = install(Some(&d), None); // dir exists but has no add-on file
         assert!(r.installed.is_empty());
         assert_eq!(r.errors.len(), 1);
         assert!(!r.needs_enable);

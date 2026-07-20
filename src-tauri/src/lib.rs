@@ -1081,9 +1081,28 @@ fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
 /// which Blender installs exist, whether each has the add-on, and whether any is older
 /// than the version the pack ships. Drives the panel's install prompt.
 #[tauri::command]
-fn blender_addon_status(state: State<'_, AppState>) -> packs::addon_install::AddonStatus {
+fn blender_addon_status(
+    state: State<'_, AppState>,
+    hwnd: u64,
+) -> packs::addon_install::AddonStatus {
     let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
-    packs::addon_install::status(dir.as_deref())
+    let title = blender_target_title(hwnd);
+    packs::addon_install::status(dir.as_deref(), title.as_deref())
+}
+
+/// Title of the window the add-on prompt is about — the version lives in it
+/// ("… - Blender 5.1.2"), and scoping to it is what keeps the prompt about the Blender
+/// the user is actually working in.
+fn blender_target_title(hwnd: u64) -> Option<String> {
+    #[cfg(windows)]
+    {
+        (hwnd != 0).then(|| capture::get_window_title(hwnd as usize))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        None
+    }
 }
 
 /// Copy the pack's add-on into every detected Blender config directory. Explicitly
@@ -1091,11 +1110,16 @@ fn blender_addon_status(state: State<'_, AppState>) -> packs::addon_install::Add
 /// silently), and deliberately does NOT enable it — the Add-ons checkbox stays the
 /// consent gate. Returns what the user must do next.
 #[tauri::command]
-fn install_blender_addon(state: State<'_, AppState>) -> packs::addon_install::InstallResult {
+fn install_blender_addon(
+    state: State<'_, AppState>,
+    hwnd: u64,
+) -> packs::addon_install::InstallResult {
     let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
-    let result = packs::addon_install::install(dir.as_deref());
+    let title = blender_target_title(hwnd);
+    let result = packs::addon_install::install(dir.as_deref(), title.as_deref());
     log::info!(
-        "[blender-addon] install → {:?} (errors: {:?}, needs_enable={})",
+        "[blender-addon] install (target {:?}) → {:?} (errors: {:?}, needs_enable={})",
+        title.as_deref().and_then(packs::addon_install::config_version_from_title),
         result.installed,
         result.errors,
         result.needs_enable

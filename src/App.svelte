@@ -324,6 +324,10 @@ See the LICENSE file in the root of this repository for complete details.
   type AddonStatus = {
     pack_version: number | null;
     available: boolean;
+    // Scoped to the Blender the user is actually working in — a second, up-to-date
+    // install must never raise the prompt (live 2026-07-19: it did, backwards).
+    target_version: string | null;
+    target_installed_version: number | null;
     installs: { blender_version: string; addons_dir: string; installed_version: number | null }[];
     needs_action: boolean;
   };
@@ -338,15 +342,19 @@ See the LICENSE file in the root of this repository for complete details.
       return;
     }
     try {
-      const st = await invoke<AddonStatus>("blender_addon_status");
+      const st = await invoke<AddonStatus>("blender_addon_status", {
+        hwnd: sharedApp.hwnd ?? 0,
+      });
       if (!st.available || !st.needs_action) {
         addonPrompt = "hidden";
         return;
       }
-      const stale = st.installs.some((i) => i.installed_version !== null);
-      addonMessage = stale
-        ? "A newer Blender add-on is available — updating lets Navisual point at tools exactly."
-        : "Install the Navisual Blender add-on for exact tool pointing (one-time setup).";
+      // Wording follows THIS Blender's own state, not any other install's.
+      const ver = st.target_version ? ` (Blender ${st.target_version})` : "";
+      addonMessage =
+        st.target_installed_version !== null
+          ? `A newer Navisual add-on is available${ver} — updating keeps tool pointing exact.`
+          : `Install the Navisual add-on${ver} for exact tool pointing (one-time setup).`;
       addonPrompt = "offer";
     } catch (_) {
       addonPrompt = "hidden";
@@ -358,6 +366,7 @@ See the LICENSE file in the root of this repository for complete details.
     try {
       const r = await invoke<{ installed: string[]; errors: string[]; needs_enable: boolean }>(
         "install_blender_addon",
+        { hwnd: sharedApp?.hwnd ?? 0 },
       );
       if (r.installed.length === 0) {
         addonMessage = `Couldn't install: ${r.errors[0] ?? "no Blender installation found"}`;
