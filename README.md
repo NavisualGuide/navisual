@@ -6,7 +6,7 @@
 
 Navisual watches your screen and walks you through any task step by step — pointing at the exact button to click, narrating each action, and reading the current state of your app. The AI never moves your mouse, clicks, or types for you. Every action stays in your hands.
 
-**[Download for Windows](https://navisualguide.com)** · [View on GitHub](https://github.com/NavisualGuide/navisual) · [navisualguide.com](https://navisualguide.com)
+**[Download for Windows](https://navisualguide.com)** · [User guide](https://navisualguide.com/docs.html) · [View on GitHub](https://github.com/NavisualGuide/navisual) · [navisualguide.com](https://navisualguide.com)
 
 > **30 free requests included — no sign-up, no API key required.**
 
@@ -92,7 +92,8 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 Additional notes:
 - **Free managed tier & model training:** the free tier is served by *free-of-charge* AI models — we route to whichever provider currently offers the best reliability/cost for the free tier, and that routing changes from time to time — and free-tier providers commonly retain your requests — **including the screenshot** — and use them to train their models. This is typically how free-of-charge AI access is offered. To avoid it, use the **paid** managed tier (paid provider endpoints, which under their *current* policies don't train on API data — their policy, which can change), a **bring-your-own-key** provider on a *paid* plan (a provider's own *free* key may still train — check its policy), or **Ollama** (fully local — the only option that doesn't depend on a provider's policy). See the [Privacy Policy](https://navisualguide.com/privacy.html).
 - Screenshots are held in memory only — never written to disk at default settings
-- Full-screen / multi-monitor capture requires explicit one-time permission each time
+- Full-desktop / single-screen capture is never automatic — you choose it yourself in the target picker, and it stays until you pick a window again
+- **Optional app add-ons:** for apps that draw their own UI (currently Blender), Navisual offers a small add-on so the app can report where its tools are. It is opt-in twice over — you click Install, then tick its checkbox in the app's own add-on settings — **read-only** (it cannot click, type, run commands, or modify your file), and listens only on `127.0.0.1` with no internet access. The interface facts it reports (mode, active tool/brush, object names) are included in the AI request; file contents and paths are not. See [Privacy Policy §3](https://navisualguide.com/privacy.html)
 - Assign a Pause hotkey in **Settings → Hotkeys** to stop all capture instantly
 - Settings and auth token live in `%LOCALAPPDATA%\com.navisual.app\`
 - On the free tier, a one-way hash of a Windows machine identifier is sent with requests so the 30 free requests are counted per device (it can't be reversed to identify your machine, and is used only to enforce the free limit — not on paid or bring-your-own-key providers)

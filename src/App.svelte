@@ -2482,6 +2482,13 @@ See the LICENSE file in the root of this repository for complete details.
         <span class="stale-icon">🧩</span>
         <span class="stale-text">{addonMessage}</span>
         {#if addonPrompt === "offer"}
+          <!-- Disclosure AT the consent point: what the add-on is, what it may read, and
+               that it can never act. The banner is too small to carry it, so it links to
+               the guide's Blender section (privacy.html §3 is the formal version). -->
+          <button
+            class="stale-action addon-what"
+            onclick={() => openUrl("https://navisualguide.com/docs.html#apps")}
+            title="What the add-on does, and what it can't do">What's this?</button>
           <button class="stale-action" onclick={installBlenderAddon}>Install</button>
         {:else if addonPrompt === "installing"}
           <span class="addon-busy">Installing…</span>
@@ -3362,6 +3369,7 @@ See the LICENSE file in the root of this repository for complete details.
           <p class="about-tagline">The AI guides, never overrides.</p>
           <p class="about-disclaimer">Navisual uses AI, which can make mistakes. Always verify each suggested action before performing it.</p>
           <div class="about-links">
+            <button class="about-link" onclick={() => openUrl("https://navisualguide.com/docs.html")}>User guide</button>
             <button class="about-link" onclick={() => openUrl("https://navisualguide.com")}>navisualguide.com</button>
             <button class="about-link" onclick={() => openUrl("https://github.com/NavisualGuide/navisual")}>GitHub</button>
             <button class="about-link" onclick={openFeedbackEmail}>Send feedback</button>
@@ -3957,6 +3965,15 @@ See the LICENSE file in the root of this repository for complete details.
     border-color: rgba(140, 175, 255, 0.5);
     color: #a8c2ff;
   }
+  /* Secondary to Install — informational, not the call to action. */
+  .addon-banner .stale-action.addon-what {
+    border-color: transparent;
+    color: var(--text-tertiary, #8a8a8a);
+    text-decoration: underline;
+    padding-left: 2px;
+    padding-right: 2px;
+  }
+  .addon-banner .stale-action.addon-what:hover { color: #a8c2ff; }
   .addon-busy { font-size: 11px; color: var(--text-tertiary, #8a8a8a); flex-shrink: 0; }
   .stale-text { flex: 1; min-width: 0; }
   .stale-action {
