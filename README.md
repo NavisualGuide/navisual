@@ -1,6 +1,6 @@
 # Navisual
 
-**The AI guides, never overrides.**
+**The AI guides, you decide.**
 
 [![Navisual demo](assets/demo.gif)](https://youtu.be/d-a2IARS0PU)
 
@@ -47,7 +47,7 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 - **Live captions** — subtitle strip shows the current instruction
 - **Audio narration** — TTS via Windows SAPI, no install required
 - **Voice input** — push-to-talk via Web Speech API
-- **Free managed tier** — 50 requests out of the box, no account needed
+- **Free managed tier** — 30 requests out of the box, no account needed
 - **Multi-provider AI** — 6 BYOK providers (incl. DeepSeek & Qwen for China) plus any OpenAI-compatible local server (LM Studio, llama.cpp, llamafile)
 - **Windows UI Automation** — primary element locator, < 5ms for browsers
 - **Windows built-in OCR** — zero model downloads, works offline

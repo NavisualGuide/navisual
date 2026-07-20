@@ -3366,7 +3366,7 @@ See the LICENSE file in the root of this repository for complete details.
             <span class="about-name">Navisual</span>
             <span class="about-version">v{appVersion}</span>
           </div>
-          <p class="about-tagline">The AI guides, never overrides.</p>
+          <p class="about-tagline">The AI guides, you decide.</p>
           <p class="about-disclaimer">Navisual uses AI, which can make mistakes. Always verify each suggested action before performing it.</p>
           <div class="about-links">
             <button class="about-link" onclick={() => openUrl("https://navisualguide.com/docs.html")}>User guide</button>
