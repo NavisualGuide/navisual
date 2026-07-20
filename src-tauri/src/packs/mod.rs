@@ -19,6 +19,8 @@
 //! the same `id` shadows a bundled one. `get_active_pack(window_title)` returns the first
 //! pack whose `window_title_pattern` matches — user packs win ties.
 
+pub mod addon_install;
+
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -183,16 +185,30 @@ fn normalize_tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Two tokens match when equal, or when they differ only by a trailing plural `s`
+/// (len > 3 on the longer side, so "as"/"is"-class short words can't alias). Live gap
+/// 2026-07-19: the AI targeted "Show Gizmo" (singular) while the pack icon is `gizmos` —
+/// exact-token containment found no candidate, the template pass never ran, honest miss.
+fn token_eq(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (long, short) = if a.len() > b.len() { (a, b) } else { (b, a) };
+    long.len() > 3 && long.len() == short.len() + 1 && long.strip_suffix('s') == Some(short)
+}
+
 /// Whether an icon filename `stem` is associated with the AI's `target_text`: one token set
-/// fully contains the other ("move_tool" ↔ "Move tool"; "render_button" ⊇ "Render"). Keeps a
-/// short generic target from latching everything while tolerating naming-style differences.
+/// fully contains the other ("move_tool" ↔ "Move tool"; "render_button" ⊇ "Render"),
+/// plural-tolerant per token ("Show Gizmo" ↔ `gizmos`). Keeps a short generic target from
+/// latching everything while tolerating naming-style differences.
 pub fn icon_stem_matches_target(stem: &str, target: &str) -> bool {
     let st = normalize_tokens(stem);
     let tt = normalize_tokens(target);
     if st.is_empty() || tt.is_empty() {
         return false;
     }
-    st.iter().all(|t| tt.contains(t)) || tt.iter().all(|t| st.contains(t))
+    let contains = |set: &[String], t: &str| set.iter().any(|s| token_eq(s, t));
+    st.iter().all(|t| contains(&tt, t)) || tt.iter().all(|t| contains(&st, t))
 }
 
 /// All loaded packs, in match-priority order (user packs first).
@@ -248,6 +264,13 @@ impl PackRegistry {
     /// The first pack whose `window_title_pattern` matches `window_title`, or `None`.
     pub fn get_active_pack(&self, window_title: &str) -> Option<&Pack> {
         self.packs.iter().find(|p| p.title_re.is_match(window_title))
+    }
+
+    /// A loaded pack by manifest id — used by add-on deployment to find the pack
+    /// directory that ships `navisual_bridge.py` (a user pack shadowing the bundled
+    /// Blender pack correctly wins here too, since it was loaded first).
+    pub fn get_by_id(&self, id: &str) -> Option<&Pack> {
+        self.packs.iter().find(|p| p.manifest.id == id)
     }
 
     pub fn len(&self) -> usize {
@@ -573,6 +596,13 @@ mod tests {
         assert!(!icon_stem_matches_target("select_tool", "Move tool")); // disjoint
         assert!(!icon_stem_matches_target("move_tool", "")); // empty target
         assert!(!icon_stem_matches_target("", "Move")); // empty stem
+        // Plural tolerance (live 2026-07-19: "Show Gizmo" vs the `gizmos` icon —
+        // exact-token matching found no candidate and the template pass never ran).
+        assert!(icon_stem_matches_target("gizmos", "Show Gizmo"));
+        assert!(icon_stem_matches_target("gizmos", "Gizmos"));
+        assert!(icon_stem_matches_target("overlays", "Show Overlay"));
+        // Short words never plural-alias ("as" must not match "a").
+        assert!(!icon_stem_matches_target("as", "a"));
     }
 
     #[test]

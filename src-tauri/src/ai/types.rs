@@ -212,6 +212,12 @@ fn default_true() -> bool {
 /// signal, never risk.
 pub fn sanitize_steps(steps: &mut [GuidanceStep]) {
     for step in steps.iter_mut() {
+        // Fenced-JSON leak (live 2026-07-19, gemini-3.5-flash): the model nested a
+        // WHOLE response JSON inside the instruction field as a ```json block — the
+        // outer parse succeeds, so no recovery path fires and the raw block renders
+        // (and would be read aloud). Recover the inner instruction (and any target
+        // fields the outer step left empty) before the normal cleaning below.
+        recover_fenced_json_instruction(step);
         let (cleaned, ids) = sanitize_instruction_text(&step.instruction);
         if cleaned != step.instruction {
             log::info!("[sanitize] instruction cleaned (leaked ids: {ids:?})");
@@ -226,6 +232,46 @@ pub fn sanitize_steps(steps: &mut [GuidanceStep]) {
                 step.target_element_id = Some(only);
             }
         }
+    }
+}
+
+/// Extract a JSON string value for `key` from possibly-MALFORMED JSON text (the live
+/// leak had trailing garbage — `}\nLoc``` ` — so a full parse can't be relied on).
+/// Returns the unescaped value of the FIRST occurrence.
+fn extract_json_string(text: &str, key: &str) -> Option<String> {
+    let pattern = format!(r#""{key}"\s*:\s*("(?:[^"\\]|\\.)*")"#, key = regex::escape(key));
+    let re = regex::Regex::new(&pattern).ok()?;
+    let m = re.captures(text)?;
+    serde_json::from_str::<String>(&m[1]).ok()
+}
+
+/// When an instruction is substantially a fenced/inline JSON blob carrying our own
+/// response schema, replace it with the inner instruction and backfill empty target
+/// fields from the blob. Conservative trigger: the text must contain both a code fence
+/// (or a leading `{`) and a quoted `"instruction"` key — ordinary prose can't trip it.
+fn recover_fenced_json_instruction(step: &mut GuidanceStep) {
+    let text = step.instruction.trim().to_string();
+    let text = text.as_str();
+    let fenced = text.contains("```");
+    let jsonish = fenced || text.starts_with('{');
+    if !jsonish || !text.contains("\"instruction\"") {
+        return;
+    }
+    let Some(inner) = extract_json_string(text, "instruction") else {
+        // JSON-shaped but unrecoverable — strip the fences at least.
+        if fenced {
+            step.instruction = text.replace("```json", " ").replace("```", " ").trim().to_string();
+            log::info!("[sanitize] fenced block stripped (no inner instruction found)");
+        }
+        return;
+    };
+    log::info!("[sanitize] fenced-JSON instruction recovered ({} chars → {})", text.len(), inner.len());
+    step.instruction = inner;
+    if step.target_text.as_deref().is_none_or(|t| t.trim().is_empty()) {
+        step.target_text = extract_json_string(text, "target_text");
+    }
+    if step.target_nearby_text.is_none() {
+        step.target_nearby_text = extract_json_string(text, "target_nearby_text");
     }
 }
 
@@ -456,6 +502,40 @@ mod tests {
         )];
         sanitize_steps(&mut steps);
         assert_eq!(steps[0].target_element_id, Some(3));
+    }
+
+    #[test]
+    fn fenced_json_instruction_recovered() {
+        // The live 2026-07-19 leak, verbatim shape: a whole response JSON nested in
+        // the instruction as a fenced block, MALFORMED tail included.
+        let leaked = "```json\n{\n  \"needs_input\": false,\n  \"steps\": [\n    {\n      \"instruction\": \"Click the Show Gizmo icon (the coordinate axes icon with a dropdown arrow) in the top-right header of the 3D viewport.\",\n      \"overlay_type\": \"circle\",\n      \"target_nearby_text\": \"Options\",\n      \"target_role\": \"button\",\n      \"target_text\": \"Show Gizmo\"\n    }\n  ]\n}\n}\nLoc```\n  ]\n}";
+        let mut steps = vec![step(&serde_json::json!({ "instruction": leaked }).to_string())];
+        sanitize_steps(&mut steps);
+        assert_eq!(
+            steps[0].instruction,
+            "Click the Show Gizmo icon (the coordinate axes icon with a dropdown arrow) in the top-right header of the 3D viewport."
+        );
+        // Empty outer target fields backfilled from the blob.
+        assert_eq!(steps[0].target_text.as_deref(), Some("Show Gizmo"));
+        assert_eq!(steps[0].target_nearby_text.as_deref(), Some("Options"));
+    }
+
+    #[test]
+    fn fenced_json_never_overwrites_outer_targets_and_prose_untouched() {
+        // An outer target_text survives recovery.
+        let leaked = "```json\n{\"instruction\": \"Inner text.\", \"target_text\": \"Inner\"}```";
+        let mut steps = vec![step(
+            &serde_json::json!({ "instruction": leaked, "target_text": "Outer" }).to_string(),
+        )];
+        sanitize_steps(&mut steps);
+        assert_eq!(steps[0].instruction, "Inner text.");
+        assert_eq!(steps[0].target_text.as_deref(), Some("Outer"));
+        // Prose that merely MENTIONS the word instruction is untouched.
+        let mut steps = vec![step(
+            r#"{"instruction": "Follow the instruction shown in the dialog."}"#,
+        )];
+        sanitize_steps(&mut steps);
+        assert_eq!(steps[0].instruction, "Follow the instruction shown in the dialog.");
     }
 
     #[test]

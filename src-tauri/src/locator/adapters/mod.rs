@@ -20,6 +20,8 @@ use super::LocateResult;
 use anyhow::Result;
 
 #[cfg(windows)]
+mod blender;
+#[cfg(windows)]
 mod excel;
 #[cfg(windows)]
 pub(crate) mod office_com;
@@ -33,6 +35,22 @@ mod word;
 /// pane-quirk-aware conversion the adapter uses.
 #[cfg(windows)]
 pub(crate) use powerpoint::convert_rect_to_pixels as ppt_points_to_pixels;
+
+/// L1 app-state prompt block for the focused window, when a script channel offers one
+/// (script-adapters-plan.md §2: state grounding, consumed by the AI — distinct from the
+/// L2 geometry the adapters feed the locator). Snapshotted at AI-capture time alongside
+/// the screenshot. `None` when no channel applies — the prompt is then unchanged.
+pub fn app_state_block(hwnd: Option<usize>) -> Option<String> {
+    #[cfg(windows)]
+    {
+        blender::app_state_block(hwnd.filter(|h| *h != 0)?)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        None
+    }
+}
 
 /// Everything an adapter may gate or resolve on. `target_role`/`nearby_text` come from the
 /// AI response (both optional): the Office canvas adapters gate on role so they can never
@@ -111,6 +129,7 @@ fn adapters() -> Vec<Box<dyn Adapter>> {
             Box::new(excel::ExcelAdapter),
             Box::new(powerpoint::PowerPointAdapter),
             Box::new(word::WordAdapter),
+            Box::new(blender::BlenderAdapter),
         ]
     }
     #[cfg(not(windows))]
@@ -199,6 +218,42 @@ pub(crate) fn window_class_lower(hwnd: usize) -> String {
         }
         String::from_utf16_lossy(&buf[..n as usize]).to_ascii_lowercase()
     }
+}
+
+/// Full path to the executable owning `hwnd`. Used by add-on deployment to read
+/// Blender's version from its install layout when the window title doesn't carry it.
+#[cfg(windows)]
+pub(crate) fn window_exe_path(hwnd: usize) -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    unsafe {
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        ok.then(|| std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn window_exe_path(_hwnd: usize) -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Lowercase exe file stem of the process owning `hwnd` ("excel", …), or empty on failure.

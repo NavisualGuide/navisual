@@ -315,6 +315,90 @@ See the LICENSE file in the root of this repository for complete details.
   };
   let sharedApp = $state<SharedAppInfo | null>(null);
 
+  // ---- Blender add-on deployment (script-channel bridge) ----
+  // The pack ships navisual_bridge.py, but Blender only loads add-ons from its own
+  // config dir. Offer the copy when the user is actually working in Blender and the
+  // add-on is missing or older than the pack's — never nag on other apps, and never
+  // install without an explicit click (writing into another app's config dir is a
+  // user decision; the Add-ons checkbox remains the consent gate for RUNNING it).
+  type AddonStatus = {
+    pack_version: number | null;
+    available: boolean;
+    // Scoped to the Blender the user is actually working in — a second, up-to-date
+    // install must never raise the prompt (live 2026-07-19: it did, backwards).
+    target_version: string | null;
+    target_installed_version: number | null;
+    installs: { blender_version: string; addons_dir: string; installed_version: number | null }[];
+    needs_action: boolean;
+  };
+  let addonPrompt = $state<"hidden" | "offer" | "installing" | "done">("hidden");
+  let addonMessage = $state("");
+  // Dismissals are PER BLENDER VERSION, and only an OFFER can be dismissed. A single
+  // session-wide flag (v1) meant dismissing the post-install "Installed — tick the
+  // checkbox" note silenced every future offer, including for a different Blender
+  // (live 2026-07-19: quiet on both installs after a manual uninstall).
+  let addonDismissedFor = $state<string[]>([]);
+  // Which Blender version the visible offer is about (so ✕ dismisses just that one).
+  let addonOfferVersion = $state<string | null>(null);
+
+  async function maybeOfferBlenderAddon() {
+    if (addonPrompt === "installing") return;
+    if (!sharedApp || friendlyName(sharedApp.exe_name).toLowerCase() !== "blender") {
+      if (addonPrompt === "offer") addonPrompt = "hidden";
+      return;
+    }
+    try {
+      const st = await invoke<AddonStatus>("blender_addon_status", {
+        hwnd: sharedApp.hwnd ?? 0,
+      });
+      if (!st.available || !st.needs_action) {
+        addonPrompt = "hidden";
+        return;
+      }
+      if (st.target_version && addonDismissedFor.includes(st.target_version)) {
+        addonPrompt = "hidden";
+        return;
+      }
+      // Wording follows THIS Blender's own state, not any other install's.
+      const ver = st.target_version ? ` (Blender ${st.target_version})` : "";
+      addonMessage =
+        st.target_installed_version !== null
+          ? `A newer Navisual add-on is available${ver} — updating keeps tool pointing exact.`
+          : `Install the Navisual add-on${ver} for exact tool pointing (one-time setup).`;
+      addonOfferVersion = st.target_version;
+      addonPrompt = "offer";
+    } catch (_) {
+      addonPrompt = "hidden";
+    }
+  }
+
+  async function installBlenderAddon() {
+    addonPrompt = "installing";
+    try {
+      const r = await invoke<{ installed: string[]; errors: string[]; needs_enable: boolean }>(
+        "install_blender_addon",
+        { hwnd: sharedApp?.hwnd ?? 0 },
+      );
+      if (r.installed.length === 0) {
+        addonMessage = `Couldn't install: ${r.errors[0] ?? "no Blender installation found"}`;
+      } else if (r.needs_enable) {
+        // Blender scans scripts/addons at STARTUP (or on Preferences → Add-ons →
+        // Refresh), so a file copied into a running Blender is invisible until then —
+        // omitting this step left the user hunting for an add-on that was already on
+        // disk (live 2026-07-19). Restart is the instruction they verified; Refresh is
+        // the faster alternative for anyone who spots the button.
+        addonMessage =
+          "Installed. Restart Blender (or press Refresh in Preferences → Add-ons), then search “Navisual” there and tick its checkbox. One time only.";
+      } else {
+        addonMessage = "Updated. Restart Blender to load the new version.";
+      }
+      addonPrompt = "done";
+    } catch (e) {
+      addonMessage = `Couldn't install: ${e}`;
+      addonPrompt = "done";
+    }
+  }
+
   // ---- Workstream P (v0.7): prefilled task suggestions ----
   // The task box is prefilled with a plausible task, rendered SELECTED so one
   // keystroke replaces it; a small ▾ toggle reveals the other guesses in a
@@ -1868,8 +1952,16 @@ See the LICENSE file in the root of this repository for complete details.
     // window the backend is capturing.
     listen<SharedAppInfo>("app_changed", (event) => {
       const prevExe = sharedApp?.exe_name;
+      const prevHwnd = sharedApp?.hwnd;
       sharedApp = event.payload;
       maybeShowTargetHint();
+      // Re-check on ANY target change, not just a different exe: switching from one
+      // Blender to another (5.1 closed, 3.6 opened) keeps exe_name "blender", and the
+      // exe-only guard skipped the check entirely (live 2026-07-19). The status call
+      // is two local file reads — cheap enough for every target change.
+      if (event.payload.exe_name !== prevExe || event.payload.hwnd !== prevHwnd) {
+        maybeOfferBlenderAddon();
+      }
       // Workstream P: a different app means stale guesses — refresh the cold-start
       // prefill (no-op unless idle with an untouched box; clearPrefill first so an
       // old app's prefill can't survive the switch).
@@ -1886,6 +1978,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (initial) {
         sharedApp = initial;
         maybeShowTargetHint();
+        maybeOfferBlenderAddon();
       }
     } catch (_) {}
     // Workstream P: first cold-start prefill once the shared-app info settled.
@@ -2380,6 +2473,32 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
       {/if}
     </div>
+
+    <!-- Blender add-on offer: shown only while Blender is the shared app AND the
+         pack ships a newer (or first) bridge. One click installs; enabling stays a
+         deliberate user action inside Blender. -->
+    {#if addonPrompt !== "hidden"}
+      <div class="stale-banner addon-banner" role="status">
+        <span class="stale-icon">🧩</span>
+        <span class="stale-text">{addonMessage}</span>
+        {#if addonPrompt === "offer"}
+          <button class="stale-action" onclick={installBlenderAddon}>Install</button>
+        {:else if addonPrompt === "installing"}
+          <span class="addon-busy">Installing…</span>
+        {/if}
+        <button
+          class="stale-dismiss"
+          onclick={() => {
+            // Only silence a rejected OFFER, and only for that Blender version —
+            // closing the post-install note must not suppress future offers.
+            if (addonPrompt === "offer" && addonOfferVersion) {
+              addonDismissedFor = [...addonDismissedFor, addonOfferVersion];
+            }
+            addonPrompt = "hidden";
+          }}
+          title="Dismiss">✕</button>
+      </div>
+    {/if}
 
     <!-- Task input — always enabled; Enter submits, isReply detected from phase -->
     <section class="task-section">
@@ -3824,6 +3943,21 @@ See the LICENSE file in the root of this repository for complete details.
     line-height: 1.35;
   }
   .stale-icon { color: #ffb800; font-size: 13px; flex-shrink: 0; }
+  /* Add-on offer: same shape as the warning banners but informational, not alarming. */
+  .addon-banner {
+    margin: 0 10px 8px;
+    background: rgba(120, 160, 255, 0.10);
+    border-color: rgba(120, 160, 255, 0.30);
+  }
+  .addon-banner .stale-icon { color: #8fb0ff; }
+  /* Post-install instructions are three steps — let them wrap to a readable block
+     rather than truncating into one cramped line. */
+  .addon-banner .stale-text { line-height: 1.45; }
+  .addon-banner .stale-action {
+    border-color: rgba(140, 175, 255, 0.5);
+    color: #a8c2ff;
+  }
+  .addon-busy { font-size: 11px; color: var(--text-tertiary, #8a8a8a); flex-shrink: 0; }
   .stale-text { flex: 1; min-width: 0; }
   .stale-action {
     background: transparent;

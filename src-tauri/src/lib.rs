@@ -936,6 +936,20 @@ async fn arm_candidates_if_shown(
     });
 }
 
+/// L1 app-state block for the prompt, bounded so a wedged script channel can never
+/// stall a capture (the channel's own connect/read timeouts are ~200/700 ms; this is
+/// the outer safety net, mirroring `enumerate_context_snapshot_bounded`'s contract).
+fn app_state_snapshot(hwnd: Option<usize>) -> Option<String> {
+    let started = std::time::Instant::now();
+    let block = locator::adapters::app_state_block(hwnd)?;
+    log::info!(
+        "[app_state] block collected in {} ms ({} chars)",
+        started.elapsed().as_millis(),
+        block.len()
+    );
+    Some(block)
+}
+
 /// Exe filename stem for `LocateTrace.app_name` — PII-free app identity (see the field's
 /// doc comment for why this is the exe stem and not the resolved display title).
 fn trace_app_name(hwnd_opt: Option<usize>) -> Option<String> {
@@ -1061,6 +1075,69 @@ fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
         let _ = (state, hwnd);
         Vec::new()
     }
+}
+
+/// Deployment status of the pack-shipped Blender add-on (the script-channel bridge):
+/// which Blender installs exist, whether each has the add-on, and whether any is older
+/// than the version the pack ships. Drives the panel's install prompt.
+#[tauri::command]
+fn blender_addon_status(
+    state: State<'_, AppState>,
+    hwnd: u64,
+) -> packs::addon_install::AddonStatus {
+    let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
+    let version = blender_target_version(hwnd);
+    packs::addon_install::status(dir.as_deref(), version.as_deref())
+}
+
+/// Config-folder version ("5.1") of the Blender the prompt is about. Scoping to the
+/// TARGET is what keeps the offer about the Blender in front of the user.
+///
+/// Two sources, because neither alone covers every version: the window title carries
+/// it on 4.x+ ("… - Blender 5.1.2"), while **Blender ≤3.x titles its window just
+/// "Blender"** — for those, the `<major>.<minor>` resource folder beside `blender.exe`
+/// is authoritative (live 2026-07-19: title-only made 3.6 permanently silent).
+fn blender_target_version(hwnd: u64) -> Option<String> {
+    #[cfg(windows)]
+    {
+        if hwnd == 0 {
+            return None;
+        }
+        let hwnd = hwnd as usize;
+        let from_title =
+            packs::addon_install::config_version_from_title(&capture::get_window_title(hwnd));
+        from_title.or_else(|| {
+            locator::adapters::window_exe_path(hwnd)
+                .as_deref()
+                .and_then(packs::addon_install::config_version_from_exe)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        None
+    }
+}
+
+/// Copy the pack's add-on into every detected Blender config directory. Explicitly
+/// user-initiated (writing into another application's config dir is not something to do
+/// silently), and deliberately does NOT enable it — the Add-ons checkbox stays the
+/// consent gate. Returns what the user must do next.
+#[tauri::command]
+fn install_blender_addon(
+    state: State<'_, AppState>,
+    hwnd: u64,
+) -> packs::addon_install::InstallResult {
+    let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
+    let version = blender_target_version(hwnd);
+    let result = packs::addon_install::install(dir.as_deref(), version.as_deref());
+    log::info!(
+        "[blender-addon] install (target {version:?}) → {:?} (errors: {:?}, needs_enable={})",
+        result.installed,
+        result.errors,
+        result.needs_enable
+    );
+    result
 }
 
 /// Must match Overlay.svelte's `APP_BOUNDARY_DURATION_MS` — no constant is
@@ -1785,6 +1862,12 @@ async fn guide(
     }
     if let (Some(els), Some(rect)) = (context_elements.as_deref(), capture_rect_opt) {
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
+    }
+    // L1 app state from a script channel (Blender bridge today) — facts the screenshot
+    // can't convey. Same capture-time atomicity as [Screen Elements]; absent when no
+    // channel applies.
+    if let Some(block) = app_state_snapshot(new_hwnd_opt) {
+        window_context.push_str(&block);
     }
 
     // Append window context to the prompt (no grid suffix any more — AI returns
@@ -2772,6 +2855,10 @@ async fn send_correction(
     }
     if let (Some(els), Some(rect)) = (context_elements.as_deref(), new_capture_rect) {
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
+    }
+    // L1 app state — same as guide()'s capture path.
+    if let Some(block) = app_state_snapshot(new_hwnd) {
+        window_context.push_str(&block);
     }
 
     // Same language + goal anchor as guide()'s continuation turns — a correction is a
@@ -4565,6 +4652,8 @@ pub fn run() {
             restore_overlay,
             get_shared_app_info,
             get_pack_starters,
+            blender_addon_status,
+            install_blender_addon,
             speak,
             get_settings,
             save_settings,
