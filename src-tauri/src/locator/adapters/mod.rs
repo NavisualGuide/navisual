@@ -220,6 +220,42 @@ pub(crate) fn window_class_lower(hwnd: usize) -> String {
     }
 }
 
+/// Full path to the executable owning `hwnd`. Used by add-on deployment to read
+/// Blender's version from its install layout when the window title doesn't carry it.
+#[cfg(windows)]
+pub(crate) fn window_exe_path(hwnd: usize) -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    unsafe {
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        ok.then(|| std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn window_exe_path(_hwnd: usize) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Lowercase exe file stem of the process owning `hwnd` ("excel", …), or empty on failure.
 #[cfg(windows)]
 pub(crate) fn window_exe_stem_lower(hwnd: usize) -> String {

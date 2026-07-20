@@ -1086,17 +1086,31 @@ fn blender_addon_status(
     hwnd: u64,
 ) -> packs::addon_install::AddonStatus {
     let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
-    let title = blender_target_title(hwnd);
-    packs::addon_install::status(dir.as_deref(), title.as_deref())
+    let version = blender_target_version(hwnd);
+    packs::addon_install::status(dir.as_deref(), version.as_deref())
 }
 
-/// Title of the window the add-on prompt is about — the version lives in it
-/// ("… - Blender 5.1.2"), and scoping to it is what keeps the prompt about the Blender
-/// the user is actually working in.
-fn blender_target_title(hwnd: u64) -> Option<String> {
+/// Config-folder version ("5.1") of the Blender the prompt is about. Scoping to the
+/// TARGET is what keeps the offer about the Blender in front of the user.
+///
+/// Two sources, because neither alone covers every version: the window title carries
+/// it on 4.x+ ("… - Blender 5.1.2"), while **Blender ≤3.x titles its window just
+/// "Blender"** — for those, the `<major>.<minor>` resource folder beside `blender.exe`
+/// is authoritative (live 2026-07-19: title-only made 3.6 permanently silent).
+fn blender_target_version(hwnd: u64) -> Option<String> {
     #[cfg(windows)]
     {
-        (hwnd != 0).then(|| capture::get_window_title(hwnd as usize))
+        if hwnd == 0 {
+            return None;
+        }
+        let hwnd = hwnd as usize;
+        let from_title =
+            packs::addon_install::config_version_from_title(&capture::get_window_title(hwnd));
+        from_title.or_else(|| {
+            locator::adapters::window_exe_path(hwnd)
+                .as_deref()
+                .and_then(packs::addon_install::config_version_from_exe)
+        })
     }
     #[cfg(not(windows))]
     {
@@ -1115,11 +1129,10 @@ fn install_blender_addon(
     hwnd: u64,
 ) -> packs::addon_install::InstallResult {
     let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
-    let title = blender_target_title(hwnd);
-    let result = packs::addon_install::install(dir.as_deref(), title.as_deref());
+    let version = blender_target_version(hwnd);
+    let result = packs::addon_install::install(dir.as_deref(), version.as_deref());
     log::info!(
-        "[blender-addon] install (target {:?}) → {:?} (errors: {:?}, needs_enable={})",
-        title.as_deref().and_then(packs::addon_install::config_version_from_title),
+        "[blender-addon] install (target {version:?}) → {:?} (errors: {:?}, needs_enable={})",
         result.installed,
         result.errors,
         result.needs_enable

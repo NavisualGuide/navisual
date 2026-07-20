@@ -57,8 +57,43 @@ pub struct AddonStatus {
     pub needs_action: bool,
 }
 
-/// Blender's window title always ends "… - Blender <major>.<minor>.<patch>"; the config
-/// folder is `<major>.<minor>`. Returns None for a non-Blender or unusual title.
+/// Blender's install layout always carries a `<major>.<minor>` resource folder beside
+/// `blender.exe` (`3.6/`, `5.1/` — holding `scripts/`, `datafiles/`), and that folder is
+/// named exactly like the per-version CONFIG folder we install into. This is the
+/// reliable version source: **Blender ≤3.x titles its window just "Blender"** with no
+/// version at all (live 2026-07-19 — which made 3.6 unreachable when the title was the
+/// only source), while every version has this folder.
+pub fn config_version_from_exe(exe_path: &Path) -> Option<String> {
+    let dir = exe_path.parent()?;
+    let mut best: Option<(u32, u32, String)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let mut parts = name.split('.');
+        let (Some(major), Some(minor), None) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(major), Ok(minor)) = (major.parse::<u32>(), minor.parse::<u32>()) else {
+            continue;
+        };
+        // Sanity: Blender's resource folder holds `datafiles`. Keeps an unrelated
+        // "1.0" directory in a portable folder from being mistaken for it.
+        if !entry.path().join("datafiles").is_dir() {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(bm, bn, _)| (major, minor) > (*bm, *bn)) {
+            best = Some((major, minor, name));
+        }
+    }
+    best.map(|(_, _, name)| name)
+}
+
+/// Blender's window title ends "… - Blender <major>.<minor>.<patch>" on 4.x+; the config
+/// folder is `<major>.<minor>`. Returns None for a non-Blender or version-less title
+/// (Blender ≤3.x titles the window just "Blender") — callers fall back to
+/// [`config_version_from_exe`].
 pub fn config_version_from_title(title: &str) -> Option<String> {
     let idx = title.rfind("Blender ")?;
     let rest = &title[idx + "Blender ".len()..];
@@ -121,7 +156,7 @@ fn blender_config_dirs() -> Vec<(String, PathBuf)> {
 
 /// Deployment status for the Blender identified by `target_title` (the target window's
 /// title). `pack_dir` is the loaded Blender pack's directory.
-pub fn status(pack_dir: Option<&Path>, target_title: Option<&str>) -> AddonStatus {
+pub fn status(pack_dir: Option<&Path>, target_version: Option<&str>) -> AddonStatus {
     let source = pack_dir.map(|d| d.join(ADDON_FILE)).filter(|p| p.is_file());
     let pack_version = source.as_deref().and_then(parse_version);
     let installs: Vec<AddonInstall> = blender_config_dirs()
@@ -136,7 +171,7 @@ pub fn status(pack_dir: Option<&Path>, target_title: Option<&str>) -> AddonStatu
             }
         })
         .collect();
-    let target_version = target_title.and_then(config_version_from_title);
+    let target_version = target_version.map(|s| s.to_string());
     // The target's installed version. A running Blender whose config dir we haven't
     // seen yet (fresh install) is simply "not installed" — install() creates the dir.
     let target_installed_version = target_version.as_ref().and_then(|tv| {
@@ -176,7 +211,7 @@ pub struct InstallResult {
 /// its window title). Falls back to every detected install only when the target can't
 /// be identified — installing into versions the user isn't running is what made the v1
 /// prompt confusing, so it's the exception, not the rule.
-pub fn install(pack_dir: Option<&Path>, target_title: Option<&str>) -> InstallResult {
+pub fn install(pack_dir: Option<&Path>, target_version: Option<&str>) -> InstallResult {
     let mut result = InstallResult {
         installed: Vec::new(),
         errors: Vec::new(),
@@ -187,7 +222,7 @@ pub fn install(pack_dir: Option<&Path>, target_title: Option<&str>) -> InstallRe
         return result;
     };
     let mut dirs = blender_config_dirs();
-    if let Some(tv) = target_title.and_then(config_version_from_title) {
+    if let Some(tv) = target_version.map(|s| s.to_string()) {
         // Scope to the running version. If its config dir hasn't been created yet
         // (fresh install), synthesize the path — create_dir_all below makes it.
         if let Some(found) = dirs.iter().find(|(v, _)| *v == tv).cloned() {
@@ -254,7 +289,7 @@ mod tests {
 
     #[test]
     fn status_without_pack_is_unavailable() {
-        let s = status(None, Some("x.blend - Blender 5.1.2"));
+        let s = status(None, Some("5.1"));
         assert!(!s.available);
         assert!(!s.needs_action, "nothing to install → no action prompt");
         assert_eq!(s.pack_version, None);
@@ -300,7 +335,33 @@ mod tests {
         );
         // Non-Blender / unusual titles never yield a version (→ never prompt).
         assert_eq!(config_version_from_title("Document1 - Word"), None);
+        // THE 3.6 CASE: Blender ≤3.x titles its window just "Blender" — no version.
+        // Title-only resolution left 3.6 permanently silent (live 2026-07-19); the
+        // caller must fall back to the exe layout, tested below.
         assert_eq!(config_version_from_title("Blender"), None);
+    }
+
+    #[test]
+    fn resolves_version_from_blender_install_layout() {
+        // Blender ships a "<major>.<minor>" resource folder beside blender.exe.
+        let d = tmp();
+        let install = d.join("blender-3.6.22-windows-x64");
+        fs::create_dir_all(install.join("3.6").join("datafiles")).unwrap();
+        fs::write(install.join("blender.exe"), b"stub").unwrap();
+        assert_eq!(
+            config_version_from_exe(&install.join("blender.exe")).as_deref(),
+            Some("3.6")
+        );
+        // A stray version-shaped folder without `datafiles` is not the resource dir.
+        fs::create_dir_all(install.join("9.9")).unwrap();
+        assert_eq!(
+            config_version_from_exe(&install.join("blender.exe")).as_deref(),
+            Some("3.6"),
+            "only the folder holding datafiles counts"
+        );
+        // No layout at all → None (caller then never prompts).
+        assert_eq!(config_version_from_exe(&d.join("nothing/blender.exe")), None);
+        fs::remove_dir_all(&d).ok();
     }
 
     #[test]
@@ -331,7 +392,7 @@ mod tests {
     #[ignore]
     fn addon_status_live() {
         let pack = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packs").join("blender");
-        let s = status(Some(&pack), std::env::var("TARGET_TITLE").ok().as_deref());
+        let s = status(Some(&pack), std::env::var("TARGET_VER").ok().as_deref());
         eprintln!("pack ships add-on: {} (version {:?})", s.available, s.pack_version);
         eprintln!("needs_action: {}", s.needs_action);
         for i in &s.installs {
