@@ -4,6 +4,11 @@
 # §3.5). Install once: Edit → Preferences → Add-ons → Install… → pick this file → enable
 # "Navisual Bridge". The checkbox IS the consent: nothing runs until you enable it.
 #
+# If Navisual placed this file for you, Blender won't list it until it rescans
+# scripts/addons — restart Blender, or press Refresh in Preferences → Add-ons — and then
+# tick the checkbox. Updating an already-enabled copy needs a Blender restart to reload
+# the module.
+#
 # What it does (and all it does): opens a localhost-only socket (127.0.0.1:47611) that
 # answers three READ-ONLY queries about the Blender UI — region layout, active tool/mode,
 # and the tool-shelf item rects — so Navisual can point at tools with exact geometry

@@ -382,8 +382,13 @@ See the LICENSE file in the root of this repository for complete details.
       if (r.installed.length === 0) {
         addonMessage = `Couldn't install: ${r.errors[0] ?? "no Blender installation found"}`;
       } else if (r.needs_enable) {
+        // Blender scans scripts/addons at STARTUP (or on Preferences → Add-ons →
+        // Refresh), so a file copied into a running Blender is invisible until then —
+        // omitting this step left the user hunting for an add-on that was already on
+        // disk (live 2026-07-19). Restart is the instruction they verified; Refresh is
+        // the faster alternative for anyone who spots the button.
         addonMessage =
-          "Installed. In Blender: Edit → Preferences → Add-ons, search “Navisual”, tick the checkbox. (One time only.)";
+          "Installed. Restart Blender (or press Refresh in Preferences → Add-ons), then search “Navisual” there and tick its checkbox. One time only.";
       } else {
         addonMessage = "Updated. Restart Blender to load the new version.";
       }
@@ -3945,6 +3950,13 @@ See the LICENSE file in the root of this repository for complete details.
     border-color: rgba(120, 160, 255, 0.30);
   }
   .addon-banner .stale-icon { color: #8fb0ff; }
+  /* Post-install instructions are three steps — let them wrap to a readable block
+     rather than truncating into one cramped line. */
+  .addon-banner .stale-text { line-height: 1.45; }
+  .addon-banner .stale-action {
+    border-color: rgba(140, 175, 255, 0.5);
+    color: #a8c2ff;
+  }
   .addon-busy { font-size: 11px; color: var(--text-tertiary, #8a8a8a); flex-shrink: 0; }
   .stale-text { flex: 1; min-width: 0; }
   .stale-action {
