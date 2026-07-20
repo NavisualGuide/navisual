@@ -260,6 +260,34 @@ mod tests {
         assert_eq!(s.pack_version, None);
     }
 
+    /// The add-on carries its version twice — `bl_info["version"]` (what Blender's
+    /// Add-ons panel displays) and `BRIDGE_VERSION` (what Navisual's staleness check
+    /// reads). They drifted live 2026-07-19: the panel showed "1.0.0" for a v2 bridge.
+    /// This pins them together at build time.
+    #[test]
+    fn bl_info_matches_bridge_version() {
+        let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("packs")
+            .join("blender")
+            .join(ADDON_FILE);
+        let text = fs::read_to_string(&file).expect("pack ships the add-on");
+        let bridge = parse_version(&file).expect("BRIDGE_VERSION present");
+        let bl_major: i64 = text
+            .lines()
+            .find_map(|l| {
+                let l = l.trim();
+                let rest = l.strip_prefix("\"version\":")?;
+                let open = rest.find('(')?;
+                rest[open + 1..].split(',').next()?.trim().parse().ok()
+            })
+            .expect("bl_info version tuple present");
+        assert_eq!(
+            bl_major, bridge,
+            "bl_info version major ({bl_major}) must equal BRIDGE_VERSION ({bridge}) — \
+             Blender's Add-ons panel shows the former, Navisual checks the latter"
+        );
+    }
+
     #[test]
     fn parses_config_version_from_title() {
         assert_eq!(

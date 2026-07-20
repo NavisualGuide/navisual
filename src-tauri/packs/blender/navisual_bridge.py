@@ -10,10 +10,15 @@
 # instead of image matching. It never calls operators, never modifies data, and never
 # accepts connections from other machines.
 
+# The MAJOR version here is the bridge protocol version and MUST equal BRIDGE_VERSION
+# below — Blender's Add-ons panel shows this one, Navisual's staleness check reads that
+# one, and a divergence means the UI says "1.0.0" while the app expects v2 (live
+# 2026-07-19). A Rust unit test (`packs::addon_install::bl_info_matches_bridge_version`)
+# fails the build if they drift apart.
 bl_info = {
     "name": "Navisual Bridge",
     "author": "Navisual",
-    "version": (1, 0, 0),
+    "version": (2, 0, 0),
     "blender": (3, 0, 0),
     "location": "background (localhost:47611)",
     "description": "Read-only UI layout/state bridge for the Navisual screen guide",

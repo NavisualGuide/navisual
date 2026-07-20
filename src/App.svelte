@@ -333,10 +333,16 @@ See the LICENSE file in the root of this repository for complete details.
   };
   let addonPrompt = $state<"hidden" | "offer" | "installing" | "done">("hidden");
   let addonMessage = $state("");
-  let addonDismissed = $state(false);
+  // Dismissals are PER BLENDER VERSION, and only an OFFER can be dismissed. A single
+  // session-wide flag (v1) meant dismissing the post-install "Installed — tick the
+  // checkbox" note silenced every future offer, including for a different Blender
+  // (live 2026-07-19: quiet on both installs after a manual uninstall).
+  let addonDismissedFor = $state<string[]>([]);
+  // Which Blender version the visible offer is about (so ✕ dismisses just that one).
+  let addonOfferVersion = $state<string | null>(null);
 
   async function maybeOfferBlenderAddon() {
-    if (addonDismissed || addonPrompt === "installing") return;
+    if (addonPrompt === "installing") return;
     if (!sharedApp || friendlyName(sharedApp.exe_name).toLowerCase() !== "blender") {
       if (addonPrompt === "offer") addonPrompt = "hidden";
       return;
@@ -349,12 +355,17 @@ See the LICENSE file in the root of this repository for complete details.
         addonPrompt = "hidden";
         return;
       }
+      if (st.target_version && addonDismissedFor.includes(st.target_version)) {
+        addonPrompt = "hidden";
+        return;
+      }
       // Wording follows THIS Blender's own state, not any other install's.
       const ver = st.target_version ? ` (Blender ${st.target_version})` : "";
       addonMessage =
         st.target_installed_version !== null
           ? `A newer Navisual add-on is available${ver} — updating keeps tool pointing exact.`
           : `Install the Navisual add-on${ver} for exact tool pointing (one-time setup).`;
+      addonOfferVersion = st.target_version;
       addonPrompt = "offer";
     } catch (_) {
       addonPrompt = "hidden";
@@ -1936,9 +1947,16 @@ See the LICENSE file in the root of this repository for complete details.
     // window the backend is capturing.
     listen<SharedAppInfo>("app_changed", (event) => {
       const prevExe = sharedApp?.exe_name;
+      const prevHwnd = sharedApp?.hwnd;
       sharedApp = event.payload;
       maybeShowTargetHint();
-      if (event.payload.exe_name !== prevExe) maybeOfferBlenderAddon();
+      // Re-check on ANY target change, not just a different exe: switching from one
+      // Blender to another (5.1 closed, 3.6 opened) keeps exe_name "blender", and the
+      // exe-only guard skipped the check entirely (live 2026-07-19). The status call
+      // is two local file reads — cheap enough for every target change.
+      if (event.payload.exe_name !== prevExe || event.payload.hwnd !== prevHwnd) {
+        maybeOfferBlenderAddon();
+      }
       // Workstream P: a different app means stale guesses — refresh the cold-start
       // prefill (no-op unless idle with an untouched box; clearPrefill first so an
       // old app's prefill can't survive the switch).
@@ -2465,7 +2483,14 @@ See the LICENSE file in the root of this repository for complete details.
         {/if}
         <button
           class="stale-dismiss"
-          onclick={() => { addonPrompt = "hidden"; addonDismissed = true; }}
+          onclick={() => {
+            // Only silence a rejected OFFER, and only for that Blender version —
+            // closing the post-install note must not suppress future offers.
+            if (addonPrompt === "offer" && addonOfferVersion) {
+              addonDismissedFor = [...addonDismissedFor, addonOfferVersion];
+            }
+            addonPrompt = "hidden";
+          }}
           title="Dismiss">✕</button>
       </div>
     {/if}
