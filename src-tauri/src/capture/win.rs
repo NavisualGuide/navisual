@@ -106,9 +106,11 @@ pub fn get_window_title(hwnd_raw: usize) -> String {
 /// Pure geometry, no sampling: take the located rect ∩ the target window's frame, then
 /// subtract every higher-z window that belongs to a DIFFERENT app; if any area is left,
 /// the target shows through → draw. If nothing is left, the spot is fully covered →
-/// suppress. The target app's own windows and our click-through overlay (the pointer
-/// itself) aren't occluders, but our **opaque panel** is — covering the target with the
-/// Navisual panel hides the pointer. Returns true (don't suppress) for degenerate inputs.
+/// suppress. The target app's own windows and ALL of our own windows (the click-through
+/// overlay AND the opaque panel) are exempt — only *another app* covering the target
+/// suppresses the pointer. When our own panel is what sits over the target we still draw
+/// (the topmost overlay renders the pointer over the panel), so the user sees the button is
+/// there and moves the panel aside. Returns true (don't suppress) for degenerate inputs.
 pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize) -> bool {
     if target_hwnd == 0 || w <= 0 || h <= 0 {
         return true;
@@ -174,16 +176,20 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
         if cloaked != 0 {
             return TRUE;
         }
-        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        // Our own click-through overlay (WS_EX_TRANSPARENT) IS the pointer — never an
-        // occluder. But our opaque panel DOES occlude: if it covers the target the user
-        // can't see or reach it, so the pointer should hide. Other apps' tool windows
-        // (tooltips, helpers) don't occlude; our own panel can be a tool window, so the
-        // tool-window skip is scoped to other processes.
-        if (ex & WS_EX_TRANSPARENT.0) != 0 {
+        // Our OWN windows never occlude the target. Occlusion detection is about ANOTHER app
+        // hiding the button (where a pointer would mislead); our windows are not that. The
+        // click-through overlay IS the pointer, and the opaque panel is ours — and trivially
+        // movable by the user. Treating the panel as an occluder blanked the WHOLE overlay
+        // (no pointer, no caption) and fired a useless "re-analyse" whenever our chrome happened
+        // to sit over the target — worse than drawing the pointer over the panel so the user sees
+        // the button is there and slides the panel aside (the user stays in control; we don't
+        // move our own window out from under them).
+        if pid == st.our_pid {
             return TRUE;
         }
-        if pid != st.our_pid && (ex & WS_EX_TOOLWINDOW.0) != 0 {
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        // Other apps' tool windows (tooltips, helpers) aren't real occluders either.
+        if (ex & WS_EX_TOOLWINDOW.0) != 0 {
             return TRUE;
         }
         if let Some(r) = frame_rect_of(hwnd) {
