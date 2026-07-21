@@ -2140,11 +2140,14 @@ See the LICENSE file in the root of this repository for complete details.
              title bar reads as dunning, not help. The exact count is one click
              away (Billing tab, same destination as the free chip below — both
              lead somewhere actionable, not a read-only report). Free users get
-             the opposite treatment just below: a visible, reddening count is an
-             intentional, appropriate nudge before their trial runs out. -->
+             a related treatment just below: the count stays HIDDEN while the
+             trial is comfortable and only surfaces — reddening — once ≤ 5
+             remain. A constant meter in the title bar reads as a countdown and
+             makes the free experience itself feel metered (strategy §4.3); the
+             number earns its place only when it's an actual, timely nudge. -->
         <button class="header-balance" onclick={() => openSettings("billing")} title="View billing">🪙</button>
-      {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null}
-        <button class="header-balance" class:header-balance-low={billing.freeRemaining <= 5} onclick={() => openSettings("billing")} title="Get more requests">{billing.freeRemaining} left</button>
+      {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null && billing.freeRemaining <= 5}
+        <button class="header-balance header-balance-low" onclick={() => openSettings("billing")} title="Get more requests">{billing.freeRemaining} left</button>
       {/if}
       {#if pendingUpdate}
         <button class="header-update" onclick={() => openAbout("about")} title="Update available">
