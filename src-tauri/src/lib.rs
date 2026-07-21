@@ -1938,6 +1938,9 @@ async fn guide(
         .as_ref()
         .map(|s| s.task_description.clone())
         .unwrap_or_default();
+    // An explicitly-chosen Language setting is an authoritative reply-language signal (it also
+    // rescues the pinyin-mis-transcription case); "auto" defers to the request's own script.
+    let voice_language = router.config.voice_language.clone();
 
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let summary = {
@@ -1955,7 +1958,7 @@ async fn guide(
         let prompt = format!(
             "{}{}",
             add_grid(base),
-            crate::ai::prompts::language_anchor(&original_task)
+            crate::ai::prompts::reply_language_directive(&original_task, &voice_language)
         );
         (
             router
@@ -1971,7 +1974,7 @@ async fn guide(
         let prompt = format!(
             "{}{}",
             add_grid(task.clone()),
-            crate::ai::prompts::language_anchor(&original_task)
+            crate::ai::prompts::reply_language_directive(&original_task, &voice_language)
         );
         (
             router
@@ -1980,7 +1983,15 @@ async fn guide(
             prompt,
         )
     } else {
-        let prompt = add_grid(crate::ai::prompts::initial_context_template(&task));
+        // Turn 1: the request IS the prompt, but it sits near the TOP with the whole screenshot +
+        // [Screen Elements] list (often in the app's UI language) between it and the model's reply.
+        // Anchor on `task` itself at the tail so a short request can't be out-shouted by a screen
+        // full of another language — the user's language ≠ app-UI-language case.
+        let prompt = format!(
+            "{}{}",
+            add_grid(crate::ai::prompts::initial_context_template(&task)),
+            crate::ai::prompts::reply_language_directive(&task, &voice_language)
+        );
         (
             router
                 .send_guidance_request(&prompt, Some(&screenshot_b64), None, on_chunk)
@@ -2871,7 +2882,8 @@ async fn send_correction(
         .as_ref()
         .map(|s| s.task_description.clone())
         .unwrap_or_default();
-    let anchor = crate::ai::prompts::language_anchor(&original_task);
+    let anchor =
+        crate::ai::prompts::reply_language_directive(&original_task, &router.config.voice_language);
 
     let final_user_text = if !window_context.is_empty() {
         format!("{user_text_owned}\n{window_context}{anchor}")

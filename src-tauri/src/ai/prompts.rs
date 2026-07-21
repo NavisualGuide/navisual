@@ -93,10 +93,17 @@ actions — the user does everything.
 == WORDING — instructions are READ ALOUD to a person ==
 13. LANGUAGE: respond ENTIRELY in the language of the USER'S TYPED OR SPOKEN
     REQUEST — every instruction and the state_summary. ONLY the user's request
-    determines the language: on-screen content, file names, window titles, and
-    UI labels must NOT change it. English request → English response even on a
-    fully non-English screen (and vice versa). Keep the user's language across
-    follow-ups and corrections; never switch or mix languages mid-task.
+    determines the language. The app's own interface is frequently in a
+    DIFFERENT language from the user, and that must NOT change your reply: the
+    screenshot, the [Screen Elements] list, on-screen content, file names,
+    window titles, and UI labels are all evidence about WHERE to click, never
+    about which language to write in. A Chinese request on an English app →
+    reply in Chinese; an English request on a Chinese/Japanese/German app →
+    reply in English. When you must name a UI label the user has to find, you
+    may quote it verbatim, but the surrounding instruction stays in the user's
+    language. Keep that language across every follow-up and correction; never
+    switch or mix languages mid-task. A LANGUAGE LOCK line at the end of the
+    prompt names the target language — obey it over any other signal.
 14. PLAIN SPOKEN TEXT: never put machine references in instruction text — no
     pixel positions, x/y values, or coordinate ranges ("the grey box starts at
     x ≈ 322" is forbidden; coordinates belong ONLY in target_bbox), and no ids
@@ -231,26 +238,108 @@ pub fn initial_context_template(task_description: &str) -> String {
     )
 }
 
-/// A per-turn language re-anchor for continuation turns (Next / resume / reply).
+/// English name of a BCP-47 tag or bare language code, for the LANGUAGE LOCK. `None` for
+/// anything we can't name confidently → the caller falls back to the exemplar form.
+fn lang_name(code: &str) -> Option<&'static str> {
+    let primary = code
+        .split(['-', '_'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Some(match primary.as_str() {
+        "en" => "English",
+        "zh" => "Chinese",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "ru" => "Russian",
+        "ar" => "Arabic",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "pt" => "Portuguese",
+        "it" => "Italian",
+        _ => return None,
+    })
+}
+
+/// Dominant non-Latin script of `text` as a language code ("zh"/"ja"/"ko"/"ru"/"ar"), or `None`
+/// when the text is Latin-scripted or its non-Latin content is only incidental.
 ///
-/// Why (recurring live issue, 2026-07-13): on a multi-turn session a Chinese-native model
-/// (Qwen) drifts into Chinese even for an all-English task on an all-English screen —
-/// the LANGUAGE rule lives deep in a long static system prompt (low salience), the immediate
-/// turn message is a machine-generated `[User completed: …]` (not the user's own words), and
-/// once the model emits ONE Chinese reply the Chinese state_summary + Chinese completed-step
-/// echo feed back and lock it in; the original request also scrolls out of the 10-turn history
-/// window. This restates the original request verbatim at the very END of the prompt (recency
-/// = high salience) as the language exemplar, re-anchoring both the goal and its language every
-/// turn. Empty task → empty string (no anchor to add).
-pub fn language_anchor(original_task: &str) -> String {
-    let t = original_task.trim();
-    if t.is_empty() {
+/// Deliberately stricter than `tts::strong_script_lang` (which fires on a SINGLE non-Latin char,
+/// because a voice must pronounce whatever is on screen). Here the non-Latin script must actually
+/// DOMINATE: the user pastes long, sometimes mixed-language instructions, and one stray CJK
+/// app-name inside an English request must NOT flip the whole reply to Chinese.
+pub(crate) fn dominant_script_lang(text: &str) -> Option<&'static str> {
+    let (mut latin, mut kana, mut hangul, mut han, mut cyr, mut arab) = (0u32, 0, 0, 0, 0, 0);
+    for c in text.chars() {
+        let u = c as u32;
+        if c.is_ascii_alphabetic() || (0x00c0..=0x024f).contains(&u) {
+            latin += 1;
+        } else if (0x3040..=0x30ff).contains(&u) {
+            kana += 1;
+        } else if (0xac00..=0xd7af).contains(&u) || (0x1100..=0x11ff).contains(&u) {
+            hangul += 1;
+        } else if (0x4e00..=0x9fff).contains(&u) || (0x3400..=0x4dbf).contains(&u) {
+            han += 1;
+        } else if (0x0400..=0x04ff).contains(&u) {
+            cyr += 1;
+        } else if (0x0600..=0x06ff).contains(&u) {
+            arab += 1;
+        }
+    }
+    // Kana is unique to Japanese, so it disambiguates ja from zh even when kanji dominate.
+    let dominates = |n: u32| n >= 2 && n * 2 >= latin;
+    if dominates(kana) {
+        return Some("ja");
+    }
+    let (code, count) = [("ko", hangul), ("zh", han), ("ru", cyr), ("ar", arab)]
+        .into_iter()
+        .max_by_key(|&(_, n)| n)?;
+    dominates(count).then_some(code)
+}
+
+/// The end-of-prompt LANGUAGE LOCK — applied to EVERY turn's prompt, including turn 1.
+///
+/// Why last, and why every turn (recurring live issue, first seen 2026-07-13; user re-reported
+/// 2026-07-20 for the harder case where the user's language differs from the target app's UI):
+/// Rule 13 lives deep in a long static system prompt (low salience), while a screenshot and a
+/// `[Screen Elements]` list full of the APP's UI language sit right beside it, actively pulling a
+/// weak model the other way. On multi-turn sessions the machine-generated `[User completed: …]`
+/// turn carries no user language signal, one drifted reply feeds its own summary back, and the
+/// original request scrolls out of history. This restates the target language at the point of
+/// highest recency, every turn.
+///
+/// Resolution order: (1) the user's request script when it DOMINATES → name the language outright
+/// (the strongest form a weak model follows); (2) else an explicitly-chosen `VOICE_LANGUAGE`
+/// (rescues pinyin mis-transcription of Chinese speech, and Latin languages on a non-Latin screen);
+/// (3) else the request itself as a same-language exemplar. Empty only when nothing anchors it.
+pub fn reply_language_directive(request_text: &str, voice_language: &str) -> String {
+    let req = request_text.trim();
+    let named = dominant_script_lang(req).and_then(lang_name).or_else(|| {
+        let v = voice_language.trim();
+        if v.is_empty() || v.eq_ignore_ascii_case("auto") {
+            None
+        } else {
+            lang_name(v)
+        }
+    });
+    if let Some(name) = named {
+        return format!(
+            "\n\nIMPORTANT — LANGUAGE LOCK: the user's language is {name}. Write EVERY instruction \
+and the state_summary ENTIRELY in {name}, no matter what language appears in the screenshot, the \
+[Screen Elements] list, UI labels, window titles, or earlier turns. Never switch or mix languages."
+        );
+    }
+    if req.is_empty() {
         return String::new();
     }
+    // Latin / undetermined: same-language exemplar. Cap the echo so a long pasted instruction
+    // doesn't bloat the tail — a prefix is enough of a language sample and recency still holds.
+    let exemplar: String = req.chars().take(160).collect();
     format!(
-        "\n\nIMPORTANT — the user's ORIGINAL request was: \"{t}\". Write your instruction and \
-state_summary in the SAME LANGUAGE as that original request, regardless of the language of \
-any on-screen text, window titles, or earlier turns. Do not switch languages."
+        "\n\nIMPORTANT — LANGUAGE LOCK: write EVERY instruction and the state_summary in the SAME \
+LANGUAGE as the user's request, no matter what language appears in the screenshot, UI labels, \
+window titles, or earlier turns. Never switch or mix languages.\nUser's request: \"{exemplar}\""
     )
 }
 
@@ -360,13 +449,44 @@ mod tests {
     }
 
     #[test]
-    fn language_anchor_restates_task_or_is_empty() {
-        use super::language_anchor;
-        let a = language_anchor("make a pivottable using these data");
+    fn directive_exemplar_for_latin_request() {
+        use super::reply_language_directive;
+        // Latin request, auto voice → exemplar form echoing the request.
+        let a = reply_language_directive("make a pivottable using these data", "auto");
         assert!(a.contains("make a pivottable using these data"));
         assert!(a.contains("SAME LANGUAGE"));
-        // Empty / whitespace task → no anchor (first turn, or missing session).
-        assert!(language_anchor("").is_empty());
-        assert!(language_anchor("   ").is_empty());
+        assert!(a.contains("LANGUAGE LOCK"));
+        // Empty / whitespace + auto → nothing to anchor on.
+        assert!(reply_language_directive("", "auto").is_empty());
+        assert!(reply_language_directive("   ", "auto").is_empty());
+    }
+
+    #[test]
+    fn directive_names_language_from_dominant_script() {
+        use super::reply_language_directive;
+        // A Chinese request names Chinese outright, regardless of voice setting.
+        let a = reply_language_directive("帮我做一个数据透视表", "auto");
+        assert!(a.contains("Chinese"), "{a}");
+        assert!(!a.contains("data")); // no exemplar branch
+    }
+
+    #[test]
+    fn directive_uses_explicit_voice_language_when_script_is_latin() {
+        use super::reply_language_directive;
+        // Latin request (e.g. pinyin mis-transcription) + an explicit zh-CN setting → name Chinese.
+        let a = reply_language_directive("bang wo zuo", "zh-CN");
+        assert!(a.contains("Chinese"), "{a}");
+    }
+
+    #[test]
+    fn dominant_script_ignores_incidental_cjk() {
+        use super::dominant_script_lang;
+        // A couple of Han chars inside an English sentence must NOT read as Chinese.
+        assert_eq!(dominant_script_lang("Open the 文件 menu and click Save"), None);
+        // A predominantly-Chinese sentence with a stray English word IS Chinese.
+        assert_eq!(dominant_script_lang("点击 File 菜单里的保存按钮"), Some("zh"));
+        // Kana disambiguates Japanese from Chinese even when kanji are present.
+        assert_eq!(dominant_script_lang("ファイルを保存してください"), Some("ja"));
+        assert_eq!(dominant_script_lang("just plain english"), None);
     }
 }
