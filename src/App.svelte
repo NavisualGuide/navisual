@@ -850,9 +850,16 @@ See the LICENSE file in the root of this repository for complete details.
   // Autopilot on-demand polling.
   let screenChangeDebounce = 0;
   let autopilotInterval: ReturnType<typeof setInterval> | null = null;
+  // Runaway guard: an animated window (a playing video, a big progress spinner) changes
+  // constantly, so the more-sensitive block-diff detector could fire every 5 s forever —
+  // each fire burning an AI request. Count auto-advances that produce NO visible progress
+  // (same instruction, same step); real progress resets it. After the cap, pause autopilot.
+  let autopilotStalls = 0;
+  const AUTOPILOT_MAX_STALLS = 3;
 
   function startAutopilotPolling() {
     if (autopilotInterval !== null) return;
+    autopilotStalls = 0;
     autopilotInterval = setInterval(async () => {
       // Bail cheaply BEFORE the invoke so we don't hammer GDI capture every
       // 500 ms during AI thinking. The capture (~50 ms each) and IPC overhead
@@ -872,7 +879,27 @@ See the LICENSE file in the root of this repository for complete details.
         if (!currentStep) return;
         screenChangeDebounce = Date.now();
         addToHistory("system", "Screen changed — checking next step…");
-        nextStep(true); // autopilot-triggered — logs "worked_auto", not "worked" (C3 + taxonomy split)
+        // Snapshot progress markers, advance, then judge whether anything actually moved.
+        const prevInstr = currentInstruction;
+        const prevIdx = stepIndex;
+        await nextStep(true); // autopilot-triggered — logs "worked_auto", not "worked" (C3 + taxonomy split)
+        // `phase` was narrowed to "guiding" by the guard above; it can change across the await
+        // (nextStep may land on needs_input), so widen it back before comparing.
+        const progressed =
+          (phase as AppPhase) === "needs_input" ||
+          currentInstruction !== prevInstr ||
+          stepIndex !== prevIdx;
+        if (progressed) {
+          autopilotStalls = 0;
+        } else if (++autopilotStalls >= AUTOPILOT_MAX_STALLS) {
+          autopilotStalls = 0;
+          autoAdvanceEnabled = false;
+          stopAutopilotPolling();
+          addToHistory(
+            "system",
+            "Autopilot paused — the screen kept changing without a clear next step. Turn it back on when you're ready.",
+          );
+        }
       } catch (_) {}
     }, 500);
   }
@@ -1448,6 +1475,9 @@ See the LICENSE file in the root of this repository for complete details.
     // Don't allow next while an AI call is in flight — the hotkey can fire
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
+    // Any manual advance means the user is engaged — clear the autopilot runaway counter so
+    // a genuine hands-on session can't accumulate stalls toward a spurious pause.
+    if (!viaAutopilot) autopilotStalls = 0;
     isOverlayCleared = false;
     // Focus give-back: a mouse click on → Next focused the panel, so the user's
     // next click on the target would be eaten by activation ("click once for

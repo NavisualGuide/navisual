@@ -206,8 +206,10 @@ struct AppState {
     /// is active.  The `ManagedClient`'s own session is kept in sync for
     /// relay requests.
     supabase_session: Mutex<Option<server::SupabaseSession>>,
-    /// Previous aHash for Autopilot on-demand screen-change polling.
-    screen_hash: parking_lot::Mutex<Option<u64>>,
+    /// Anchored block-diff signature (SIG_DIM×SIG_DIM luma) for Autopilot screen-change polling —
+    /// the screen the AI last guided against. Compared per-cell against each poll; not the drifting
+    /// per-poll baseline of the pre-anchor design.
+    screen_sig: parking_lot::Mutex<Option<Vec<u8>>>,
     /// Most-recent AI-image JPEG bytes (the one sent to the AI on the latest
     /// `guide`/`next_step`/`send_correction`). Held in RAM only — never
     /// written to disk — so the lightbox can re-open it without persisting
@@ -648,12 +650,25 @@ fn execute_step(
 
 // ---------- Autopilot screen-change polling + stale-response detection ----------
 
-/// Hamming distance (out of 64) at which Autopilot considers the screen to have
-/// "changed" relative to the state the AI last gave guidance for.
-/// 10/64 ≈ 16% — high enough to ignore JPEG noise, blinking carets, small live
-/// content (Slack typing indicators, etc.); low enough to catch a dialog
-/// opening, page navigation, or a new view.
-const AUTOPILOT_CHANGE_THRESHOLD: u32 = 10;
+/// Autopilot change detection is a BLOCK-DIFF, not a global average-hash. The old 8×8 aHash + a
+/// Hamming threshold diluted localized changes: a dialog covering a few cells of a maximized
+/// window flipped too few of the 64 global bits to cross the threshold, so Autopilot only ever
+/// reacted to whole-view / navigation changes and missed a dropdown, a side panel, a dialog. A
+/// per-cell diff lights up the changed region regardless of how small a FRACTION of the window it
+/// is, and normalizes across window sizes.
+///
+/// `SIG_DIM`×`SIG_DIM` grayscale grid. `CELL_DELTA` (0–255) is how far one cell's brightness must
+/// move to count as "changed" — ~24 ≈ 9%, above JPEG/caret shimmer, and it favors solid UI
+/// (a dialog fills a cell) over thin text (a small area-fill of a ~60×34px cell barely moves its
+/// average). `AUTOPILOT_MIN_CELLS` is how many cells must change to fire: 16/1024 ≈ 1.6% — a
+/// dropdown/dialog is dozens of cells; a blinking caret or the small animated pointer ripple is a
+/// handful, under the bar. All three are TUNABLE — the false-positive axis (a whole paragraph of
+/// typing, a playing video) is what to watch live; the frontend runaway guard (AUTOPILOT_MAX_STALLS)
+/// backstops a window that changes forever.
+const SIG_DIM: u32 = 32;
+const SIG_LEN: usize = (SIG_DIM * SIG_DIM) as usize;
+const CELL_DELTA: u8 = 24;
+const AUTOPILOT_MIN_CELLS: u32 = 16;
 
 /// Hamming distance at which an AI response is considered "stale" — i.e. the
 /// screen drifted enough during the 5–90 s of AI thinking that the rendered
@@ -679,28 +694,105 @@ fn ahash_of_jpeg(jpeg: &[u8]) -> Option<u64> {
     Some(ahash_from_luma8(&img.to_luma8()))
 }
 
-/// Capture the guidance target raw + compute aHash in one step. Used by the autopilot
-/// polling loop, the post-AI-call baseline anchor, and stale-response detection. Skipping
-/// the JPEG roundtrip used elsewhere saves ~10 ms per call — meaningful at 2 captures/sec
-/// while autopilot is on.
+/// Raw capture of the window guidance is anchored to, panel-blanked. Shared by the aHash
+/// (stale-response) and block-sig (autopilot) paths.
 ///
 /// `target_hwnd` (audit 2026-07-12 C5): the window guidance is anchored to (a pin, or the
-/// last-guided foreground window). When set, hash THAT window — so autopilot reacts to
-/// changes in the app being guided, not whatever the user alt-tabbed to, and the
-/// stale-response check compares like-for-like against `guide()`'s own target capture. A
-/// closed/minimized target (or `None`, e.g. full-screen mode) falls back to the foreground
-/// window, matching the pre-C5 behaviour.
-fn ahash_of_screen(target_hwnd: Option<usize>) -> Option<u64> {
+/// last-guided window) so we watch the app being guided, not whatever the user alt-tabbed to.
+/// FIX (2026-07-21): when a SPECIFIC target is set but its recapture fails, return `None` —
+/// the old code silently fell back to the foreground window, so a momentary target-capture
+/// failure would compare a target-window baseline against a foreground-window sample (garbage
+/// distance → a false autopilot fire or a false stale banner). `None` target (full-screen mode)
+/// legitimately captures the foreground.
+fn capture_guidance_raw(
+    target_hwnd: Option<usize>,
+) -> Option<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>> {
     let exclude = capture::get_panel_rects();
-    let img = match target_hwnd {
+    match target_hwnd {
         Some(h) => capture::recapture_window_raw(h, &exclude)
             .map(|(img, _rect)| img)
-            .or_else(|_| capture::capture_active_window_raw(&exclude).map(|(img, _, _)| img))
-            .ok()?,
-        None => capture::capture_active_window_raw(&exclude).map(|(img, _, _)| img).ok()?,
-    };
-    let luma = image::imageops::grayscale(&img);
-    Some(ahash_from_luma8(&luma))
+            .ok(),
+        None => capture::capture_active_window_raw(&exclude)
+            .map(|(img, _, _)| img)
+            .ok(),
+    }
+}
+
+/// aHash of the guidance target — the stale-response primitive (compared against `pre_hash`,
+/// which is the aHash of the AI screenshot JPEG). Kept on aHash on purpose: pre/post come from
+/// two different capture pipelines (downscaled AI JPEG vs raw window), which an 8×8 average
+/// tolerates but a fine per-cell diff would not.
+fn ahash_of_screen(target_hwnd: Option<usize>) -> Option<u64> {
+    let img = capture_guidance_raw(target_hwnd)?;
+    Some(ahash_from_luma8(&image::imageops::grayscale(&img)))
+}
+
+/// Downsample luma to the `SIG_DIM`×`SIG_DIM` change-detection signature (row-major bytes).
+fn screen_sig_from_luma8(luma: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>) -> Vec<u8> {
+    let thumb = image::imageops::resize(
+        luma,
+        SIG_DIM,
+        SIG_DIM,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut sig = Vec::with_capacity(SIG_LEN);
+    sig.extend(thumb.pixels().map(|p| p.0[0]));
+    sig
+}
+
+/// Block-diff signature of the guidance target — the Autopilot primitive. Both the baseline
+/// anchor and the poll go through here (same raw-window pipeline), so the per-cell diff compares
+/// like-for-like.
+fn screen_sig_of_screen(target_hwnd: Option<usize>) -> Option<Vec<u8>> {
+    let img = capture_guidance_raw(target_hwnd)?;
+    Some(screen_sig_from_luma8(&image::imageops::grayscale(&img)))
+}
+
+/// Count cells (out of `SIG_LEN`) whose brightness moved more than `CELL_DELTA` between two
+/// signatures. A length mismatch (shouldn't happen — `SIG_DIM` is fixed) yields 0, i.e. "no
+/// change decided", never a false fire.
+fn changed_cells(a: &[u8], b: &[u8]) -> u32 {
+    if a.len() != b.len() {
+        return 0;
+    }
+    a.iter()
+        .zip(b.iter())
+        .filter(|(&x, &y)| x.abs_diff(y) > CELL_DELTA)
+        .count() as u32
+}
+
+#[cfg(test)]
+mod autopilot_change_tests {
+    use super::*;
+
+    #[test]
+    fn sig_downsamples_to_fixed_length() {
+        let luma = image::ImageBuffer::from_pixel(200, 120, image::Luma([128u8]));
+        assert_eq!(screen_sig_from_luma8(&luma).len(), SIG_LEN);
+    }
+
+    #[test]
+    fn changed_cells_counts_only_cells_over_delta() {
+        let base = vec![100u8; SIG_LEN];
+        // Identical → nothing changed.
+        assert_eq!(changed_cells(&base, &base), 0);
+        // Sub-delta drift (JPEG/caret shimmer) → ignored.
+        let mut jitter = base.clone();
+        for c in jitter.iter_mut().take(50) {
+            *c += CELL_DELTA; // exactly the threshold is NOT over it
+        }
+        assert_eq!(changed_cells(&base, &jitter), 0);
+        // A localized change (a small block of cells moving well past the delta) IS counted,
+        // even though it's a tiny fraction of the whole signature — the point of block-diff.
+        let mut dialog = base.clone();
+        for c in dialog.iter_mut().take(20) {
+            *c = 255;
+        }
+        assert_eq!(changed_cells(&base, &dialog), 20);
+        assert!(20 >= AUTOPILOT_MIN_CELLS, "a 20-cell change should fire");
+        // Length mismatch is a no-decision, never a false fire.
+        assert_eq!(changed_cells(&base, &base[..10]), 0);
+    }
 }
 
 /// The window guidance is currently anchored to — a pin if set, else the last-guided
@@ -736,19 +828,18 @@ fn emit_stale_if_drifted(app: &tauri::AppHandle, pre_hash: Option<u64>, post_has
     }
 }
 
-/// Capture a fresh active-window hash off the blocking pool and store it as
-/// the Autopilot baseline. Called at the end of every AI/local guidance event
-/// (`guide`, `next_step`, `send_correction`) so the baseline always reflects
-/// the screen the user is being directed against, not a drifting 500 ms-old
-/// sample. Returns the captured hash for the caller (used by stale detection).
-async fn anchor_autopilot_baseline(state: &AppState) -> Option<u64> {
+/// Capture a fresh block-diff signature off the blocking pool and store it as the Autopilot
+/// baseline. Called at the end of every AI/local guidance event (`guide`, `next_step`,
+/// `send_correction`) so the baseline always reflects the screen the user is being directed
+/// against, not a drifting 500 ms-old sample. Stale detection is separate (aHash) — it no longer
+/// piggybacks on this return value.
+async fn anchor_autopilot_baseline(state: &AppState) {
     let target = guidance_target_hwnd(state);
-    let h = tokio::task::spawn_blocking(move || ahash_of_screen(target))
+    let sig = tokio::task::spawn_blocking(move || screen_sig_of_screen(target))
         .await
         .ok()
         .flatten();
-    *state.screen_hash.lock() = h;
-    h
+    *state.screen_sig.lock() = sig;
 }
 
 /// Called by the frontend Autopilot polling loop every 500 ms while autopilot
@@ -764,14 +855,16 @@ async fn anchor_autopilot_baseline(state: &AppState) -> Option<u64> {
 #[tauri::command]
 async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let target = guidance_target_hwnd(&state);
-    let hash = tokio::task::spawn_blocking(move || ahash_of_screen(target))
+    let sig = tokio::task::spawn_blocking(move || screen_sig_of_screen(target))
         .await
         .ok()
         .flatten();
-    let prev = *state.screen_hash.lock();
-    let changed = match (hash, prev) {
-        (Some(h), Some(p)) => hamming64(p, h) >= AUTOPILOT_CHANGE_THRESHOLD,
-        _ => false,
+    let changed = {
+        let base = state.screen_sig.lock();
+        match (sig.as_ref(), base.as_ref()) {
+            (Some(s), Some(b)) => changed_cells(s, b) >= AUTOPILOT_MIN_CELLS,
+            _ => false,
+        }
     };
     Ok(serde_json::json!({ "changed": changed }))
 }
@@ -2226,10 +2319,17 @@ async fn guide(
     }
 
     if steps.is_empty() {
-        // Still anchor the autopilot baseline + run stale detection so that the
-        // needs_input branch behaves the same as a normal response.
-        let post_hash = anchor_autopilot_baseline(&state).await;
-        emit_stale_if_drifted(&app, pre_hash, post_hash);
+        // Still anchor the autopilot baseline + run stale detection so the needs_input branch
+        // behaves like a normal response. This branch draws no pointer, so the screen is
+        // pointer-free like pre_hash — stale uses its own aHash capture (decoupled from the
+        // block-sig baseline, which no longer returns a value).
+        anchor_autopilot_baseline(&state).await;
+        let stale_target = guidance_target_hwnd(&state);
+        let stale_hash = tokio::task::spawn_blocking(move || ahash_of_screen(stale_target))
+            .await
+            .ok()
+            .flatten();
+        emit_stale_if_drifted(&app, pre_hash, stale_hash);
         return Ok(GuideResponse {
             ok: true,
             session_id,
@@ -3100,8 +3200,15 @@ async fn send_correction(
     }
 
     if steps.is_empty() {
-        let post_hash = anchor_autopilot_baseline(&state).await;
-        emit_stale_if_drifted(&app, pre_hash, post_hash);
+        // Decoupled like guide()'s empty-steps branch: block-sig baseline + a separate aHash for
+        // stale (no pointer drawn here, so the screen is pointer-free like pre_hash).
+        anchor_autopilot_baseline(&state).await;
+        let stale_target = guidance_target_hwnd(&state);
+        let stale_hash = tokio::task::spawn_blocking(move || ahash_of_screen(stale_target))
+            .await
+            .ok()
+            .flatten();
+        emit_stale_if_drifted(&app, pre_hash, stale_hash);
         return Ok(GuideResponse {
             ok: true,
             session_id,
@@ -4672,7 +4779,7 @@ pub fn run() {
                 env_path,
                 supabase_session_path,
                 supabase_session: tokio::sync::Mutex::new(initial_session),
-                screen_hash: parking_lot::Mutex::new(None),
+                screen_sig: parking_lot::Mutex::new(None),
                 chat_full_jpeg: parking_lot::Mutex::new(None),
                 packs,
             });
