@@ -89,13 +89,13 @@ struct GuidanceState {
     /// `retry_locate` when it shows 2+ candidates; resolved (label banked to the
     /// local training mirror) or expired at the next backend event.
     pending_candidates: Option<locator::candidates::PendingCandidates>,
-    /// Session-sticky reply language (English name, e.g. "Chinese"), set when the user WRITES to
-    /// us in a script-unambiguous language and persisted across machine `[User completed:]` turns —
-    /// so an explicit mid-session switch ("请说中文" in an English session) isn't reverted by the
-    /// original task's language on the very next turn. Recomputed on each new task; upgraded (never
-    /// cleared by a Latin reply) on a reply. `None` → defer to the request's own script, then the
-    /// VOICE_LANGUAGE setting, then the exemplar (prompts::reply_language_directive).
-    reply_lang: Option<String>,
+    /// Session-sticky language SAMPLE — the user's last substantial message (see
+    /// `prompts::is_language_sample`), persisted across machine `[User completed:]` turns so the
+    /// reply language follows what the user last wrote, in EITHER direction: into a non-Latin
+    /// language ("请说中文") and back out again ("please speak English."). Recomputed on each new
+    /// task; updated on any reply that is itself a language sample; a short ack ("ok") leaves it
+    /// unchanged. `None` → defer to the current request text (`prompts::reply_language_directive`).
+    reply_lang_sample: Option<String>,
 }
 
 /// S.1 — enumerate the Structured-Context element snapshot for the captured window.
@@ -1573,19 +1573,17 @@ async fn guide(
         g.session_id = None;
         g.steps = vec![];
         g.state_summary = String::new();
-        // A new task governs its own reply language — clear any prior mid-session switch, then
-        // set from THIS task's script (Some for a Chinese/Japanese/… task, None for Latin).
-        g.reply_lang = crate::ai::prompts::named_language_of(&task).map(str::to_string);
+        // A new task governs its own reply language — store it as the language sample when it's
+        // substantial enough to read (else clear, and the directive falls back to the task text).
+        g.reply_lang_sample = crate::ai::prompts::is_language_sample(&task).then(|| task.clone());
         // Drop the previous screenshot from RAM — new task starts fresh.
         *state.chat_full_jpeg.lock() = None;
-    } else if is_reply {
-        // An explicit mid-session language switch: the user just WROTE to us in another script
-        // ("请说中文" in an English session). Honor it and make it sticky so the next machine
-        // `[User completed:]` turn doesn't revert to the original task's language. A Latin reply
-        // carries no such signal and leaves a prior non-Latin session language untouched.
-        if let Some(name) = crate::ai::prompts::named_language_of(&task) {
-            state.guidance.lock().reply_lang = Some(name.to_string());
-        }
+    } else if is_reply && crate::ai::prompts::is_language_sample(&task) {
+        // A substantial reply updates the sticky language sample, so a mid-session switch takes
+        // effect and survives the next machine `[User completed:]` turn — in BOTH directions
+        // (into "请说中文", and back out with "please speak English."). A short ack ("ok") is not a
+        // sample, so it leaves the current session language untouched.
+        state.guidance.lock().reply_lang_sample = Some(task.clone());
     }
 
     let session_id = {
@@ -1959,9 +1957,9 @@ async fn guide(
     // An explicitly-chosen Language setting is an authoritative reply-language signal (it also
     // rescues the pinyin-mis-transcription case); "auto" defers to the request's own script.
     let voice_language = router.config.voice_language.clone();
-    // Session-sticky override — an explicit mid-session switch the user wrote in another script.
-    // Highest priority in the directive; survives machine turns that carry no language signal.
-    let reply_lang_override = state.guidance.lock().reply_lang.clone();
+    // Session-sticky language sample — the user's last substantial message. The directive treats
+    // it as the language authority, so it survives the machine turns that carry no language signal.
+    let reply_sample = state.guidance.lock().reply_lang_sample.clone();
 
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let summary = {
@@ -1980,7 +1978,7 @@ async fn guide(
             "{}{}",
             add_grid(base),
             crate::ai::prompts::reply_language_directive(
-                reply_lang_override.as_deref(),
+                reply_sample.as_deref(),
                 &original_task,
                 &voice_language,
             )
@@ -2000,7 +1998,7 @@ async fn guide(
             "{}{}",
             add_grid(task.clone()),
             crate::ai::prompts::reply_language_directive(
-                reply_lang_override.as_deref(),
+                reply_sample.as_deref(),
                 &original_task,
                 &voice_language,
             )
@@ -2020,7 +2018,7 @@ async fn guide(
             "{}{}",
             add_grid(crate::ai::prompts::initial_context_template(&task)),
             crate::ai::prompts::reply_language_directive(
-                reply_lang_override.as_deref(),
+                reply_sample.as_deref(),
                 &task,
                 &voice_language,
             )
@@ -2915,10 +2913,10 @@ async fn send_correction(
         .as_ref()
         .map(|s| s.task_description.clone())
         .unwrap_or_default();
-    // Honor a sticky mid-session language switch here too (a correction is a continuation).
-    let reply_lang_override = state.guidance.lock().reply_lang.clone();
+    // Honor the sticky session language sample here too (a correction is a continuation).
+    let reply_sample = state.guidance.lock().reply_lang_sample.clone();
     let anchor = crate::ai::prompts::reply_language_directive(
-        reply_lang_override.as_deref(),
+        reply_sample.as_deref(),
         &original_task,
         &router.config.voice_language,
     );
