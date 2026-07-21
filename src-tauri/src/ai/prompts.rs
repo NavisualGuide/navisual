@@ -298,6 +298,15 @@ pub(crate) fn dominant_script_lang(text: &str) -> Option<&'static str> {
     dominates(count).then_some(code)
 }
 
+/// The nameable language the user WROTE in, when the script makes it unambiguous — the signal
+/// the guidance loop captures as a session-sticky reply-language override. Encodes "answer in the
+/// language I write to you in": robust and false-positive-free, because it keys on the script the
+/// user typed, not on any phrase — a task *about* Chinese written in English stays English, and
+/// only writing *to* us in Chinese switches us. `None` for Latin/undetermined text (no switch).
+pub(crate) fn named_language_of(text: &str) -> Option<&'static str> {
+    dominant_script_lang(text).and_then(lang_name)
+}
+
 /// The end-of-prompt LANGUAGE LOCK — applied to EVERY turn's prompt, including turn 1.
 ///
 /// Why last, and why every turn (recurring live issue, first seen 2026-07-13; user re-reported
@@ -309,20 +318,29 @@ pub(crate) fn dominant_script_lang(text: &str) -> Option<&'static str> {
 /// original request scrolls out of history. This restates the target language at the point of
 /// highest recency, every turn.
 ///
-/// Resolution order: (1) the user's request script when it DOMINATES → name the language outright
-/// (the strongest form a weak model follows); (2) else an explicitly-chosen `VOICE_LANGUAGE`
-/// (rescues pinyin mis-transcription of Chinese speech, and Latin languages on a non-Latin screen);
-/// (3) else the request itself as a same-language exemplar. Empty only when nothing anchors it.
-pub fn reply_language_directive(request_text: &str, voice_language: &str) -> String {
+/// Resolution order: (0) an explicit session override — the user WROTE to us in another language
+/// mid-session ("请说中文"), captured sticky by the caller so it survives machine turns; (1) else
+/// the current request's script when it DOMINATES → name the language outright (the strongest form
+/// a weak model follows); (2) else an explicitly-chosen `VOICE_LANGUAGE` (rescues pinyin
+/// mis-transcription of Chinese speech, and Latin languages on a non-Latin screen); (3) else the
+/// request itself as a same-language exemplar. Empty only when nothing anchors it.
+pub fn reply_language_directive(
+    override_lang: Option<&str>,
+    request_text: &str,
+    voice_language: &str,
+) -> String {
     let req = request_text.trim();
-    let named = dominant_script_lang(req).and_then(lang_name).or_else(|| {
-        let v = voice_language.trim();
-        if v.is_empty() || v.eq_ignore_ascii_case("auto") {
-            None
-        } else {
-            lang_name(v)
-        }
-    });
+    let named: Option<String> = override_lang
+        .map(str::to_string)
+        .or_else(|| dominant_script_lang(req).and_then(lang_name).map(str::to_string))
+        .or_else(|| {
+            let v = voice_language.trim();
+            if v.is_empty() || v.eq_ignore_ascii_case("auto") {
+                None
+            } else {
+                lang_name(v).map(str::to_string)
+            }
+        });
     if let Some(name) = named {
         return format!(
             "\n\nIMPORTANT — LANGUAGE LOCK: the user's language is {name}. Write EVERY instruction \
@@ -451,21 +469,21 @@ mod tests {
     #[test]
     fn directive_exemplar_for_latin_request() {
         use super::reply_language_directive;
-        // Latin request, auto voice → exemplar form echoing the request.
-        let a = reply_language_directive("make a pivottable using these data", "auto");
+        // Latin request, no override, auto voice → exemplar form echoing the request.
+        let a = reply_language_directive(None, "make a pivottable using these data", "auto");
         assert!(a.contains("make a pivottable using these data"));
         assert!(a.contains("SAME LANGUAGE"));
         assert!(a.contains("LANGUAGE LOCK"));
         // Empty / whitespace + auto → nothing to anchor on.
-        assert!(reply_language_directive("", "auto").is_empty());
-        assert!(reply_language_directive("   ", "auto").is_empty());
+        assert!(reply_language_directive(None, "", "auto").is_empty());
+        assert!(reply_language_directive(None, "   ", "auto").is_empty());
     }
 
     #[test]
     fn directive_names_language_from_dominant_script() {
         use super::reply_language_directive;
         // A Chinese request names Chinese outright, regardless of voice setting.
-        let a = reply_language_directive("帮我做一个数据透视表", "auto");
+        let a = reply_language_directive(None, "帮我做一个数据透视表", "auto");
         assert!(a.contains("Chinese"), "{a}");
         assert!(!a.contains("data")); // no exemplar branch
     }
@@ -474,8 +492,27 @@ mod tests {
     fn directive_uses_explicit_voice_language_when_script_is_latin() {
         use super::reply_language_directive;
         // Latin request (e.g. pinyin mis-transcription) + an explicit zh-CN setting → name Chinese.
-        let a = reply_language_directive("bang wo zuo", "zh-CN");
+        let a = reply_language_directive(None, "bang wo zuo", "zh-CN");
         assert!(a.contains("Chinese"), "{a}");
+    }
+
+    #[test]
+    fn directive_override_wins_over_request_and_setting() {
+        use super::reply_language_directive;
+        // The sticky session override (user said "请说中文" mid-session) beats an English request
+        // and an en-US setting — the explicit switch must not be suppressed by the anti-drift lock.
+        let a = reply_language_directive(Some("Chinese"), "open the File menu", "en-US");
+        assert!(a.contains("Chinese"), "{a}");
+        assert!(!a.contains("File")); // no exemplar of the English request
+    }
+
+    #[test]
+    fn named_language_of_keys_on_written_script() {
+        use super::named_language_of;
+        // Writing TO us in Chinese switches us…
+        assert_eq!(named_language_of("请说中文"), Some("Chinese"));
+        // …but an English request that merely mentions Chinese does NOT.
+        assert_eq!(named_language_of("translate this into Chinese"), None);
     }
 
     #[test]

@@ -89,6 +89,13 @@ struct GuidanceState {
     /// `retry_locate` when it shows 2+ candidates; resolved (label banked to the
     /// local training mirror) or expired at the next backend event.
     pending_candidates: Option<locator::candidates::PendingCandidates>,
+    /// Session-sticky reply language (English name, e.g. "Chinese"), set when the user WRITES to
+    /// us in a script-unambiguous language and persisted across machine `[User completed:]` turns —
+    /// so an explicit mid-session switch ("请说中文" in an English session) isn't reverted by the
+    /// original task's language on the very next turn. Recomputed on each new task; upgraded (never
+    /// cleared by a Latin reply) on a reply. `None` → defer to the request's own script, then the
+    /// VOICE_LANGUAGE setting, then the exemplar (prompts::reply_language_directive).
+    reply_lang: Option<String>,
 }
 
 /// S.1 — enumerate the Structured-Context element snapshot for the captured window.
@@ -1566,8 +1573,19 @@ async fn guide(
         g.session_id = None;
         g.steps = vec![];
         g.state_summary = String::new();
+        // A new task governs its own reply language — clear any prior mid-session switch, then
+        // set from THIS task's script (Some for a Chinese/Japanese/… task, None for Latin).
+        g.reply_lang = crate::ai::prompts::named_language_of(&task).map(str::to_string);
         // Drop the previous screenshot from RAM — new task starts fresh.
         *state.chat_full_jpeg.lock() = None;
+    } else if is_reply {
+        // An explicit mid-session language switch: the user just WROTE to us in another script
+        // ("请说中文" in an English session). Honor it and make it sticky so the next machine
+        // `[User completed:]` turn doesn't revert to the original task's language. A Latin reply
+        // carries no such signal and leaves a prior non-Latin session language untouched.
+        if let Some(name) = crate::ai::prompts::named_language_of(&task) {
+            state.guidance.lock().reply_lang = Some(name.to_string());
+        }
     }
 
     let session_id = {
@@ -1941,6 +1959,9 @@ async fn guide(
     // An explicitly-chosen Language setting is an authoritative reply-language signal (it also
     // rescues the pinyin-mis-transcription case); "auto" defers to the request's own script.
     let voice_language = router.config.voice_language.clone();
+    // Session-sticky override — an explicit mid-session switch the user wrote in another script.
+    // Highest priority in the directive; survives machine turns that carry no language signal.
+    let reply_lang_override = state.guidance.lock().reply_lang.clone();
 
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let summary = {
@@ -1958,7 +1979,11 @@ async fn guide(
         let prompt = format!(
             "{}{}",
             add_grid(base),
-            crate::ai::prompts::reply_language_directive(&original_task, &voice_language)
+            crate::ai::prompts::reply_language_directive(
+                reply_lang_override.as_deref(),
+                &original_task,
+                &voice_language,
+            )
         );
         (
             router
@@ -1974,7 +1999,11 @@ async fn guide(
         let prompt = format!(
             "{}{}",
             add_grid(task.clone()),
-            crate::ai::prompts::reply_language_directive(&original_task, &voice_language)
+            crate::ai::prompts::reply_language_directive(
+                reply_lang_override.as_deref(),
+                &original_task,
+                &voice_language,
+            )
         );
         (
             router
@@ -1990,7 +2019,11 @@ async fn guide(
         let prompt = format!(
             "{}{}",
             add_grid(crate::ai::prompts::initial_context_template(&task)),
-            crate::ai::prompts::reply_language_directive(&task, &voice_language)
+            crate::ai::prompts::reply_language_directive(
+                reply_lang_override.as_deref(),
+                &task,
+                &voice_language,
+            )
         );
         (
             router
@@ -2882,8 +2915,13 @@ async fn send_correction(
         .as_ref()
         .map(|s| s.task_description.clone())
         .unwrap_or_default();
-    let anchor =
-        crate::ai::prompts::reply_language_directive(&original_task, &router.config.voice_language);
+    // Honor a sticky mid-session language switch here too (a correction is a continuation).
+    let reply_lang_override = state.guidance.lock().reply_lang.clone();
+    let anchor = crate::ai::prompts::reply_language_directive(
+        reply_lang_override.as_deref(),
+        &original_task,
+        &router.config.voice_language,
+    );
 
     let final_user_text = if !window_context.is_empty() {
         format!("{user_text_owned}\n{window_context}{anchor}")
