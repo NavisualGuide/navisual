@@ -2614,7 +2614,7 @@ See the LICENSE file in the root of this repository for complete details.
       <button class="btn-action btn-mic" class:btn-mic-active={isRecording}
         onclick={toggleVoiceInput}
         disabled={!settingsForm.voice_input_enabled}
-        title={settingsForm.voice_input_enabled ? (isRecording ? `Stop recording (${settingsForm.hotkey_talk})` : `Voice input (${settingsForm.hotkey_talk})`) : "Enable voice input in Settings → Audio"}>
+        title={settingsForm.voice_input_enabled ? (isRecording ? `Stop recording (${prettyHotkey(settingsForm.hotkey_talk)})` : `Voice input (${prettyHotkey(settingsForm.hotkey_talk)})`) : "Enable voice input in Settings → Audio"}>
         🎤
       </button>
       <button class="btn-action btn-more" class:btn-more-open={showQuickMenu}
