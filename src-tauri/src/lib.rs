@@ -1202,7 +1202,17 @@ fn announce_shared_app(app: &AppHandle, hwnd_raw: Option<usize>, draw_boundary: 
 
 #[cfg(windows)]
 pub fn refresh_active_window(app: &AppHandle) {
-    let state = app.state::<AppState>();
+    // Startup race: the win-tracker thread's WinEvent hook starts firing the moment
+    // `WindowTracker::new()` runs in setup(), which is BEFORE `handle.manage(AppState)` later in
+    // the same setup(). `APP_HANDLE` is already set by then, so the tracker's `if let Some(app)`
+    // guard passes and reaches here. `state::<AppState>()` PANICS when state isn't managed yet, and
+    // because this runs inside a Win32 callback that cannot unwind, that panic ABORTS the whole
+    // process (STATUS_STACK_BUFFER_OVERRUN) instead of being caught — intermittent, race-dependent.
+    // `try_state` degrades to a no-op until state is live; the next event refreshes normally. This
+    // is the backend twin of the frontend's `invokeReady()` "state not managed" retry.
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
     let active_info = capture::get_active_window_info();
     let (announce_hwnd, changed) = {
         let mut g = state.guidance.lock();
