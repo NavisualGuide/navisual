@@ -81,6 +81,9 @@ pub struct Config {
     // Behavior
     pub subtitle_enabled: bool,
     pub auto_advance: bool,
+    /// Autopilot sensitivity: how many downsampled cells (of 1024, SIG_LEN) must change for a
+    /// screen change to trigger an auto-advance. Lower = more sensitive. Default 16 (~1.6%).
+    pub autopilot_min_cells: u32,
 
     // Audio output (TTS)
     pub tts_enabled: bool,
@@ -154,6 +157,7 @@ impl Default for Config {
             bbox_distrust_models: "nemotron,gemma,kimi".to_string(),
             overlay_color: "#FF6B35".to_string(),
             overlay_thickness: 4,
+            autopilot_min_cells: 16,
             subtitle_enabled: true,
             auto_advance: false,
             tts_enabled: true,
@@ -331,6 +335,13 @@ impl Config {
         }
         if let Ok(v) = env::var("AUTO_ADVANCE") {
             config.auto_advance = v == "true" || v == "1";
+        }
+        if let Ok(v) = env::var("AUTOPILOT_MIN_CELLS") {
+            if let Ok(n) = v.parse::<u32>() {
+                // Clamp to a sane band: below ~4 fires on caret-scale noise; above ~200 (of 1024)
+                // needs most of the window to change. Guards a hand-edited .env, too.
+                config.autopilot_min_cells = n.clamp(4, 200);
+            }
         }
         if let Ok(v) = env::var("TTS_ENABLED") {
             config.tts_enabled = v == "true" || v == "1";

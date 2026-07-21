@@ -853,7 +853,13 @@ async fn anchor_autopilot_baseline(state: &AppState) {
 /// async worker — important because this fires twice per second and an in-flight
 /// AI streaming request shares those workers.
 #[tauri::command]
-async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+async fn check_screen_changed(
+    state: State<'_, AppState>,
+    // The applied sensitivity, passed by the poll loop so the hot path never locks the config.
+    // Clamped here too — the command is callable independent of the settings UI.
+    min_cells: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let threshold = min_cells.unwrap_or(AUTOPILOT_MIN_CELLS).clamp(4, 200);
     let target = guidance_target_hwnd(&state);
     let sig = tokio::task::spawn_blocking(move || screen_sig_of_screen(target))
         .await
@@ -862,7 +868,7 @@ async fn check_screen_changed(state: State<'_, AppState>) -> Result<serde_json::
     let changed = {
         let base = state.screen_sig.lock();
         match (sig.as_ref(), base.as_ref()) {
-            (Some(s), Some(b)) => changed_cells(s, b) >= AUTOPILOT_MIN_CELLS,
+            (Some(s), Some(b)) => changed_cells(s, b) >= threshold,
             _ => false,
         }
     };
@@ -1403,6 +1409,12 @@ struct SharedAppInfoPayload {
     exe_name: String,
 }
 
+/// serde default for `autopilot_min_cells` — keeps older `.env`/payloads without the field on the
+/// shipped default rather than 0 (which would fire on any pixel of noise).
+fn default_autopilot_min_cells() -> u32 {
+    AUTOPILOT_MIN_CELLS
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct SettingsPayload {
     api_provider: String,
@@ -1430,6 +1442,8 @@ struct SettingsPayload {
     overlay_thickness: u32,
     subtitle_enabled: bool,
     auto_advance: bool,
+    #[serde(default = "default_autopilot_min_cells")]
+    autopilot_min_cells: u32,
     tts_enabled: bool,
     tts_voice: String,
     voice_input_enabled: bool,
@@ -3840,6 +3854,7 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         overlay_thickness: c.overlay_thickness,
         subtitle_enabled: c.subtitle_enabled,
         auto_advance: c.auto_advance,
+        autopilot_min_cells: c.autopilot_min_cells,
         tts_enabled: c.tts_enabled,
         tts_voice: c.tts_voice.clone(),
         voice_input_enabled: c.voice_input_enabled,
@@ -3910,6 +3925,10 @@ async fn save_settings(
             payload.subtitle_enabled.to_string(),
         ),
         ("AUTO_ADVANCE".into(), payload.auto_advance.to_string()),
+        (
+            "AUTOPILOT_MIN_CELLS".into(),
+            payload.autopilot_min_cells.clamp(4, 200).to_string(),
+        ),
         ("TTS_ENABLED".into(), payload.tts_enabled.to_string()),
         ("TTS_VOICE".into(), payload.tts_voice.clone()),
         (

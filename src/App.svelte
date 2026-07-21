@@ -86,6 +86,7 @@ See the LICENSE file in the root of this repository for complete details.
     overlay_thickness: number;
     subtitle_enabled: boolean;
     auto_advance: boolean;
+    autopilot_min_cells: number;
     tts_enabled: boolean;
     tts_voice: string;
     voice_input_enabled: boolean;
@@ -644,7 +645,7 @@ See the LICENSE file in the root of this repository for complete details.
     custom_api_key: "", custom_model: "", custom_base_url: "",
     managed_tier: "regular",
     overlay_color: "#FF6B35", overlay_thickness: 4,
-    subtitle_enabled: true, auto_advance: false,
+    subtitle_enabled: true, auto_advance: false, autopilot_min_cells: 16,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
     hotkey_pause: "", hotkey_icon: "", hotkey_talk: "Ctrl+KeyD",
@@ -846,6 +847,9 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Whether the global auto-advance setting is on (loaded from config on mount).
   let autoAdvanceEnabled = $state(false);
+  // Applied autopilot sensitivity (cells-of-1024 that must change to fire) — mirrors the
+  // "apply on Apply" pattern of autoAdvanceEnabled; passed to check_screen_changed each poll.
+  let autopilotMinCells = $state(16);
 
   // Autopilot on-demand polling.
   let screenChangeDebounce = 0;
@@ -870,7 +874,9 @@ See the LICENSE file in the root of this repository for complete details.
       if (steps.length === 0) return;
       if (Date.now() - screenChangeDebounce < 5000) return;
       try {
-        const res = await invoke<{ changed: boolean }>("check_screen_changed");
+        const res = await invoke<{ changed: boolean }>("check_screen_changed", {
+          minCells: autopilotMinCells,
+        });
         if (!res.changed) return;
         // Re-check phase after the await — guarding against the small race where
         // a manual Cancel or new task fired while the capture was in flight.
@@ -1295,6 +1301,7 @@ See the LICENSE file in the root of this repository for complete details.
       await invoke("save_settings", { payload: settingsForm });
       provider = settingsForm.api_provider;
       autoAdvanceEnabled = settingsForm.auto_advance;
+      autopilotMinCells = settingsForm.autopilot_min_cells;
       if (autoAdvanceEnabled) startAutopilotPolling(); else stopAutopilotPolling();
       isMuted = !settingsForm.tts_enabled;
       debugShowInfo = settingsForm.debug_show_response_info;
@@ -1892,6 +1899,7 @@ See the LICENSE file in the root of this repository for complete details.
       // restored. Surprise-autopilot on launch is jarring and burns API credits
       // before the user has a chance to opt in.
       autoAdvanceEnabled = false;
+      autopilotMinCells = init.autopilot_min_cells ?? 16;
       isMuted = !init.tts_enabled;
       if (init.api_provider) provider = init.api_provider;
       settingsForm = { ...SETTINGS_DEFAULTS, ...init, auto_advance: false };
@@ -3205,6 +3213,25 @@ See the LICENSE file in the root of this repository for complete details.
                 <input type="checkbox" bind:checked={settingsForm.auto_advance} />
                 <span>Automatically move to the next step when the screen changes</span>
               </label>
+              <div class="sensitivity-row">
+                <span class="sensitivity-end">Less</span>
+                <!-- Slider shows SENSITIVITY (right = more); stored value is autopilot_min_cells
+                     (how many of 1024 cells must change — lower = more sensitive), so reverse:
+                     min_cells = 46 − slider. Band 6–40 cells ≈ 0.6–4% of the window. -->
+                <input
+                  class="sensitivity-slider"
+                  type="range" min="6" max="40" step="2"
+                  value={46 - settingsForm.autopilot_min_cells}
+                  oninput={(e) => (settingsForm.autopilot_min_cells = 46 - Number(e.currentTarget.value))}
+                  aria-label="Autopilot screen-change sensitivity" />
+                <span class="sensitivity-end">More</span>
+              </div>
+              <p class="setting-hint" style="margin-top:4px">
+                Sensitivity of screen-change detection — how much of the screen must change to
+                auto-advance. <strong>Less</strong> ignores small changes (typing, minor updates);
+                <strong>More</strong> reacts to smaller ones like a dialog opening. The default is a
+                good balance.
+              </p>
             </div>
 
           {:else if settingsTab === "hotkeys"}
@@ -4854,6 +4881,27 @@ See the LICENSE file in the root of this repository for complete details.
     accent-color: var(--accent-500);
     cursor: pointer;
     flex-shrink: 0;
+  }
+
+  .sensitivity-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+    padding-left: 24px; /* align under the checkbox label text */
+  }
+
+  .sensitivity-end {
+    font-size: 11px;
+    color: var(--text-tertiary, #8a8a8a);
+    flex-shrink: 0;
+  }
+
+  .sensitivity-slider {
+    flex: 1;
+    min-width: 0;
+    accent-color: var(--accent-500);
+    cursor: pointer;
   }
 
   /* ── About modal ──────────────────────────────────── */
