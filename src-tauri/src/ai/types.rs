@@ -281,8 +281,12 @@ fn sanitize_instruction_text(text: &str) -> (String, Vec<u32>) {
     static EMPHASIS: OnceLock<regex::Regex> = OnceLock::new();
     static SPACES: OnceLock<regex::Regex> = OnceLock::new();
     static SPACE_PUNCT: OnceLock<regex::Regex> = OnceLock::new();
-    let id_ref = ID_REF
-        .get_or_init(|| regex::Regex::new(r"(?i)[(\[]\s*id\s*[:#=]?\s*(\d{1,5})\s*[)\]]").unwrap());
+    // Bracket classes include the FULLWIDTH / CJK forms （）【】［］〔〕and the fullwidth colon
+    // '：', because a model replying in Chinese/Japanese emits CJK punctuation — the ASCII-only
+    // form silently missed a real leak ("…编辑框（ID 91）…", live 2026-07-20, gemini-3.1-flash-lite).
+    let id_ref = ID_REF.get_or_init(|| {
+        regex::Regex::new(r"(?i)[(\[（【［〔]\s*id\s*[:#=：]?\s*(\d{1,5})\s*[)\]）】］〕]").unwrap()
+    });
     let ids: Vec<u32> = id_ref
         .captures_iter(text)
         .filter_map(|c| c[1].parse().ok())
@@ -476,6 +480,20 @@ mod tests {
         sanitize_steps(&mut steps);
         assert_eq!(steps[0].instruction, "click the Search box");
         assert_eq!(steps[0].target_element_id, Some(30));
+    }
+
+    #[test]
+    fn sanitize_strips_fullwidth_cjk_id_refs() {
+        // Live 2026-07-20 (gemini-3.1-flash-lite, Chinese reply): the ids leaked with FULLWIDTH
+        // parens （）(U+FF08/FF09) that the ASCII-only class missed → shown + spoken verbatim.
+        let mut steps = vec![step(
+            r#"{"instruction": "在中间的“Editor content”编辑框（ID 91）中输入语句，然后点击“Run”按钮（ID 90）。"}"#,
+        )];
+        sanitize_steps(&mut steps);
+        assert!(!steps[0].instruction.contains("ID"), "{}", steps[0].instruction);
+        assert!(!steps[0].instruction.contains('（'), "{}", steps[0].instruction);
+        // Two distinct ids → ambiguous → not recovered (matches the ASCII behavior).
+        assert!(steps[0].target_element_id.is_none());
     }
 
     #[test]
