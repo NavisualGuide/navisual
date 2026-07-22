@@ -51,6 +51,26 @@ const CT_CUSTOM: i32 = 50_025;
 /// this is a safety bound against runaway recursion, not an expected duration.
 const FIND_GRID_BUDGET_MS: u64 = 1500;
 
+/// Prompt hint injected (via `adapters::app_state_block`) whenever Excel is the focused app.
+/// Steers the AI to target GRID CELLS by their A1-style reference — which this adapter resolves
+/// to exact pixels via `GridPattern` (Pass 0) — instead of the cell's visible text. Cell text on
+/// a dense grid is the worst case for the fallback pipeline: A11y tends to time out on Excel's
+/// huge tree and OCR then mis-picks a duplicate (the active cell's content is mirrored in the
+/// formula bar, so "Provider" matched the formula bar rather than cell A1 — live 2026-07-21).
+/// Scoped to native Excel only: for a browser spreadsheet (Google Sheets) there is no adapter,
+/// so a bare "B5" would just make OCR hunt for the text "B5" and miss — hence NOT a global rule.
+pub(crate) fn targeting_hint() -> String {
+    "\n[App: Microsoft Excel]\n\
+     To point at a spreadsheet CELL (or any location in the data grid), set target_text to the \
+     cell's A1-style reference — e.g. \"A1\", \"B5\", \"Q34\" — NOT the cell's contents. Read the \
+     reference from the column letters along the top and the row numbers down the left edge. A \
+     cell reference resolves to that exact cell and is far more reliable than the cell's text \
+     (which may repeat elsewhere, or be echoed in the formula bar). Ribbon tabs and buttons, \
+     menus, and dialog controls are unchanged — keep targeting those by their visible label. \
+     Cell references are ONLY for grid cells."
+        .to_string()
+}
+
 pub struct ExcelAdapter;
 
 impl Adapter for ExcelAdapter {

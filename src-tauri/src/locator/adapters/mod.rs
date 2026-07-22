@@ -43,7 +43,15 @@ pub(crate) use powerpoint::convert_rect_to_pixels as ppt_points_to_pixels;
 pub fn app_state_block(hwnd: Option<usize>) -> Option<String> {
     #[cfg(windows)]
     {
-        blender::app_state_block(hwnd.filter(|h| *h != 0)?)
+        let h = hwnd.filter(|h| *h != 0)?;
+        // Excel: a static targeting hint (not runtime state) so the AI points at grid cells by
+        // A1 reference, which the cell adapter (Pass 0) resolves exactly. Gated on the Excel
+        // window class exactly like `ExcelAdapter::matches`, so it never appears for a browser
+        // spreadsheet where a cell ref would only mislead the fallback pipeline.
+        if window_class_lower(h) == "xlmain" || window_exe_stem_lower(h) == "excel" {
+            return Some(excel::targeting_hint());
+        }
+        blender::app_state_block(h)
     }
     #[cfg(not(windows))]
     {
