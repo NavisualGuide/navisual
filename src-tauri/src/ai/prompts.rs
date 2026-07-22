@@ -342,6 +342,30 @@ pub(crate) fn is_language_sample(text: &str) -> bool {
     c.latin >= 6 && c.latin >= 2 * nl
 }
 
+/// Best-effort "is this English?" — true when the text contains ≥2 distinctive English function
+/// words. These are deliberately words the OTHER major Latin languages (French/Spanish/German/…)
+/// do NOT share ("the", "you", "how", "with", "using", …), so a non-English Latin request won't
+/// trip it and stays on the same-language exemplar. Lets the LANGUAGE LOCK NAME English (the
+/// strong form) for the common case, instead of the weaker "same language as this message" that
+/// gpt-5.4-mini was observed to ignore (drifting to Japanese/Georgian on all-English tasks).
+fn looks_like_english(text: &str) -> bool {
+    const EN: &[&str] = &[
+        "the", "you", "your", "how", "what", "make", "using", "use", "with", "this", "that",
+        "please", "help", "want", "need", "show", "create", "add", "select", "click", "and",
+        "for", "are", "from", "open", "into", "when", "where", "which", "step", "next", "then",
+    ];
+    let mut hits = 0u8;
+    for w in text.split(|c: char| !c.is_ascii_alphabetic()) {
+        if !w.is_empty() && EN.contains(&w.to_ascii_lowercase().as_str()) {
+            hits += 1;
+            if hits >= 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// The end-of-prompt LANGUAGE LOCK — applied to EVERY turn's prompt, including turn 1.
 ///
 /// Why last, and why every turn (recurring live issue, first seen 2026-07-13; user re-reported
@@ -383,6 +407,15 @@ and the state_summary ENTIRELY in {name}, no matter what language appears in the
     // (1) dominant non-Latin script → name it outright.
     if let Some(name) = dominant_script_lang(src).and_then(lang_name) {
         return named_lock(name);
+    }
+    // (1b) English is the common case AND cleanly detectable (its function words aren't shared by
+    // the other major Latin languages), so name it explicitly — the strong form — instead of the
+    // weak exemplar. Live: gpt-5.4-mini IGNORED the exemplar and drifted to Japanese (turn 1) and
+    // Georgian on all-English tasks; "Write ENTIRELY in English" is far harder for a model to
+    // override. French/Spanish/… don't hit `looks_like_english`, so they stay on the exemplar
+    // (which is correct for them — no risk of mis-naming a Latin language).
+    if looks_like_english(src) {
+        return named_lock("English");
     }
     // (2) Latin / undetermined: an explicit VOICE_LANGUAGE setting.
     let v = voice_language.trim();
@@ -510,16 +543,30 @@ mod tests {
     }
 
     #[test]
-    fn directive_exemplar_for_latin_request() {
+    fn directive_exemplar_for_non_english_latin() {
         use super::reply_language_directive;
-        // Latin request, no override, auto voice → exemplar form echoing the request.
-        let a = reply_language_directive(None, "make a pivottable using these data", "auto");
-        assert!(a.contains("make a pivottable using these data"));
+        // A non-English Latin request (French) doesn't hit looks_like_english, so it stays on the
+        // same-language exemplar (which is correct — we must not mis-name it "English").
+        let a = reply_language_directive(None, "faire un tableau avec ces données", "auto");
+        assert!(a.contains("faire un tableau avec ces données"));
         assert!(a.contains("SAME LANGUAGE"));
-        assert!(a.contains("LANGUAGE LOCK"));
+        assert!(!a.contains("English"));
         // Empty / whitespace + auto → nothing to anchor on.
         assert!(reply_language_directive(None, "", "auto").is_empty());
         assert!(reply_language_directive(None, "   ", "auto").is_empty());
+    }
+
+    #[test]
+    fn directive_names_english_for_english_request() {
+        use super::reply_language_directive;
+        // The common case: an all-English request gets the STRONG named form ("in English"),
+        // not the weak exemplar that gpt-5.4-mini drifted past (→ Japanese/Georgian).
+        let a = reply_language_directive(None, "make pivot table using the data", "auto");
+        assert!(a.contains("English"), "{a}");
+        assert!(!a.contains("SAME LANGUAGE")); // named form, not exemplar
+        // A single stray English-ish word must NOT trigger it (needs ≥2 distinctive words).
+        let b = reply_language_directive(None, "the", "auto");
+        assert!(!b.contains("the user's language is English"), "{b}");
     }
 
     #[test]
