@@ -2185,13 +2185,17 @@ See the LICENSE file in the root of this repository for complete details.
              away (Billing tab, same destination as the free chip below — both
              lead somewhere actionable, not a read-only report). Free users get
              a related treatment just below: the count stays HIDDEN while the
-             trial is comfortable and only surfaces — reddening — once ≤ 5
-             remain. A constant meter in the title bar reads as a countdown and
-             makes the free experience itself feel metered (strategy §4.3); the
-             number earns its place only when it's an actual, timely nudge. -->
+             trial is comfortable — a plain "Free tier" label sits there instead
+             so the user always knows which tier they're on — and the count only
+             surfaces (reddening) once ≤ 5 remain. A constant meter in the title
+             bar reads as a countdown and makes the free experience itself feel
+             metered (strategy §4.3); the number earns its place only when it's
+             an actual, timely nudge. -->
         <button class="header-balance" onclick={() => openSettings("billing")} title="View billing">🪙</button>
       {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null && billing.freeRemaining <= 5}
         <button class="header-balance header-balance-low" onclick={() => openSettings("billing")} title="Get more requests">{billing.freeRemaining} left</button>
+      {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null}
+        <button class="header-balance header-balance-free" onclick={() => openSettings("billing")} title="You're on the free tier — click for billing">Free tier</button>
       {/if}
       {#if pendingUpdate}
         <button class="header-update" onclick={() => openAbout("about")} title="Update available">
@@ -3567,10 +3571,14 @@ See the LICENSE file in the root of this repository for complete details.
 
   /* ── Icon mode ─────────────────────────────────── */
 
+  /* Fill the collapsed window (ICON_SIZE square, transparent) and CENTRE the icon inside it.
+     The fixed 64px button in a 56px window couldn't centre — it jammed into the top-left and
+     the overflow exposed the corner. Filling + flex-centring makes it robust to the window size. */
   .icon-btn {
-    width: 64px;
-    height: 64px;
-    border-radius: 16px;
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     background: none;
     border: none;
     cursor: pointer;
@@ -3578,17 +3586,22 @@ See the LICENSE file in the root of this repository for complete details.
     align-items: center;
     justify-content: center;
     padding: 0;
-    filter: drop-shadow(0 4px 12px rgba(255, 107, 53, 0.5));
+    /* Softer/tighter shadow so it isn't clipped by the small window and doesn't read as a
+       light halo at the corner; keep it centred (no downward offset). */
+    filter: drop-shadow(0 0 6px rgba(255, 107, 53, 0.45));
     transition: filter 160ms ease-out, transform 160ms ease-out;
   }
   .icon-btn:hover {
-    filter: drop-shadow(0 6px 18px rgba(255, 107, 53, 0.75));
-    transform: scale(1.08);
+    filter: drop-shadow(0 0 9px rgba(255, 107, 53, 0.7));
+    transform: scale(1.06);
   }
+  /* Sized to leave a small margin inside the window so the rounded icon centres cleanly and
+     the shadow has room. 48/56 ≈ the SVG's own corner ratio (rx 112/512) → radius ≈ 11px. */
   .icon-fish {
-    width: 64px;
-    height: 64px;
-    border-radius: 14px;
+    display: block;
+    width: 48px;
+    height: 48px;
+    border-radius: 11px;
     pointer-events: none;
     user-select: none;
   }
@@ -3663,6 +3676,16 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .header-balance-low:hover {
     background: rgba(255, 64, 64, 0.25);
+  }
+  /* Free-tier label while the count is hidden: informational, not a nudge —
+     muted, no accent tint, so it reads as a status not a call to action. */
+  .header-balance-free {
+    color: var(--text-tertiary, #8a8a8a);
+    background: rgba(255, 255, 255, 0.06);
+    font-family: inherit;
+  }
+  .header-balance-free:hover {
+    background: rgba(255, 255, 255, 0.12);
   }
 
   .header-provider {
