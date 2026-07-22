@@ -2126,6 +2126,12 @@ See the LICENSE file in the root of this repository for complete details.
     listen("pointer_restored", () => {
       pointerOccluded = false;
     });
+    // The tracked window was DESTROYED (a dialog we pointed at was dismissed, or the app
+    // closed) — not occluded. Clear the pointer quietly; do NOT show the "bring it to the
+    // front" occlusion banner, which is misleading when the target is gone, not hidden.
+    listen("target_dismissed", () => {
+      pointerOccluded = false;
+    });
 
     lastAppliedModel = providerLabel;
     await addToHistory("system", `Navisual ready — using ${providerLabel}`);

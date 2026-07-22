@@ -666,7 +666,14 @@ unsafe fn recompute(force: bool) {
                 let _ = overlay::emit_update(&s.app, u);
             }
             s.shown = false;
-            let _ = s.app.emit("pointer_occluded", ());
+            // A DESTROYED tracked window is NOT occlusion. The tracker anchors to the window
+            // under the located point (`start_with_candidates`), which for a button on a dialog
+            // is the DIALOG — so completing the step (clicking OK, the dialog dismisses) destroys
+            // the tracked window and lands here. Emitting `pointer_occluded` showed the misleading
+            // "Target window isn't visible — bring it to the front / Re-analyse" banner (the window
+            // isn't hidden behind something, it's gone; live on the PivotTable OK dialog + the demo
+            // video). Emit a quiet `target_dismissed` that clears the pointer without nagging.
+            let _ = s.app.emit("target_dismissed", ());
         }
         return;
     }
