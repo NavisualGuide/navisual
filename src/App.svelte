@@ -1423,9 +1423,9 @@ See the LICENSE file in the root of this repository for complete details.
       addToHistory("ai", cleanInstruction, meta);
       if (!isMuted) invoke("speak", { text: cleanInstruction, lang: settingsForm.voice_language, requestHint: lastRequestHint, fallbackLocale: navigator.language }).catch(() => {});
     }
-    if (res.debug_screenshot_path) {
-      addToHistory("system", `📷 ${res.debug_screenshot_path}`);
-    }
+    // The debug screenshot is still SAVED to disk when the capture setting is on (backend
+    // writes it), but its path is no longer surfaced in the conversation — it was clutter even
+    // for dev use; the files are in %LOCALAPPDATA%\com.navisual.app\debug.
     // Workstream P: the AI offered next-task guesses (task complete / nothing in
     // progress). applyPrefill enforces the guards (toggle, needs_input, typed text).
     if (res.suggested_tasks?.length) {
