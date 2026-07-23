@@ -1277,6 +1277,23 @@ See the LICENSE file in the root of this repository for complete details.
     return errors;
   }
 
+  // Two-click confirm for the all-tabs reset: the first click arms it (the button relabels to
+  // spell out the scope), a second click within 4s performs it. Prevents a reset-all when the
+  // user thought it only touched the current tab.
+  let resetArmed = $state(false);
+  let resetArmTimer: ReturnType<typeof setTimeout> | null = null;
+  function handleResetClick() {
+    if (!resetArmed) {
+      resetArmed = true;
+      if (resetArmTimer) clearTimeout(resetArmTimer);
+      resetArmTimer = setTimeout(() => (resetArmed = false), 4000);
+      return;
+    }
+    if (resetArmTimer) clearTimeout(resetArmTimer);
+    resetArmed = false;
+    resetSettings();
+  }
+
   function resetSettings() {
     // Restore everything to defaults but preserve API keys so the user
     // doesn't lose credentials they've already entered.
@@ -3392,7 +3409,13 @@ See the LICENSE file in the root of this repository for complete details.
             {/if}
           </div>
           <div class="footer-actions">
-            <button class="btn-ghost btn-reset" onclick={resetSettings} title="Restore all settings to defaults (API keys are preserved)">Reset to defaults</button>
+            <button
+              class="btn-ghost btn-reset"
+              class:btn-reset-armed={resetArmed}
+              onclick={handleResetClick}
+              title="Restores EVERY setting on ALL tabs to its default — not just this tab. Your API keys are kept.">
+              {resetArmed ? "Click again — resets ALL tabs" : "Reset all settings"}
+            </button>
             <button class="btn-ghost" onclick={() => (showSettings = false)}>Cancel</button>
             <button class="btn-ghost" onclick={applySettings} disabled={settingsSaving}>
               {settingsSaving ? "Saving…" : "Apply"}
@@ -4775,6 +4798,12 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .btn-reset { margin-right: auto; font-size: 12px; opacity: 0.75; }
   .btn-reset:hover { opacity: 1; }
+  .btn-reset-armed {
+    opacity: 1;
+    color: #ff4040;
+    border-color: rgba(255, 64, 64, 0.5);
+    background: rgba(255, 64, 64, 0.12);
+  }
 
   /* ── Settings form elements ──────────────────────── */
 
