@@ -30,7 +30,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
-    GWL_EXSTYLE, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, WS_EX_TOOLWINDOW,
     WS_EX_TRANSPARENT,
 };
@@ -668,15 +669,18 @@ pub fn raise_overlay_topmost() {
             if IsIconic(hwnd).as_bool() {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
             }
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
+            // A single SetWindowPos(HWND_TOPMOST) is a NO-OP for reordering when the overlay is
+            // ALREADY topmost — so it can't climb above a topmost MODAL DIALOG (Excel's "PivotTable
+            // from table or range", a Save/Open dialog, etc.) that Windows placed above it, leaving
+            // the pointer drawn BEHIND the dialog (live 2026-07-23, and visible in the demo take).
+            // Toggling NOTOPMOST→TOPMOST forces the overlay to be re-inserted at the TOP of the
+            // topmost band. Both SWP_NOACTIVATE so focus never leaves the app; the two calls run
+            // back-to-back with no message pump between them, so there is no visible flicker. The
+            // overlay is click-through (WS_EX_TRANSPARENT), so sitting above the dialog never blocks
+            // the user from interacting with it.
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+            let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
             return FALSE; // overlay found — stop enumerating
         }
         TRUE
