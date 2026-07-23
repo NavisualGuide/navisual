@@ -1184,6 +1184,11 @@ pub fn find_element(
     // browser isn't mislabeled `Other` (which skipped the fast path and timed out).
     let mut framework_hwnd: Option<usize> = opts.target_hwnd;
 
+    // How many of the leading search roots are owned popups/dialogs. Used to short-circuit the
+    // root loop: once a modal dialog yields the target, the main window behind it must NOT be
+    // searched — for Excel that trailing walk is a 22-26s pathological scan for a name ("OK")
+    // that isn't in its tree at all (live 2026-07-23), while the dialog find itself is ~1s.
+    let mut popup_root_count = 0usize;
     let search_roots: Vec<UIElement> = if let Some(hwnd_raw) = opts.target_hwnd {
         let hwnd = HWND(hwnd_raw as *mut _);
         let mut roots = Vec::new();
@@ -1196,6 +1201,7 @@ pub fn find_element(
             for popup in collect_owned_popups(hwnd) {
                 if let Ok(el) = automation.element_from_handle(popup.into()) {
                     roots.push(el);
+                    popup_root_count += 1;
                 }
             }
             if !hwnd.0.is_null() && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
@@ -1249,7 +1255,7 @@ pub fn find_element(
         }
         candidates.clear();
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        for root in &search_roots {
+        for (root_idx, root) in search_roots.iter().enumerate() {
             if Instant::now() > deadline {
                 trace.timed_out = true;
                 break;
@@ -1401,6 +1407,14 @@ pub fn find_element(
                         });
                     }
                 }
+            }
+            // Short-circuit: this root is an owned popup/dialog and it produced a surviving
+            // candidate — that IS the target (the user is being guided within the dialog). Stop
+            // before searching the main window behind it, whose tree is irrelevant here and, for
+            // Excel, a ~25s pathological walk. Only fires when a POPUP matched, so a target that
+            // genuinely lives in the main window (no dialog match) still searches it normally.
+            if root_idx < popup_root_count && candidates.len() > candidates_before_root {
+                break;
             }
         }
         if !candidates.is_empty() {
