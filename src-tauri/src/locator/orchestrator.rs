@@ -13,11 +13,19 @@
 use super::adapters;
 use super::hit_test::{self, HitTestOutcome, RoleHit};
 use super::trace::{
-    AdapterTrace, Corroboration, FinalDecision, LocateTrace, OcrTrace, SelectionTrace,
+    A11yTrace, AdapterTrace, Corroboration, FinalDecision, LocateTrace, OcrTrace, SelectionTrace,
     TemplateTrace,
 };
 use super::{a11y, ocr, template, ContextElement, LocateResult};
 use crate::capture::{self, Rect};
+use std::time::Duration;
+
+/// Hard wall-clock ceiling on the A11y locate pass. Excel's `find_all` is a single blocking COM
+/// call that, with a modal dialog open, can run 20-40s — the pass's own per-node/per-pass deadline
+/// can't interrupt a call already in flight. Past this budget the caller ABANDONS the (still
+/// running) walk and falls through to the AI-bbox probe / OCR, which resolve a dialog's OK button
+/// in milliseconds. Legit A11y hits finish in well under 3s, so this never cuts a normal locate.
+const A11Y_LOCATE_BUDGET_MS: u64 = 4000;
 use anyhow::Result;
 use std::time::Instant;
 
@@ -184,14 +192,34 @@ pub fn locate(
     if a11y_opts.a11y_timeout_ms == 0 {
         a11y_opts.a11y_timeout_ms = 150;
     }
-    let (a11y_hit, a11y_trace) = match a11y::find_element(target_text, &a11y_opts) {
-        Ok(v) => v,
-        Err(e) => {
-            trace.final_decision = FinalDecision::Error {
-                message: e.to_string(),
-            };
-            trace.elapsed_ms = started.elapsed().as_millis() as u32;
-            return Ok((None, trace));
+    // Run the A11y locate on a throwaway thread and wait at most A11Y_LOCATE_BUDGET_MS. On a
+    // pathological slow walk (Excel + modal dialog) we abandon it and continue; the abandoned COM
+    // call finishes on its own thread (a can't-cancel cost, same as the enumeration's bounded
+    // wrapper). LocateResult/A11yTrace are plain Serialize data, so they cross the channel fine.
+    let (a11y_hit, a11y_trace) = {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tt = target_text.to_string();
+        let opts_for_a11y = a11y_opts.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(a11y::find_element(&tt, &opts_for_a11y));
+        });
+        match rx.recv_timeout(Duration::from_millis(A11Y_LOCATE_BUDGET_MS)) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                trace.final_decision = FinalDecision::Error {
+                    message: e.to_string(),
+                };
+                trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                return Ok((None, trace));
+            }
+            Err(_) => (
+                None,
+                A11yTrace {
+                    ran: true,
+                    timed_out: true,
+                    ..Default::default()
+                },
+            ),
         }
     };
     trace.a11y = a11y_trace;
