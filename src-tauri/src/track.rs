@@ -238,28 +238,13 @@ impl WindowTracker {
             .name("overlay-raise".into())
             .spawn(|| loop {
                 std::thread::sleep(Duration::from_millis(250));
-                // Read the current pointer's absolute rect while a pointer is shown. Snapshot under
-                // the lock, then release before touching Win32 so the 2 Hz hot path never blocks the
-                // event thread.
-                let pointer = STATE.get().and_then(|s| s.lock().ok()).and_then(|g| {
-                    g.as_ref().filter(|st| st.shown).map(|st| {
-                        (
-                            st.win_left + st.rel_bbox.x,
-                            st.win_top + st.rel_bbox.y,
-                            st.rel_bbox.width as i32,
-                            st.rel_bbox.height as i32,
-                        )
-                    })
-                });
-                // Re-assert TOPMOST ONLY when the overlay is actually behind another app's window at
-                // the pointer — an unconditional toggle every tick churns a desktop-spanning window's
-                // z-order and reveals the auto-hide taskbar (live 2026-07-24). Once on top, the check
-                // is false and we do nothing, so the taskbar stays hidden; it re-raises the instant a
-                // modal appears above the pointer.
-                if let Some((x, y, w, h)) = pointer {
-                    if crate::capture::overlay_occluded_in_rect(x, y, w, h) {
-                        crate::capture::raise_overlay_topmost();
-                    }
+                let shown = STATE
+                    .get()
+                    .and_then(|s| s.lock().ok())
+                    .and_then(|g| g.as_ref().map(|st| st.shown))
+                    .unwrap_or(false);
+                if shown {
+                    crate::capture::raise_overlay_topmost();
                 }
             })
             .expect("overlay raise thread");
