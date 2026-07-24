@@ -497,6 +497,21 @@ pub fn raise_overlay_topmost() {
     }
 }
 
+/// True when the overlay is below another app's window at the pointer's rect. Used to gate the
+/// periodic re-raise so it only churns z-order when actually occluded (see `win::overlay_occluded_in_rect`).
+/// Always false on non-Windows.
+#[allow(unused_variables)]
+pub fn overlay_occluded_in_rect(x: i32, y: i32, w: i32, h: i32) -> bool {
+    #[cfg(windows)]
+    {
+        win::overlay_occluded_in_rect(x, y, w, h)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Convenience: base64-encode JPEG bytes (suitable for AI API payloads).
 pub fn to_base64(bytes: &[u8]) -> String {
     use base64::Engine;
