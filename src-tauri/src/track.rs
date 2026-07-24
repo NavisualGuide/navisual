@@ -223,32 +223,6 @@ impl WindowTracker {
             .spawn(|| unsafe { run_event_thread() })
             .expect("window tracker thread");
 
-        // The tracker re-asserts the overlay's TOPMOST z-order only when a WinEvent fires. A
-        // pointer drawn on a window that then goes STATIC (a modal dialog — Excel's "PivotTable
-        // from table or range", a Save/Open box) gets no such event, so a modal that Windows
-        // raised over the overlay — a race the one-shot raise can lose under fast / posted-input
-        // timing — stays on top, drawing the pointer BEHIND the dialog (live 2026-07-23 demo
-        // take; a slower manual run generates stray events that re-raise it, masking the bug).
-        // This loop re-asserts TOPMOST every 250ms WHILE a pointer is shown, so the overlay
-        // reliably climbs above a just-appeared modal within a frame. Cheap (EnumWindows + two
-        // SWP_NOACTIVATE calls, click-through so it never steals focus) and idle when nothing
-        // shows. Runs for the process lifetime — the tracker is created once at startup.
-        #[cfg(windows)]
-        std::thread::Builder::new()
-            .name("overlay-raise".into())
-            .spawn(|| loop {
-                std::thread::sleep(Duration::from_millis(250));
-                let shown = STATE
-                    .get()
-                    .and_then(|s| s.lock().ok())
-                    .and_then(|g| g.as_ref().map(|st| st.shown))
-                    .unwrap_or(false);
-                if shown {
-                    crate::capture::raise_overlay_topmost();
-                }
-            })
-            .expect("overlay raise thread");
-
         Self { state }
     }
 
