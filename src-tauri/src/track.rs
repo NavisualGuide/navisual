@@ -572,6 +572,51 @@ unsafe extern "system" fn win_event_proc(
             crate::refresh_active_window(app);
         }
         schedule_settle();
+        schedule_delayed_raise();
+    }
+}
+
+/// Active one-shot "delayed raise" timer id (0 = none). See `schedule_delayed_raise`.
+static RAISE_TIMER: AtomicUsize = AtomicUsize::new(0);
+
+/// How long after a foreground/show/z-order event to re-assert the overlay's TOPMOST z-order.
+///
+/// The immediate raise (in `recompute`) and the 120 ms `schedule_settle` raise both fire before a
+/// just-opened MODAL DIALOG has finished claiming topmost — so under fast (posted-input) timing the
+/// dialog ends up above the overlay and the pointer draws behind it (live 2026-07-23: the OK button
+/// of Excel's "PivotTable from table or range" modal). This later single re-raise fires after the
+/// modal has settled, so the toggle actually wins and the pointer sits on top. Kept as ONE delayed
+/// shot, not a periodic loop: rapidly re-toggling a virtual-desktop-spanning topmost window makes
+/// Windows reveal an auto-hide taskbar (the regression that a 250 ms loop caused), whereas the
+/// occasional single toggle here re-hides on its own — matching the pre-existing event-driven raise.
+const RAISE_DELAY_MS: u32 = 450;
+
+/// (Re)arm a coalesced one-shot timer that re-asserts the overlay's TOPMOST z-order once, after a
+/// modal/popup that appeared on a z-order event has had time to settle. Resets on each event so a
+/// burst collapses to a single fire.
+#[cfg(windows)]
+unsafe fn schedule_delayed_raise() {
+    let prev = RAISE_TIMER.swap(0, Ordering::SeqCst);
+    if prev != 0 {
+        let _ = KillTimer(None, prev);
+    }
+    let id = SetTimer(None, 0, RAISE_DELAY_MS, Some(raise_timer_proc));
+    RAISE_TIMER.store(id, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn raise_timer_proc(_hwnd: HWND, _msg: u32, id: usize, _time: u32) {
+    let _ = KillTimer(None, id);
+    let _ = RAISE_TIMER.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    // Only touch z-order when a pointer is actually on screen — otherwise there's nothing to keep
+    // above a dialog, and a stray toggle would be pure churn.
+    let shown = STATE
+        .get()
+        .and_then(|s| s.lock().ok())
+        .and_then(|g| g.as_ref().map(|st| st.shown))
+        .unwrap_or(false);
+    if shown {
+        crate::capture::raise_overlay_topmost();
     }
 }
 
