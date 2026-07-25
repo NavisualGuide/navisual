@@ -32,8 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
     GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE,
-    WS_EX_TOOLWINDOW,
+    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, WS_EX_TOOLWINDOW,
     WS_EX_TRANSPARENT,
 };
 
@@ -629,98 +628,6 @@ pub fn own_panel_rects() -> Vec<Rect> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
     state.rects
-}
-
-/// Temporarily shift our own panel window so it no longer overlaps `target` (a screen-space rect,
-/// typically the AI's predicted target region). Used at locate time: when the panel physically
-/// covers the target, the composited-screen capture sees the panel (blanked grey) instead of the
-/// target, so OCR reads it truncated or matches a same-text duplicate elsewhere and the pointer is
-/// rejected (live 2026-07-24: Photoshop "Remove background"). Nudging the panel clear lets the
-/// re-capture read the real target; the caller restores it immediately after. Returns
-/// `Some((hwnd, orig_x, orig_y))` when a panel was moved, `None` when nothing overlapped. Shifts
-/// along whichever of the four directions needs the least movement, so the panel barely budges.
-pub fn nudge_panel_off_target(target: Rect) -> Option<(usize, i32, i32)> {
-    if target.width == 0 || target.height == 0 {
-        return None;
-    }
-    let our_pid = std::process::id();
-    struct State {
-        pid: u32,
-        target: Rect,
-        hit: Option<(HWND, RECT)>,
-    }
-    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
-        let st = &mut *(lparam.0 as *mut State);
-        if st.hit.is_some() {
-            return FALSE;
-        }
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid != st.pid || !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
-            return TRUE;
-        }
-        // The overlay is our other window — click-through (WS_EX_TRANSPARENT), never the panel.
-        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        if (ex & WS_EX_TRANSPARENT.0) != 0 {
-            return TRUE;
-        }
-        let mut wr = RECT::default();
-        if GetWindowRect(hwnd, &mut wr).is_err() {
-            return TRUE;
-        }
-        let pr = Rect {
-            x: wr.left,
-            y: wr.top,
-            width: (wr.right - wr.left).max(0) as u32,
-            height: (wr.bottom - wr.top).max(0) as u32,
-        };
-        let inter = rect_intersect(&pr, &st.target);
-        if inter.width > 0 && inter.height > 0 {
-            st.hit = Some((hwnd, wr));
-            return FALSE;
-        }
-        TRUE
-    }
-    let mut state = State {
-        pid: our_pid,
-        target,
-        hit: None,
-    };
-    unsafe {
-        let _ = EnumWindows(Some(cb), LPARAM(&mut state as *mut State as isize));
-    }
-    let (hwnd, wr) = state.hit?;
-    let (orig_x, orig_y) = (wr.left, wr.top);
-    let (pw, ph) = (wr.right - wr.left, wr.bottom - wr.top);
-    let (tx2, ty2) = (target.x + target.width as i32, target.y + target.height as i32);
-    // Four ways to clear the target; each is (new_x, new_y, movement magnitude). Pick the least.
-    let candidates = [
-        (target.x - pw - 16, orig_y, (orig_x - (target.x - pw - 16)).abs()), // left
-        (tx2 + 16, orig_y, ((tx2 + 16) - orig_x).abs()),                     // right
-        (orig_x, target.y - ph - 16, (orig_y - (target.y - ph - 16)).abs()), // up
-        (orig_x, ty2 + 16, ((ty2 + 16) - orig_y).abs()),                     // down
-    ];
-    let (nx, ny, _) = candidates.iter().min_by_key(|c| c.2).copied()?;
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            nx,
-            ny,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
-    Some((hwnd.0 as usize, orig_x, orig_y))
-}
-
-/// Move our panel window back to `(x, y)` after [`nudge_panel_off_target`].
-pub fn restore_panel_position(hwnd: usize, x: i32, y: i32) {
-    let h = HWND(hwnd as *mut core::ffi::c_void);
-    unsafe {
-        let _ = SetWindowPos(h, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
 }
 
 /// Re-assert the overlay window's TOPMOST z-order so the guidance pointer stays

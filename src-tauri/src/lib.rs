@@ -414,6 +414,15 @@ type StepOutcome = (
     Vec<capture::Rect>,
 );
 
+/// Do two screen-space rects overlap at all? (Used to tell when the AI's target region sits under
+/// our own panel — see the "behind-our-own-panel" cue in `execute_step`.)
+fn rects_overlap(a: &capture::Rect, b: &capture::Rect) -> bool {
+    a.x < b.x + b.width as i32
+        && b.x < a.x + a.width as i32
+        && a.y < b.y + b.height as i32
+        && b.y < a.y + a.height as i32
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_step(
     app: &AppHandle,
@@ -456,54 +465,17 @@ fn execute_step(
 ) -> Result<StepOutcome, String> {
     let (located, trace) = match precomputed {
         Some(pre) => pre,
-        None => {
-            let first = locate_for_step(
-                step,
-                target_hwnd,
-                debug_ocr_path.clone(),
-                ai_bbox,
-                bbox_decisive,
-                avoid_bboxes.clone(),
-                packs,
-                context_elements.clone(),
-                pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r)),
-            );
-            // Panel-occlusion retry (3.c): the first pass found nothing, but the model's trusted
-            // bbox sits UNDER our own panel — the capture blanked the target grey (or OCR matched a
-            // duplicate elsewhere), so the miss is likely our fault, not the app's. Nudge the panel
-            // clear, force a fresh OCR capture (pre_ocr=None), and retry once. Only fires on a real
-            // miss + a decisive bbox that actually overlaps the panel, so a normal locate never
-            // moves the panel. Live 2026-07-24: Photoshop "Remove background".
-            if first.0.is_none() && bbox_decisive {
-                match ai_bbox.and_then(capture::nudge_panel_off_target) {
-                    Some((phwnd, ox, oy)) => {
-                        // Let the desktop recomposite with the panel moved before re-capturing.
-                        std::thread::sleep(std::time::Duration::from_millis(60));
-                        let retry = locate_for_step(
-                            step,
-                            target_hwnd,
-                            debug_ocr_path,
-                            ai_bbox,
-                            bbox_decisive,
-                            avoid_bboxes,
-                            packs,
-                            context_elements,
-                            None, // force a re-capture now that the panel is out of the way
-                        );
-                        capture::restore_panel_position(phwnd, ox, oy);
-                        if retry.0.is_some() {
-                            log::info!("[locate] recovered after nudging the panel off the target");
-                            retry
-                        } else {
-                            first
-                        }
-                    }
-                    None => first,
-                }
-            } else {
-                first
-            }
-        }
+        None => locate_for_step(
+            step,
+            target_hwnd,
+            debug_ocr_path,
+            ai_bbox,
+            bbox_decisive,
+            avoid_bboxes,
+            packs,
+            context_elements,
+            pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r)),
+        ),
     };
 
     let mut kind = overlay_kind_for_step(&step.overlay_type);
@@ -586,6 +558,21 @@ fn execute_step(
                 kind = overlay::OverlayKind::Hint;
                 bbox = Some(hint);
                 hint_shown = true;
+            }
+        }
+    }
+
+    // Behind-our-own-panel cue (3.c, no-move design): when the hint landed on a spot OUR panel
+    // covers, the target is most likely hidden BEHIND the panel (opaque apps where OCR can't read
+    // through it — live 2026-07-24 Photoshop "Remove background"). We deliberately do NOT move the
+    // panel (the user stays in control). The hint ring already draws OVER the panel to show roughly
+    // where it is; we additionally tell the panel to suggest sliding itself aside. Fires only when
+    // a hint is showing AND the trusted bbox actually overlaps a panel rect.
+    if hint_shown {
+        if let Some(ai) = ai_bbox {
+            let behind = capture::get_panel_rects().iter().any(|p| rects_overlap(p, &ai));
+            if behind {
+                let _ = app.emit("pointer_behind_panel", ());
             }
         }
     }

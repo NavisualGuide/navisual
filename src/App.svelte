@@ -225,6 +225,9 @@ See the LICENSE file in the root of this repository for complete details.
   let locateResult = $state<LocateResult | null>(null);
   // Backend hid the pointer because the target window is occluded (not a locate miss).
   let pointerOccluded = $state(false);
+  // The trusted AI region sits under OUR panel — the target is likely hidden behind it, so we
+  // show the hint ring there (it draws over the panel) and suggest sliding the panel aside.
+  let behindPanel = $state(false);
   let locateTrace = $state<LocateTrace | null>(null);
   let debugDrawerOpen = $state(false);
   // Test-user feedback (see logFeedback / submitWrong / correction).
@@ -1471,6 +1474,7 @@ See the LICENSE file in the root of this repository for complete details.
     streamStepsSeen = 0;
     staleResponse = false;
     pointerOccluded = false;
+    behindPanel = false;
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -1530,6 +1534,7 @@ See the LICENSE file in the root of this repository for complete details.
     // session, where one Designer-pane pop armed the banner for good.
     staleResponse = false;
     pointerOccluded = false;
+    behindPanel = false;
     const nextIdx = stepIndex + 1;
     const prevPhase = phase;
     if (nextIdx >= steps.length) {
@@ -1606,6 +1611,7 @@ See the LICENSE file in the root of this repository for complete details.
     streamStepsSeen = 0;
     staleResponse = false;
     pointerOccluded = false;
+    behindPanel = false;
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
@@ -2149,6 +2155,12 @@ See the LICENSE file in the root of this repository for complete details.
     listen("target_dismissed", () => {
       pointerOccluded = false;
     });
+    // The trusted AI region sits under OUR own panel — the target is likely hidden behind it.
+    // We don't move the panel (the user stays in control); the hint ring draws over the panel to
+    // show roughly where it is, and this prompts the user to slide the panel aside.
+    listen("pointer_behind_panel", () => {
+      behindPanel = true;
+    });
 
     lastAppliedModel = providerLabel;
     await addToHistory("system", `Navisual ready — using ${providerLabel}`);
@@ -2279,7 +2291,11 @@ See the LICENSE file in the root of this repository for complete details.
              found. Suppressed when Flow-B candidate boxes are on screen (boxes ARE
              the pointer's answer; "unavailable" would contradict them). -->
         {#if !locateResult && !pointerOccluded && candidateCount < 2 && steps[stepIndex]?.target_text && phase === "guiding"}
-          <p class="miss-note">⊘ Pointer unavailable — follow the instruction above</p>
+          {#if behindPanel}
+            <p class="miss-note">◎ This looks like it's behind this panel — drag the panel aside to reveal the highlighted spot.</p>
+          {:else}
+            <p class="miss-note">⊘ Pointer unavailable — follow the instruction above</p>
+          {/if}
         {/if}
 
         <!-- Feedback: mark this step wrong (promoted from the ··· quick-menu) -->
