@@ -366,6 +366,17 @@ impl WindowTracker {
     pub fn clear(&self) {
         *self.state.lock().unwrap() = None;
     }
+
+    /// True while a located pointer is being tracked (anchored to a window). A hint-ring-only
+    /// overlay (an AI-bbox shown on a miss) does NOT start the tracker, so this is false then —
+    /// which is exactly the case `refresh_active_window` uses to decide it's safe to clear a
+    /// stale, untracked ring on an app switch without wiping a live tracked pointer.
+    pub fn is_active(&self) -> bool {
+        self.state
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+    }
 }
 
 /// Dedicated thread: register the window-event hooks, create the hidden

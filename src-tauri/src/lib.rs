@@ -456,17 +456,54 @@ fn execute_step(
 ) -> Result<StepOutcome, String> {
     let (located, trace) = match precomputed {
         Some(pre) => pre,
-        None => locate_for_step(
-            step,
-            target_hwnd,
-            debug_ocr_path,
-            ai_bbox,
-            bbox_decisive,
-            avoid_bboxes,
-            packs,
-            context_elements,
-            pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r)),
-        ),
+        None => {
+            let first = locate_for_step(
+                step,
+                target_hwnd,
+                debug_ocr_path.clone(),
+                ai_bbox,
+                bbox_decisive,
+                avoid_bboxes.clone(),
+                packs,
+                context_elements.clone(),
+                pre_ocr.as_ref().map(|(p, r)| (p.as_slice(), *r)),
+            );
+            // Panel-occlusion retry (3.c): the first pass found nothing, but the model's trusted
+            // bbox sits UNDER our own panel — the capture blanked the target grey (or OCR matched a
+            // duplicate elsewhere), so the miss is likely our fault, not the app's. Nudge the panel
+            // clear, force a fresh OCR capture (pre_ocr=None), and retry once. Only fires on a real
+            // miss + a decisive bbox that actually overlaps the panel, so a normal locate never
+            // moves the panel. Live 2026-07-24: Photoshop "Remove background".
+            if first.0.is_none() && bbox_decisive {
+                match ai_bbox.and_then(capture::nudge_panel_off_target) {
+                    Some((phwnd, ox, oy)) => {
+                        // Let the desktop recomposite with the panel moved before re-capturing.
+                        std::thread::sleep(std::time::Duration::from_millis(60));
+                        let retry = locate_for_step(
+                            step,
+                            target_hwnd,
+                            debug_ocr_path,
+                            ai_bbox,
+                            bbox_decisive,
+                            avoid_bboxes,
+                            packs,
+                            context_elements,
+                            None, // force a re-capture now that the panel is out of the way
+                        );
+                        capture::restore_panel_position(phwnd, ox, oy);
+                        if retry.0.is_some() {
+                            log::info!("[locate] recovered after nudging the panel off the target");
+                            retry
+                        } else {
+                            first
+                        }
+                    }
+                    None => first,
+                }
+            } else {
+                first
+            }
+        }
     };
 
     let mut kind = overlay_kind_for_step(&step.overlay_type);
@@ -689,11 +726,6 @@ fn ahash_from_luma8(luma: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>) -> u64 
     hash
 }
 
-fn ahash_of_jpeg(jpeg: &[u8]) -> Option<u64> {
-    let img = image::load_from_memory(jpeg).ok()?;
-    Some(ahash_from_luma8(&img.to_luma8()))
-}
-
 /// Raw capture of the window guidance is anchored to, panel-blanked. Shared by the aHash
 /// (stale-response) and block-sig (autopilot) paths.
 ///
@@ -718,10 +750,13 @@ fn capture_guidance_raw(
     }
 }
 
-/// aHash of the guidance target — the stale-response primitive (compared against `pre_hash`,
-/// which is the aHash of the AI screenshot JPEG). Kept on aHash on purpose: pre/post come from
-/// two different capture pipelines (downscaled AI JPEG vs raw window), which an 8×8 average
-/// tolerates but a fine per-cell diff would not.
+/// aHash of the guidance target — the stale-response primitive. BOTH the pre-response baseline
+/// and the post-response sample now come through this one function (raw window recapture,
+/// panel-blanked), so the comparison is like-for-like and only real on-screen change registers.
+/// (Previously the baseline was the aHash of the downscaled AI JPEG — a different pipeline whose
+/// app-dependent baseline drift false-fired the stale banner on detail-heavy UIs; fixed 2026-07-24.)
+/// Kept on aHash (not the finer per-cell block-sig) because a modest global drift is exactly the
+/// "screen meaningfully moved during thinking" signal we want here.
 fn ahash_of_screen(target_hwnd: Option<usize>) -> Option<u64> {
     let img = capture_guidance_raw(target_hwnd)?;
     Some(ahash_from_luma8(&image::imageops::grayscale(&img)))
@@ -1323,6 +1358,18 @@ pub fn refresh_active_window(app: &AppHandle) {
         g.last_announced_hwnd = hwnd;
         (hwnd, changed)
     };
+    // A stale AI-bbox hint ring (drawn on a miss) is NOT tracked — it sits at fixed screen
+    // coordinates and would otherwise linger over the newly-focused app (live 2026-07-24:
+    // Photoshop's "Crop" hint ring drew over Word/VLC after an app switch). When the followed
+    // app genuinely changed and there's no live *tracked* pointer to preserve, clear it. Gating
+    // on `!tracker.is_active()` keeps the glance-away-and-back case intact: a tracked pointer is
+    // hidden/re-shown by the tracker's own occlusion logic, so we must not wipe it here.
+    if changed && !state.tracker.is_active() {
+        state.tracker.clear();
+        if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
+            let _ = overlay::emit_update(app, update);
+        }
+    }
     // Flash only when the followed target actually changed (a new app took focus),
     // not on every passive refresh (z-order shuffle, object update, same app
     // re-settling) — see commit 1601f40 for why a blanket flash-on-every-refresh
@@ -1892,7 +1939,13 @@ async fn guide(
         };
 
         let thumb_b64 = make_chat_thumbnail(&final_bytes);
-        let pre_hash = ahash_of_jpeg(&final_bytes);
+        // Stale baseline: hash a RAW recapture of the same window (identical pipeline to the
+        // post-response `ahash_of_screen`), NOT the downscaled+JPEG AI image. Comparing a
+        // downscaled JPEG aHash against a native-res raw aHash injected an app-dependent baseline
+        // drift that, on a detail-heavy UI like File Explorer, sat right at the 13/64 threshold and
+        // false-fired the "guidance may be out of date" banner on unchanged screens (live
+        // 2026-07-24, 3/3 FE locates). Same pipeline both sides ⇒ only *real* change registers.
+        let pre_hash = ahash_of_screen(hwnd_opt);
         let b64 = capture::to_base64(&final_bytes);
         Ok((b64, rect_opt, hwnd_opt, debug_path, thumb_b64, final_bytes, pre_hash, ocr_png, ocr_rect))
     })
@@ -2952,7 +3005,9 @@ async fn send_correction(
             };
 
             let thumb_b64 = make_chat_thumbnail(&final_bytes);
-            let pre_hash = ahash_of_jpeg(&final_bytes);
+            // Same-pipeline stale baseline as the guide() path (raw recapture, not the JPEG) —
+            // see the note there. Kills the File-Explorer false-positive banner.
+            let pre_hash = ahash_of_screen(hwnd_opt);
             let b64 = capture::to_base64(&final_bytes);
             (
                 b64,

@@ -487,6 +487,30 @@ pub fn get_panel_rects() -> Vec<Rect> {
     }
 }
 
+/// Temporarily shift our panel window clear of `target` so a re-capture can read a target the
+/// panel was covering. Returns `Some((hwnd, orig_x, orig_y))` for [`restore_panel_position`], or
+/// `None` if nothing overlapped. See `win::nudge_panel_off_target`. Non-Windows → `None`.
+#[allow(unused_variables)]
+pub fn nudge_panel_off_target(target: Rect) -> Option<(usize, i32, i32)> {
+    #[cfg(windows)]
+    {
+        win::nudge_panel_off_target(target)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Move the panel window back after [`nudge_panel_off_target`]. Non-Windows → no-op.
+#[allow(unused_variables)]
+pub fn restore_panel_position(hwnd: usize, x: i32, y: i32) {
+    #[cfg(windows)]
+    {
+        win::restore_panel_position(hwnd, x, y);
+    }
+}
+
 /// Re-assert the overlay window's TOPMOST z-order so the guidance pointer stays
 /// above transient popups (dropdown menus, combo lists, tooltips) created by
 /// other apps. No-op on non-Windows. See `win::raise_overlay_topmost`.

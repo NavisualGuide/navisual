@@ -90,10 +90,15 @@
     const baseRx = bw / 2 + 8;
     const baseRy = bh / 2 + 8;
     const growth = Math.min(bw, bh) * 0.7;
+    // On a wide, thin row (a sidebar/list item — bw ≫ bh) cap how far the ring grows on its
+    // SHORT axis so it stays a flat puff hugging the row instead of a tall oval that swallows
+    // the items above and below (live 2026-07-24: the Settings sidebar ring overshot its
+    // neighbours). Square/tall targets keep the full, circular growth.
+    const ryGrowth = bw > bh * 2 ? Math.min(growth, bh * 0.4) : growth;
     for (let i = 0; i < 3; i++) {
       const phase = ((t / 1500 + i / 3) % 1);
       const rx = baseRx + phase * growth;
-      const ry = baseRy + phase * growth;
+      const ry = baseRy + phase * ryGrowth;
       const alpha  = (1 - phase) * 0.55;
       ctx.beginPath();
       ctx.ellipse(cx, cy, Math.max(rx, 0.1), Math.max(ry, 0.1), 0, 0, Math.PI * 2);
@@ -464,10 +469,15 @@
     const baseRx = bw / 2 + 8;
     const baseRy = bh / 2 + 8;
     const growth = Math.min(bw, bh) * 0.7;
+    // On a wide, thin row (a sidebar/list item — bw ≫ bh) cap how far the ring grows on its
+    // SHORT axis so it stays a flat puff hugging the row instead of a tall oval that swallows
+    // the items above and below (live 2026-07-24: the Settings sidebar ring overshot its
+    // neighbours). Square/tall targets keep the full, circular growth.
+    const ryGrowth = bw > bh * 2 ? Math.min(growth, bh * 0.4) : growth;
     for (let i = 0; i < 3; i++) {
       const phase = ((t / 1500 + i / 3) % 1);
       const rx = baseRx + phase * growth;
-      const ry = baseRy + phase * growth;
+      const ry = baseRy + phase * ryGrowth;
       const alpha  = (1 - phase) * 0.40;
       ctx.beginPath();
       ctx.ellipse(cx, cy, Math.max(rx, 0.1), Math.max(ry, 0.1), 0, 0, Math.PI * 2);
