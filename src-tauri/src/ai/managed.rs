@@ -350,6 +350,15 @@ impl ManagedClient {
                             recovered.steps.len()
                         );
                         recovered
+                    } else if looks_like_leaked_pseudocall(content) {
+                        // It's a leaked tool call we couldn't parse — never dump the raw
+                        // `default_api:navigate_step{…}` blob at the user as an instruction.
+                        log::warn!(
+                            "[managed] leaked tool-call blob could not be recovered; asking for retry: {content}"
+                        );
+                        return Err(anyhow!(
+                            "The model returned a malformed response. Please try again."
+                        ));
                     } else {
                         log::info!("[managed] no tool_call; surfacing plain message as a reply");
                         NavigateStepResponse {
@@ -400,12 +409,109 @@ fn try_recover_leaked_json(content: &str) -> Option<NavigateStepResponse> {
         .strip_suffix("```")
         .map(str::trim_end)
         .unwrap_or(unfenced);
-    let parsed: NavigateStepResponse = serde_json::from_str(unfenced).ok()?;
-    let has_real_instruction = parsed
-        .steps
-        .first()
-        .is_some_and(|s| !s.instruction.trim().is_empty());
-    has_real_instruction.then_some(parsed)
+    if let Ok(parsed) = serde_json::from_str::<NavigateStepResponse>(unfenced) {
+        let has_real_instruction = parsed
+            .steps
+            .first()
+            .is_some_and(|s| !s.instruction.trim().is_empty());
+        if has_real_instruction {
+            return Some(parsed);
+        }
+    }
+    // Second chance: Gemini/Google models sometimes render the tool call as UNQUOTED pseudo-JSON
+    // text (`default_api:navigate_step{needs_input:false,steps:[{instruction:…,target_text:Rotate}]}`)
+    // — not valid JSON (unquoted keys AND unquoted free-text values with embedded commas/colons)
+    // so the strict parse above can't touch it. Live 2026-07-24: gemini-3.5-flash on the managed
+    // Regular tier leaked exactly this on a Blender task, dumping the raw blob as the instruction.
+    recover_leaked_pseudocall(content)
+}
+
+/// Does `content` look like a leaked `navigate_step` tool call rendered as plain text (rather than
+/// a genuine conversational reply)? Covers Gemini's `default_api:navigate_step{…}` /
+/// `default_api.navigate_step(…)` and a bare `navigate_step{…}`/`navigate_step(…)`.
+fn looks_like_leaked_pseudocall(content: &str) -> bool {
+    content.contains("navigate_step{")
+        || content.contains("navigate_step(")
+        || content.contains("default_api:navigate_step")
+        || content.contains("default_api.navigate_step")
+}
+
+/// Grab the value after `key` up to the earliest of `boundaries` (or end of string), trimming
+/// surrounding whitespace and quotes. Lets us pull fields out of the unquoted pseudo-JSON leak
+/// where a value (the instruction) can itself contain commas, colons and brackets — so we rely on
+/// the schema's fixed field ORDER (the next key marks the end) rather than JSON structure.
+fn field_after<'a>(content: &'a str, key: &str, boundaries: &[&str]) -> Option<&'a str> {
+    let start = content.find(key)? + key.len();
+    let rest = &content[start..];
+    let end = boundaries
+        .iter()
+        .filter_map(|b| rest.find(b))
+        .min()
+        .unwrap_or(rest.len());
+    let v = rest[..end]
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim();
+    (!v.is_empty()).then_some(v)
+}
+
+/// Best-effort recovery of the fields we actually need (instruction, target_text, target_bbox,
+/// state_summary) from the unquoted pseudo-JSON leak. Strict-or-fall-through: returns `None` on
+/// any failure, so it never manufactures a worse outcome than the plain-text fallback. The caller
+/// treats a `None` here (when the content still *looks* like a leaked call) as a retry rather than
+/// dumping the raw blob at the user.
+fn recover_leaked_pseudocall(content: &str) -> Option<NavigateStepResponse> {
+    if !looks_like_leaked_pseudocall(content) {
+        return None;
+    }
+    let instruction = field_after(
+        content,
+        "instruction:",
+        &[
+            ",overlay_type:",
+            ",target_bbox:",
+            ",target_role:",
+            ",target_text:",
+            ",target_region:",
+            ",target_nearby_text:",
+            ",clipboard:",
+            ",checkpoint:",
+            "}",
+            "]",
+        ],
+    )?
+    .to_string();
+    let target_text = field_after(content, "target_text:", &["}", "]", ","]).map(str::to_string);
+    let target_bbox = regex::Regex::new(
+        r"target_bbox\s*[:=]\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]",
+    )
+    .ok()
+    .and_then(|re| {
+        let caps = re.captures(content)?;
+        let f = |i: usize| caps.get(i).and_then(|m| m.as_str().parse::<f64>().ok());
+        Some([f(1)?, f(2)?, f(3)?, f(4)?])
+    });
+    let state_summary = field_after(content, "state_summary:", &[",steps:", ",needs_input:", "}"])
+        .map(str::to_string)
+        .unwrap_or_default();
+    log::info!("[managed] recovered leaked default_api pseudo-call (target_text={target_text:?})");
+    Some(NavigateStepResponse {
+        steps: vec![GuidanceStep {
+            instruction,
+            target_text,
+            target_role: None,
+            target_region: None,
+            target_nearby_text: None,
+            overlay_type: OverlayType::Arrow,
+            clipboard: None,
+            checkpoint: true,
+            target_bbox,
+            target_element_id: None,
+        }],
+        state_summary,
+        needs_input: false,
+        suggested_tasks: Vec::new(),
+    })
 }
 
 pub fn build_messages(
@@ -555,5 +661,28 @@ mod tests {
     #[test]
     fn rejects_malformed_json() {
         assert!(try_recover_leaked_json("```json\n{ not valid json\n```").is_none());
+    }
+
+    #[test]
+    fn recovers_gemini_default_api_pseudocall() {
+        // The live 2026-07-24 case: gemini-3.5-flash (managed Regular) leaked the tool call as
+        // UNQUOTED pseudo-JSON text on a Blender "rotate" task. Not valid JSON (unquoted keys AND
+        // an unquoted free-text instruction with commas/periods) so only the pseudo-call path can
+        // recover it. The answer was correct inside the blob.
+        let content = "default_api:navigate_step{needs_input:false,state_summary:user wants to rotate the cube in Blender.,steps:[{checkpoint:true,instruction:Click the Rotate tool button on the left toolbar (the icon with a circular arrow) to activate the rotation gizmo. Alternatively, you can press the 'R' key on your keyboard.,overlay_type:circle,target_bbox:[214,5,245,26],target_role:button,target_text:Rotate}]}";
+        let recovered = try_recover_leaked_json(content).expect("should recover pseudo-call");
+        assert_eq!(recovered.steps.len(), 1);
+        assert!(recovered.steps[0].instruction.starts_with("Click the Rotate tool button"));
+        assert!(recovered.steps[0].instruction.contains("press the 'R' key"));
+        assert_eq!(recovered.steps[0].target_text.as_deref(), Some("Rotate"));
+        assert_eq!(recovered.steps[0].target_bbox, Some([214.0, 5.0, 245.0, 26.0]));
+        assert!(!recovered.needs_input);
+    }
+
+    #[test]
+    fn leaked_pseudocall_without_instruction_is_not_recovered() {
+        // A leak-shaped blob with no usable instruction falls through (the caller then asks for a
+        // retry rather than dumping it) — never a manufactured empty step.
+        assert!(try_recover_leaked_json("default_api:navigate_step{needs_input:true,steps:[]}").is_none());
     }
 }
