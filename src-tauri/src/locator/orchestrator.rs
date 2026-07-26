@@ -1265,12 +1265,14 @@ mod tests {
                 name: "Save As".to_string(),
                 role: "Button".to_string(),
                 rect: bbox_stub(),
+                enabled: true,
             },
             ContextElement {
                 id: 2,
                 name: "Performance".to_string(),
                 role: "TabItem".to_string(),
                 rect: bbox_stub(),
+                enabled: true,
             },
         ];
         // Fabricated id → not in snapshot.

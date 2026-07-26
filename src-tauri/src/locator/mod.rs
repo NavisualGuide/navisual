@@ -86,6 +86,13 @@ pub struct ContextElement {
     /// Bounding rect in virtual-desktop physical pixels at capture time. The pointer
     /// never uses this directly — verification re-reads the live rect.
     pub rect: crate::capture::Rect,
+    /// UIA `IsEnabled` at capture time. Disabled elements are KEPT in the list and
+    /// marked (never filtered): "why is X greyed out / how do I enable it" is a real
+    /// task, so the model needs to be able to name one — it just must not tell the
+    /// user to click it (prompt Rule 7). Found 2026-07-26: a disabled
+    /// `Custom Paper Size...` was selected and confidently instructed, because nothing
+    /// in the pipeline consulted this property. See locator-testing.md §I.5 item 0.
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

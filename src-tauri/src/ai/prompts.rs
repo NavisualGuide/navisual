@@ -54,6 +54,22 @@ actions — the user does everything.
    appears there, set target_element_id to its integer id — ONLY ids from the
    list, never invented. Still fill target_text (and target_bbox) as normal;
    omit target_element_id when the target is not listed or no list is present.
+   DISABLED (greyed-out) elements: a row marked "| DISABLED" cannot be clicked
+   — the app itself reports it as unavailable, which is more reliable than how
+   it looks in the screenshot. NEVER write an instruction that tells the user to
+   click, press, tick, or choose a DISABLED element; telling someone to click a
+   dead control is worse than saying nothing, because they assume they did it
+   wrong. Instead work out WHY it is unavailable and give the step that makes it
+   available — a greyed control almost always has an unmet precondition (nothing
+   is selected yet, a required field is empty, a prerequisite checkbox is off, a
+   different mode or tab must be active first). Point at the control that
+   satisfies the precondition, not at the dead one. You MAY still target a
+   DISABLED element when the user's own question is about it ("why is X greyed
+   out?") — then the instruction explains its state, and must not use a click
+   verb. If you cannot tell from this screen what would enable it, say plainly
+   that it is unavailable here and may have to be changed elsewhere (another
+   dialog, another app, an administrator) — an honest dead end beats a confident
+   guess that wastes the user's time.
 8. SCROLL FIRST: if the element the user needs is not visible in the current
    view, tell them to scroll BEFORE telling them to click — a scroll step is
    its own instruction with overlay_type="none" and no target_text. A new
@@ -204,6 +220,7 @@ pub fn elements_context_block(
     let mut block = String::from(
         "\n[Screen Elements] — interactive elements detected on the current screen.\n\
          If your target is one of these, set target_element_id to its id (and still fill target_text).\n\
+         A row ending in | DISABLED is greyed out and CANNOT be clicked — see rule 7.\n\
          id | role | name | center x,y (0-1000)\n",
     );
     for el in elements {
@@ -218,13 +235,16 @@ pub fn elements_context_block(
         } else {
             el.name.clone()
         };
+        // Marker only on disabled rows: enabled is the overwhelming majority, so this
+        // costs ~0 tokens in the normal case and stays visually obvious when it fires.
         block.push_str(&format!(
-            "{} | {} | \"{}\" | {},{}\n",
+            "{} | {} | \"{}\" | {},{}{}\n",
             el.id,
             el.role.to_lowercase(),
             name,
             (cx.round() as i64).clamp(0, 1000),
             (cy.round() as i64).clamp(0, 1000),
+            if el.enabled { "" } else { " | DISABLED" },
         ));
     }
     block
@@ -443,6 +463,20 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn ctx_el(id: u32, name: &str, role: &str, x: i32, y: i32, w: u32, h: u32) -> crate::locator::ContextElement {
+        ctx_el_state(id, name, role, x, y, w, h, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ctx_el_state(
+        id: u32,
+        name: &str,
+        role: &str,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        enabled: bool,
+    ) -> crate::locator::ContextElement {
         crate::locator::ContextElement {
             id,
             name: name.to_string(),
@@ -453,6 +487,7 @@ mod tests {
                 width: w,
                 height: h,
             },
+            enabled,
         }
     }
 
@@ -474,6 +509,37 @@ mod tests {
         let off = vec![ctx_el(1, "X", "Button", -500, -500, 10, 10)];
         let block = elements_context_block(&off, rect);
         assert!(block.contains("| 0,0\n"), "{block}");
+    }
+
+    #[test]
+    fn elements_block_marks_disabled_only() {
+        // Found live 2026-07-26 (LibreOffice → Canon driver): a DISABLED
+        // "Custom Paper Size..." was selected and the user told to click it, because
+        // nothing in the pipeline consulted UIA IsEnabled. Enabled rows must stay
+        // byte-identical (no token cost, no prompt churn); only disabled rows are marked.
+        let rect = crate::capture::Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        };
+        let els = vec![
+            ctx_el_state(1, "Custom Paper Size...", "Button", 100, 100, 200, 20, false),
+            ctx_el_state(2, "Page Options...", "Button", 400, 100, 200, 20, true),
+        ];
+        let block = elements_context_block(&els, rect);
+        assert!(
+            block.contains("1 | button | \"Custom Paper Size...\" | 200,110 | DISABLED\n"),
+            "{block}"
+        );
+        assert!(
+            block.contains("2 | button | \"Page Options...\" | 500,110\n"),
+            "{block}"
+        );
+        // The enabled row carries no marker at all.
+        assert_eq!(block.matches("DISABLED").count(), 2); // 1 header mention + 1 row
+        // The header tells the model what the marker means.
+        assert!(block.contains("CANNOT be clicked"), "{block}");
     }
 
     #[test]

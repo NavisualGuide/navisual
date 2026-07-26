@@ -733,6 +733,7 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let _ = cache.add_property(UIProperty::BoundingRectangle);
     let _ = cache.add_property(UIProperty::IsOffscreen);
     let _ = cache.add_property(UIProperty::ClassName); // for the Excel walk's dedup
+    let _ = cache.add_property(UIProperty::IsEnabled); // greyed-out marker for the prompt
 
     // Gather candidate elements (context-type, with the cache attached). Two ways in:
     // Excel → the pruned collecting walk; everything else → the original bulk Descendants
@@ -865,6 +866,10 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                     width: w,
                     height: h,
                 },
+                // Unreadable property → assume enabled: the marker is advisory, and
+                // wrongly calling a live control "disabled" would steer the model away
+                // from a valid target (the worse error of the two).
+                enabled: el.is_cached_enabled().unwrap_or(true),
             });
         }
     }
