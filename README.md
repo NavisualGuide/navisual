@@ -2,7 +2,7 @@
 
 **The AI guides, you decide.**
 
-[![Navisual demo](assets/demo.gif)](https://youtu.be/d-a2IARS0PU)
+[![Navisual demo](assets/demo.gif)](https://youtu.be/_C-3g769eig)
 
 Navisual watches your screen and walks you through any task step by step — pointing at the exact button to click, narrating each action, and reading the current state of your app. The AI never moves your mouse, clicks, or types for you. Every action stays in your hands.
 
