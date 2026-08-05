@@ -1,10 +1,14 @@
 # Navisual
 
-**The AI guides, you decide.**
+**An AI that sees, solves, and can be seen — you make the call.**
 
 [![Navisual demo](assets/demo.gif)](https://youtu.be/_C-3g769eig)
 
-Navisual watches your screen and walks you through any task step by step — pointing at the exact button to click, narrating each action, and reading the current state of your app. The AI never moves your mouse, clicks, or types for you. Every action stays in your hands.
+Most AI is invisible at the moment it matters. An agent clicks and you see only the aftermath; a chatbot answers in a separate window and you're still hunting for the button it means.
+
+Navisual understands what's on your screen, works out what to do about it, and renders the answer **onto that screen** — pointing at the exact control, narrating the step, and stopping there. It never moves your mouse, clicks, or types. Every action stays yours.
+
+Because the answer is drawn *before* anything happens, a wrong answer is visibly wrong — and you simply don't click. The pointer isn't the product; it's how the model's conclusion gets delivered onto your real screen, on your version, in your window.
 
 **[Download for Windows](https://navisualguide.com)** · [User guide](https://navisualguide.com/docs.html) · [View on GitHub](https://github.com/NavisualGuide/navisual) · [navisualguide.com](https://navisualguide.com)
 
@@ -42,7 +46,7 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 
 ## Features
 
-- **Observe, never act** — reads your screen, never moves the mouse or types
+- **Observe, never act** — understands your screen, never moves the mouse or types
 - **Screen Guide** — visual pointers land on the exact button, tab, or field
 - **Live captions** — subtitle strip shows the current instruction
 - **Audio narration** — TTS via Windows SAPI, no install required
@@ -104,18 +108,38 @@ Additional notes:
 
 ## Architecture
 
+**The AI returns a text description of the target, never pixel coordinates.** A local element
+locator resolves it against the live UI — app object-model adapters, then AI element *selection*
+verified against the accessibility tree, then a framework-routed UIA search, then OCR with a
+corroboration gate, then icon template matching. Grounding accuracy comes from the machine's own
+accessibility data rather than the model's spatial reasoning, which is why a cheap model is
+enough.
+
+**The derivation is inspectable, not just the answer.** The debug drawer records which pass
+resolved the target (`hit_adapter`, `hit_selection`, `hit_a11y`, `hit_ocr`, `hit_template`),
+every candidate considered, the reason each was rejected, and the model's own predicted box
+beside the resolved rect — so a wrong pointer can be diagnosed instead of guessed at.
+
 For a short technical tour of the data flow, element locator, and key design decisions, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
 ## Roadmap
 
+Current release: **v0.7.8** · [release notes](https://github.com/NavisualGuide/navisual/releases)
+
 ```
-v0.5    ✅ Free managed tier · auto-updater · signed installer · 6 BYOK providers
-        🔜 Pay-as-you-go coin purchases (Stripe)
-v0.6    Template matching · Nav-Packs for Blender / SolidWorks
-v1.0    Microsoft Store · enterprise features · public launch
-v1.x    macOS · Linux
+v0.5   ✅ Free managed tier · signed installer + auto-updater · 6 BYOK providers
+          pay-as-you-go coins (Stripe) · account management
+v0.6   ✅ App-aware locator — Excel cell adapter · Nav-Packs (66-icon Blender pack)
+          theme-robust icon template matching · per-monitor DPI prior
+v0.7   ✅ Structured-Context locator ("select, don't ground") — the AI picks an
+          element id from a verified on-screen list instead of guessing coordinates
+       ✅ Office COM adapters (Word / PowerPoint) · Blender script-channel add-on
+       ✅ Autopilot block-diff change detection · disabled-control awareness
+v1.0   🔜 Microsoft Store (MSIX) · enterprise SSO + audit logs · Nav-Pack plugin
+          system · browser companion extension · subscriptions
+v1.x      macOS · Linux
 ```
 
 ---
