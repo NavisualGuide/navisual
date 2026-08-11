@@ -2817,7 +2817,7 @@ See the LICENSE file in the root of this repository for complete details.
             Navisual captures your active window and sends it to the AI provider you've selected.
           </p>
           <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
-            <li>Screenshots are held in memory only — never written to disk by Navisual.</li>
+            <li>Screenshots are held in memory — nothing is saved to your disk unless you choose to save it.</li>
             <li>Only the active window is captured by default; full-screen needs your permission each time.</li>
             <li><strong>The default free tier uses free AI models that may keep your requests — including the screenshot — to train their models.</strong> Paid tiers, per their providers' current policies, don't; Ollama keeps everything on your machine. (<button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>details</button>)</li>
             <li>On the free tier, a one-way hash of a device identifier counts your 30 free requests per machine — it can't identify you and isn't used on paid or your-own-key providers.</li>
