@@ -470,28 +470,92 @@ pub(crate) const CONTEXT_BUDGET_MS: u128 = 1000;
 /// doesn't help this case (see its doc comment) since the call itself can't be shortened,
 /// only abandoned — which is exactly what the timeout in `enumerate_context_snapshot_bounded`
 /// (lib.rs) does, recording the outcome here.
-static CONTEXT_SLOW_WINDOWS: OnceLock<Mutex<HashMap<usize, u32>>> = OnceLock::new();
-/// Consecutive timeouts required before a window is skipped outright. Kept above 1 so a
-/// single transient blip (a GC pause, a disk hiccup) on an otherwise-fine window can't
-/// permanently blacklist it for the rest of the session — Lightroom Classic timed out 5/5
-/// times by a wide margin (2.2-5.7s vs a 1s budget), so a threshold of 2 still catches the
-/// real case almost immediately.
-const CONTEXT_SLOW_THRESHOLD: u32 = 2;
+static CONTEXT_SLOW_WINDOWS: OnceLock<Mutex<HashMap<usize, SlowWindow>>> = OnceLock::new();
 
-/// Has `hwnd` already timed out enough times in a row to skip trying again this session?
-pub(crate) fn context_window_is_slow(hwnd: usize) -> bool {
+/// Per-window skip state. Was a bare strike count until 2026-08-12, when the count alone
+/// proved to be a **one-way door**: `enumerate_context_snapshot_bounded` returns early on a
+/// slow window *before* it can reach `context_window_mark_fast`, so a window that timed out
+/// twice was never measured again and could therefore never be un-marked. Measured
+/// consequence on Word (locator-testing.md §II, 2026-08-11 human session): locates went from
+/// 5-52 ms `hit_selection` to 2426-5969 ms with a miss, silently, for the whole session —
+/// while the *same* Word ran healthy in the session before and after. The trigger for those
+/// transient timeouts is still unexplained; this only makes the penalty recoverable.
+#[derive(Default, Clone, Copy)]
+struct SlowWindow {
+    /// Consecutive timeouts. At/above `CONTEXT_SLOW_THRESHOLD` the window is gated.
+    strikes: u32,
+    /// Requests skipped since the last probe was allowed through.
+    skipped: u32,
+    /// Skips to wait before letting the next probe through; doubles on each failed probe.
+    backoff: u32,
+}
+
+/// Consecutive timeouts required before a window is gated. Kept above 1 so a single
+/// transient blip (a GC pause, a disk hiccup) on an otherwise-fine window can't gate it —
+/// Lightroom Classic timed out 5/5 times by a wide margin (2.2-5.7s vs a 1s budget), so a
+/// threshold of 2 still catches the real case almost immediately.
+const CONTEXT_SLOW_THRESHOLD: u32 = 2;
+/// Skips before the first probe once a window is gated. Small, so a transiently-slow window
+/// (Word) rejoins the fast path within a few requests instead of losing the session.
+const CONTEXT_PROBE_BACKOFF_START: u32 = 4;
+/// Ceiling on the doubling. At 64 a permanently-dead window (Lightroom's all-`Pane` tree)
+/// costs ~6 probe timeouts across a 200-request session — the deliberate price of never
+/// writing off a window that might recover.
+const CONTEXT_PROBE_BACKOFF_MAX: u32 = 64;
+
+/// What to do about `hwnd` on this request.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum ContextGate {
+    /// Not gated — enumerate normally.
+    Enumerate,
+    /// Gated, but this request is the periodic canary; enumerate and let the result decide.
+    Probe,
+    /// Gated; skip. `next_probe_in` requests remain until the next canary.
+    Skip { next_probe_in: u32 },
+}
+
+/// Decide whether to enumerate `hwnd`. **Mutating** — a `Skip` advances the probe counter,
+/// so this must be called exactly once per request.
+pub(crate) fn context_window_gate(hwnd: usize) -> ContextGate {
     let cell = CONTEXT_SLOW_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
-    cell.lock().get(&hwnd).copied().unwrap_or(0) >= CONTEXT_SLOW_THRESHOLD
+    let mut map = cell.lock();
+    let Some(st) = map.get_mut(&hwnd) else {
+        return ContextGate::Enumerate;
+    };
+    if st.strikes < CONTEXT_SLOW_THRESHOLD {
+        return ContextGate::Enumerate;
+    }
+    st.skipped += 1;
+    if st.skipped >= st.backoff {
+        st.skipped = 0;
+        ContextGate::Probe
+    } else {
+        ContextGate::Skip {
+            next_probe_in: st.backoff.saturating_sub(st.skipped),
+        }
+    }
 }
 
 /// Record that enumeration against `hwnd` didn't finish inside the wait budget.
 pub(crate) fn context_window_mark_slow(hwnd: usize) {
     let cell = CONTEXT_SLOW_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
-    *cell.lock().entry(hwnd).or_insert(0) += 1;
+    let mut map = cell.lock();
+    let st = map.entry(hwnd).or_insert_with(|| SlowWindow {
+        backoff: CONTEXT_PROBE_BACKOFF_START,
+        ..Default::default()
+    });
+    st.strikes += 1;
+    if st.strikes > CONTEXT_SLOW_THRESHOLD {
+        // A failed *probe* (not one of the initial strikes) — back off further.
+        st.backoff = (st.backoff.saturating_mul(2)).min(CONTEXT_PROBE_BACKOFF_MAX);
+    }
 }
 
 /// Record that enumeration against `hwnd` completed within budget, clearing any prior
 /// strikes — a window that's fast now shouldn't stay penalised by an old, unrelated blip.
+/// This is also what a successful probe calls, which is the whole recovery path; it further
+/// self-heals the latent `HWND`-reuse case, where Windows recycles a handle value and a new
+/// window inherits a dead one's strikes.
 pub(crate) fn context_window_mark_fast(hwnd: usize) {
     let cell = CONTEXT_SLOW_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
     cell.lock().remove(&hwnd);
@@ -1687,7 +1751,7 @@ fn match_in_subtree_all(
     // the whole allocation when nothing is found, starving Passes 2 and 3.
     // The outer deadline already enforces the total budget.
     let internal_timeout = timeout_ms.min(100);
-    let mut matcher = automation
+    let matcher = automation
         .create_matcher()
         .from_ref(root)
         .depth(15)
@@ -1700,11 +1764,27 @@ fn match_in_subtree_all(
             // Strip a trailing accelerator ("Playback Alt+I" → "Playback") so the anchored
             // regex matches menu items whose UIA name carries the shortcut suffix.
             let normed = strip_accelerator(&norm_dashes(&name));
-            Ok(re.is_match(&normed))
+            if !re.is_match(&normed) {
+                return Ok(false);
+            }
+            // Control-type check lives HERE, not in `matcher.control_type(ct)`, because that
+            // builder takes ONE exact type and so silently excluded the whole button *family*
+            // before `ct_family_matches` could be lenient about it (D-4, locator-testing.md).
+            // Word exposes every ribbon dropdown as MenuItem — Breaks, Margins, Orientation,
+            // Size, Columns, Line Numbers, Hyphenation — while the AI calls them "button"
+            // because visually they are, so an exact filter returned ZERO candidates for a
+            // plainly visible control. 23 of Word's controls are MenuItem vs 45 Button.
+            //
+            // Ordered after the regex so the extra get_control_type() COM call is paid only
+            // for the handful of elements whose name already matched, not the whole tree.
+            match control_type {
+                Some(want) => Ok(el
+                    .get_control_type()
+                    .map(|ct| ct_family_matches(ct, want))
+                    .unwrap_or(false)),
+                None => Ok(true),
+            }
         }));
-    if let Some(ct) = control_type {
-        matcher = matcher.control_type(ct);
-    }
     match matcher.find_all() {
         Ok(els) => Ok(els
             .into_iter()
@@ -2624,6 +2704,34 @@ mod tests {
     }
 
     #[test]
+    fn button_role_accepts_the_whole_clickable_family() {
+        use super::ct_family_matches;
+        use uiautomation::controls::ControlType as CT;
+        // D-4 (2026-08-11, locator-testing.md): Word exposes EVERY ribbon dropdown as
+        // MenuItem — Breaks, Margins, Orientation, Size, Columns, Line Numbers,
+        // Hyphenation — while the AI calls them "button" because visually they are.
+        // 23 of Word's controls are MenuItem against 45 Button, so excluding the family
+        // makes roughly a third of the ribbon unreachable. This rule was already correct;
+        // the bug was that `matcher.control_type(ct)` filtered to ONE exact type at query
+        // time, so the family check never ran. The type test now lives in the matcher's
+        // filter_fn — keep it that way.
+        for resolved in [CT::Button, CT::SplitButton, CT::Hyperlink, CT::MenuItem] {
+            assert!(
+                ct_family_matches(resolved, CT::Button),
+                "{resolved:?} must satisfy a button-role target"
+            );
+        }
+        // Leniency is one-directional and button-only: a textbox request must never
+        // accept a button, or "type in the search box" lands on a toolbar icon.
+        assert!(!ct_family_matches(CT::Button, CT::Edit));
+        assert!(!ct_family_matches(CT::MenuItem, CT::Edit));
+        assert!(!ct_family_matches(CT::Button, CT::TabItem));
+        // Exact matches still hold for every other role.
+        assert!(ct_family_matches(CT::Edit, CT::Edit));
+        assert!(ct_family_matches(CT::TabItem, CT::TabItem));
+    }
+
+    #[test]
     fn deep_name_filter_keeps_known_loose_matches() {
         use super::{deep_name_filter, norm_dashes};
         // VS Code activity bar: accelerator-suffixed name → anchored via the
@@ -2677,32 +2785,125 @@ mod tests {
     // could interfere with each other.
     #[test]
     fn slow_window_tracking_requires_consecutive_strikes() {
-        use super::{context_window_is_slow, context_window_mark_slow};
+        use super::{context_window_gate, context_window_mark_slow, ContextGate};
         let hwnd = 0xDEAD_0001;
-        assert!(!context_window_is_slow(hwnd), "fresh hwnd starts clean");
+        assert_eq!(
+            context_window_gate(hwnd),
+            ContextGate::Enumerate,
+            "fresh hwnd starts clean"
+        );
         context_window_mark_slow(hwnd);
-        assert!(
-            !context_window_is_slow(hwnd),
-            "one strike alone must not blacklist — a single blip shouldn't be permanent"
+        assert_eq!(
+            context_window_gate(hwnd),
+            ContextGate::Enumerate,
+            "one strike alone must not gate — a single blip shouldn't cost anything"
         );
         context_window_mark_slow(hwnd);
         assert!(
-            context_window_is_slow(hwnd),
-            "two consecutive strikes (CONTEXT_SLOW_THRESHOLD) should skip the window"
+            matches!(context_window_gate(hwnd), ContextGate::Skip { .. }),
+            "two consecutive strikes (CONTEXT_SLOW_THRESHOLD) should gate the window"
         );
     }
 
     #[test]
     fn a_fast_result_clears_prior_strikes() {
-        use super::{context_window_is_slow, context_window_mark_fast, context_window_mark_slow};
+        use super::{
+            context_window_gate, context_window_mark_fast, context_window_mark_slow, ContextGate,
+        };
         let hwnd = 0xDEAD_0002;
         context_window_mark_slow(hwnd);
         context_window_mark_fast(hwnd);
         context_window_mark_slow(hwnd);
-        assert!(
-            !context_window_is_slow(hwnd),
+        assert_eq!(
+            context_window_gate(hwnd),
+            ContextGate::Enumerate,
             "mark_fast must reset the counter, not just decrement it — otherwise an old, \
              unrelated blip plus one new strike could wrongly cross the threshold"
         );
+    }
+
+    /// The regression that matters: before 2026-08-12 a gated window was skipped *forever*,
+    /// because the caller returned before it could ever reach `mark_fast`. A transiently slow
+    /// window (Word, measured live) therefore lost Structured-Context for the whole session.
+    #[test]
+    fn a_gated_window_is_probed_and_can_recover() {
+        use super::{
+            context_window_gate, context_window_mark_fast, context_window_mark_slow,
+            ContextGate, CONTEXT_PROBE_BACKOFF_START,
+        };
+        let hwnd = 0xDEAD_0003;
+        context_window_mark_slow(hwnd);
+        context_window_mark_slow(hwnd);
+
+        for i in 1..CONTEXT_PROBE_BACKOFF_START {
+            assert!(
+                matches!(context_window_gate(hwnd), ContextGate::Skip { .. }),
+                "request {i} while gated should skip"
+            );
+        }
+        assert_eq!(
+            context_window_gate(hwnd),
+            ContextGate::Probe,
+            "after CONTEXT_PROBE_BACKOFF_START skips, one probe must be let through"
+        );
+
+        // Probe succeeds -> full recovery, no lingering penalty.
+        context_window_mark_fast(hwnd);
+        assert_eq!(
+            context_window_gate(hwnd),
+            ContextGate::Enumerate,
+            "a successful probe must fully un-gate the window, not merely reduce its backoff"
+        );
+    }
+
+    #[test]
+    fn a_failed_probe_doubles_the_backoff_and_is_capped() {
+        use super::{
+            context_window_gate, context_window_mark_slow, ContextGate,
+            CONTEXT_PROBE_BACKOFF_MAX, CONTEXT_PROBE_BACKOFF_START,
+        };
+        let hwnd = 0xDEAD_0004;
+        context_window_mark_slow(hwnd);
+        context_window_mark_slow(hwnd);
+
+        // Reach the first probe, then fail it.
+        for _ in 1..CONTEXT_PROBE_BACKOFF_START {
+            let _ = context_window_gate(hwnd);
+        }
+        assert_eq!(context_window_gate(hwnd), ContextGate::Probe);
+        context_window_mark_slow(hwnd);
+
+        // The wait to the next probe must now be twice as long.
+        for i in 1..(CONTEXT_PROBE_BACKOFF_START * 2) {
+            assert!(
+                matches!(context_window_gate(hwnd), ContextGate::Skip { .. }),
+                "request {i} after a failed probe should still skip (backoff doubled)"
+            );
+        }
+        assert_eq!(
+            context_window_gate(hwnd),
+            ContextGate::Probe,
+            "the next probe arrives after 2x the previous backoff"
+        );
+
+        // Many more failures must not let the backoff run away — a permanently dead window
+        // should settle at a fixed, cheap probe rate rather than an ever-growing one.
+        for _ in 0..20 {
+            context_window_mark_slow(hwnd);
+        }
+        let mut skips = 0u32;
+        loop {
+            match context_window_gate(hwnd) {
+                ContextGate::Probe => break,
+                _ => {
+                    skips += 1;
+                    assert!(
+                        skips <= CONTEXT_PROBE_BACKOFF_MAX,
+                        "backoff exceeded CONTEXT_PROBE_BACKOFF_MAX — a dead window would \
+                         eventually stop being probed at all, reintroducing the one-way door"
+                    );
+                }
+            }
+        }
     }
 }

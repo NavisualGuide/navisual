@@ -26,6 +26,117 @@ use crate::locator::LocateResult;
 use anyhow::{Context, Result};
 use windows::Win32::System::Com::IDispatch;
 
+/// L1 caret/state block for Word (`[App State — Word]`). Same shape as the Blender bridge's
+/// block: facts the screenshot cannot convey, consumed by the model, no geometry.
+///
+/// The caret is the one piece of state the AI genuinely **cannot** see — 1 px wide, blinking
+/// off half the time, and the first thing lost to the Lanczos→1536-cap→JPEG-q75 pipeline
+/// (confirmed absent in every B1 capture). Prompt Rule 3 exists precisely because of this
+/// blind spot; this converts it from an unobservable into an observable, the same move
+/// Structured-Context made for position and the DISABLED marker made for state.
+///
+/// Deliberately L1 only — the caret's *screen rect* is obtainable too, but pointing at it
+/// would highlight the user's own blinking cursor, which they can already see.
+///
+/// Every field is best-effort: Word's object model is remoted COM and any property can fail
+/// on a busy instance, so a missing field is omitted rather than failing the whole block.
+#[cfg(windows)]
+pub fn app_state_block(hwnd: usize, include_paragraph_text: bool) -> Option<String> {
+    let app = get_active_object("Word.Application").ok()?;
+    // Word is SDI — resolve OUR window, so a pinned-but-inactive document never reports
+    // another window's cursor (same care as `locate`).
+    let window = super::office_com::resolve_app_window(&app, hwnd).ok()?;
+    let sel = get_path(&window, &["Selection"]).ok()?;
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // wdActiveEndPageNumber / wdNumberOfPagesInDocument / wdFirstCharacterLineNumber
+    let info = |id: i32| -> Option<i32> {
+        as_i32(&get_indexed(&sel, "Information", vec![v_i32(id)]).ok()?).ok()
+    };
+    let mut where_bits: Vec<String> = Vec::new();
+    if let (Some(p), Some(of)) = (info(3), info(4)) {
+        where_bits.push(format!("page {p} of {of}"));
+    }
+    // Sections matter for exactly the tasks that need them (headers, restarted numbering)
+    // and are invisible in a screenshot beyond a small "Section 2" tab in header edit mode.
+    if let Some(s) = info(2) {
+        match get_path(&window, &["Document", "Sections"])
+            .ok()
+            .and_then(|secs| as_i32(&get(&secs, "Count").ok()?).ok())
+        {
+            Some(total) if total > 1 => where_bits.push(format!("section {s} of {total}")),
+            _ => {}
+        }
+    }
+    if let Some(l) = info(10) {
+        where_bits.push(format!("line {l}"));
+    }
+    // wdSelectionIP = 1 — a plain insertion point, i.e. nothing selected.
+    let story = as_i32(&get(&sel, "StoryType").ok()?).unwrap_or(1);
+    where_bits.push(
+        match story {
+            7 => "in the header",
+            9 => "in the footer",
+            _ => "in the main body",
+        }
+        .to_string(),
+    );
+    if !where_bits.is_empty() {
+        lines.push(format!("Cursor: {}", where_bits.join(", ")));
+    }
+
+    match as_i32(&get(&sel, "Type").ok()?).unwrap_or(1) {
+        1 => lines.push("Selection: none (insertion point only)".into()),
+        _ => {
+            let txt = as_string(&get_path(&sel, &["Range"]).ok().and_then(|r| get(&r, "Text").ok())?)
+                .unwrap_or_default();
+            lines.push(format!("Selection: {} characters selected", txt.chars().count()));
+        }
+    }
+
+    if let Ok(style) = get_path(&sel, &["Style"]).and_then(|s| get(&s, "NameLocal")) {
+        if let Ok(name) = as_string(&style) {
+            if !name.trim().is_empty() {
+                lines.push(format!("Paragraph style: {}", name.trim()));
+            }
+        }
+    }
+
+    // Document content entering the prompt. The screenshot already carries it, so this is
+    // not a new category — but it IS newly structured and greppable, so it is capped hard
+    // and reported as a length beyond that rather than dumping a paragraph.
+    if let Some(text) = get_indexed(&sel, "Paragraphs", vec![v_i32(1)])
+        .ok()
+        .and_then(|p| as_dispatch(&p).ok())
+        .and_then(|p| get_path(&p, &["Range"]).ok())
+        .and_then(|r| get(&r, "Text").ok())
+        .and_then(|t| as_string(&t).ok())
+    {
+        let flat = text.replace(['\r', '\n', '\u{7}'], " ");
+        let flat = flat.trim();
+        if flat.is_empty() {
+            lines.push("Paragraph: (empty)".into());
+        } else if !include_paragraph_text || flat.chars().count() > 90 {
+            // Opted out, or too long to quote: report the shape, not the prose. The AI still
+            // learns "you are in a substantial paragraph" without the document leaving as text.
+            lines.push(format!("Paragraph: {} characters", flat.chars().count()));
+        } else {
+            lines.push(format!("Paragraph: \"{flat}\""));
+        }
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n[App State — Word] authoritative for the fields listed here; the screenshot \
+         cannot show the text cursor at all, so trust these over anything you infer about \
+         where the cursor is.\n{}\n",
+        lines.join("\n")
+    ))
+}
+
 pub struct WordAdapter;
 
 /// Characters of document text kept on each side of an occurrence for the nearby check.

@@ -31,6 +31,22 @@ mod imp {
 
     static TX: OnceLock<Mutex<Sender<Cmd>>> = OnceLock::new();
 
+    /// The window we currently hold a live subscription on, 0 for none. Mirrors the thread's
+    /// `current` so callers can ask *without* messaging the thread (which would deadlock the
+    /// diagnostics path: it runs on the same blocking pool the thread can be waiting on).
+    /// Written by the thread only, at the two points `current` changes — so it can lag a
+    /// subscribe by microseconds but never reports a subscription that was never made.
+    static WARMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// Which hwnd, if any, is currently kept warm. Diagnostic only — used to test whether an
+    /// active AT subscription correlates with slow enumeration on the same window.
+    pub fn warmed_hwnd() -> Option<usize> {
+        match WARMED.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            h => Some(h),
+        }
+    }
+
     /// Release the subscription after this long with no `warm()` call — i.e. guidance stopped (the
     /// user switched to another app / went idle). Active guidance refreshes it on every request, so
     /// this fires only once the user has genuinely moved on; the next guide re-subscribes. This is
@@ -90,6 +106,7 @@ mod imp {
                             ) {
                                 Ok(()) => {
                                     log::info!("keepwarm: subscribed {hwnd:#x}");
+                                    WARMED.store(hwnd, std::sync::atomic::Ordering::Relaxed);
                                     current = Some((hwnd, el, handler));
                                 }
                                 Err(e) => log::warn!("keepwarm: subscribe {hwnd:#x} failed: {e}"),
@@ -99,6 +116,7 @@ mod imp {
                             // Guidance stopped — release so we don't keep an idle app's tree built.
                             if let Some((hwnd, el, h)) = current.take() {
                                 let _ = automation.remove_structure_changed_event_handler(&el, &h);
+                                WARMED.store(0, std::sync::atomic::Ordering::Relaxed);
                                 log::info!("keepwarm: released {hwnd:#x} (idle)");
                             }
                         }
@@ -120,3 +138,13 @@ pub fn warm(hwnd: usize) {
 
 #[cfg(not(windows))]
 pub fn warm(_hwnd: usize) {}
+
+#[cfg(windows)]
+pub fn warmed_hwnd() -> Option<usize> {
+    imp::warmed_hwnd()
+}
+
+#[cfg(not(windows))]
+pub fn warmed_hwnd() -> Option<usize> {
+    None
+}

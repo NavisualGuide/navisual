@@ -386,6 +386,10 @@ impl WindowTracker {
 #[cfg(windows)]
 unsafe fn run_event_thread() {
     create_display_watch_window();
+    // A WH_MOUSE_LL hook is dispatched through the installing thread's message queue, so it
+    // must live on a thread that pumps — this one already does, for the WinEvent hooks below.
+    // It records nothing until a guidance session arms it with a target PID.
+    crate::last_click::install();
 
     // Keep the hook handles alive for the life of the thread (process lifetime).
     let _hooks: [HWINEVENTHOOK; 5] = [

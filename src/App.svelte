@@ -438,6 +438,31 @@ See the LICENSE file in the root of this repository for complete details.
     });
   }
 
+  /** Grow the task box to fit its content, up to the CSS `max-height` cap.
+   *
+   * The box was a fixed 2 rows with `resize: none`, so pasting anything long showed two
+   * lines and no sign of how much was hidden — bad for the paste-instructions flow, which
+   * is the whole point of "paste an answer that doesn't match your screen".
+   *
+   * Setting height to `auto` first is load-bearing: without it `scrollHeight` can only
+   * ever report the current (larger) height, so the box would grow and never shrink back.
+   * The cap is CSS `max-height`, which beats this inline height, so past the cap the box
+   * stops growing and scrolls instead of pushing the buttons off the panel. */
+  function autoGrowTaskInput() {
+    const el = taskInputEl;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }
+
+  // Runs for programmatic changes too — prefill, clearing on a new session, and the
+  // needs_input switch — not just typing, so the box is never left the wrong size.
+  $effect(() => {
+    task;
+    phase;
+    tick().then(autoGrowTaskInput);
+  });
+
   function clearPrefill() {
     prefillActive = false;
     taskSuggestions = [];
@@ -2607,6 +2632,9 @@ See the LICENSE file in the root of this repository for complete details.
             // Real typing replaces the prefill (the selection is typed over) and
             // protects the user's text from any further prefill.
             if (prefillActive) clearPrefill();
+            // Synchronous so a paste resizes in the same frame it lands — the $effect
+            // above also fires, but a tick later, which reads as a visible jump.
+            autoGrowTaskInput();
           }}
           onfocus={() => {
             // Select-on-focus: applyPrefill skips select() while the panel is a
@@ -2819,6 +2847,8 @@ See the LICENSE file in the root of this repository for complete details.
           <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
             <li>Screenshots are held in memory — nothing is saved to your disk unless you choose to save it.</li>
             <li>Only the active window is captured by default; full-screen needs your permission each time.</li>
+            <li>While guiding, Navisual notes <strong>which control you click</strong> inside the app you're being guided in — its name and type, like <em>Button "Save"</em> — so the AI knows what you just did. Clicks in any other window are discarded and never recorded. Navisual does not monitor your keyboard at all, and never reads the contents of a password box.</li>
+            <li>In Word, it also reads where your cursor is (page, section, line) and the style of the paragraph you're in — a screenshot can't show a text cursor.</li>
             <li><strong>The default free tier uses free AI models that may keep your requests — including the screenshot — to train their models.</strong> Paid tiers, per their providers' current policies, don't; Ollama keeps everything on your machine. (<button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>details</button>)</li>
             <li>On the free tier, a one-way hash of a device identifier counts your 30 free requests per machine — it can't identify you and isn't used on paid or your-own-key providers.</li>
             <li>Voice input (optional) sends audio to Microsoft's online speech service via the WebView2 Web Speech API.</li>
@@ -4431,6 +4461,12 @@ See the LICENSE file in the root of this repository for complete details.
     outline: none;
     resize: none;
     line-height: 1.5;
+    /* Auto-grow (autoGrowTaskInput) sets an inline height; this clamps it. The cap is
+       in vh, which inside the WebView means a share of the PANEL, so it adapts when the
+       user resizes the window instead of a fixed pixel guess. Past the cap the box
+       scrolls rather than pushing the buttons off the bottom. */
+    max-height: 32vh;
+    overflow-y: auto;
     transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
   }
   textarea:focus { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255, 107, 53, 0.15); }

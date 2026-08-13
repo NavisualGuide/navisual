@@ -8,6 +8,7 @@ mod ai;
 mod capture;
 mod credvault;
 mod jsonl_log;
+mod last_click;
 mod locator;
 mod overlay;
 mod packs;
@@ -103,24 +104,79 @@ struct GuidanceState {
 /// the screenshot); every skip (framework `Other`, over-cap, over-budget, zero
 /// elements) is logged with its reason and yields `None` → no prompt block, no
 /// Pass 0.5 (Decision 4: skip the whole block, never truncate).
+/// Diagnostic prefix for every `[context]` line — the fields needed to root-cause the
+/// intermittent enumeration timeouts (locator-testing.md item 0b). The trigger is unexplained:
+/// cold start, Navigation-pane thumbnails and document state are all disproved, while the same
+/// Word flips between 346-513 ms and >1500 ms across sessions. The leading hypothesis is COM
+/// **apartment poisoning of tokio's pooled blocking threads** — `enumerate_context_snapshot`
+/// runs under `spawn_blocking`, `UIAutomation::new()` requires MTA, and the Office COM adapter
+/// (which Word requests exercise) treats a "wrong mode" `CoInitializeEx` as benign without
+/// verifying the pre-existing apartment actually *is* MTA. If the thread is STA, every UIA call
+/// on it is cross-apartment marshalled — and which pooled thread a task lands on is arbitrary,
+/// which is exactly the observed intermittency. This class already bit this code once
+/// (2026-07-18 STA bug, `58b9f8f`).
+///
+/// So: log the app (attribution — the old lines never said *which* window was skipped), the
+/// thread id and its apartment (tests the hypothesis directly), and whether keep-warm holds a
+/// live AT subscription on the same window (the secondary hypothesis — an AT subscription can
+/// itself slow the provider it is attached to). Cheap: three trivial Win32/COM calls, off the
+/// per-frame path.
+#[cfg(windows)]
+fn context_diag(hwnd: usize) -> String {
+    use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+
+    let app = crate::capture::exe_stem_for_hwnd(hwnd).unwrap_or_else(|| "?".into());
+    let tid = unsafe { GetCurrentThreadId() };
+    let apt = unsafe {
+        let mut t = APTTYPE::default();
+        let mut q = APTTYPEQUALIFIER::default();
+        match CoGetApartmentType(&mut t, &mut q) {
+            Ok(()) => match t.0 {
+                0 => "STA",
+                1 => "MTA",
+                2 => "NA",
+                3 => "MAINSTA",
+                _ => "?",
+            },
+            // CO_E_NOTINITIALIZED — this thread has no apartment yet, which is itself
+            // interesting: the enumeration is about to initialize one.
+            Err(_) => "none",
+        }
+    };
+    let warm = match locator::keepwarm::warmed_hwnd() {
+        Some(w) if w == hwnd => "warm:self",
+        Some(_) => "warm:other",
+        None => "warm:no",
+    };
+    format!("app={app} tid={tid} apt={apt} {warm}")
+}
+
 #[cfg(windows)]
 fn enumerate_context_snapshot(hwnd: usize) -> Option<Vec<locator::ContextElement>> {
     let started = std::time::Instant::now();
+    let diag = context_diag(hwnd);
     match locator::a11y::enumerate_context_elements(hwnd) {
         Ok(els) if els.is_empty() => {
-            log::info!("[context] skipped: zero elements");
+            log::info!(
+                "[context] skipped: zero elements after {} ms | {diag}",
+                started.elapsed().as_millis()
+            );
             None
         }
         Ok(els) => {
             log::info!(
-                "[context] {} elements enumerated in {} ms",
+                "[context] {} elements enumerated in {} ms | {diag}",
                 els.len(),
                 started.elapsed().as_millis()
             );
             Some(els)
         }
         Err(reason) => {
-            log::info!("[context] skipped: {reason}");
+            log::info!(
+                "[context] skipped: {reason} after {} ms | {diag}",
+                started.elapsed().as_millis()
+            );
             None
         }
     }
@@ -145,9 +201,22 @@ fn enumerate_context_snapshot(_hwnd: usize) -> Option<Vec<locator::ContextElemen
 /// session rather than on every single request.
 #[cfg(windows)]
 async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::ContextElement>> {
-    if locator::a11y::context_window_is_slow(hwnd) {
-        log::info!("[context] skipped: window already proven slow this session");
-        return None;
+    // Gated windows are RETRIED periodically rather than written off. The old code returned
+    // here unconditionally, which meant `context_window_mark_fast` below was unreachable and a
+    // window that timed out twice could never be re-measured — so a *transiently* slow window
+    // (Word, measured) lost Structured-Context for the entire session. See `context_window_gate`.
+    match locator::a11y::context_window_gate(hwnd) {
+        locator::a11y::ContextGate::Enumerate => {}
+        locator::a11y::ContextGate::Probe => {
+            log::info!("[context] gated window — letting one probe through to test recovery");
+        }
+        locator::a11y::ContextGate::Skip { next_probe_in } => {
+            log::info!(
+                "[context] skipped: window gated as slow (next probe in {next_probe_in} requests) | {}",
+                context_diag(hwnd)
+            );
+            return None;
+        }
     }
     // This outer timeout is only the uninterruptible-COM safety net — the inner
     // `enumerate_context_elements` enforces its own, tighter, per-window budget
@@ -166,14 +235,20 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
     .await
     {
         Ok(Ok(result)) => {
+            // Clears any strikes — this is the recovery path a successful probe takes.
             locator::a11y::context_window_mark_fast(hwnd);
             result
         }
         Ok(Err(_join_error)) => None,
         Err(_timed_out) => {
+            // `context_diag` here runs on the *caller's* thread, not the abandoned blocking
+            // one, so `tid`/`apt` describe the waiter rather than the worker. That is still
+            // the useful pairing: compare it against the `tid`/`apt` logged from inside
+            // `enumerate_context_snapshot` on the requests that DID complete.
             log::info!(
-                "[context] skipped: enumeration exceeded {} ms wall-clock, abandoning (still finishing in the background)",
-                budget.as_millis()
+                "[context] skipped: enumeration exceeded {} ms wall-clock, abandoning (still finishing in the background) | {}",
+                budget.as_millis(),
+                context_diag(hwnd)
             );
             locator::a11y::context_window_mark_slow(hwnd);
             None
@@ -815,6 +890,27 @@ mod autopilot_change_tests {
         // Length mismatch is a no-decision, never a false fire.
         assert_eq!(changed_cells(&base, &base[..10]), 0);
     }
+
+    /// `context_diag` is pure instrumentation, so nothing downstream would fail if it silently
+    /// degraded to a constant — and a diagnostic that always prints the same thing is worse
+    /// than none, because it looks like evidence. Pin that each field is actually produced.
+    #[cfg(windows)]
+    #[test]
+    fn context_diag_emits_all_fields_and_tolerates_a_dead_hwnd() {
+        let s = super::context_diag(0); // no such window: must degrade, never panic
+        assert!(s.contains("app=?"), "unknown window should report app=? — got {s}");
+        assert!(s.contains("tid="), "missing thread id — got {s}");
+        assert!(s.contains("apt="), "missing apartment type — got {s}");
+        assert!(s.contains("warm:"), "missing keep-warm state — got {s}");
+        // The apartment must be one of the values the root-cause hypothesis distinguishes;
+        // an unrecognised APTTYPE printing as "?" would make the STA/MTA question unanswerable.
+        assert!(
+            ["STA", "MTA", "NA", "MAINSTA", "none"]
+                .iter()
+                .any(|a| s.contains(&format!("apt={a} "))),
+            "apartment must resolve to a known value, got {s}"
+        );
+    }
 }
 
 /// The window guidance is currently anchored to — a pin if set, else the last-guided
@@ -1067,15 +1163,46 @@ async fn arm_candidates_if_shown(
 /// L1 app-state block for the prompt, bounded so a wedged script channel can never
 /// stall a capture (the channel's own connect/read timeouts are ~200/700 ms; this is
 /// the outer safety net, mirroring `enumerate_context_snapshot_bounded`'s contract).
-fn app_state_snapshot(hwnd: Option<usize>) -> Option<String> {
+fn app_state_snapshot(hwnd: Option<usize>, word_paragraph_text: bool) -> Option<String> {
     let started = std::time::Instant::now();
-    let block = locator::adapters::app_state_block(hwnd)?;
+    let block = locator::adapters::app_state_block(hwnd, word_paragraph_text)?;
     log::info!(
         "[app_state] block collected in {} ms ({} chars)",
         started.elapsed().as_millis(),
         block.len()
     );
     Some(block)
+}
+
+/// How stale a recorded click may be and still be worth telling the AI about. Long enough to
+/// cover a user reading an instruction and acting on it; short enough that a click from a
+/// previous, abandoned line of work is never presented as "what they just did".
+const LAST_CLICK_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Arm the click hook for the window being guided and render the `[Last user action]` line.
+/// Arming here means the hook is always pointed at the app of the *current* target before the
+/// user's next click, and is disarmed (pid 0) whenever there is no single target — full-screen
+/// mode included, where "which app did they click" has no answer worth reporting.
+fn last_click_snapshot(hwnd: Option<usize>) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let pid = hwnd
+            .filter(|h| *h != 0)
+            .and_then(capture::pid_for_hwnd)
+            .unwrap_or(0);
+        last_click::set_target_pid(pid);
+        if pid == 0 {
+            return None;
+        }
+        let line = last_click::describe(LAST_CLICK_MAX_AGE)?;
+        log::info!("[click] reported to AI: {}", line.trim());
+        Some(line)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        None
+    }
 }
 
 /// Exe filename stem for `LocateTrace.app_name` — PII-free app identity (see the field's
@@ -2039,8 +2166,15 @@ async fn guide(
     // L1 app state from a script channel (Blender bridge today) — facts the screenshot
     // can't convey. Same capture-time atomicity as [Screen Elements]; absent when no
     // channel applies.
-    if let Some(block) = app_state_snapshot(new_hwnd_opt) {
+    if let Some(block) =
+        app_state_snapshot(new_hwnd_opt, router.config.word_state_paragraph_text)
+    {
         window_context.push_str(&block);
+    }
+    // What the user actually did since the last turn, as a resolved control. Also (re)arms
+    // the click hook for the app being guided — see `last_click` for the privacy contract.
+    if let Some(line) = last_click_snapshot(new_hwnd_opt) {
+        window_context.push_str(&line);
     }
 
     // Append window context to the prompt (no grid suffix any more — AI returns
@@ -2067,9 +2201,16 @@ async fn guide(
     // locate time (seconds later). Fired once, on a background thread; no-op off-Chromium.
     let prime_hwnd = new_hwnd_opt;
     let mut primed = false;
+    // First-token timestamp. The caption streams, so this — not the full round-trip — is
+    // when the user stops staring at nothing. Recorded as an Instant rather than a delta
+    // because `ai_started` is declared below; the difference is taken after the call.
+    let ttft_at: std::sync::Arc<parking_lot::Mutex<Option<std::time::Instant>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let ttft_setter = ttft_at.clone();
     let on_chunk = move |chunk: &str, steps_seen: usize| {
         if !primed {
             primed = true;
+            *ttft_setter.lock() = Some(std::time::Instant::now());
             #[cfg(windows)]
             if let Some(h) = prime_hwnd {
                 std::thread::spawn(move || crate::locator::a11y::prime(h));
@@ -2189,6 +2330,15 @@ async fn guide(
     };
 
     let ai_elapsed_ms = ai_started.elapsed().as_millis();
+    let ai_ttft_ms = ttft_at
+        .lock()
+        .map(|t| t.saturating_duration_since(ai_started).as_millis());
+    log::info!(
+        "[latency] ttft={} ms  full={ai_elapsed_ms} ms  (caption appears at ttft; pointer at full)",
+        ai_ttft_ms
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".into())
+    );
 
     // Payload audit (debug captures on): write the exact dynamic text we sent to
     // the AI alongside screenshot_<ts>.jpg. The appended [Current Window Info]
@@ -2475,6 +2625,7 @@ async fn guide(
         t.input_tokens = Some(in_tok);
         t.output_tokens = Some(out_tok);
         t.ai_elapsed_ms = Some(ai_elapsed_ms as u32);
+        t.ai_ttft_ms = ai_ttft_ms.map(|v| v as u32);
         t.app_name = trace_app_name(new_hwnd_opt);
         maybe_log_trace(&app, t, log_trace, training_enabled);
     }
@@ -3065,7 +3216,7 @@ async fn send_correction(
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
     // L1 app state — same as guide()'s capture path.
-    if let Some(block) = app_state_snapshot(new_hwnd) {
+    if let Some(block) = app_state_snapshot(new_hwnd, router.config.word_state_paragraph_text) {
         window_context.push_str(&block);
     }
 
@@ -3106,9 +3257,16 @@ async fn send_correction(
     // Warm the target window's UIA tree on first stream chunk (see guide()).
     let prime_hwnd = new_hwnd;
     let mut primed = false;
+    // First-token timestamp. The caption streams, so this — not the full round-trip — is
+    // when the user stops staring at nothing. Recorded as an Instant rather than a delta
+    // because `ai_started` is declared below; the difference is taken after the call.
+    let ttft_at: std::sync::Arc<parking_lot::Mutex<Option<std::time::Instant>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let ttft_setter = ttft_at.clone();
     let on_chunk = move |chunk: &str, steps_seen: usize| {
         if !primed {
             primed = true;
+            *ttft_setter.lock() = Some(std::time::Instant::now());
             #[cfg(windows)]
             if let Some(h) = prime_hwnd {
                 std::thread::spawn(move || crate::locator::a11y::prime(h));
@@ -3143,6 +3301,15 @@ async fn send_correction(
         .await;
 
     let ai_elapsed_ms = ai_started.elapsed().as_millis();
+    let ai_ttft_ms = ttft_at
+        .lock()
+        .map(|t| t.saturating_duration_since(ai_started).as_millis());
+    log::info!(
+        "[latency] ttft={} ms  full={ai_elapsed_ms} ms  (caption appears at ttft; pointer at full)",
+        ai_ttft_ms
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".into())
+    );
     let (timing_ok, timing_steps) = match &resp {
         Ok(r) => (true, r.steps.len()),
         Err(_) => (false, 0),
@@ -3356,6 +3523,7 @@ async fn send_correction(
         t.input_tokens = Some(in_tok);
         t.output_tokens = Some(out_tok);
         t.ai_elapsed_ms = Some(ai_elapsed_ms as u32);
+        t.ai_ttft_ms = ai_ttft_ms.map(|v| v as u32);
         t.app_name = trace_app_name(new_hwnd);
         maybe_log_trace(&app, t, log_trace, training_enabled);
     }
@@ -3546,6 +3714,9 @@ fn new_session(state: State<'_, AppState>) {
     g.steps = vec![];
     g.state_summary = String::new();
     g.target_hwnd = None;
+    // A click from the abandoned task is not "what the user just did" for the new one —
+    // it would be reported as fresh context on the first turn and steer the opening answer.
+    last_click::clear();
 }
 
 /// Item 1 — clear the pinned window and return to auto-detection.

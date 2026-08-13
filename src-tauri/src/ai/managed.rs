@@ -312,6 +312,17 @@ impl ManagedClient {
         // BYOK token table by provider name, so this never affects billing.)
         let in_tokens = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
         let out_tokens = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+        // Automatic prompt caching (OpenAI-compat providers discount an identical prefix —
+        // ours is the constant SYSTEM_PROMPT, which sits first). Nothing here *requests*
+        // caching; this only reveals whether we are already getting it for free, which is
+        // the question that decides whether explicit caching is worth wiring. Input
+        // dominates this workload (measured 6203 in / 167 out), so the answer matters.
+        let cached = body["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        if let Some(pct) = (cached * 100).checked_div(in_tokens) {
+            log::info!("[tokens] in={in_tokens} out={out_tokens} cached={cached} ({pct}% of input)");
+        }
 
         let message = &body["choices"][0]["message"];
         let nav_response: NavigateStepResponse =

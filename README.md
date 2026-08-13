@@ -80,7 +80,10 @@ All hotkeys are configurable in **Settings → Hotkeys**.
 
 **What stays on your machine:** element matching (UIA + OCR), session history, settings, and cost tracking. The AI returns *text descriptions* of UI elements; your machine finds the pixels — coordinates are never sent.
 
-**What gets sent to the AI:** a screenshot of the active window only (not the full desktop) plus your conversation text.
+**What gets sent to the AI:** a screenshot of the active window only (not the full desktop) plus your conversation text, and while a session is active:
+
+- **The control you last clicked** — its name and type only (e.g. `Button "Save"`), and **only for clicks inside the app you're being guided in**; clicks anywhere else are discarded in-process and never stored. Keystrokes are never captured, and a password field is reported only as `(password field)`.
+- **Cursor position in supported apps** — in Word, the page/section/line your cursor is on, the paragraph style, and the paragraph text (capped; set `WORD_STATE_PARAGRAPH_TEXT=false` in your `.env` to send only its length). A screenshot cannot show a text cursor.
 
 | Provider | Where the screenshot goes |
 |---|---|

@@ -76,6 +76,13 @@ pub struct LocateTrace {
     /// `elapsed_ms`/grounding accuracy). `None` for `next_step` — same reason as the token
     /// fields: it reuses a prior response, no new AI call happens.
     pub ai_elapsed_ms: Option<u32>,
+    /// Time to FIRST streamed token, ms. `ai_elapsed_ms` is the full round-trip, but the
+    /// caption streams — so what the user actually feels is this, not that. The pointer
+    /// still waits for the complete JSON, so the pair brackets the real experience:
+    /// `ai_ttft_ms` is when words appear, `ai_elapsed_ms` is when the pointer appears.
+    /// Recorded because "is the felt wait 6 s or 1.5 s?" decides whether speculative
+    /// prefetch is worth its cost, and nothing measured it before.
+    pub ai_ttft_ms: Option<u32>,
 }
 
 /// Flow B — a pass's declared tie: 2+ equally-good answers it refused to pick among

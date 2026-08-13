@@ -165,6 +165,14 @@ impl GeminiClient {
                     .get("candidatesTokenCount")
                     .and_then(|t| t.as_u64())
                     .unwrap_or(output_tokens);
+                // Gemini reports implicit-cache hits here. We never ask for caching, so a
+                // non-zero value means we are getting it free; a persistent zero is the
+                // evidence for wiring explicit context caching on the constant prefix.
+                if let Some(c) = usage.get("cachedContentTokenCount").and_then(|t| t.as_u64()) {
+                    if c > 0 {
+                        log::info!("[tokens] gemini cachedContentTokenCount={c}");
+                    }
+                }
             }
 
             if let Some(candidates) = data.get("candidates").and_then(|c| c.as_array()) {

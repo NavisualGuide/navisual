@@ -123,6 +123,18 @@ pub struct Config {
     /// The training/ dir is exempt from the 7-day debug cleanup — it exists only when
     /// this is deliberately on, and its whole point is accumulation.
     pub training_capture_enabled: bool,
+
+    /// Include the *text* of the paragraph the cursor is in, in the `[App State — Word]`
+    /// block. Default on — it is what lets the AI say "you're in the Outlook heading"
+    /// rather than "you're on line 1".
+    ///
+    /// Separated from the rest of the block because it is the only field that transmits
+    /// document **content** rather than **position**. Page/section/line/style are metadata
+    /// the AI cannot get any other way; the paragraph text is prose the user may not want
+    /// leaving the machine in structured, greppable form — the screenshot already carries
+    /// it, but as pixels, not as a loggable string. Turning this off keeps every positional
+    /// field, so the feature still works; it just stops quoting the document.
+    pub word_state_paragraph_text: bool,
 }
 
 impl Default for Config {
@@ -176,6 +188,7 @@ impl Default for Config {
             debug_prompt_log_file_enabled: false,
             debug_show_ai_bbox: false,
             training_capture_enabled: false,
+            word_state_paragraph_text: true,
         }
     }
 }
@@ -405,6 +418,10 @@ impl Config {
         }
         if let Ok(v) = env::var("TRAINING_CAPTURE_ENABLED") {
             config.training_capture_enabled = v == "true" || v == "1";
+        }
+        // Defaults ON, so this one reads as an opt-OUT (unlike the toggles above).
+        if let Ok(v) = env::var("WORD_STATE_PARAGRAPH_TEXT") {
+            config.word_state_paragraph_text = !(v == "false" || v == "0");
         }
 
         // BYOK keys stored in the Windows Credential Manager are referenced from

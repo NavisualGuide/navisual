@@ -289,6 +289,47 @@ fn exe_path_of_pid(pid: u32) -> String {
     }
 }
 
+/// PID owning `hwnd_raw`, or `None` if the window is gone. Used to scope the click hook to
+/// the app being guided (clicks elsewhere are dropped in the hook, never stored).
+pub fn pid_for_hwnd(hwnd_raw: usize) -> Option<u32> {
+    if hwnd_raw == 0 {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    unsafe {
+        GetWindowThreadProcessId(
+            HWND(hwnd_raw as *mut core::ffi::c_void),
+            Some(&mut pid as *mut u32),
+        );
+    }
+    (pid != 0).then_some(pid)
+}
+
+/// Exe stem of the process owning `hwnd_raw` ("WINWORD", "chrome", …), lowercase-preserved
+/// as on disk. Diagnostics only — the friendly-name mapping above is for UI; logs want the
+/// raw stem so they group cleanly. Returns `None` if the window or process is gone.
+pub fn exe_stem_for_hwnd(hwnd_raw: usize) -> Option<String> {
+    if hwnd_raw == 0 {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    unsafe {
+        GetWindowThreadProcessId(
+            HWND(hwnd_raw as *mut core::ffi::c_void),
+            Some(&mut pid as *mut u32),
+        );
+    }
+    if pid == 0 {
+        return None;
+    }
+    let path = exe_path_of_pid(pid);
+    std::path::Path::new(&path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// For UWP/Store apps (Microsoft To Do, OneNote, Mail, …) the process is the
 /// shared `ApplicationFrameHost`, so the exe name is useless. Windows titles a
 /// UWP window `"Document - App Name"` (or just the app name), so the **last**

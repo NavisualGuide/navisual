@@ -417,6 +417,10 @@ pub use win::TargetWindowInfo;
 #[cfg(windows)]
 #[allow(unused_imports)] // used by the nav-pack-authoring `#[ignore]` test harnesses
 pub use win::find_window_by_title;
+#[cfg(windows)]
+pub use win::exe_stem_for_hwnd;
+#[cfg(windows)]
+pub use win::pid_for_hwnd;
 
 /// Item 1: enumerate all candidate windows for the target-picker dropdown.
 #[cfg(windows)]
