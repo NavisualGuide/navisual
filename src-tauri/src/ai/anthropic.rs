@@ -207,11 +207,30 @@ impl AnthropicClient {
                         let uncached = u("input_tokens");
                         let cache_write = u("cache_creation_input_tokens");
                         let cache_read = u("cache_read_input_tokens");
-                        input_tokens = uncached + cache_write + cache_read;
+                        let true_total = uncached + cache_write + cache_read;
+
+                        // Anthropic is the only provider whose input tokens are billed at
+                        // three different rates: uncached 1x, cache WRITE 1.25x, cache READ
+                        // 0.1x. `pricing.rs` has a single flat input rate per model, and
+                        // widening the usage tuple through all seven providers to carry the
+                        // split would be a lot of churn for a dev-gated estimate — so the
+                        // weighting is applied here, at the only place the split exists.
+                        //
+                        // The reported figure is therefore a BILLING-EQUIVALENT token count,
+                        // not a raw one: priced at the flat base rate it yields the right
+                        // cost. Summing the three raw buckets instead (what this did before)
+                        // over-charges reads by 10x, and does so by MORE the better caching
+                        // works — the opposite of the truth. The raw split is logged.
+                        let billable = uncached as f64
+                            + cache_write as f64 * 1.25
+                            + cache_read as f64 * 0.10;
+                        input_tokens = billable.round() as u64;
+
                         if cache_write + cache_read > 0 {
                             log::info!(
-                                "[tokens] anthropic in={input_tokens} (uncached={uncached} \
-                                 cache_write={cache_write} cache_read={cache_read})"
+                                "[tokens] anthropic raw_in={true_total} (uncached={uncached} \
+                                 cache_write={cache_write} cache_read={cache_read}) \
+                                 billing_equivalent={input_tokens}"
                             );
                         }
                     }

@@ -187,10 +187,21 @@ impl GeminiClient {
                     .get("promptTokenCount")
                     .and_then(|t| t.as_u64())
                     .unwrap_or(input_tokens);
-                output_tokens = usage
+                // Google bills reasoning as OUTPUT, so the cost estimate needs both.
+                // `candidatesTokenCount` alone under-reported by ~4x on a measured request
+                // (156 visible against 447 thinking) — the Usage tab was showing a quarter
+                // of what was actually charged.
+                let visible = usage
                     .get("candidatesTokenCount")
                     .and_then(|t| t.as_u64())
-                    .unwrap_or(output_tokens);
+                    .unwrap_or(0);
+                let thoughts = usage
+                    .get("thoughtsTokenCount")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                if visible + thoughts > 0 {
+                    output_tokens = visible + thoughts;
+                }
                 // Gemini reports implicit-cache hits here. We never ask for caching, so a
                 // non-zero value means we are getting it free; a persistent zero is the
                 // evidence for wiring explicit context caching on the constant prefix.

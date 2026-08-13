@@ -4,6 +4,18 @@
 //! (see `navisual-internal/docs/model-comparison.csv`, May–Jun 2026). These are
 //! ESTIMATES ONLY — they go stale when providers change pricing, so the UI shows a
 //! "provider-set, subject to change" disclosure. Update this table as prices move.
+//!
+//! **Two things the flat (input, output) pair cannot express, handled upstream:**
+//!
+//! * **Cache tiers.** Anthropic bills input at three rates (uncached 1×, cache write
+//!   1.25×, cache read 0.1×). `anthropic.rs` folds that into a *billing-equivalent*
+//!   input count before it reaches here, so the flat rate lands correctly. No other
+//!   provider currently exposes a cache split — and on the default path (Gemini via the
+//!   relay) caching was measured as **not happening at all** (2026-08-13: no
+//!   `cachedContentTokenCount` in the response), so input is paid at full rate.
+//! * **Reasoning tokens.** Providers bill hidden reasoning as OUTPUT. `gemini.rs` adds
+//!   `thoughtsTokenCount` to the output count — it was ~447 against 156 visible tokens on
+//!   a measured request, so ignoring it under-reported output roughly 4×.
 
 /// (input_per_1m, output_per_1m) USD for a known model, else None.
 fn price_for(model: &str) -> Option<(f64, f64)> {
