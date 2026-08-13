@@ -198,10 +198,22 @@ impl AnthropicClient {
                 let data: Value = serde_json::from_str(&event.data).unwrap_or_default();
                 if let Some(msg) = data.get("message") {
                     if let Some(usage) = msg.get("usage") {
-                        input_tokens = usage
-                            .get("input_tokens")
-                            .and_then(|t| t.as_u64())
-                            .unwrap_or(0);
+                        let u = |k: &str| usage.get(k).and_then(|t| t.as_u64()).unwrap_or(0);
+                        // Anthropic splits input three ways and `input_tokens` counts ONLY the
+                        // uncached remainder — so reading it alone under-reports total input,
+                        // and does so by MORE the better caching works. Both cache buckets are
+                        // real input the request paid for (creation at a premium, reads at ~10%
+                        // of base), so the cost tracker needs the sum.
+                        let uncached = u("input_tokens");
+                        let cache_write = u("cache_creation_input_tokens");
+                        let cache_read = u("cache_read_input_tokens");
+                        input_tokens = uncached + cache_write + cache_read;
+                        if cache_write + cache_read > 0 {
+                            log::info!(
+                                "[tokens] anthropic in={input_tokens} (uncached={uncached} \
+                                 cache_write={cache_write} cache_read={cache_read})"
+                            );
+                        }
                     }
                 }
             } else if event.event == "message_delta" {

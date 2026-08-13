@@ -323,6 +323,18 @@ impl ManagedClient {
         if let Some(pct) = (cached * 100).checked_div(in_tokens) {
             log::info!("[tokens] in={in_tokens} out={out_tokens} cached={cached} ({pct}% of input)");
         }
+        // `cached == 0` is ambiguous: the upstream may not be caching, OR it may be caching and
+        // simply not reporting it under the OpenAI field name. The relay reaches Gemini through
+        // Google's *OpenAI-compatibility* endpoint and forwards the body verbatim, so the field
+        // set is whatever that shim emits — not something we can look up reliably. Dump the raw
+        // usage object once per process so the real field names are on record; the answer
+        // decides whether ~20-35% of request cost is already being discounted invisibly.
+        if cached == 0 {
+            static DUMPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::info!("[tokens] raw usage object (once): {}", body["usage"]);
+            }
+        }
 
         let message = &body["choices"][0]["message"];
         let nav_response: NavigateStepResponse =

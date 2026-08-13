@@ -196,6 +196,22 @@ impl DeepSeekClient {
                     if let Some(n) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
                         output_tokens = n;
                     }
+                    // Prompt caching on this path is AUTOMATIC — nothing here requests it.
+                    // Two field shapes because this one client serves several providers:
+                    // OpenAI/Qwen report `prompt_tokens_details.cached_tokens`, DeepSeek reports
+                    // `prompt_cache_hit_tokens`. Reported only so we can see whether the
+                    // discount is arriving; our prefix (the constant ~2.4k-token SYSTEM_PROMPT,
+                    // sent first) already satisfies every provider's minimum, so a persistent
+                    // zero means the provider isn't caching, not that we asked wrongly.
+                    let cached = usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(|v| v.as_u64()))
+                        .unwrap_or(0);
+                    if cached > 0 {
+                        log::info!("[tokens] in={input_tokens} cached={cached}");
+                    }
                 }
 
                 if let Some(fr) = data
