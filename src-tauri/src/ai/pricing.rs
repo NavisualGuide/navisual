@@ -27,7 +27,11 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // Gemini
         "gemini-2.5-flash-lite" => (0.10, 0.40),
         "gemini-2.5-flash" => (0.30, 2.50),
-        "gemini-3.5-flash" | "gemini-3-flash-preview" => (0.50, 3.00),
+        // 1.50/9.00 per model-comparison.csv. Was (0.50, 3.00) — a third of list, which
+        // under-reported the most likely BYOK Gemini model by 3x (caught 2026-08-13 when a
+        // recomputed per-request cost came out LOWER despite measurably more tokens).
+        // Cached input would be 0.15, but the default path is measurably not caching.
+        "gemini-3.5-flash" | "gemini-3-flash-preview" => (1.50, 9.00),
         m if m.starts_with("gemini-3.1-pro") || m.starts_with("gemini-3-pro") => (2.0, 12.0),
         // OpenAI
         "gpt-5.4-mini" => (0.75, 4.50),
