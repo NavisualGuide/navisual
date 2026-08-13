@@ -12,10 +12,18 @@ pub struct GeminiClient {
     client: Client,
     api_key: String,
     pub model: String,
+    /// `None` = omit thinkingConfig entirely (provider default: dynamic).
+    /// `Some(0)` = thinking off. `Some(n)` = cap at ~n tokens. See the payload site.
+    thinking_budget: Option<i32>,
 }
 
 impl GeminiClient {
-    pub fn new(api_key: String, model: String, timeout_sec: u64) -> Result<Self> {
+    pub fn new(
+        api_key: String,
+        model: String,
+        timeout_sec: u64,
+        thinking_budget: Option<i32>,
+    ) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
@@ -31,6 +39,7 @@ impl GeminiClient {
             client,
             api_key,
             model,
+            thinking_budget,
         })
     }
 
@@ -104,7 +113,7 @@ impl GeminiClient {
             }
         });
 
-        let payload = json!({
+        let mut payload = json!({
             "contents": messages,
             "systemInstruction": {
                 "parts": [{"text": SYSTEM_PROMPT}]
@@ -117,6 +126,23 @@ impl GeminiClient {
                 }
             }
         });
+
+        // Reasoning budget. Left ABSENT by default, which means the provider's own dynamic
+        // policy — measured at 447 thinking tokens against 156 of actual output on a
+        // "which control do I click" task, i.e. ~74% of generated tokens producing nothing
+        // the user ever sees. Sending 0 disables thinking (Flash only; Pro has a floor), a
+        // positive value caps it while still allowing reasoning.
+        //
+        // Deliberately not defaulted to 0: some steps ARE genuine multi-step planning
+        // ("restart page numbering at page 3 without touching the title page") and that is
+        // where the budget earns its latency. The right home for this is the existing
+        // Speed/Regular/Smart dial rather than a global switch — this field exists so the
+        // trade can be measured before it is wired to a tier.
+        if let Some(budget) = self.thinking_budget {
+            payload["generationConfig"] = json!({
+                "thinkingConfig": { "thinkingBudget": budget }
+            });
+        }
 
         // Use streamGenerateContent with SSE (alt=sse)
         let url = format!(

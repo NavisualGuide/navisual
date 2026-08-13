@@ -220,6 +220,7 @@ impl AiRouter {
                         key.clone(),
                         self.config.gemini_model.clone(),
                         self.config.api_timeout_sec,
+                        self.config.gemini_thinking_budget,
                     ) {
                         Ok(client) => self.client = Some(ApiClient::Gemini(client)),
                         Err(e) => log::error!("GeminiClient init failed: {e}"),

@@ -135,6 +135,13 @@ pub struct Config {
     /// it, but as pixels, not as a loggable string. Turning this off keeps every positional
     /// field, so the feature still works; it just stops quoting the document.
     pub word_state_paragraph_text: bool,
+
+    /// Gemini reasoning budget, in tokens. `None` (default) omits `thinkingConfig` so the
+    /// provider applies its own dynamic policy — measured at 447 thinking tokens against
+    /// 156 tokens of visible output. `Some(0)` disables thinking (Flash only); `Some(n)`
+    /// caps it. Exists to measure the latency/quality trade before deciding whether the
+    /// Speed/Regular/Smart tiers should drive it.
+    pub gemini_thinking_budget: Option<i32>,
 }
 
 impl Default for Config {
@@ -189,6 +196,7 @@ impl Default for Config {
             debug_show_ai_bbox: false,
             training_capture_enabled: false,
             word_state_paragraph_text: true,
+            gemini_thinking_budget: None,
         }
     }
 }
@@ -420,6 +428,9 @@ impl Config {
             config.training_capture_enabled = v == "true" || v == "1";
         }
         // Defaults ON, so this one reads as an opt-OUT (unlike the toggles above).
+        if let Ok(v) = env::var("GEMINI_THINKING_BUDGET") {
+            config.gemini_thinking_budget = v.trim().parse::<i32>().ok();
+        }
         if let Ok(v) = env::var("WORD_STATE_PARAGRAPH_TEXT") {
             config.word_state_paragraph_text = !(v == "false" || v == "0");
         }
