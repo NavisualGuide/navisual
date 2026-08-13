@@ -168,9 +168,18 @@ impl GeminiClient {
                 // Gemini reports implicit-cache hits here. We never ask for caching, so a
                 // non-zero value means we are getting it free; a persistent zero is the
                 // evidence for wiring explicit context caching on the constant prefix.
-                if let Some(c) = usage.get("cachedContentTokenCount").and_then(|t| t.as_u64()) {
-                    if c > 0 {
-                        log::info!("[tokens] gemini cachedContentTokenCount={c}");
+                let c = usage
+                    .get("cachedContentTokenCount")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                log::info!("[tokens] gemini in={input_tokens} out={output_tokens} cached={c}");
+                // A zero is ambiguous between "not caching" and "not reporting", so put the
+                // real field set on record once rather than guessing from the absence.
+                if c == 0 {
+                    static DUMPED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        log::info!("[tokens] raw gemini usageMetadata (once): {usage}");
                     }
                 }
             }
