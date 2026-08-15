@@ -13,6 +13,12 @@ use crate::ai::ollama::{build_messages as build_ollama, OllamaClient};
 use crate::ai::session::SessionManager;
 use crate::ai::types::NavigateStepResponse;
 
+/// How many user+assistant exchanges of raw history to send. Deliberately expressed in
+/// exchanges rather than turns: the old constant was `10` turns, which is five exchanges, and
+/// reading it as "ten steps" is what hid the fact that the goal was being evicted around step
+/// five (memory-management-plan.md §1).
+const CONVERSATION_EXCHANGES: usize = 5;
+
 pub enum ApiClient {
     Anthropic(AnthropicClient),
     Gemini(GeminiClient),
@@ -345,7 +351,9 @@ impl AiRouter {
         mut on_chunk: impl FnMut(&str, usize),
     ) -> Result<NavigateStepResponse> {
         let conversation = if let Some(session) = &self.session_manager.current_session {
-            session.get_conversation_for_api(10)
+            // Exchanges, not turns. The previous `10` meant ten *turns* — and a request appends
+            // two — so it delivered five exchanges while reading as ten steps.
+            session.get_conversation_for_api_exchanges(CONVERSATION_EXCHANGES)
         } else {
             Vec::new()
         };

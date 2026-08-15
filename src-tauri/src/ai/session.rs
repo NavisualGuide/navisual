@@ -5,6 +5,12 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// How many turns are dropped at once when the window overflows. Larger = the retained slice
+/// (and therefore the prompt prefix) stays byte-identical across more consecutive requests,
+/// which is what makes provider prefix caching reachable; smaller = less history carried past
+/// the nominal budget. 6 ≈ three exchanges of slack.
+const EVICTION_BATCH: usize = 6;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSummary {
     pub summary_text: String,
@@ -17,6 +23,14 @@ pub struct Turn {
     pub content: String,
     pub screenshot_hash: Option<String>,
     pub timestamp: String,
+    /// Never evicted by the sliding window — a turn where the user stated intent in their own
+    /// words (the opening task, a `needs_input` answer, a correction). Retention here is by
+    /// **kind, not recency**: those are the only turns the model cannot reconstruct from a
+    /// summary, and the first one is *not* reliably turn 1 — an opener is often
+    /// "show me around this app" with the real goal arriving several turns later.
+    /// `#[serde(default)]` so sessions saved before this field load as unpinned.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,13 +73,35 @@ impl Session {
     }
 
     pub fn add_turn(&mut self, role: &str, content: String, screenshot_hash: Option<String>) {
+        self.add_turn_pinned(role, content, screenshot_hash, false)
+    }
+
+    /// `pinned` turns survive the sliding window — see `Turn::pinned`.
+    pub fn add_turn_pinned(
+        &mut self,
+        role: &str,
+        content: String,
+        screenshot_hash: Option<String>,
+        pinned: bool,
+    ) {
         self.conversation.push(Turn {
             role: role.to_string(),
             content,
             screenshot_hash,
             timestamp: Local::now().to_rfc3339(),
+            pinned,
         });
         self.last_active_at = Local::now().to_rfc3339();
+    }
+
+    /// The task the user is actually trying to accomplish. Mutable because the opening message
+    /// is frequently *not* the goal — "help me with this document" followed by the AI asking
+    /// what for, and the real objective arriving as a reply, is the common shape. Before this
+    /// existed, `task_description` was write-once and that opener stayed the goal forever.
+    pub fn set_task_description(&mut self, task: String) {
+        if !task.trim().is_empty() {
+            self.task_description = task;
+        }
     }
 
     pub fn update_state(&mut self, summary_text: String) {
@@ -80,25 +116,48 @@ impl Session {
         self.token_usage.output += output_tokens;
     }
 
-    pub fn get_conversation_for_api(&self, max_turns: usize) -> Vec<Message> {
-        let start = if self.conversation.len() > max_turns {
-            self.conversation.len() - max_turns
+    /// Conversation to send, in **exchanges** (one user + one assistant turn), not raw turns.
+    ///
+    /// The unit matters: a request appends *two* turns, so the previous `max_turns: 10` delivered
+    /// five exchanges while reading as "ten steps" — the constant was measured in a unit nobody
+    /// reasons in, and that is what hid the eviction problem.
+    ///
+    /// Two behaviours beyond a plain tail:
+    ///
+    /// * **Pinned turns always survive** (`Turn::pinned`) — retention by kind, not recency.
+    /// * **Eviction happens in BATCHES.** A window that slides by two turns per request changes
+    ///   the prompt prefix on *every* request, which independently defeats provider prefix
+    ///   caching (Gemini/OpenAI/Anthropic all key on an exact prefix). Holding the window still
+    ///   and dropping a chunk only on overflow keeps the prefix byte-stable in between — the
+    ///   same reasoning behind Anthropic's `clear_at_least`. Memory and caching are one fix.
+    pub fn get_conversation_for_api_exchanges(&self, max_exchanges: usize) -> Vec<Message> {
+        let budget = max_exchanges.saturating_mul(2).max(2);
+        // Overflow is allowed to run to `budget + EVICTION_BATCH` before anything is dropped, so
+        // the retained slice is identical across that whole span instead of shifting every turn.
+        let keep = if self.conversation.len() > budget + EVICTION_BATCH {
+            // Drop whole batches, then keep the most recent `budget`.
+            budget
         } else {
-            0
+            self.conversation.len()
         };
+        let start = self.conversation.len().saturating_sub(keep);
 
         let mut messages = Vec::new();
-        for turn in &self.conversation[start..] {
-            if turn.role == "correction" || turn.role == "user" {
-                messages.push(Message {
+        for (i, turn) in self.conversation.iter().enumerate() {
+            // Pinned turns are emitted wherever they fall, in order, even from before the window.
+            if i < start && !turn.pinned {
+                continue;
+            }
+            match turn.role.as_str() {
+                "correction" | "user" => messages.push(Message {
                     role: Role::User,
                     content: turn.content.clone(),
-                });
-            } else if turn.role == "assistant" {
-                messages.push(Message {
+                }),
+                "assistant" => messages.push(Message {
                     role: Role::Assistant,
                     content: turn.content.clone(),
-                });
+                }),
+                _ => {}
             }
         }
         messages
@@ -151,18 +210,70 @@ impl SessionManager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn conversation_for_api_keeps_last_n_turns() {
-        let mut s = Session::new("task".into());
-        for i in 0..12 {
+    fn fill(s: &mut Session, n: usize) {
+        for i in 0..n {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
             s.add_turn(role, format!("turn {i}"), None);
         }
-        let msgs = s.get_conversation_for_api(10);
-        assert_eq!(msgs.len(), 10);
-        // Oldest two turns trimmed — window starts at turn 2.
-        assert_eq!(msgs[0].content, "turn 2");
-        assert_eq!(msgs.last().unwrap().content, "turn 11");
+    }
+
+    #[test]
+    fn conversation_window_is_measured_in_exchanges() {
+        let mut s = Session::new("task".into());
+        fill(&mut s, 30);
+        // 5 exchanges = 10 turns of budget. Well past the eviction batch, so the tail is exact.
+        let msgs = s.get_conversation_for_api_exchanges(5);
+        assert_eq!(msgs.len(), 10, "5 exchanges must mean 10 turns, not 5");
+        assert_eq!(msgs.last().unwrap().content, "turn 29");
+    }
+
+    /// The regression this whole design exists for: a window that slides every request changes
+    /// the prompt prefix every request, which defeats provider prefix caching. Eviction must
+    /// happen in batches so the retained slice is byte-identical across consecutive requests.
+    #[test]
+    fn eviction_is_batched_so_the_prefix_holds_still() {
+        let budget = 10; // 5 exchanges
+        let mut a = Session::new("task".into());
+        fill(&mut a, budget + 1);
+        let mut b = Session::new("task".into());
+        fill(&mut b, budget + 2);
+
+        // Both are over budget but within the eviction batch, so both still start at turn 0 —
+        // adding a turn did NOT shift the front.
+        assert_eq!(a.get_conversation_for_api_exchanges(5)[0].content, "turn 0");
+        assert_eq!(b.get_conversation_for_api_exchanges(5)[0].content, "turn 0");
+
+        // Past budget + EVICTION_BATCH, a whole batch is dropped at once.
+        let mut c = Session::new("task".into());
+        fill(&mut c, budget + EVICTION_BATCH + 1);
+        let first = &c.get_conversation_for_api_exchanges(5)[0].content;
+        assert_ne!(first, "turn 0", "overflow past the batch must finally evict");
+    }
+
+    #[test]
+    fn pinned_turns_survive_eviction() {
+        let mut s = Session::new("task".into());
+        // The user's real goal, stated at turn 0 and pinned.
+        s.add_turn_pinned("user", "add page numbers from page 3".into(), None, true);
+        fill(&mut s, 40); // bury it far past any window
+        let msgs = s.get_conversation_for_api_exchanges(5);
+        assert!(
+            msgs.iter().any(|m| m.content == "add page numbers from page 3"),
+            "a pinned intent turn must never be evicted — it is the one thing the model \
+             cannot reconstruct from a summary"
+        );
+        assert_eq!(msgs[0].content, "add page numbers from page 3", "and it stays first");
+    }
+
+    #[test]
+    fn goal_is_mutable_but_not_erasable_by_blank_input() {
+        let mut s = Session::new("help me with this document".into());
+        // The real goal arrives later, as a needs_input reply.
+        s.set_task_description("add page numbers from page 3".into());
+        assert_eq!(s.task_description, "add page numbers from page 3");
+        // A blank/whitespace answer must not wipe it.
+        s.set_task_description("   ".into());
+        assert_eq!(s.task_description, "add page numbers from page 3");
     }
 
     #[test]
@@ -171,7 +282,7 @@ mod tests {
         s.add_turn("user", "do the thing".into(), None);
         s.add_turn("assistant", "click X".into(), None);
         s.add_turn("correction", "that was wrong".into(), None);
-        let msgs = s.get_conversation_for_api(10);
+        let msgs = s.get_conversation_for_api_exchanges(5);
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[1].role, Role::Assistant);
         // Corrections are presented to the provider as user messages.
@@ -183,7 +294,7 @@ mod tests {
         let mut s = Session::new("task".into());
         s.add_turn("user", "hi".into(), None);
         s.add_turn("system", "internal note".into(), None);
-        assert_eq!(s.get_conversation_for_api(10).len(), 1);
+        assert_eq!(s.get_conversation_for_api_exchanges(5).len(), 1);
     }
 
     #[test]

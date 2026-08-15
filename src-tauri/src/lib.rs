@@ -1867,7 +1867,21 @@ async fn guide(
     let session_id = {
         let mut router = state.ai_router.lock().await;
         if task.is_empty() || is_reply || is_next_requery {
-            if let Some(session) = &router.session_manager.current_session {
+            if let Some(session) = &mut router.session_manager.current_session {
+                // A `needs_input` answer is very often the REAL goal: the opener is
+                // "help me with this document", the AI asks what for, and the objective
+                // arrives here. `task_description` used to be write-once, so that opener
+                // stayed the goal for the whole session (memory-management-plan.md §1).
+                // Promote a substantial reply; short acknowledgements ("ok", "yes") are
+                // not goals and must not overwrite one.
+                if is_reply && crate::ai::prompts::is_language_sample(&task) {
+                    log::info!(
+                        "[memory] goal updated from reply: {:?} -> {:?}",
+                        session.task_description,
+                        task
+                    );
+                    session.set_task_description(task.clone());
+                }
                 session.id.to_string()
             } else {
                 return Err("No active session to continue".to_string());
@@ -2243,9 +2257,12 @@ async fn guide(
     let timing_provider = router.config.api_provider.clone();
     let ai_started = std::time::Instant::now();
 
-    // The original user request, restated each continuation turn as a language + goal
-    // anchor (see prompts::language_anchor — fixes Qwen drifting to Chinese on multi-turn
-    // English sessions). Empty for the first turn, where the request IS the prompt.
+    // The session's goal. Feeds TWO tail anchors on continuation turns: `goal_anchor`
+    // restates the objective (it would otherwise be stated once on turn 1 and evicted with
+    // the window), and `reply_language_directive` reads it to pin the reply language (fixes
+    // Qwen drifting to Chinese on multi-turn English sessions). Empty on the first turn,
+    // where the request IS the prompt. NB: a comment here used to credit the goal half to
+    // `prompts::language_anchor` — no such function ever existed.
     let original_task = router
         .session_manager
         .current_session
@@ -2273,8 +2290,15 @@ async fn guide(
             )
         };
         let prompt = format!(
-            "{}{}",
+            "{}{}{}",
             add_grid(base),
+            // Restate the goal. CLAUDE.md and a comment above both claimed
+            // `prompts::language_anchor` already did this on every continuation turn — that
+            // function never existed; `reply_language_directive` kept the language half and
+            // dropped the goal half. Without this the objective is stated once on turn 1 and
+            // then evicted with the window, leaving the model steering from its own rolling
+            // summary (memory-management-plan.md §1).
+            crate::ai::prompts::goal_anchor(&original_task),
             crate::ai::prompts::reply_language_directive(
                 reply_sample.as_deref(),
                 &original_task,
@@ -2293,8 +2317,9 @@ async fn guide(
             g.state_summary.clone()
         };
         let prompt = format!(
-            "{}{}",
+            "{}{}{}",
             add_grid(task.clone()),
+            crate::ai::prompts::goal_anchor(&original_task),
             crate::ai::prompts::reply_language_directive(
                 reply_sample.as_deref(),
                 &original_task,
@@ -2490,7 +2515,13 @@ async fn guide(
         } else {
             task.clone()
         };
-        session.add_turn("user", user_turn_text, None);
+        // Pin turns where the user stated intent IN THEIR OWN WORDS — the opening task and any
+        // `needs_input` answer. Those are the only turns the model cannot reconstruct from a
+        // summary, and they survive the sliding window. Note the filler turn ("Next", from a
+        // → Next re-query) is never pinned: it carries no information, and pinning it would
+        // spend the pin budget on nothing. Retention by KIND, not recency.
+        let pinned = !task.is_empty();
+        session.add_turn_pinned("user", user_turn_text, None, pinned);
         let content = steps
             .iter()
             .map(|s| s.instruction.clone())

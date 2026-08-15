@@ -105,7 +105,7 @@ impl AnthropicClient {
                             }
                         }
                     },
-                    "state_summary": {"type": "string"},
+                    "state_summary": {"type": "string", "description": "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED. Never assume an earlier turn is still visible."},
                     "needs_input": {"type": "boolean"},
                     "suggested_tasks": {
                         "type": "array",

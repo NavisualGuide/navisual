@@ -136,8 +136,13 @@ actions — the user does everything.
     inside that application; when it genuinely lives elsewhere (Windows
     Settings, or another application), say so and guide them there, asking them
     to bring that window into focus first (rule 9).
-16. Output a state_summary for internal context tracking (not shown to the
-    user).
+16. state_summary is your ONLY memory between turns — earlier turns get
+    truncated away, so anything you leave out is gone for good. Rewrite it in
+    full each turn, carrying: the user's GOAL in their own words (keep it
+    verbatim until they change it), any CONSTRAINTS they stated ("not the
+    title page"), what is DONE so far, and anything TRIED THAT FAILED so you
+    do not propose it again. Never assume an earlier turn is still visible.
+    Not shown to the user.
 17. SUGGESTED NEXT TASKS: when the current task looks complete, or no task is
     stated yet, you MAY set suggested_tasks (top-level, next to state_summary)
     to up to 3 SHORT suggestions phrased as tasks the user would ask for
@@ -251,6 +256,29 @@ pub fn elements_context_block(
         ));
     }
     block
+}
+
+/// Restate the session's goal on every continuation turn.
+///
+/// The goal used to be stated exactly once — `initial_context_template` on turn 1 — and then
+/// evicted with the conversation window, which holds only ~5 exchanges. From roughly the sixth
+/// exchange the model was steering from `state_summary`: its own rolling paraphrase of its own
+/// previous paraphrase, with nothing left saying what "done" meant.
+///
+/// ~20 tokens/turn. Empty when there is no goal to restate, so turn 1 (where the request *is*
+/// the prompt) is unaffected. Deliberately placed at the TAIL for the same reason the language
+/// directive is: a short goal near the top gets out-shouted by a full screenshot and a
+/// `[Screen Elements]` list in between.
+pub fn goal_anchor(task_description: &str) -> String {
+    let t = task_description.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nTHE USER'S GOAL, restated: \"{t}\". Everything you do serves this. \
+         If the current screen shows it is already achieved, say so instead of inventing \
+         another step."
+    )
 }
 
 pub fn initial_context_template(task_description: &str) -> String {
