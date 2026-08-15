@@ -449,20 +449,28 @@ pub const CONTEXT_ELEMENTS_CAP: usize = 300;
 /// not a new failure mode. Still well under the multi-second AI call this precedes.
 ///
 /// 1000→1500 (2026-08-15) — and this value is now the ONLY one; the separate, larger
-/// Excel budget is folded in here. Word was gating itself out of Structured-Context on
-/// real documents while every blank-document repro passed, which is why it resisted
-/// reproduction for so long: **the enumeration cost scales with the document's content,
-/// not with Word itself.** Measured on one machine, same window, same session — a
-/// one-paragraph document enumerated in ~150 ms, while a real report with headings and
-/// tables cost 702 ms for 147 elements (in-app, cached bulk call), i.e. ~75 % of the old
-/// 1000 ms budget, so ordinary run-to-run variance tipped it over and two tips gated the
-/// window for the rest of the session. Excel already ran at 1500 ms for the same
-/// reason — a heavier tree than the sub-100 ms apps this was first tuned against — so
-/// unifying at 1500 both fixes Word and deletes an app-identity special case, which is
-/// the direction this module is supposed to move in (see `context_window_is_slow`).
-/// The downside is bounded and paid only by windows that were going to fail anyway:
-/// at most ~500 ms more before falling through, against an AI call measured at ~3.2 s
-/// to first token.
+/// Excel budget is folded in here. The reason is **variance, not tree size**. Word was
+/// gating itself out of Structured-Context, and the same query against the same window,
+/// seconds apart in one session, measured **388 / 445 / 3,087 ms** — an 8× spread with
+/// no input change at all. The tree itself is stable and unremarkable: ~200 control-view
+/// elements, of which the ribbon is 118 **and identical across documents**; the document
+/// surface (`_WwF`) contributes only 10–27 (five `page`, five `edit`, one `document`,
+/// scrollbars) because Word exposes body text through `TextPattern` on one element rather
+/// than as a per-paragraph subtree. So the driver is a provider that is *occasionally*
+/// very slow, not one that is *persistently* slow, and a tight budget simply converts
+/// those unlucky draws into permanent session-level gating (two strikes).
+///
+/// Excel already ran at 1500 ms, so unifying both widens Word's margin and deletes an
+/// app-identity special case, which is the direction this module is supposed to move in
+/// (see `context_window_is_slow`). The downside is bounded and paid only by windows that
+/// were going to fall through anyway: at most ~500 ms more, against an AI call measured
+/// at ~3.2 s to first token.
+///
+/// Note for anyone tempted to shrink the *result* instead: a control-type filter does not
+/// help. Measured, whole-window: filtering to the 12 interactive types returned **70 % of
+/// the elements for 99 % of the time** — UIA walks the entire raw tree to evaluate the
+/// condition, so a filter shrinks the answer and never the walk. Only pruning a subtree
+/// cuts real cost, and the only prunable subtree here (`_WwF`) is worth 50–90 ms.
 ///
 /// This bound is *advisory only* for the general (non-Excel) bulk path below — it's
 /// checked after `find_all_build_cache` already returned, so it can decide to keep or
