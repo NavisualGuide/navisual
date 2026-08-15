@@ -448,12 +448,28 @@ pub const CONTEXT_ELEMENTS_CAP: usize = 300;
 /// the 500 ms floor with no engine change — headroom against normal tree growth,
 /// not a new failure mode. Still well under the multi-second AI call this precedes.
 ///
+/// 1000→1500 (2026-08-15) — and this value is now the ONLY one; the separate, larger
+/// Excel budget is folded in here. Word was gating itself out of Structured-Context on
+/// real documents while every blank-document repro passed, which is why it resisted
+/// reproduction for so long: **the enumeration cost scales with the document's content,
+/// not with Word itself.** Measured on one machine, same window, same session — a
+/// one-paragraph document enumerated in ~150 ms, while a real report with headings and
+/// tables cost 702 ms for 147 elements (in-app, cached bulk call), i.e. ~75 % of the old
+/// 1000 ms budget, so ordinary run-to-run variance tipped it over and two tips gated the
+/// window for the rest of the session. Excel already ran at 1500 ms for the same
+/// reason — a heavier tree than the sub-100 ms apps this was first tuned against — so
+/// unifying at 1500 both fixes Word and deletes an app-identity special case, which is
+/// the direction this module is supposed to move in (see `context_window_is_slow`).
+/// The downside is bounded and paid only by windows that were going to fail anyway:
+/// at most ~500 ms more before falling through, against an AI call measured at ~3.2 s
+/// to first token.
+///
 /// This bound is *advisory only* for the general (non-Excel) bulk path below — it's
 /// checked after `find_all_build_cache` already returned, so it can decide to keep or
 /// discard a result but can never cut the underlying blocking COM call short (Lightroom
 /// Classic measured 2.2-5.7s here regardless of this value; see `context_window_is_slow`
 /// for the mechanism that actually bounds wall-clock wait time).
-pub(crate) const CONTEXT_BUDGET_MS: u128 = 1000;
+pub(crate) const CONTEXT_BUDGET_MS: u128 = 1500;
 
 /// S.1 adaptive skip — windows whose enumeration has already proven itself unproductive
 /// this session. Deliberately identity-agnostic: no window class, no app name, no
@@ -679,14 +695,6 @@ pub(crate) const EXCEL_GRID_CLASS: &str = "ExcelGrid";
 /// is what actually stops the self-nesting) — just prevents runaway recursion if some other,
 /// truly-infinite pattern is ever found. Excel's real tree is < 8 deep.
 pub(crate) const SCROLLBAR_SCAN_DEPTH: u32 = 12;
-/// Excel gets a larger budget than [`CONTEXT_BUDGET_MS`]: the pruned collecting walk is
-/// inherently ~290 ms (measured, cached) vs the sub-100 ms bulk search other apps use, and a
-/// PivotTable field pane pushes it higher — so the general 500 ms budget would spuriously
-/// skip Excel even though the walk is correct and bounded. This is a one-time cost before the
-/// multi-second AI call, so ~1 s of headroom is an acceptable trade for Structured-Context
-/// actually working on Excel.
-pub(crate) const EXCEL_CONTEXT_BUDGET_MS: u128 = 1500;
-
 /// (ClassName, (left, top, width, height)) — a structural signature for the walk's dedup.
 pub(crate) type ClassRectSignature = (String, (i32, i32, i32, i32));
 
@@ -815,15 +823,13 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
 
     // Excel's scrollbar provider makes a bulk `find_all(Descendants)` explode into 1,200+
     // duplicate nodes (see EXCEL_BROKEN_SCROLLBAR_CLASS) — detect it and use the pruned
-    // collecting walk instead, with a larger budget. Every other app keeps the fast bulk path.
+    // collecting walk instead. Every other app keeps the fast bulk path. The budget is the
+    // same for both since 2026-08-15 (see CONTEXT_BUDGET_MS): heavy trees are not an Excel
+    // property, so they don't get an Excel-shaped exception.
     let is_excel = roots
         .iter()
         .any(|r| matches!(r.get_classname(), Ok(c) if c == EXCEL_MAIN_WINDOW_CLASS));
-    let budget_ms = if is_excel {
-        EXCEL_CONTEXT_BUDGET_MS
-    } else {
-        CONTEXT_BUDGET_MS
-    };
+    let budget_ms = CONTEXT_BUDGET_MS;
 
     let cond = {
         let mut cond = None;

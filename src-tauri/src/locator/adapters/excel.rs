@@ -46,7 +46,7 @@ const MAX_ROW: i32 = 1_048_576;
 const CT_TABLE: i32 = 50_036;
 const CT_DATA_GRID: i32 = 50_028;
 const CT_CUSTOM: i32 = 50_025;
-/// Same budget-scale as the Structured-Context Excel walk (`a11y::EXCEL_CONTEXT_BUDGET_MS`)
+/// Same budget-scale as the Structured-Context walk (`a11y::CONTEXT_BUDGET_MS`)
 /// — this is the same pruned-walk shape, so it should finish in the same ~300 ms ballpark;
 /// this is a safety bound against runaway recursion, not an expected duration.
 const FIND_GRID_BUDGET_MS: u64 = 1500;

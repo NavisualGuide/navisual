@@ -231,15 +231,12 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
         }
     }
     // This outer timeout is only the uninterruptible-COM safety net — the inner
-    // `enumerate_context_elements` enforces its own, tighter, per-window budget
-    // (CONTEXT_BUDGET_MS for the bulk path, the larger EXCEL_CONTEXT_BUDGET_MS for
-    // Excel's pruned walk). So the net must be the LARGER of the two, or it would
-    // kill Excel ~500 ms before Excel's own budget even fires — silently defeating
-    // EXCEL_CONTEXT_BUDGET_MS and making the adaptive-skip trip harder for Excel than
-    // designed (found 2026-07-13). The wrapper stays app-identity-agnostic; the inner
-    // code owns the per-window value.
-    let net_ms = locator::a11y::CONTEXT_BUDGET_MS.max(locator::a11y::EXCEL_CONTEXT_BUDGET_MS);
-    let budget = std::time::Duration::from_millis(net_ms as u64);
+    // `enumerate_context_elements` enforces the same budget itself, but can only check it
+    // *after* the blocking COM call returns, so a call that never returns needs this. One
+    // shared value since 2026-08-15: while Excel had its own larger budget, this net had to
+    // be the max of the two or it killed Excel before Excel's own budget fired (found
+    // 2026-07-13) — a footgun that no longer exists now there is only one number.
+    let budget = std::time::Duration::from_millis(locator::a11y::CONTEXT_BUDGET_MS as u64);
     // The guard moves INTO the closure, so the flag clears when the COM call really returns —
     // not when the timeout below stops waiting for it. That distinction is the entire point.
     let drain = locator::a11y::context_begin_inflight(hwnd);
