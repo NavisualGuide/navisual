@@ -417,12 +417,22 @@ fn context_cache_invalidate(_hwnd: usize) {}
 /// Take a snapshot for `hwnd` in the background and bank it, without anyone waiting on it.
 /// Used to warm on focus change and to refresh behind a cache hit. Never stacks: the drain
 /// flag refuses a second enumeration while one is outstanding.
+///
+/// **Plain `std::thread`, deliberately — NOT `tokio::task::spawn_blocking`.** The focus-warm
+/// caller is `refresh_active_window`, which runs on the win-tracker thread: an ordinary OS
+/// thread pumping Win32 messages, with no Tokio runtime entered. `spawn_blocking` there panics
+/// with "there is no reactor running", and because it happens inside a `SetWinEventHook`
+/// callback that cannot unwind, the panic **aborts the process** (`STATUS_STACK_BUFFER_OVERRUN`)
+/// rather than being caught — a hard startup crash, and exactly the same shape as the
+/// `try_state` bug fixed in v0.7.6. A one-shot blocking COM enumeration needs no runtime, so a
+/// plain thread is both correct and sufficient here. (`enumerate_context_snapshot_bounded` still
+/// uses `spawn_blocking`: it is `async`, so it always has a runtime.)
 #[cfg(windows)]
 fn context_cache_refresh_in_background(hwnd: usize) {
     if locator::a11y::context_is_inflight(hwnd) {
         return;
     }
-    tokio::task::spawn_blocking(move || {
+    std::thread::spawn(move || {
         let drain = locator::a11y::context_begin_inflight(hwnd);
         let _drain = drain;
         let started = std::time::Instant::now();
