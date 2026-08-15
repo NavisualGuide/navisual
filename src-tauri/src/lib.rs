@@ -2517,10 +2517,15 @@ async fn guide(
         };
         // Pin turns where the user stated intent IN THEIR OWN WORDS — the opening task and any
         // `needs_input` answer. Those are the only turns the model cannot reconstruct from a
-        // summary, and they survive the sliding window. Note the filler turn ("Next", from a
-        // → Next re-query) is never pinned: it carries no information, and pinning it would
-        // spend the pin budget on nothing. Retention by KIND, not recency.
-        let pinned = !task.is_empty();
+        // summary. Retention by KIND, not recency.
+        //
+        // `!task.is_empty()` alone is NOT that test, and using it pinned 18 of 36 turns in a
+        // live 16-step session (2026-08-14): a → Next re-query carries a machine-built
+        // "[User completed: …]" string, so `task` is non-empty and every turn got pinned —
+        // which makes pinning meaningless and stops the window evicting user turns at all,
+        // growing the prompt without bound. `is_next_requery` is the discriminator (it is
+        // exactly `task.starts_with("[User completed:")`, set at the top of this fn).
+        let pinned = !task.is_empty() && !is_next_requery;
         session.add_turn_pinned("user", user_turn_text, None, pinned);
         let content = steps
             .iter()
