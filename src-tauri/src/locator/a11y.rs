@@ -2285,6 +2285,366 @@ fn walk_recursive(
 #[allow(dead_code)]
 fn _scope_hint(_: TreeScope) {}
 
+#[cfg(all(test, windows))]
+mod incremental_walk_live_tests {
+    //! "What would we have had at 600 ms / 1500 ms of a call that takes 3,000 ms?"
+    //!
+    //! On the bulk path that question has no answer: `find_all_build_cache(Descendants)` is
+    //! ONE blocking COM call that yields nothing until it returns, which is exactly why the
+    //! budget can abandon the wait but never shorten the work. Partial data only exists if
+    //! the tree is walked incrementally — and `excel_pruned_walk` already does that, already
+    //! takes a deadline, and is Excel-specific in name only.
+    //!
+    //! So this runs that walk against any window, stamping each context-type element with the
+    //! moment it was discovered, and reports what a deadline at 600 / 1000 / 1500 / 2000 ms
+    //! would have captured versus letting it run to completion. It also compares the walk's
+    //! finished set against the bulk call's, since a cheaper partial is worthless if the walk
+    //! finds different elements.
+    //!
+    //!   cargo test --lib incremental_walk_coverage_live -- --ignored --nocapture
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn incremental_walk_coverage_live() {
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+
+        let automation = UIAutomation::new().expect("uia");
+        let root = automation
+            .element_from_handle((hwnd as isize).into())
+            .expect("element_from_handle");
+        let true_cond = automation.create_true_condition().expect("true cond");
+        let cache = automation.create_cache_request().expect("cache");
+        let _ = cache.add_property(UIProperty::Name);
+        let _ = cache.add_property(UIProperty::ControlType);
+        let _ = cache.add_property(UIProperty::BoundingRectangle);
+        let _ = cache.add_property(UIProperty::IsOffscreen);
+        let _ = cache.add_property(UIProperty::ClassName);
+        let _ = cache.add_property(UIProperty::IsEnabled);
+
+        // --- the incremental walk, with a discovery timestamp per element ---------------
+        let started = Instant::now();
+        let far_deadline = started + Duration::from_secs(30);
+        let mut seen: std::collections::HashSet<ClassRectSignature> =
+            std::collections::HashSet::new();
+        let mut found: Vec<(u128, String)> = Vec::new();
+        excel_pruned_walk(
+            &root,
+            SCROLLBAR_SCAN_DEPTH,
+            &true_cond,
+            None,
+            &cache,
+            &mut seen,
+            far_deadline,
+            &mut |el, _class| {
+                if matches!(el.get_cached_control_type(), Ok(ct) if is_context_ct(ct)) {
+                    if let Ok(n) = el.get_cached_name() {
+                        if !n.trim().is_empty() {
+                            found.push((started.elapsed().as_millis(), n));
+                        }
+                    }
+                }
+            },
+        );
+        let walk_total = started.elapsed().as_millis();
+        println!(
+            "\n  incremental walk: {} named context elements in {} ms",
+            found.len(),
+            walk_total
+        );
+        for cut in [600u128, 1000, 1500, 2000, 3000] {
+            let n = found.iter().filter(|(t, _)| *t <= cut).count();
+            let pct = if found.is_empty() {
+                0.0
+            } else {
+                100.0 * n as f64 / found.len() as f64
+            };
+            println!("    by {cut:>5} ms: {n:>4} elements ({pct:>5.1}% of the finished walk)");
+        }
+
+        // --- the bulk call, for the same window, to compare the finished sets ------------
+        let bulk_started = Instant::now();
+        let bulk = enumerate_context_elements(hwnd);
+        let bulk_ms = bulk_started.elapsed().as_millis();
+        match &bulk {
+            Ok(v) => {
+                let walk_names: std::collections::HashSet<&str> =
+                    found.iter().map(|(_, n)| n.as_str()).collect();
+                let bulk_names: std::collections::HashSet<&str> =
+                    v.iter().map(|e| e.name.as_str()).collect();
+                let only_bulk = bulk_names.difference(&walk_names).count();
+                let only_walk = walk_names.difference(&bulk_names).count();
+                println!("  bulk call:        {} elements in {} ms", v.len(), bulk_ms);
+                println!("    names only the bulk call found: {only_bulk}");
+                println!("    names only the walk found:      {only_walk}");
+            }
+            Err(e) => println!("  bulk call: FAILED in {bulk_ms} ms — {e}"),
+        }
+    }
+
+    /// The single-shot test above suggested the pruned walk beats the bulk `Descendants`
+    /// call outright on Word. That is a big enough claim to deserve an A/B rather than one
+    /// sample: the bulk path is bimodal (~47 % over budget), so a single slow reading could
+    /// be an unlucky draw, and running the walk first could plausibly warm something for it.
+    ///
+    /// Alternates the two, starting with the bulk call on even rounds so neither order is
+    /// privileged, and reports both distributions plus set agreement.
+    ///
+    ///   cargo test --lib walk_vs_bulk_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn walk_vs_bulk_live() {
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+        let rounds: usize = std::env::var("NAVISUAL_TEST_RUNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+
+        let mut walk_ms: Vec<u128> = Vec::new();
+        let mut bulk_ms: Vec<u128> = Vec::new();
+        let mut bulk_fail = 0usize;
+        let mut agreement: Vec<(usize, usize, usize)> = Vec::new(); // (walk, bulk, shared)
+
+        for round in 1..=rounds {
+            let bulk_first = round % 2 == 0;
+            let do_walk = |out: &mut Vec<u128>| -> std::collections::HashSet<String> {
+                let automation = UIAutomation::new().expect("uia");
+                let root = automation
+                    .element_from_handle((hwnd as isize).into())
+                    .expect("handle");
+                let true_cond = automation.create_true_condition().expect("cond");
+                let cache = automation.create_cache_request().expect("cache");
+                let _ = cache.add_property(UIProperty::Name);
+                let _ = cache.add_property(UIProperty::ControlType);
+                let _ = cache.add_property(UIProperty::BoundingRectangle);
+                let _ = cache.add_property(UIProperty::IsOffscreen);
+                let _ = cache.add_property(UIProperty::ClassName);
+                let _ = cache.add_property(UIProperty::IsEnabled);
+                let mut seen: std::collections::HashSet<ClassRectSignature> =
+                    std::collections::HashSet::new();
+                let mut names = std::collections::HashSet::new();
+                let t = Instant::now();
+                excel_pruned_walk(
+                    &root,
+                    SCROLLBAR_SCAN_DEPTH,
+                    &true_cond,
+                    None,
+                    &cache,
+                    &mut seen,
+                    t + Duration::from_secs(30),
+                    &mut |el, _c| {
+                        if matches!(el.get_cached_control_type(), Ok(ct) if is_context_ct(ct)) {
+                            if let Ok(n) = el.get_cached_name() {
+                                if !n.trim().is_empty() {
+                                    names.insert(n);
+                                }
+                            }
+                        }
+                    },
+                );
+                out.push(t.elapsed().as_millis());
+                names
+            };
+            let do_bulk = |out: &mut Vec<u128>| -> Option<std::collections::HashSet<String>> {
+                let t = Instant::now();
+                let r = enumerate_context_elements(hwnd);
+                out.push(t.elapsed().as_millis());
+                r.ok().map(|v| v.into_iter().map(|e| e.name).collect())
+            };
+
+            let (w, b) = if bulk_first {
+                let b = do_bulk(&mut bulk_ms);
+                let w = do_walk(&mut walk_ms);
+                (w, b)
+            } else {
+                let w = do_walk(&mut walk_ms);
+                let b = do_bulk(&mut bulk_ms);
+                (w, b)
+            };
+            match b {
+                Some(b) => {
+                    let shared = w.intersection(&b).count();
+                    agreement.push((w.len(), b.len(), shared));
+                    println!(
+                        "  round {round:2} ({}): walk {:>5} ms / {:>3} names | bulk {:>5} ms / {:>3} names | shared {shared}",
+                        if bulk_first { "bulk first" } else { "walk first" },
+                        walk_ms.last().unwrap(),
+                        w.len(),
+                        bulk_ms.last().unwrap(),
+                        b.len()
+                    );
+                }
+                None => {
+                    bulk_fail += 1;
+                    println!(
+                        "  round {round:2} ({}): walk {:>5} ms / {:>3} names | bulk {:>5} ms  OVER BUDGET",
+                        if bulk_first { "bulk first" } else { "walk first" },
+                        walk_ms.last().unwrap(),
+                        w.len(),
+                        bulk_ms.last().unwrap()
+                    );
+                }
+            }
+        }
+
+        let med = |mut v: Vec<u128>| -> u128 {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        println!(
+            "\n  walk: median {} ms, max {} ms",
+            med(walk_ms.clone()),
+            walk_ms.iter().max().unwrap()
+        );
+        println!(
+            "  bulk: median {} ms, max {} ms, over budget {bulk_fail}/{rounds}",
+            med(bulk_ms.clone()),
+            bulk_ms.iter().max().unwrap()
+        );
+        if let Some((w, b, s)) = agreement.last() {
+            println!("  last agreeing round: walk {w} names, bulk {b} names, {s} shared");
+        }
+    }
+
+    /// Speed is settled (walk ~491 ms median vs bulk ~2,065 ms, 8/8 over budget). **Coverage
+    /// is the question that decides anything**, and it could not be answered above because the
+    /// bulk call refuses to return its result once over budget — so this reimplements BOTH
+    /// gather strategies inside the test, budget-free, over the identical root set, condition
+    /// set and cache request. Any difference is then the strategy, not the plumbing.
+    ///
+    /// A 4x speedup that silently drops a fifth of the elements is not a win; it is a
+    /// different bug.
+    ///
+    ///   cargo test --lib walk_vs_bulk_coverage_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn walk_vs_bulk_coverage_live() {
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+
+        let automation = UIAutomation::new().expect("uia");
+        // ONE root: the target window itself. The production path also searches owned popups,
+        // but including them here polluted a first attempt with other applications' elements
+        // ("Foxit PDF Editor - 1 running window", desktop shortcuts), which made the two sides
+        // incomparable. Both strategies iterate roots identically, so the strategy question is
+        // answered on a single root — and answering it on a clean one is the point.
+        let roots: Vec<UIElement> = vec![automation
+            .element_from_handle((hwnd as isize).into())
+            .expect("handle")];
+        for r in &roots {
+            println!(
+                "  root: class={:?} name={:?} ct={:?}",
+                r.get_classname().unwrap_or_default(),
+                r.get_name().unwrap_or_default().chars().take(40).collect::<String>(),
+                r.get_control_type().map(|c| c as i32),
+            );
+        }
+        // Per-control-type census through the SAME condition machinery, one type at a time.
+        // If the OR of twelve returns 6 while the individual types return hundreds, the bug is
+        // in how the condition is composed, not in the tree.
+        for &id in CONTEXT_CT_IDS {
+            if let Ok(c) =
+                automation.create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+            {
+                let n = roots[0]
+                    .find_all(TreeScope::Descendants, &c)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                if n > 0 {
+                    println!("    ct {id}: {n}");
+                }
+            }
+        }
+
+        let cache = automation.create_cache_request().expect("cache");
+        let _ = cache.add_property(UIProperty::Name);
+        let _ = cache.add_property(UIProperty::ControlType);
+        let _ = cache.add_property(UIProperty::BoundingRectangle);
+        let _ = cache.add_property(UIProperty::IsOffscreen);
+        let _ = cache.add_property(UIProperty::ClassName);
+        let _ = cache.add_property(UIProperty::IsEnabled);
+
+        // --- bulk: the OR-of-12-control-types Descendants search, per root, no budget -----
+        let mut cond = None;
+        for &id in CONTEXT_CT_IDS {
+            let c = automation
+                .create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+                .expect("cond");
+            cond = Some(match cond.take() {
+                None => c,
+                Some(prev) => automation.create_or_condition(prev, c).expect("or"),
+            });
+        }
+        let cond = cond.expect("non-empty");
+        let t = Instant::now();
+        let mut bulk: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for root in &roots {
+            if let Ok(v) = root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
+                for el in v {
+                    if let Ok(n) = el.get_cached_name() {
+                        if !n.trim().is_empty() {
+                            bulk.insert(n);
+                        }
+                    }
+                }
+            }
+        }
+        let bulk_ms = t.elapsed().as_millis();
+
+        // --- walk: the pruned children-scoped walk, same roots, no deadline pressure ------
+        let true_cond = automation.create_true_condition().expect("true");
+        let t = Instant::now();
+        let mut walk: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<ClassRectSignature> =
+            std::collections::HashSet::new();
+        for root in &roots {
+            excel_pruned_walk(
+                root,
+                SCROLLBAR_SCAN_DEPTH,
+                &true_cond,
+                None,
+                &cache,
+                &mut seen,
+                Instant::now() + Duration::from_secs(60),
+                &mut |el, _c| {
+                    if matches!(el.get_cached_control_type(), Ok(ct) if is_context_ct(ct)) {
+                        if let Ok(n) = el.get_cached_name() {
+                            if !n.trim().is_empty() {
+                                walk.insert(n);
+                            }
+                        }
+                    }
+                },
+            );
+        }
+        let walk_ms = t.elapsed().as_millis();
+
+        // char-wise, not byte-wise: a first attempt panicked slicing a CJK name mid-character.
+        let clip = |s: &str| -> String { s.chars().take(70).collect() };
+        println!("  bulk: {:>4} unique names in {:>5} ms", bulk.len(), bulk_ms);
+        println!("  walk: {:>4} unique names in {:>5} ms", walk.len(), walk_ms);
+        let only_bulk: Vec<&String> = bulk.difference(&walk).collect();
+        let only_walk: Vec<&String> = walk.difference(&bulk).collect();
+        println!("  shared: {}", bulk.intersection(&walk).count());
+        println!("  MISSED BY THE WALK ({}):", only_bulk.len());
+        for n in only_bulk.iter().take(25) {
+            println!("     {}", clip(n));
+        }
+        println!("  found only by the walk ({}):", only_walk.len());
+        for n in only_walk.iter().take(15) {
+            println!("     {}", clip(n));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{build_name_regex, norm_dashes, strip_accelerator, walk_name_matches};
