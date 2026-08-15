@@ -466,6 +466,23 @@ pub const CONTEXT_ELEMENTS_CAP: usize = 300;
 /// were going to fall through anyway: at most ~500 ms more, against an AI call measured
 /// at ~3.2 s to first token.
 ///
+/// **Do not read this as "Word is fixed".** Measured through *this* code path
+/// (`context_budget_headroom_live`, 40 sequential runs on a real Word window): an element
+/// block is produced **19 of 40 times at 1500 ms**, against ~14 of 40 at the old 1000 ms.
+/// The raise roughly +35 %'d availability; it did not buy full coverage, and 6 consecutive
+/// over-budget runs were observed, which is more than enough to trip the two-strike gate in
+/// a live session. Raising further is not the answer either — the distribution is bimodal
+/// with a gap around 1.5–2.1 s, so 1500 already sits near the natural split and the next
+/// meaningful threshold is ~4 s, which no request can afford up front. **The real fix is
+/// the snapshot cache** (plan item 0c): at ~47 % per-attempt success, one success cached
+/// covers the rest of the session, and pre-warming at pin time hides the slow mode entirely.
+///
+/// Historical note, because it misled this investigation: the in-app figures previously
+/// cited for Word ("344–749 ms, median 493") were **survivorship-biased**. They came from
+/// the success-only log line, so every slow run was invisible by construction — which is
+/// exactly why Word looked like it had modest headroom when it actually spends about half
+/// its attempts past any affordable budget.
+///
 /// Note for anyone tempted to shrink the *result* instead: a control-type filter does not
 /// help. Measured, whole-window: filtering to the 12 interactive types returned **70 % of
 /// the elements for 99 % of the time** — UIA walks the entire raw tree to evaluate the

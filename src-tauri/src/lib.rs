@@ -898,6 +898,62 @@ mod drain_flag_live_tests {
             .expect("NAVISUAL_TEST_HWND must be a decimal integer")
     }
 
+    /// Is Structured-Context *fully* enabled on a heavy window at the current budget, or only
+    /// some of the time? Everything answering that so far came from a standalone .NET UIA
+    /// probe running ~3x slower than the real path, with the 3x factor calibrated on a single
+    /// pair — too thin to set a budget on. This runs the production enumeration itself, so
+    /// `Some` vs `None` IS the answer: `enumerate_context_elements` applies the budget
+    /// internally and skips the block when it is exceeded.
+    ///
+    /// Sequential on purpose: concurrent calls would be refused by the drain flag, and
+    /// stacking them is the cascade this is meant to characterise the absence of.
+    ///
+    ///   cargo test --lib context_budget_headroom_live -- --ignored --nocapture
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn context_budget_headroom_live() {
+        let hwnd = test_hwnd();
+        let runs: usize = std::env::var("NAVISUAL_TEST_RUNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+
+        let mut times: Vec<u128> = Vec::new();
+        let mut skipped = 0usize;
+        for i in 1..=runs {
+            let started = std::time::Instant::now();
+            let got = tokio::task::spawn_blocking(move || enumerate_context_snapshot(hwnd))
+                .await
+                .expect("enumeration task panicked");
+            let ms = started.elapsed().as_millis();
+            times.push(ms);
+            match &got {
+                Some(v) => println!("  run {i:2}: {ms:5} ms  {} elements", v.len()),
+                None => {
+                    skipped += 1;
+                    println!("  run {i:2}: {ms:5} ms  SKIPPED (over budget or empty)");
+                }
+            }
+            // Let any straggler settle so runs stay independent.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+
+        times.sort_unstable();
+        let median = times[times.len() / 2];
+        let over_1000 = times.iter().filter(|&&t| t > 1000).count();
+        let over_1500 = times.iter().filter(|&&t| t > 1500).count();
+        println!(
+            "\n  min {} / median {} / max {} ms over {} runs",
+            times[0],
+            median,
+            times[times.len() - 1],
+            runs
+        );
+        println!("  skipped (no element block): {skipped}/{runs}");
+        println!("  would exceed a 1000 ms budget: {over_1000}/{runs}");
+        println!("  exceeds the current 1500 ms budget: {over_1500}/{runs}");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn drain_flag_blocks_a_second_enumeration() {
