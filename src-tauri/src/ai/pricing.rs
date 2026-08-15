@@ -32,6 +32,11 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // recomputed per-request cost came out LOWER despite measurably more tokens).
         // Cached input would be 0.15, but the default path is measurably not caching.
         "gemini-3.5-flash" | "gemini-3-flash-preview" => (1.50, 9.00),
+        // ⚠️ PROMOTIONAL PRICING, ends 2026-12-31 — reverts to (1.50, 7.50) on 2027-01-01.
+        // Half 3.5-flash's input and ~42% of its output while it lasts. Cached input 0.075
+        // (0.15 after), though our ~2,924-token prefix is under Gemini's 4,096 cache minimum
+        // so no discount applies today. Revisit this row before January 2027.
+        "gemini-3.7-flash" => (0.75, 3.75),
         m if m.starts_with("gemini-3.1-pro") || m.starts_with("gemini-3-pro") => (2.0, 12.0),
         // OpenAI
         "gpt-5.4-mini" => (0.75, 4.50),
