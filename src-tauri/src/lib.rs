@@ -205,6 +205,18 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
     // here unconditionally, which meant `context_window_mark_fast` below was unreachable and a
     // window that timed out twice could never be re-measured — so a *transiently* slow window
     // (Word, measured) lost Structured-Context for the entire session. See `context_window_gate`.
+    // Never stack enumerations on the same window. An abandoned call keeps running, and a
+    // running call measurably slows the next one (1.9x with 3 outstanding) — which is what
+    // turns a single timeout into a cascade that only ends when the process dies. Checked
+    // BEFORE the strike gate, because the gate's own recovery probes were adding to the pile.
+    if locator::a11y::context_is_inflight(hwnd) {
+        log::info!(
+            "[context] skipped: a previous enumeration is still running — starting another \
+             would queue behind it and make both slower | {}",
+            context_diag(hwnd)
+        );
+        return None;
+    }
     match locator::a11y::context_window_gate(hwnd) {
         locator::a11y::ContextGate::Enumerate => {}
         locator::a11y::ContextGate::Probe => {
@@ -228,9 +240,15 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
     // code owns the per-window value.
     let net_ms = locator::a11y::CONTEXT_BUDGET_MS.max(locator::a11y::EXCEL_CONTEXT_BUDGET_MS);
     let budget = std::time::Duration::from_millis(net_ms as u64);
+    // The guard moves INTO the closure, so the flag clears when the COM call really returns —
+    // not when the timeout below stops waiting for it. That distinction is the entire point.
+    let drain = locator::a11y::context_begin_inflight(hwnd);
     match tokio::time::timeout(
         budget,
-        tokio::task::spawn_blocking(move || enumerate_context_snapshot(hwnd)),
+        tokio::task::spawn_blocking(move || {
+            let _drain = drain;
+            enumerate_context_snapshot(hwnd)
+        }),
     )
     .await
     {

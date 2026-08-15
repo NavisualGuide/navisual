@@ -472,6 +472,57 @@ pub(crate) const CONTEXT_BUDGET_MS: u128 = 1000;
 /// (lib.rs) does, recording the outcome here.
 static CONTEXT_SLOW_WINDOWS: OnceLock<Mutex<HashMap<usize, SlowWindow>>> = OnceLock::new();
 
+/// Enumerations that are still executing, keyed by window. `true` = a call we already stopped
+/// waiting for is **still running**.
+///
+/// Abandoning a call does not stop it — COM calls cannot be cancelled, so a timed-out
+/// enumeration keeps walking the tree on its own thread. **Measured 2026-08-15: three
+/// in-flight enumerations make the next one 1.9× slower (415 ms → 790 ms), returning to
+/// exactly baseline the moment they drain.** That is the cascade: one call exceeds the budget →
+/// abandoned but still running → the next is slower because of it → also times out → two are
+/// running → and so on, ending only when the process dies. Live this pinned Word at ~2,500 ms
+/// (from ~225 ms) for days across app restarts; killing every Navisual process restored it
+/// instantly, which is what identified it.
+///
+/// Refusing to start a new enumeration while one is outstanding breaks the loop at step two.
+/// This matters MORE than the strike/backoff gate above, because that gate's probes were
+/// themselves adding in-flight calls — feeding the thing they were probing.
+static CONTEXT_INFLIGHT: OnceLock<Mutex<HashMap<usize, std::sync::Arc<std::sync::atomic::AtomicBool>>>> =
+    OnceLock::new();
+
+/// Clears the in-flight flag when the blocking call ACTUALLY returns — including on panic,
+/// hence a Drop guard rather than a store at the end of the closure. A flag stuck `true` would
+/// disable enumeration for that window for the rest of the session.
+pub(crate) struct DrainGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for DrainGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Is a previous enumeration for `hwnd` still executing?
+pub(crate) fn context_is_inflight(hwnd: usize) -> bool {
+    let cell = CONTEXT_INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()));
+    cell.lock()
+        .get(&hwnd)
+        .map(|f| f.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(false)
+}
+
+/// Mark an enumeration started. The returned guard must be moved INTO the blocking closure, so
+/// the flag clears when the work really finishes — not when the caller gives up waiting.
+pub(crate) fn context_begin_inflight(hwnd: usize) -> DrainGuard {
+    let cell = CONTEXT_INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cell.lock();
+    let flag = map
+        .entry(hwnd)
+        .or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .clone();
+    flag.store(true, std::sync::atomic::Ordering::Release);
+    DrainGuard(flag)
+}
+
 /// Per-window skip state. Was a bare strike count until 2026-08-12, when the count alone
 /// proved to be a **one-way door**: `enumerate_context_snapshot_bounded` returns early on a
 /// slow window *before* it can reach `context_window_mark_fast`, so a window that timed out
@@ -2825,6 +2876,33 @@ mod tests {
     /// The regression that matters: before 2026-08-12 a gated window was skipped *forever*,
     /// because the caller returned before it could ever reach `mark_fast`. A transiently slow
     /// window (Word, measured live) therefore lost Structured-Context for the whole session.
+    /// The drain flag must track the WORK, not the waiter. Abandoning a call does not stop it,
+    /// and a still-running call slows the next one (measured 1.9× with 3 outstanding), so
+    /// clearing the flag when the caller gives up would re-open the exact cascade this exists
+    /// to prevent.
+    #[test]
+    fn inflight_clears_only_when_the_work_really_finishes() {
+        use super::{context_begin_inflight, context_is_inflight};
+        let hwnd = 0xDEAD_0005;
+        assert!(!context_is_inflight(hwnd), "nothing running on a fresh hwnd");
+
+        let guard = context_begin_inflight(hwnd);
+        assert!(context_is_inflight(hwnd), "marked in-flight while the work runs");
+
+        // Simulate the caller timing out and walking away — the guard lives on inside the
+        // still-running closure, so the window must STILL read as busy.
+        assert!(
+            context_is_inflight(hwnd),
+            "abandoning the wait must not clear the flag — the COM call is still executing"
+        );
+
+        drop(guard); // the blocking call actually returns (or panics — Drop runs either way)
+        assert!(
+            !context_is_inflight(hwnd),
+            "flag must clear on real completion, or enumeration is disabled for the session"
+        );
+    }
+
     #[test]
     fn a_gated_window_is_probed_and_can_recover() {
         use super::{
