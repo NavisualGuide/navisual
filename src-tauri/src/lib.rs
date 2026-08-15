@@ -1205,6 +1205,26 @@ fn last_click_snapshot(hwnd: Option<usize>) -> Option<String> {
     }
 }
 
+/// The session's current goal, for `GuideResponse.goal` (stage 4). Read from the live session
+/// rather than the request's `task` so it reflects a goal PROMOTED from a `needs_input` reply —
+/// the whole point being that the opener is often not the goal.
+///
+/// Uses `try_lock`: this is display-only, and blocking a response on a router lock that a
+/// concurrent locate may hold would trade a real capability for a cosmetic one.
+fn session_goal(state: &AppState) -> String {
+    state
+        .ai_router
+        .try_lock()
+        .ok()
+        .and_then(|r| {
+            r.session_manager
+                .current_session
+                .as_ref()
+                .map(|s| s.task_description.clone())
+        })
+        .unwrap_or_default()
+}
+
 /// Exe filename stem for `LocateTrace.app_name` — PII-free app identity (see the field's
 /// doc comment for why this is the exe stem and not the resolved display title).
 fn trace_app_name(hwnd_opt: Option<usize>) -> Option<String> {
@@ -1511,6 +1531,12 @@ struct GuideResponse {
     instruction: String,
     located: Option<locator::LocateResult>,
     needs_input: bool,
+    /// The goal the session is currently working toward, as the backend understands it.
+    /// Surfaced so the user can SEE it — a memory the user cannot see is one they cannot
+    /// correct, and today the model decides what to remember while the user finds out three
+    /// wrong steps later. Empty before a goal exists. This is the product's own slogan
+    /// applied to memory: the AI guides, you decide.
+    goal: String,
     provider: String,
     /// The model that actually handled this request. For managed this is the concrete
     /// model OpenRouter routed to (the relay sends the `openrouter/free` router); for
@@ -1937,6 +1963,7 @@ async fn guide(
                     .map(|i| i.app_name)
                     .unwrap_or_else(|| "The pinned app".to_string());
                 return Ok(GuideResponse {
+                    goal: session_goal(&state),
                     ok: false,
                     session_id,
                     request_id: None,
@@ -2110,6 +2137,7 @@ async fn guide(
         }
         Err(()) => {
             return Ok(GuideResponse {
+                goal: session_goal(&state),
                 ok: false,
                 session_id,
                 request_id: None,
@@ -2459,6 +2487,7 @@ async fn guide(
                 let _ = app.emit("insufficient_coins", ());
             }
             return Ok(GuideResponse {
+                goal: session_goal(&state),
                 ok: false,
                 session_id,
                 request_id: Some(request_id),
@@ -2571,6 +2600,7 @@ async fn guide(
             .flatten();
         emit_stale_if_drifted(&app, pre_hash, stale_hash);
         return Ok(GuideResponse {
+            goal: session_goal(&state),
             ok: true,
             session_id,
             request_id: Some(request_id),
@@ -2671,6 +2701,7 @@ async fn guide(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        goal: session_goal(&state),
         ok: true,
         session_id,
         request_id: Some(request_id),
@@ -2797,6 +2828,7 @@ async fn next_step(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        goal: session_goal(&state),
         ok: true,
         session_id,
         request_id,
@@ -2990,6 +3022,7 @@ async fn retry_locate(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        goal: session_goal(&state),
         ok: true,
         session_id,
         request_id,
@@ -3469,6 +3502,7 @@ async fn send_correction(
             .flatten();
         emit_stale_if_drifted(&app, pre_hash, stale_hash);
         return Ok(GuideResponse {
+            goal: session_goal(&state),
             ok: true,
             session_id,
             request_id: Some(request_id),
@@ -3568,6 +3602,7 @@ async fn send_correction(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        goal: session_goal(&state),
         ok: true,
         session_id,
         request_id: Some(request_id),

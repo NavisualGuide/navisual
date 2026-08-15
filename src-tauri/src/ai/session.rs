@@ -11,6 +11,12 @@ use uuid::Uuid;
 /// the nominal budget. 6 ≈ three exchanges of slack.
 const EVICTION_BATCH: usize = 6;
 
+/// Ceiling on pinned turns. Pins are a backstop against the model's summary drifting, not an
+/// archive of everything the user ever said — uncapped they would grow the prompt without
+/// bound in a chatty session. Oldest-first eviction: if the goal has been restated since, the
+/// first phrasing is the stale one.
+const MAX_PINNED_TURNS: usize = 5;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSummary {
     pub summary_text: String,
@@ -92,6 +98,9 @@ impl Session {
             pinned,
         });
         self.last_active_at = Local::now().to_rfc3339();
+        if pinned {
+            self.enforce_pin_cap();
+        }
     }
 
     /// The task the user is actually trying to accomplish. Mutable because the opening message
@@ -102,6 +111,33 @@ impl Session {
         if !task.trim().is_empty() {
             self.task_description = task;
         }
+    }
+
+    /// Keep only the most recent `MAX_PINNED_TURNS` pins, un-pinning older ones.
+    ///
+    /// Pins are a **backstop, not an archive**. Without a cap a long chatty session accumulates
+    /// them until they dominate the prompt — the exact opposite of the point, in a workload
+    /// where input is ~97% of cost. The oldest intent is also the most likely to be stale: if
+    /// the user has restated their goal five times since, the first phrasing is history.
+    fn enforce_pin_cap(&mut self) {
+        let pinned: Vec<usize> = self
+            .conversation
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.pinned)
+            .map(|(i, _)| i)
+            .collect();
+        if pinned.len() <= MAX_PINNED_TURNS {
+            return;
+        }
+        for &i in &pinned[..pinned.len() - MAX_PINNED_TURNS] {
+            self.conversation[i].pinned = false;
+        }
+        log::info!(
+            "[memory] pin cap: {} pinned -> {} (oldest un-pinned)",
+            pinned.len(),
+            MAX_PINNED_TURNS
+        );
     }
 
     pub fn update_state(&mut self, summary_text: String) {

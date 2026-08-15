@@ -41,6 +41,9 @@ See the LICENSE file in the root of this repository for complete details.
     instruction: string;
     located: LocateResult | null;
     needs_input: boolean;
+    /** The goal the backend is working toward (stage 4). Reflects a goal promoted from a
+     *  needs_input reply, not necessarily the opening message. */
+    goal: string;
     provider: string;
     model: string | null;
     input_tokens: number | null;
@@ -286,6 +289,9 @@ See the LICENSE file in the root of this repository for complete details.
   // Surfaces a soft banner over the instruction so the user knows the
   // guidance may be referring to state that no longer exists.
   let staleResponse = $state(false);
+  // Stage 4: the goal the backend is working toward, surfaced so drift is a one-glance
+  // catch instead of a three-wrong-steps discovery.
+  let sessionGoal = $state("");
   // Managed provider (S.1 / S.2) state now lives in the billing store
   // (src/lib/billing.svelte.ts) — billing.freeRemaining/coinBalanceMicro/tier used to be
   // three $states here written from 6+ places, the root of the F1/F6 bug class.
@@ -1450,6 +1456,7 @@ See the LICENSE file in the root of this repository for complete details.
     if (res.request_id) lastRequestId = res.request_id;
     if (res.provider) provider = res.provider;
     if (res.model) routedModel = res.model;
+    sessionGoal = res.goal ?? "";
     phase = res.needs_input ? "needs_input" : "guiding";
     if (res.instruction) {
       const cleanInstruction = res.instruction;
@@ -2292,6 +2299,16 @@ See the LICENSE file in the root of this repository for complete details.
             <span class="badge badge-clip" title="Text copied to clipboard">📋 copied</span>
           {/if}
         </div>
+        <!-- The goal the AI is working toward. Visible because a memory the user can't see is
+             one they can't correct — previously the model quietly decided what to remember and
+             the user only found out after a few wrong steps. If it's wrong, saying so is just a
+             normal message, which the backend promotes into the goal. -->
+        {#if sessionGoal && phase !== "thinking"}
+          <div class="goal-line" title="What Navisual thinks you're trying to do. If it's wrong, just say so.">
+            <span class="goal-label">Working on</span>
+            <span class="goal-text">{sessionGoal}</span>
+          </div>
+        {/if}
         {#if staleResponse && phase !== "thinking"}
           <div class="stale-banner" role="status">
             <span class="stale-icon">⚠</span>
@@ -3997,6 +4014,28 @@ See the LICENSE file in the root of this repository for complete details.
     margin-bottom: 5px;
   }
 
+  .goal-line {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    margin: 2px 0 8px 0;
+    font-size: 0.82em;
+    color: var(--text-tertiary);
+    line-height: 1.35;
+  }
+  .goal-label {
+    flex: 0 0 auto;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.9em;
+    opacity: 0.75;
+  }
+  .goal-text {
+    color: var(--text-secondary);
+    /* Long goals wrap rather than truncate — a clipped goal is exactly as unverifiable
+       as no goal, which would defeat showing it. */
+    overflow-wrap: anywhere;
+  }
   .step-counter {
     font-size: 10px;
     font-weight: 600;
