@@ -873,6 +873,84 @@ fn changed_cells(a: &[u8], b: &[u8]) -> u32 {
         .count() as u32
 }
 
+#[cfg(all(test, windows))]
+mod drain_flag_live_tests {
+    //! Live verification for the drain flag, which the unit tests can only prove
+    //! *mechanically* (the flag flips) — not that it actually short-circuits a real
+    //! enumeration against a real window.
+    //!
+    //! This exists because driving the same proof through the app proved unreliable: the
+    //! panel loses its target under synthetic input (`GetWindowRect failed for target hwnd
+    //! … treating as gone`), so the cascade condition could never be forced on demand. Here
+    //! there is no panel, no AI, no clicking — just two concurrent calls at the exact layer
+    //! the guard lives in.
+    //!
+    //! Get an hwnd (PowerShell), then run:
+    //!   $env:NAVISUAL_TEST_HWND = (Get-Process WINWORD | ? {$_.MainWindowHandle -ne 0} |
+    //!                              Select -First 1).MainWindowHandle
+    //!   cargo test --lib drain_flag_blocks_a_second_enumeration -- --ignored --nocapture
+    use super::*;
+
+    fn test_hwnd() -> usize {
+        std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND to a real top-level window handle (decimal)")
+            .parse()
+            .expect("NAVISUAL_TEST_HWND must be a decimal integer")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn drain_flag_blocks_a_second_enumeration() {
+        let hwnd = test_hwnd();
+        assert!(
+            !locator::a11y::context_is_inflight(hwnd),
+            "nothing should be in flight before the test starts"
+        );
+
+        // First call runs the real enumeration and holds the flag for its duration.
+        let first = tokio::spawn(async move { enumerate_context_snapshot_bounded(hwnd).await });
+
+        // Give the blocking task a moment to actually start and set the flag. This is the
+        // one timing assumption in the test, and it is checked rather than assumed below.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert!(
+            locator::a11y::context_is_inflight(hwnd),
+            "the first enumeration should have marked the window in-flight by now — if this \
+             fails the window enumerated in under 120 ms and the test cannot prove anything; \
+             pick a heavier window"
+        );
+
+        // Second call, while the first is demonstrably still running. The guard must refuse
+        // it *immediately* — the whole point is that it never queues behind the first.
+        let started = std::time::Instant::now();
+        let second = enumerate_context_snapshot_bounded(hwnd).await;
+        let elapsed = started.elapsed();
+        println!("[drain] second call returned in {:?}", elapsed);
+
+        assert!(
+            second.is_none(),
+            "the second call must be refused while one is outstanding"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "refusal must be immediate (was {elapsed:?}) — a slow None means it fell through \
+             to the timeout instead of the in-flight guard, which is the bug, not the fix"
+        );
+
+        let first = first.await.expect("first task panicked");
+        println!(
+            "[drain] first call yielded {:?} elements",
+            first.as_ref().map(|v| v.len())
+        );
+        // The guard must clear once the real work returns, or one timeout would disable
+        // Structured-Context on this window permanently.
+        assert!(
+            !locator::a11y::context_is_inflight(hwnd),
+            "the flag must clear when the blocking call returns"
+        );
+    }
+}
+
 #[cfg(test)]
 mod autopilot_change_tests {
     use super::*;
