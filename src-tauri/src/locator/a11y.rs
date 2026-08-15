@@ -441,6 +441,12 @@ fn ai_bbox_probe(
 /// (~100–400 ms; the budget bounds that separately) — only the token cap fired.
 /// Worst-case prompt add at 300 ≈ +1–1.2k tokens, still dwarfed by the screenshot.
 pub const CONTEXT_ELEMENTS_CAP: usize = 300;
+/// Below this many filtered elements, the bulk result is treated as implausible and the
+/// materialising walk rescue runs (see the rescue block in `enumerate_context_elements`).
+/// From measurement: a lazy-state Word bulk-filters to 15–33 while the same window healthy
+/// yields 139–148; VS Code runs ~101; a genuinely tiny window (Search host: 1) walks in
+/// single-digit milliseconds, so a false trigger on small-but-honest windows costs nothing.
+pub(crate) const CONTEXT_WALK_RESCUE_FLOOR: usize = 40;
 /// S.1 hard budget; exceeded → skip the block (the AI call proceeds without it).
 /// Raised 300→500 (2026-07-05, VS Code's raw query alone measured ~287 ms) then
 /// 500→1000 (2026-07-06): a live SolidWorks session crept from ~400 ms early on to
@@ -972,28 +978,34 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let _ = budget_ms;
 
     // Single filter pass over the cached candidates (name / on-screen / geometry / dedup).
+    // Expressed as a closure because the walk rescue below feeds a SECOND batch through the
+    // identical filter, sharing the same dedup set and cap accounting.
     let mut out: Vec<super::ContextElement> = Vec::new();
     let mut seen: std::collections::HashSet<(String, (i32, i32, u32, u32))> =
         std::collections::HashSet::new();
     let mut total_qualifying: usize = 0;
-    for el in &candidates {
+    type SeenKey = (String, (i32, i32, u32, u32));
+    let apply_filter = |el: &UIElement,
+                        out: &mut Vec<super::ContextElement>,
+                        seen: &mut std::collections::HashSet<SeenKey>,
+                        total_qualifying: &mut usize| {
         // Non-empty display name (a glyph-only control has nothing to select by).
         let Ok(raw_name) = el.get_cached_name() else {
-            continue;
+            return;
         };
         let name = context_display_name(&raw_name);
         if name.is_empty() {
-            continue;
+            return;
         }
         // On-screen: UIA's own flag (scrolled-out list items) + rect ∩ window.
         if el.is_cached_offscreen().unwrap_or(false) {
-            continue;
+            return;
         }
         let Ok(ct) = el.get_cached_control_type() else {
-            continue;
+            return;
         };
         let Ok(rect) = el.get_cached_bounding_rectangle() else {
-            continue;
+            return;
         };
         let (left, top) = (rect.get_left(), rect.get_top());
         let (w, h) = (
@@ -1001,28 +1013,29 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
             rect.get_height().max(0) as u32,
         );
         if w == 0 || h == 0 || !rect_is_onscreen(left, top) {
-            continue;
+            return;
         }
         if left + (w as i32) <= win_rect.left
             || left >= win_rect.right
             || top + (h as i32) <= win_rect.top
             || top >= win_rect.bottom
         {
-            continue;
+            return;
         }
         // Control-sized: >90% of the window in either axis is a container.
         if (w as i64) * 10 > win_w * 9 || (h as i64) * 10 > win_h * 9 {
-            continue;
+            return;
         }
-        // Dedupe exact (name, rect) repeats (Chrome doubles names).
+        // Dedupe exact (name, rect) repeats (Chrome doubles names; the walk rescue re-visits
+        // elements the bulk query already returned).
         if !seen.insert((name.clone(), (left, top, w, h))) {
-            continue;
+            return;
         }
         // Keep counting past the cap (cheap — the candidates are already cached) so an
         // over-cap skip reports the true qualifying count, not just ">CAP". Stop building
         // `out` at the cap since an over-cap result is always discarded by the caller
         // (Decision 4 — skip the whole block, never truncate).
-        total_qualifying += 1;
+        *total_qualifying += 1;
         if out.len() < CONTEXT_ELEMENTS_CAP {
             out.push(super::ContextElement {
                 id: out.len() as u32 + 1,
@@ -1039,6 +1052,59 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                 // from a valid target (the worse error of the two).
                 enabled: el.is_cached_enabled().unwrap_or(true),
             });
+        }
+    };
+    for el in &candidates {
+        apply_filter(el, &mut out, &mut seen, &mut total_qualifying);
+    }
+
+    // Walk rescue for LAZY trees (2026-08-15, found live on Word). Word materialises its UIA
+    // tree per-subtree on demand: a bulk `FindAll` sees only what is already built, while the
+    // painted screen carries the full ribbon. Measured on one live window, minutes apart, the
+    // bulk query filtered to 15–33 elements with the ribbon entirely absent — yet Pass 1 A11y
+    // (which primes, retries and walks) found those same ribbon controls seconds later, which
+    // is exactly the "we have a11y info when grounding but never sent it" asymmetry reported
+    // from live use. The pruned walk cures it as a side effect of HOW it reads: one
+    // children-scoped query per container forces each level to materialise, and its
+    // (class, rect) dedup prunes provider explosions by construction — the same live window
+    // carried an MsoDockLeft (Navigation pane) subtree exploded to 10,831 descendants, and the
+    // walk still finished in ~300 ms. Bulk and walk are COMPLEMENTARY on a lazy tree (bulk
+    // sees built-but-deep content the depth-capped walk misses; the walk materialises unbuilt
+    // chrome), so the rescue merges both through the same filter rather than replacing one
+    // with the other.
+    //
+    // Behavioural trigger, no app identity: an implausibly small filtered result. Windows that
+    // are genuinely tiny walk in single-digit milliseconds, so a false trigger costs nothing.
+    if !is_excel && out.len() < CONTEXT_WALK_RESCUE_FLOOR {
+        if let Ok(true_cond) = automation.create_true_condition() {
+            let before = out.len();
+            let mut walk_seen: std::collections::HashSet<ClassRectSignature> =
+                std::collections::HashSet::new();
+            // A fresh budget slice, not the bulk pass's remainder: the walk is the productive
+            // pass precisely when the bulk pass was slow, and the caller's wait is bounded by
+            // the outer timeout regardless (an over-budget completion still banks its result).
+            let deadline = Instant::now() + Duration::from_millis(budget_ms as u64);
+            for root in &roots {
+                excel_pruned_walk(
+                    root,
+                    SCROLLBAR_SCAN_DEPTH,
+                    &true_cond,
+                    None,
+                    &cache,
+                    &mut walk_seen,
+                    deadline,
+                    &mut |el, _class_name| {
+                        if matches!(el.get_cached_control_type(), Ok(ct) if is_context_ct(ct)) {
+                            apply_filter(el, &mut out, &mut seen, &mut total_qualifying);
+                        }
+                    },
+                );
+            }
+            log::info!(
+                "[context] walk rescue: bulk filtered to {before} (< {CONTEXT_WALK_RESCUE_FLOOR}) — \
+                 the materialising walk added {} more",
+                out.len() - before
+            );
         }
     }
     if total_qualifying > CONTEXT_ELEMENTS_CAP {

@@ -1544,7 +1544,10 @@ mod drain_flag_live_tests {
             // requests is 10.1 s); 2 s is enough for an abandoned call to land.
             tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
         }
-        println!("\n  rounds that shipped an element list: {with_list}/{rounds}");
+        println!(
+            "\n  rounds that shipped an element list: {with_list}/{rounds} \
+             (over budget in {timed_out})"
+        );
         assert!(
             with_list * 2 > rounds,
             "a slow but PRODUCTIVE window must keep getting lists ({with_list}/{rounds}); the \
