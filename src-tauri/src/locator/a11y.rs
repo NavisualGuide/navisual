@@ -2512,6 +2512,145 @@ mod incremental_walk_live_tests {
         }
     }
 
+    /// Does the bulk query's RESULT COUNT fluctuate, not just its duration? Two measurements
+    /// hours apart disagreed wildly on the identical root: 6 unique names one time, 148
+    /// descendants another. If the count really does collapse, then "the walk finds more than
+    /// the bulk query" is a statement about *when you asked*, and every comparison in item 0e
+    /// has to be re-read in that light.
+    ///
+    /// Records count AND duration together, which no earlier probe did — the duration probes
+    /// ignored the count and the coverage probes ignored the clock.
+    ///
+    ///   cargo test --lib bulk_stability_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bulk_stability_live() {
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+        let rounds: usize = std::env::var("NAVISUAL_TEST_RUNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        let automation = UIAutomation::new().expect("uia");
+        let root = automation
+            .element_from_handle((hwnd as isize).into())
+            .expect("handle");
+        let cache = automation.create_cache_request().expect("cache");
+        let _ = cache.add_property(UIProperty::Name);
+        let _ = cache.add_property(UIProperty::ControlType);
+        let mut cond = None;
+        for &id in CONTEXT_CT_IDS {
+            let c = automation
+                .create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+                .expect("cond");
+            cond = Some(match cond.take() {
+                None => c,
+                Some(prev) => automation.create_or_condition(prev, c).expect("or"),
+            });
+        }
+        let cond = cond.expect("cond");
+
+        println!("  round      ms   elements");
+        let mut counts = Vec::new();
+        for i in 1..=rounds {
+            let t = Instant::now();
+            let n = root
+                .find_all_build_cache(TreeScope::Descendants, &cond, &cache)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            let ms = t.elapsed().as_millis();
+            counts.push((ms, n));
+            println!("  {i:5}  {ms:6}  {n:9}");
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        let full = counts.iter().filter(|(_, n)| *n > 100).count();
+        let empty = counts.iter().filter(|(_, n)| *n < 20).count();
+        println!(
+            "\n  rounds returning a full tree (>100): {full}/{rounds}\n  \
+             rounds returning near-nothing (<20): {empty}/{rounds}"
+        );
+    }
+
+    /// What ARE the popup roots, and how did another application's elements appear under a
+    /// Word target? `collect_owned_popups` is PID-gated, so a foreign *window* should be
+    /// structurally impossible — which means either the gate is not doing what it reads like,
+    /// or the foreign names arrive through the UIA tree rather than through the root set.
+    /// This dumps every root with its owning process and a sample of what its bulk query
+    /// returns, so the answer is observed instead of reasoned about.
+    ///
+    ///   cargo test --lib popup_roots_diagnostic_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn popup_roots_diagnostic_live() {
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
+            .expect("set NAVISUAL_TEST_HWND")
+            .parse()
+            .expect("decimal hwnd");
+        let automation = UIAutomation::new().expect("uia");
+
+        let target = HWND(hwnd as *mut std::ffi::c_void);
+        let mut target_pid = 0u32;
+        unsafe { GetWindowThreadProcessId(target, Some(&mut target_pid)) };
+        println!("  target hwnd={hwnd} pid={target_pid}");
+
+        let popups = unsafe { collect_owned_popups(target) };
+        println!("  collect_owned_popups returned {} window(s)", popups.len());
+
+        let cache = automation.create_cache_request().expect("cache");
+        let _ = cache.add_property(UIProperty::Name);
+        let _ = cache.add_property(UIProperty::ControlType);
+
+        let mut cond = None;
+        for &id in CONTEXT_CT_IDS {
+            let c = automation
+                .create_property_condition(UIProperty::ControlType, Variant::from(id), None)
+                .expect("cond");
+            cond = Some(match cond.take() {
+                None => c,
+                Some(prev) => automation.create_or_condition(prev, c).expect("or"),
+            });
+        }
+        let cond = cond.expect("cond");
+
+        let mut all: Vec<HWND> = popups.clone();
+        all.push(target);
+        for h in all {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+            let Ok(el) = automation.element_from_handle(h.into()) else {
+                println!("  root {:?}: element_from_handle FAILED", h.0);
+                continue;
+            };
+            let cls = el.get_classname().unwrap_or_default();
+            let nm: String = el
+                .get_name()
+                .unwrap_or_default()
+                .chars()
+                .take(46)
+                .collect();
+            let n = el
+                .find_all_build_cache(TreeScope::Descendants, &cond, &cache)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            println!(
+                "  root hwnd={:?} pid={pid}{} class={cls:?}\n       name={nm:?}  bulk-descendants={n}",
+                h.0,
+                if pid == target_pid { "" } else { "  <-- FOREIGN PID" }
+            );
+            if let Ok(v) = el.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
+                for e in v.iter().take(6) {
+                    let en: String =
+                        e.get_cached_name().unwrap_or_default().chars().take(52).collect();
+                    if !en.trim().is_empty() {
+                        println!("         · {en}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Speed is settled (walk ~491 ms median vs bulk ~2,065 ms, 8/8 over budget). **Coverage
     /// is the question that decides anything**, and it could not be answered above because the
     /// bulk call refuses to return its result once over budget — so this reimplements BOTH
