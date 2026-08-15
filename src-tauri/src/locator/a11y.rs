@@ -570,11 +570,25 @@ pub(crate) fn context_begin_inflight(hwnd: usize) -> DrainGuard {
 /// twice was never measured again and could therefore never be un-marked. Measured
 /// consequence on Word (locator-testing.md §II, 2026-08-11 human session): locates went from
 /// 5-52 ms `hit_selection` to 2426-5969 ms with a miss, silently, for the whole session —
-/// while the *same* Word ran healthy in the session before and after. The trigger for those
-/// transient timeouts is still unexplained; this only makes the penalty recoverable.
+/// while the *same* Word ran healthy in the session before and after.
+///
+/// **A strike now means "produced nothing usable", NOT "was slow" (2026-08-15).** The two were
+/// conflated because a timeout was the trigger, and once the snapshot cache landed that became
+/// actively harmful: Word produces 147 elements every time and merely takes 452-3,731 ms to do
+/// it, so two slow-but-successful calls gated it — and being gated then blocked the very
+/// enumeration the cache needed to refill, so a single `hit_selection` was followed by nothing
+/// at all (reported from a live session). Meanwhile the case this gate actually exists for,
+/// Lightroom Classic, is unproductive by construction: its ~370 nodes are all `Pane`, so the
+/// control-view filter can only ever return empty however long it runs.
+///
+/// So the decision moved to where the outcome is known — the blocking closure in
+/// `enumerate_context_snapshot_bounded`, which runs to completion even when its caller has
+/// given up waiting. Productive clears the strikes, unproductive adds one, and a timeout on
+/// its own says nothing either way. Slow-but-productive is precisely what the cache absorbs.
 #[derive(Default, Clone, Copy)]
 struct SlowWindow {
-    /// Consecutive timeouts. At/above `CONTEXT_SLOW_THRESHOLD` the window is gated.
+    /// Consecutive *unproductive* completions. At/above `CONTEXT_SLOW_THRESHOLD` the window
+    /// is gated. (Was consecutive timeouts until 2026-08-15 — see the type docs.)
     strikes: u32,
     /// Requests skipped since the last probe was allowed through.
     skipped: u32,

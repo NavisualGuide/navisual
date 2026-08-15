@@ -436,14 +436,18 @@ fn context_cache_refresh_in_background(hwnd: usize) {
         let drain = locator::a11y::context_begin_inflight(hwnd);
         let _drain = drain;
         let started = std::time::Instant::now();
-        if let Some(els) = enumerate_context_snapshot(hwnd) {
-            let cost = started.elapsed().as_millis();
-            let sig = screen_sig_of_screen(Some(hwnd));
-            log::info!(
-                "[context] background refresh banked {} elements ({cost} ms)",
-                els.len()
-            );
-            context_cache::store(hwnd, els, sig, cost);
+        match enumerate_context_snapshot(hwnd) {
+            Some(els) => {
+                let cost = started.elapsed().as_millis();
+                let sig = screen_sig_of_screen(Some(hwnd));
+                log::info!(
+                    "[context] background refresh banked {} elements ({cost} ms)",
+                    els.len()
+                );
+                context_cache::store(hwnd, els, sig, cost);
+                locator::a11y::context_window_mark_fast(hwnd);
+            }
+            None => locator::a11y::context_window_mark_slow(hwnd),
         }
     });
 }
@@ -577,33 +581,50 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
             // 3 s enumeration produced nothing at all.
             let started = std::time::Instant::now();
             let got = enumerate_context_snapshot(hwnd);
-            if let Some(els) = got.as_ref() {
-                let cost = started.elapsed().as_millis();
-                let sig = screen_sig_of_screen(Some(hwnd));
-                context_cache::store(hwnd, els.clone(), sig, cost);
+            match got.as_ref() {
+                Some(els) => {
+                    let cost = started.elapsed().as_millis();
+                    let sig = screen_sig_of_screen(Some(hwnd));
+                    context_cache::store(hwnd, els.clone(), sig, cost);
+                    // Productive, however long it took — clear any strikes. See the gate note
+                    // below for why duration is no longer what the gate judges.
+                    locator::a11y::context_window_mark_fast(hwnd);
+                }
+                None => locator::a11y::context_window_mark_slow(hwnd),
             }
             got
         }),
     )
     .await
     {
-        Ok(Ok(result)) => {
-            // Clears any strikes — this is the recovery path a successful probe takes.
-            locator::a11y::context_window_mark_fast(hwnd);
-            result
-        }
+        // Strike bookkeeping now happens inside the closure, where the *outcome* is known.
+        Ok(Ok(result)) => result,
         Ok(Err(_join_error)) => None,
         Err(_timed_out) => {
             // `context_diag` here runs on the *caller's* thread, not the abandoned blocking
             // one, so `tid`/`apt` describe the waiter rather than the worker. That is still
             // the useful pairing: compare it against the `tid`/`apt` logged from inside
             // `enumerate_context_snapshot` on the requests that DID complete.
+            // NO strike here (changed 2026-08-15). A timeout says the call was slow; it says
+            // nothing about whether this window can produce a usable list, and those are the
+            // two cases the gate must not confuse.
+            //
+            // The gate exists for Lightroom Classic, whose ~370 nodes are all `Pane` — the
+            // control-view filter can only ever return EMPTY, so enumerating is pure cost
+            // forever. Word is the opposite: 147 elements every time, just slowly (452-3,731 ms
+            // for an identical result). Striking on duration gated Word after two slow calls
+            // even though every one of them was productive, and being gated then blocked the
+            // very enumeration the cache needed to refill — so one hit was followed by nothing.
+            // Reported from a live session: "only 1 hit_selection, then Word was gated".
+            //
+            // The abandoned call is still running and still banks its result on completion, and
+            // *that* is where the strike decision now lives: productive clears, unproductive
+            // strikes. Slow-but-productive is exactly what the cache was built to absorb.
             log::info!(
-                "[context] skipped: enumeration exceeded {} ms wall-clock, abandoning (still finishing in the background) | {}",
+                "[context] skipped: enumeration exceeded {} ms wall-clock, abandoning (still finishing in the background, will bank its result) | {}",
                 budget.as_millis(),
                 context_diag(hwnd)
             );
-            locator::a11y::context_window_mark_slow(hwnd);
             None
         }
     }
@@ -1337,11 +1358,37 @@ mod drain_flag_live_tests {
     //!   cargo test --lib drain_flag_blocks_a_second_enumeration -- --ignored --nocapture
     use super::*;
 
+    /// The window under test, **printed with its class and title**.
+    ///
+    /// Not decoration. `(Get-Process WINWORD).MainWindowHandle` looks like the obvious way to
+    /// get a target and is not: with a recovery document open it returned an
+    /// `MSO_BORDEREFFECT_WINDOW_CLASS` shadow window with no title, which enumerates to zero
+    /// elements because it genuinely has none. A whole run was spent concluding the code was
+    /// broken when the handle was. Printing identity makes that failure obvious in one glance
+    /// instead of one hour — pick the `OpusApp` window, not whatever Windows hands back first.
     fn test_hwnd() -> usize {
-        std::env::var("NAVISUAL_TEST_HWND")
+        let hwnd: usize = std::env::var("NAVISUAL_TEST_HWND")
             .expect("set NAVISUAL_TEST_HWND to a real top-level window handle (decimal)")
             .parse()
-            .expect("NAVISUAL_TEST_HWND must be a decimal integer")
+            .expect("NAVISUAL_TEST_HWND must be a decimal integer");
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindowTextW};
+            let h = HWND(hwnd as *mut std::ffi::c_void);
+            unsafe {
+                let mut cls = [0u16; 64];
+                let n = GetClassNameW(h, &mut cls);
+                let mut title = [0u16; 128];
+                let t = GetWindowTextW(h, &mut title);
+                println!(
+                    "  target: hwnd={hwnd} class={:?} title={:?}",
+                    String::from_utf16_lossy(&cls[..n.max(0) as usize]),
+                    String::from_utf16_lossy(&title[..t.max(0) as usize]),
+                );
+            }
+        }
+        hwnd
     }
 
     /// Is Structured-Context *fully* enabled on a heavy window at the current budget, or only
@@ -1451,6 +1498,57 @@ mod drain_flag_live_tests {
         println!(
             "  after invalidate: {:>5} ms (cache refused, as designed)",
             t.elapsed().as_millis()
+        );
+    }
+
+    /// Reproduces the reported failure — "only 1 hit_selection, then Word was gated" — as a
+    /// repeatable sequence, and asserts it no longer happens.
+    ///
+    /// Each round is one request in a real session: post-step invalidation (the user did what
+    /// we asked, so the cached list is dropped) followed by a request. Before the gate was
+    /// changed to judge *productivity* rather than *duration*, two slow-but-successful
+    /// enumerations gated the window, and being gated blocked the very enumeration the cache
+    /// needed to refill — so round 1 produced a list and everything after it produced nothing.
+    ///
+    ///   cargo test --lib gate_does_not_starve_a_slow_but_productive_window_live -- --ignored --nocapture
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn gate_does_not_starve_a_slow_but_productive_window_live() {
+        let hwnd = test_hwnd();
+        context_cache::invalidate_all();
+        locator::a11y::context_window_mark_fast(hwnd); // clear strikes from earlier runs
+
+        let rounds: usize = std::env::var("NAVISUAL_TEST_RUNS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        let mut with_list = 0;
+        let mut timed_out = 0;
+        for i in 1..=rounds {
+            // The user just performed the step we pointed at.
+            context_cache_invalidate(hwnd);
+            let t = std::time::Instant::now();
+            let got = enumerate_context_snapshot_bounded(hwnd).await;
+            let ms = t.elapsed().as_millis();
+            match &got {
+                Some(v) => {
+                    with_list += 1;
+                    println!("  round {i}: {ms:>5} ms  {} elements", v.len());
+                }
+                None => {
+                    timed_out += 1;
+                    println!("  round {i}: {ms:>5} ms  NO LIST (over budget — banking behind us)");
+                }
+            }
+            // Real sessions leave far more room than this (the 5th-percentile gap between
+            // requests is 10.1 s); 2 s is enough for an abandoned call to land.
+            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        }
+        println!("\n  rounds that shipped an element list: {with_list}/{rounds}");
+        assert!(
+            with_list * 2 > rounds,
+            "a slow but PRODUCTIVE window must keep getting lists ({with_list}/{rounds}); the \
+             old duration-based strike gated it after two slow successes and it never recovered"
         );
     }
 
