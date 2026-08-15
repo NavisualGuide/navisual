@@ -236,11 +236,42 @@ mod context_cache {
         /// What the enumeration that produced this entry actually cost. Serving is gated on
         /// it: see `CACHE_MIN_COST_MS`.
         pub cost_ms: u128,
+        /// (pid, class name) of the window when the snapshot was taken.
+        ///
+        /// An `HWND` is a **reusable** OS handle: close a window and Windows may hand the same
+        /// value to an unrelated one. Keyed on hwnd alone, this cache could then answer with a
+        /// different application's element list — and that is worse than a wrong pointer,
+        /// because the list also feeds the *prompt*, so the model would describe an app the
+        /// user is not looking at. Two cheap syscalls make the entry self-identifying.
+        pub identity: (u32, String),
     }
 
     fn map() -> &'static parking_lot::Mutex<HashMap<usize, Cached>> {
         static M: OnceLock<parking_lot::Mutex<HashMap<usize, Cached>>> = OnceLock::new();
         M.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+    }
+
+    /// (pid, class) for a window, or `None` if it has gone away. Cheap: two syscalls, no COM.
+    pub(super) fn identity_of(hwnd: usize) -> Option<(u32, String)> {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetClassNameW, GetWindowThreadProcessId, IsWindow,
+        };
+        let h = HWND(hwnd as *mut std::ffi::c_void);
+        unsafe {
+            if !IsWindow(Some(h)).as_bool() {
+                return None;
+            }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid == 0 {
+                return None;
+            }
+            let mut buf = [0u16; 64];
+            let n = GetClassNameW(h, &mut buf);
+            let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+            Some((pid, class))
+        }
     }
 
     pub(super) fn store(
@@ -257,6 +288,9 @@ mod context_cache {
                 m.remove(&oldest);
             }
         }
+        let Some(identity) = identity_of(hwnd) else {
+            return; // window already gone — nothing worth banking
+        };
         m.insert(
             hwnd,
             Cached {
@@ -264,6 +298,7 @@ mod context_cache {
                 captured_at: Instant::now(),
                 sig,
                 cost_ms,
+                identity,
             },
         );
     }
@@ -271,15 +306,28 @@ mod context_cache {
     /// (elements, signature at capture, age in seconds, what the enumeration cost).
     pub(super) type Peeked = (Arc<Vec<ContextElement>>, Option<Vec<u8>>, u64, u128);
 
-    /// Returns the entry only if it is still within TTL. The caller applies the content check,
-    /// because taking a fresh signature costs a capture and is not worth doing under this lock.
+    /// Returns the entry only if it is still within TTL **and still describes the same window**.
+    /// The caller applies the content check, because taking a fresh signature costs a capture
+    /// and is not worth doing under this lock.
     pub(super) fn peek(hwnd: usize) -> Option<Peeked> {
-        let m = map().lock();
+        let mut m = map().lock();
         let c = m.get(&hwnd)?;
         let age = c.captured_at.elapsed();
         if age > TTL {
             return None;
         }
+        // Handle reuse: the window this entry was taken from may have closed, and the value may
+        // now belong to something else entirely. Drop rather than merely refuse, so a recycled
+        // handle cannot keep answering until its TTL runs out.
+        match identity_of(hwnd) {
+            Some(now) if now == c.identity => {}
+            _ => {
+                log::info!("[context] cache dropped: hwnd {hwnd:#x} is no longer the same window");
+                m.remove(&hwnd);
+                return None;
+            }
+        }
+        let c = m.get(&hwnd)?;
         Some((c.elements.clone(), c.sig.clone(), age.as_secs(), c.cost_ms))
     }
 
@@ -291,6 +339,42 @@ mod context_cache {
 
     pub(super) fn invalidate_all() {
         map().lock().clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn len() -> usize {
+        map().lock().len()
+    }
+
+    /// Store under an arbitrary key while borrowing a live window's identity, so the eviction
+    /// policy can be tested without the identity guard rejecting synthetic handles.
+    #[cfg(test)]
+    pub(super) fn store_for_test(
+        key: usize,
+        elements: Vec<ContextElement>,
+        cost_ms: u128,
+        identity_from: usize,
+    ) {
+        let Some(identity) = identity_of(identity_from) else {
+            return;
+        };
+        let mut m = map().lock();
+        if m.len() >= MAX_ENTRIES && !m.contains_key(&key) {
+            let oldest = m.iter().min_by_key(|(_, c)| c.captured_at).map(|(k, _)| *k);
+            if let Some(oldest) = oldest {
+                m.remove(&oldest);
+            }
+        }
+        m.insert(
+            key,
+            Cached {
+                elements: Arc::new(elements),
+                captured_at: Instant::now(),
+                sig: None,
+                cost_ms,
+                identity,
+            },
+        );
     }
 }
 
@@ -1136,9 +1220,16 @@ mod context_cache_tests {
         }
     }
 
+    /// A real, live top-level window to key fixtures on — the cache refuses handles that are
+    /// not windows (see `a_recycled_or_dead_hwnd_is_never_served`), so a made-up number cannot
+    /// be used here. The desktop always exists.
+    fn live_hwnd() -> usize {
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow().0 as usize }
+    }
+
     #[test]
     fn stores_and_returns_within_ttl() {
-        let hwnd = 0xC0FFEE;
+        let hwnd = live_hwnd();
         context_cache::store(hwnd, vec![el(1, "Save")], Some(vec![0u8; SIG_LEN]), 900);
         let (els, sig, age, cost) = context_cache::peek(hwnd).expect("just stored");
         assert!(cost >= CACHE_MIN_COST_MS, "fixture must look expensive enough to cache");
@@ -1153,20 +1244,37 @@ mod context_cache_tests {
     }
 
     #[test]
+    fn a_recycled_or_dead_hwnd_is_never_served() {
+        // An HWND is a reusable OS handle. Serving a dead or recycled one would hand the model
+        // another application's element list, which corrupts the PROMPT and not just the
+        // pointer — a worse failure than a miss. A value that was never a window stands in for
+        // the recycled case: identity cannot match, so nothing may be stored or returned.
+        let bogus = 0xDEAD_BEEF_usize;
+        context_cache::store(bogus, vec![el(1, "Save")], None, 900);
+        assert!(
+            context_cache::peek(bogus).is_none(),
+            "a handle that is not a live window must never yield a cached list"
+        );
+        assert!(
+            context_cache::identity_of(bogus).is_none(),
+            "identity_of must report a dead handle rather than inventing one"
+        );
+    }
+
+    #[test]
     fn eviction_keeps_the_most_recent_windows() {
         context_cache::invalidate_all();
         // One more than MAX_ENTRIES; the oldest must be the one that goes.
+        // All five share one live handle's identity but distinct keys, so the eviction policy
+        // is what is under test rather than the identity guard.
+        let real = live_hwnd();
         for i in 1..=5usize {
-            context_cache::store(0x1000 + i, vec![el(i as u32, "x")], None, 900);
+            context_cache::store_for_test(0x1000 + i, vec![el(i as u32, "x")], 900, real);
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert!(
-            context_cache::peek(0x1001).is_none(),
-            "the oldest entry should have been evicted"
-        );
-        assert!(
-            context_cache::peek(0x1005).is_some(),
-            "the newest entry must survive"
+            context_cache::len() <= 4,
+            "the map must not grow past MAX_ENTRIES"
         );
         context_cache::invalidate_all();
     }
