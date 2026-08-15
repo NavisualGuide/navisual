@@ -187,6 +187,227 @@ fn enumerate_context_snapshot(_hwnd: usize) -> Option<Vec<locator::ContextElemen
     None
 }
 
+// ---------------------------------------------------------------------------------------
+// Snapshot cache (locator-testing.md §I.5 item 0c)
+// ---------------------------------------------------------------------------------------
+//
+// Enumeration is not slow so much as *unreliably* slow: on one Word window the identical query
+// returned an identical 148-element result in anywhere from 452 ms to 3,731 ms, roughly half the
+// attempts past any budget a request can afford. Tuning the budget cannot fix a spread like that
+// (measured bimodal, with a gap around 1.5-2.1 s), so this moves the cost off the critical path
+// instead of trying to shrink it.
+//
+// The cache does NOT make an update cheaper — a refresh costs exactly what a build costs. It buys
+// **availability**: the ~50% of requests that currently burn 2-3.7 s and then ship no element list
+// at all now ship one. The comparison is a slightly-old list versus *no* list, not versus a
+// perfect one, and the floor is the status quo: a stale entry fails Pass 0.5's positional
+// verification and falls through to the four-pass pipeline exactly as an absent block does.
+//
+// Sized against real usage (774 consecutive request pairs, 212 sessions): the 5th-percentile gap
+// between requests is 10.1 s and **no** gap is under 4 s, while the worst enumeration ever
+// measured is 3.7 s — so a background refresh always lands before it is needed.
+//
+// Staleness is real and is why invalidation is load-bearing rather than a nicety: across 593
+// consecutive pairs the previous snapshot was *identical* 40.8% of the time and 0.934 overlapping
+// at the median, but about a quarter of pairs differed by more than half. Those large changes are
+// mostly caused by the user performing the step we just asked for, which is why the post-step
+// trigger matters most, and why the block-signature check below exists as a content-based
+// backstop that needs no cooperation from the provider.
+#[cfg(windows)]
+mod context_cache {
+    use super::locator::ContextElement;
+    use std::collections::HashMap;
+    use std::sync::{Arc, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// Backstop only. With a background refresh on every serve, entries stay fresh on their own;
+    /// this bounds the first request after a long idle, where the world may have moved on.
+    const TTL: Duration = Duration::from_secs(120);
+    /// Windows kept. Small on purpose — a session works in one or two apps, and a stale entry for
+    /// an app the user left is worth nothing.
+    const MAX_ENTRIES: usize = 4;
+
+    pub(super) struct Cached {
+        pub elements: Arc<Vec<ContextElement>>,
+        pub captured_at: Instant,
+        /// Autopilot block signature of the target window at capture time, when one could be
+        /// taken. `None` disables the content check for that entry (fail-open to the TTL).
+        pub sig: Option<Vec<u8>>,
+        /// What the enumeration that produced this entry actually cost. Serving is gated on
+        /// it: see `CACHE_MIN_COST_MS`.
+        pub cost_ms: u128,
+    }
+
+    fn map() -> &'static parking_lot::Mutex<HashMap<usize, Cached>> {
+        static M: OnceLock<parking_lot::Mutex<HashMap<usize, Cached>>> = OnceLock::new();
+        M.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn store(
+        hwnd: usize,
+        elements: Vec<ContextElement>,
+        sig: Option<Vec<u8>>,
+        cost_ms: u128,
+    ) {
+        let mut m = map().lock();
+        if m.len() >= MAX_ENTRIES && !m.contains_key(&hwnd) {
+            // Evict the oldest rather than clearing: two-app workflows are common.
+            let oldest = m.iter().min_by_key(|(_, c)| c.captured_at).map(|(k, _)| *k);
+            if let Some(oldest) = oldest {
+                m.remove(&oldest);
+            }
+        }
+        m.insert(
+            hwnd,
+            Cached {
+                elements: Arc::new(elements),
+                captured_at: Instant::now(),
+                sig,
+                cost_ms,
+            },
+        );
+    }
+
+    /// (elements, signature at capture, age in seconds, what the enumeration cost).
+    pub(super) type Peeked = (Arc<Vec<ContextElement>>, Option<Vec<u8>>, u64, u128);
+
+    /// Returns the entry only if it is still within TTL. The caller applies the content check,
+    /// because taking a fresh signature costs a capture and is not worth doing under this lock.
+    pub(super) fn peek(hwnd: usize) -> Option<Peeked> {
+        let m = map().lock();
+        let c = m.get(&hwnd)?;
+        let age = c.captured_at.elapsed();
+        if age > TTL {
+            return None;
+        }
+        Some((c.elements.clone(), c.sig.clone(), age.as_secs(), c.cost_ms))
+    }
+
+    /// Drop a window's entry — the UI is known to have moved (a step was executed, the window
+    /// was resized, the structure changed).
+    pub(super) fn invalidate(hwnd: usize) {
+        map().lock().remove(&hwnd);
+    }
+
+    pub(super) fn invalidate_all() {
+        map().lock().clear();
+    }
+}
+
+/// How far the target window's block signature may drift before a cached snapshot is refused.
+/// Deliberately tighter than `AUTOPILOT_MIN_CELLS` (which asks "did something happen worth
+/// re-querying the AI about?"): here the question is "is this element list still a fair
+/// description of the screen?", and the cost of being wrong is a list that describes a UI the
+/// user is no longer looking at.
+#[cfg(windows)]
+const CACHE_SIG_MAX_CELLS: u32 = 8;
+
+// Autopilot asks "did something happen worth re-querying the AI about?"; the cache asks "is this
+// element list still a fair description of the screen?". The second question must stay the more
+// conservative of the two — otherwise we would serve a cached list for a screen that Autopilot
+// already considers changed. Enforced at compile time so the two cannot drift apart silently.
+#[cfg(windows)]
+const _: () = assert!(CACHE_SIG_MAX_CELLS < AUTOPILOT_MIN_CELLS);
+
+/// Only cache windows where enumerating is expensive enough to be worth avoiding.
+///
+/// Serving a cached list is **not free**: the content check below costs a downscaled capture,
+/// measured live at ~300 ms. On a window that enumerates in 66 ms (VS Code) or 129 ms
+/// (Notepad++) the cache would therefore make things *worse* — a slower, staler answer than
+/// simply asking. The production log agrees about where the problem is: every app measured
+/// except Word already gets its element list on 100 % of requests, at a p90 under 350 ms.
+///
+/// 300 ms sits above every healthy app measured and far below Word's bad mode (2–3.7 s).
+#[cfg(windows)]
+const CACHE_MIN_COST_MS: u128 = 300;
+
+/// Invalidate any cached element list for a window whose UI we have reason to believe moved.
+#[cfg(windows)]
+fn context_cache_invalidate(hwnd: usize) {
+    context_cache::invalidate(hwnd);
+}
+
+#[cfg(not(windows))]
+fn context_cache_invalidate(_hwnd: usize) {}
+
+/// Take a snapshot for `hwnd` in the background and bank it, without anyone waiting on it.
+/// Used to warm on focus change and to refresh behind a cache hit. Never stacks: the drain
+/// flag refuses a second enumeration while one is outstanding.
+#[cfg(windows)]
+fn context_cache_refresh_in_background(hwnd: usize) {
+    if locator::a11y::context_is_inflight(hwnd) {
+        return;
+    }
+    tokio::task::spawn_blocking(move || {
+        let drain = locator::a11y::context_begin_inflight(hwnd);
+        let _drain = drain;
+        let started = std::time::Instant::now();
+        if let Some(els) = enumerate_context_snapshot(hwnd) {
+            let cost = started.elapsed().as_millis();
+            let sig = screen_sig_of_screen(Some(hwnd));
+            log::info!(
+                "[context] background refresh banked {} elements ({cost} ms)",
+                els.len()
+            );
+            context_cache::store(hwnd, els, sig, cost);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn context_cache_refresh_in_background(_hwnd: usize) {}
+
+/// A cached list is served only if it is both recent enough (TTL, inside `peek`) and still a
+/// fair description of what is on screen.
+///
+/// The content check is the load-bearing half. `StructureChanged` cannot be trusted on its own —
+/// provider unreliability on exactly that event is the reason `keepwarm` exists — so this
+/// compares the target window's current block signature against the one taken when the snapshot
+/// was captured. It costs one downscaled capture (the same machinery Autopilot already runs at
+/// 2 Hz) against an enumeration that may cost seconds.
+///
+/// Fails **open to enumerating**, never open to serving: if no signature can be taken now, or
+/// none was stored, the entry is refused and the normal path runs. A wrong refusal costs the
+/// status quo; a wrong acceptance ships a list describing a screen the user has left.
+#[cfg(windows)]
+fn context_cache_take_if_valid(hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    let (elements, stored_sig, age_secs, cost_ms) = context_cache::peek(hwnd)?;
+    // Only windows where enumerating actually hurts. Serving the cache is not free — the
+    // content check costs a downscaled capture, measured at ~300 ms — so on a window that
+    // enumerates in 66 ms (VS Code) or 129 ms (Notepad++) the cache would be a *regression*,
+    // trading a fast fresh answer for a slower stale one. Measured availability says the same
+    // thing: every app in the log except Word already gets its list 100 % of the time.
+    //
+    // Behavioural and self-tuning, like every other gate here: the threshold is compared
+    // against what this window's own last enumeration cost, so no app is named anywhere.
+    if cost_ms < CACHE_MIN_COST_MS {
+        return None;
+    }
+    let stored_sig = stored_sig?;
+    let now_sig = screen_sig_of_screen(Some(hwnd))?;
+    let moved = changed_cells(&stored_sig, &now_sig);
+    if moved > CACHE_SIG_MAX_CELLS {
+        log::info!(
+            "[context] cache refused: screen moved {moved} cells since capture (max {CACHE_SIG_MAX_CELLS}), \
+             re-enumerating | {}",
+            context_diag(hwnd)
+        );
+        context_cache::invalidate(hwnd);
+        return None;
+    }
+    log::info!(
+        "[context] cache hit: {} elements, {age_secs}s old, {moved} cells moved | {}",
+        elements.len(),
+        context_diag(hwnd)
+    );
+    Some((*elements).clone())
+}
+
+#[cfg(not(windows))]
+fn context_cache_take_if_valid(_hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    None
+}
+
 /// S.1 adaptive skip (2026-07-07) — wraps `enumerate_context_snapshot` with a real
 /// wall-clock bound. `CONTEXT_BUDGET_MS` alone can't do this: it's checked only after the
 /// blocking `find_all_build_cache` call already returned, so on a window like Lightroom
@@ -209,7 +430,18 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
     // running call measurably slows the next one (1.9x with 3 outstanding) — which is what
     // turns a single timeout into a cascade that only ends when the process dies. Checked
     // BEFORE the strike gate, because the gate's own recovery probes were adding to the pile.
+    // Serve a still-valid cached list immediately and refresh behind it. This is the whole
+    // point of the cache: not a faster update (there isn't one) but paying the cost off the
+    // critical path, so a request that would have shipped nothing ships a list.
+    if let Some(cached) = context_cache_take_if_valid(hwnd) {
+        context_cache_refresh_in_background(hwnd);
+        return Some(cached);
+    }
+
     if locator::a11y::context_is_inflight(hwnd) {
+        // No usable cache AND a call already outstanding. Still refuse to stack — an abandoned
+        // enumeration keeps running and measurably slows the next one (1.9x with 3 in flight),
+        // which is the cascade that made Word unusable for days.
         log::info!(
             "[context] skipped: a previous enumeration is still running — starting another \
              would queue behind it and make both slower | {}",
@@ -244,7 +476,19 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
         budget,
         tokio::task::spawn_blocking(move || {
             let _drain = drain;
-            enumerate_context_snapshot(hwnd)
+            // Bank EVERY completed enumeration, including one whose caller has already given
+            // up waiting. The closure has to do this itself: on timeout the `JoinHandle` is
+            // dropped and the task's return value is lost, so a value returned from here after
+            // the deadline would simply vanish — which is what used to happen, and is why a
+            // 3 s enumeration produced nothing at all.
+            let started = std::time::Instant::now();
+            let got = enumerate_context_snapshot(hwnd);
+            if let Some(els) = got.as_ref() {
+                let cost = started.elapsed().as_millis();
+                let sig = screen_sig_of_screen(Some(hwnd));
+                context_cache::store(hwnd, els.clone(), sig, cost);
+            }
+            got
         }),
     )
     .await
@@ -874,6 +1118,90 @@ fn changed_cells(a: &[u8], b: &[u8]) -> u32 {
 }
 
 #[cfg(all(test, windows))]
+mod context_cache_tests {
+    use super::*;
+
+    fn el(id: u32, name: &str) -> locator::ContextElement {
+        locator::ContextElement {
+            id,
+            role: "Button".into(),
+            name: name.into(),
+            rect: capture::Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn stores_and_returns_within_ttl() {
+        let hwnd = 0xC0FFEE;
+        context_cache::store(hwnd, vec![el(1, "Save")], Some(vec![0u8; SIG_LEN]), 900);
+        let (els, sig, age, cost) = context_cache::peek(hwnd).expect("just stored");
+        assert!(cost >= CACHE_MIN_COST_MS, "fixture must look expensive enough to cache");
+        assert_eq!(els.len(), 1);
+        assert!(sig.is_some());
+        assert_eq!(age, 0);
+        context_cache::invalidate(hwnd);
+        assert!(
+            context_cache::peek(hwnd).is_none(),
+            "invalidate must drop the entry — this is the post-step trigger"
+        );
+    }
+
+    #[test]
+    fn eviction_keeps_the_most_recent_windows() {
+        context_cache::invalidate_all();
+        // One more than MAX_ENTRIES; the oldest must be the one that goes.
+        for i in 1..=5usize {
+            context_cache::store(0x1000 + i, vec![el(i as u32, "x")], None, 900);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(
+            context_cache::peek(0x1001).is_none(),
+            "the oldest entry should have been evicted"
+        );
+        assert!(
+            context_cache::peek(0x1005).is_some(),
+            "the newest entry must survive"
+        );
+        context_cache::invalidate_all();
+    }
+
+    #[test]
+    fn signature_drift_is_measured_against_the_serve_threshold() {
+        // The content check is what makes a stale entry safe to hold: ~24% of consecutive
+        // request pairs differ by more than half, so an unchanged screen must read as
+        // unchanged and a moved one must read as moved.
+        let base = vec![100u8; SIG_LEN];
+        assert_eq!(changed_cells(&base, &base), 0, "identical screen → serve");
+
+        let mut nudged = base.clone();
+        for c in nudged.iter_mut().take(CACHE_SIG_MAX_CELLS as usize) {
+            *c += CELL_DELTA + 1;
+        }
+        assert_eq!(changed_cells(&base, &nudged), CACHE_SIG_MAX_CELLS);
+        assert!(
+            changed_cells(&base, &nudged) <= CACHE_SIG_MAX_CELLS,
+            "exactly at the threshold still serves"
+        );
+
+        let mut moved = base.clone();
+        for c in moved.iter_mut().take(CACHE_SIG_MAX_CELLS as usize + 1) {
+            *c += CELL_DELTA + 1;
+        }
+        assert!(
+            changed_cells(&base, &moved) > CACHE_SIG_MAX_CELLS,
+            "one cell past the threshold must refuse the cache"
+        );
+    }
+
+}
+
+#[cfg(all(test, windows))]
 mod drain_flag_live_tests {
     //! Live verification for the drain flag, which the unit tests can only prove
     //! *mechanically* (the flag flips) — not that it actually short-circuits a real
@@ -952,6 +1280,60 @@ mod drain_flag_live_tests {
         println!("  skipped (no element block): {skipped}/{runs}");
         println!("  would exceed a 1000 ms budget: {over_1000}/{runs}");
         println!("  exceeds the current 1500 ms budget: {over_1500}/{runs}");
+    }
+
+    /// The cache end to end against a real window: a first call pays whatever the provider
+    /// charges, a second is served from the bank. Asserts the second is *fast*, not merely
+    /// `Some` — a slow `Some` would mean it re-enumerated and the cache did nothing.
+    ///
+    ///   cargo test --lib context_cache_serves_the_second_call_live -- --ignored --nocapture
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn context_cache_serves_the_second_call_live() {
+        let hwnd = test_hwnd();
+        context_cache::invalidate_all();
+
+        let t = std::time::Instant::now();
+        let first = enumerate_context_snapshot_bounded(hwnd).await;
+        let first_ms = t.elapsed().as_millis();
+        println!(
+            "  first  call: {first_ms:>5} ms  {:?} elements",
+            first.as_ref().map(|v| v.len())
+        );
+
+        // A first call that timed out has still banked its result from inside the closure, but
+        // the background task may not have finished; give a slow provider room to land.
+        if first.is_none() {
+            println!("  (first call was over budget — waiting for the harvest to land)");
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        }
+
+        let t = std::time::Instant::now();
+        let second = enumerate_context_snapshot_bounded(hwnd).await;
+        let second_ms = t.elapsed().as_millis();
+        println!(
+            "  second call: {second_ms:>5} ms  {:?} elements",
+            second.as_ref().map(|v| v.len())
+        );
+
+        assert!(
+            second.is_some(),
+            "the second call must produce a list — banked by the first even if it timed out"
+        );
+        assert!(
+            second_ms < 400,
+            "the second call must be served from the cache (was {second_ms} ms); a slow hit \
+             means it re-enumerated and the cache bought nothing"
+        );
+
+        // Post-step invalidation must actually force a re-enumeration.
+        context_cache_invalidate(hwnd);
+        let t = std::time::Instant::now();
+        let _ = enumerate_context_snapshot_bounded(hwnd).await;
+        println!(
+            "  after invalidate: {:>5} ms (cache refused, as designed)",
+            t.elapsed().as_millis()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1651,6 +2033,19 @@ pub fn refresh_active_window(app: &AppHandle) {
         state.tracker.clear();
         if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
             let _ = overlay::emit_update(app, update);
+        }
+    }
+    // Warm the element-list cache for the app that just took focus (item 0c). This is the
+    // trigger that makes the cache pay on the FIRST request rather than the second: the user
+    // now has to read the screen and type a task, which is far longer than the worst
+    // enumeration measured (3.7 s). Gated on `changed` for the same reason the flash is —
+    // a passive refresh must not kick off work.
+    //
+    // Deliberately unconditional about the app's identity: like every other mechanism in this
+    // path it reacts to behaviour (focus moved) and knows nothing about which program it is.
+    if changed {
+        if let Some(hwnd) = announce_hwnd {
+            context_cache_refresh_in_background(hwnd);
         }
     }
     // Flash only when the followed target actually changed (a new app took focus),
@@ -2903,6 +3298,21 @@ async fn next_step(
 ) -> Result<GuideResponse, String> {
     // Flow A: resolve candidate boxes from the app state the user's click produced.
     resolve_pending_candidates(&app, &state, false).await;
+    // The user just performed the step we pointed at, so the UI has almost certainly moved —
+    // and the corpus agrees: across 593 consecutive request pairs, ~24 % differed by more than
+    // half, and those large changes are overwhelmingly *caused* by the user acting. This is the
+    // cheapest and most reliable of the invalidation triggers (item 0c). The block-signature
+    // check would catch most of it anyway, but a small change (a dropdown opening) can move few
+    // cells while invalidating many element rects, so do not rely on the signature alone here.
+    {
+        let target = {
+            let g = state.guidance.lock();
+            g.pinned_hwnd.or(g.target_hwnd)
+        };
+        if let Some(hwnd) = target {
+            context_cache_invalidate(hwnd);
+        }
+    }
     let (steps, session_id, needs_input, provider, capture_rect, context_elements, request_id) = {
         let g = state.guidance.lock();
         (
@@ -3916,6 +4326,14 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
         g.full_screen_mode = false; // a specific window and full-screen are mutually exclusive
         g.full_screen_monitor = None;
         g.last_announced_hwnd = Some(hwnd);
+    }
+    // Deliberately pinning a target is the user telling us the world changed. Warm the new
+    // one and drop every other entry rather than let a snapshot for an app they just left
+    // survive its TTL (item 0c).
+    #[cfg(windows)]
+    {
+        context_cache::invalidate_all();
+        context_cache_refresh_in_background(hwnd);
     }
     #[cfg(windows)]
     announce_shared_app(&app, Some(hwnd), true);

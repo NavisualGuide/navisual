@@ -942,12 +942,20 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
         out
     };
 
-    if started.elapsed().as_millis() > budget_ms {
-        return Err(format!(
-            "budget exceeded ({} ms)",
-            started.elapsed().as_millis()
-        ));
-    }
+    // NOTE (2026-08-15): there used to be a `budget exceeded → return Err` check right here.
+    // It fired *after* the expensive COM enumeration had fully returned and `candidates` was
+    // populated, and *before* the filter pass below — which is the microsecond part (cached
+    // property reads, zero round trips, plus the dedup). So a 3,000 ms enumeration completed,
+    // sat in hand, and was thrown away to save microseconds of filtering. It was also redundant
+    // for its stated purpose: the real wall-clock bound on the *caller* is the outer
+    // `tokio::time::timeout` in `enumerate_context_snapshot_bounded`, which this could never
+    // shorten (one blocking COM call yields nothing until it returns).
+    //
+    // Now a completed enumeration always produces its elements. The caller decides whether it
+    // still wants them — and if it has already given up waiting, it banks them in the snapshot
+    // cache so the *next* request gets a list instead of nothing. `budget_ms` still bounds the
+    // collecting walk above, which genuinely can stop early.
+    let _ = budget_ms;
 
     // Single filter pass over the cached candidates (name / on-screen / geometry / dedup).
     let mut out: Vec<super::ContextElement> = Vec::new();
@@ -2595,7 +2603,7 @@ mod incremental_walk_live_tests {
         unsafe { GetWindowThreadProcessId(target, Some(&mut target_pid)) };
         println!("  target hwnd={hwnd} pid={target_pid}");
 
-        let popups = unsafe { collect_owned_popups(target) };
+        let popups = collect_owned_popups(target);
         println!("  collect_owned_popups returned {} window(s)", popups.len());
 
         let cache = automation.create_cache_request().expect("cache");
