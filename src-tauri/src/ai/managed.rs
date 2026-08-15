@@ -385,6 +385,7 @@ impl ManagedClient {
                     } else {
                         log::info!("[managed] no tool_call; surfacing plain message as a reply");
                         NavigateStepResponse {
+                            goal: String::new(),
                             steps: vec![GuidanceStep {
                                 instruction: content.to_string(),
                                 target_text: None,
@@ -519,6 +520,7 @@ fn recover_leaked_pseudocall(content: &str) -> Option<NavigateStepResponse> {
         .unwrap_or_default();
     log::info!("[managed] recovered leaked default_api pseudo-call (target_text={target_text:?})");
     Some(NavigateStepResponse {
+        goal: String::new(),
         steps: vec![GuidanceStep {
             instruction,
             target_text,
@@ -628,6 +630,7 @@ fn navigate_step_tool() -> Value {
                             }
                         }
                     },
+                    "goal": {"type": "string", "description": "The user's overall objective, carried across turns. Set it from their first request. When they add detail or a constraint later, MERGE it into the existing goal rather than replacing it - 'centre them at the bottom' REFINES 'add page numbers starting on page 3', it is not a new goal. Replace the goal outright only when the user genuinely switches to a different task. Omit or leave empty to keep the current goal unchanged."},
                     "state_summary": {"type": "string", "description": "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED. Never assume an earlier turn is still visible."},
                     "needs_input": {"type": "boolean"},
                     "suggested_tasks": {

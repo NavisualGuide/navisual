@@ -25,6 +25,7 @@ Example (copy this structure exactly):
       "checkpoint": true
     }
   ],
+  "goal": "Add page numbers starting at 1 on page 3, centred, none on the title or contents pages",
   "state_summary": "GOAL: add page numbers starting at 1 on page 3. CONSTRAINTS: title and contents pages must have none. DONE: opened the Layout tab. FAILED: nothing yet.",
   "needs_input": false
 }
@@ -40,6 +41,7 @@ Step fields (inside "steps" array only):
 - target_element_id: integer id from the [Screen Elements] list in the message when your target appears there — only ids from the list, never invented; still fill target_text (optional, omit when the target is not listed or no list is present)
 
 Top-level fields (outside "steps", required):
+- goal: the user's overall objective, carried across turns. MERGE later detail into it rather than replacing it ('centre them at the bottom' refines the goal, it is not a new goal); replace it outright only on a genuine task switch; omit to leave it unchanged
 - state_summary: your ONLY memory between turns (earlier turns are truncated away). Rewrite it in full each turn carrying the user's GOAL in their own words, any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED
 - needs_input: true only if you must ask the user a question before continuing
 
@@ -240,6 +242,7 @@ impl OllamaClient {
 
         // Last resort: wrap raw text as a single checkpoint step.
         let fallback = NavigateStepResponse {
+            goal: String::new(),
             steps: vec![GuidanceStep {
                 instruction: text.clone(),
                 target_text: None,

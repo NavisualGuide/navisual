@@ -1918,12 +1918,21 @@ async fn guide(
                 // stayed the goal for the whole session (memory-management-plan.md §1).
                 // Promote a substantial reply; short acknowledgements ("ok", "yes") are
                 // not goals and must not overwrite one.
-                if is_reply && crate::ai::prompts::is_language_sample(&task) {
-                    log::info!(
-                        "[memory] goal updated from reply: {:?} -> {:?}",
-                        session.task_description,
-                        task
-                    );
+                // Promote a `needs_input` answer ONLY while the goal is still the opener —
+                // i.e. the one case where the stored goal is known to be a placeholder rather
+                // than something worth preserving.
+                //
+                // This used to fire on every substantial reply, which was last-write-wins and
+                // therefore destructive: six follow-ups refining one task left the goal as the
+                // last fragment ("And centre them at the bottom") with the real objective gone
+                // (measured 2026-08-15). Refinement needs MERGING, which requires language
+                // understanding — so it is now the model's job via `NavigateStepResponse.goal`,
+                // applied after the response arrives. This branch only covers the bootstrap.
+                if is_reply
+                    && crate::ai::prompts::is_language_sample(&task)
+                    && session.task_description.trim().is_empty()
+                {
+                    log::info!("[memory] goal bootstrapped from reply: {task:?}");
                     session.set_task_description(task.clone());
                 }
                 session.id.to_string()
@@ -2543,6 +2552,7 @@ async fn guide(
     ai::types::sanitize_steps(&mut steps);
     let steps = steps;
     let state_summary = response.state_summary;
+    let response_goal = response.goal.clone();
     let needs_input = response.needs_input;
     // Workstream P: the toggle gates the data at the source — when off, suggestions
     // never reach the frontend (the static prompt rule stays; making it dynamic
@@ -2556,6 +2566,17 @@ async fn guide(
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
     if let Some(session) = &mut router.session_manager.current_session {
+        // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
+        // the field leaves the stored goal alone rather than wiping it — the failure mode here
+        // must be inaction, never destruction.
+        if !response_goal.trim().is_empty() && response_goal.trim() != session.task_description {
+            log::info!(
+                "[memory] goal (model): {:?} -> {:?}",
+                session.task_description,
+                response_goal
+            );
+            session.set_task_description(response_goal.trim().to_string());
+        }
         session.update_state(state_summary.clone());
         let user_turn_text = if task.is_empty() {
             "Next".to_string()
@@ -3468,6 +3489,7 @@ async fn send_correction(
     ai::types::sanitize_steps(&mut steps);
     let steps = steps;
     let state_summary = response.state_summary;
+    let response_goal = response.goal.clone();
     let needs_input = response.needs_input;
     // Workstream P: same source-gating as guide().
     let suggested_tasks = if router.config.task_suggestions {
@@ -3479,6 +3501,17 @@ async fn send_correction(
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
     if let Some(session) = &mut router.session_manager.current_session {
+        // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
+        // the field leaves the stored goal alone rather than wiping it — the failure mode here
+        // must be inaction, never destruction.
+        if !response_goal.trim().is_empty() && response_goal.trim() != session.task_description {
+            log::info!(
+                "[memory] goal (model): {:?} -> {:?}",
+                session.task_description,
+                response_goal
+            );
+            session.set_task_description(response_goal.trim().to_string());
+        }
         session.update_state(state_summary.clone());
         session.add_turn("user", user_text.to_string(), None);
         let content = steps

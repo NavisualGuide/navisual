@@ -306,6 +306,21 @@ fn sanitize_instruction_text(text: &str) -> (String, Vec<u32>) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NavigateStepResponse {
     pub steps: Vec<GuidanceStep>,
+    /// The user's overall objective, **maintained by the model across turns**.
+    ///
+    /// Exists because the backend cannot merge intent safely. `set_task_description` was
+    /// last-write-wins, so six follow-ups refining one task ("…start on page 3", "…none on the
+    /// title page", "…centre them") left the goal as the final fragment and destroyed the
+    /// actual objective — measured live 2026-08-15. Merging "centre them at the bottom" INTO
+    /// "add page numbers starting page 3" needs language understanding, which is the model's
+    /// job, not a string assignment's.
+    ///
+    /// Empty is normal and means "unchanged" — a turn that returns no goal leaves the stored
+    /// one alone, so a model that ignores the field degrades to the previous behaviour rather
+    /// than wiping the goal. `#[serde(default)]` for the same reason garbage never fails the
+    /// parse anywhere else here (`lax_bbox`, `lax_overlay`, `lax_suggestions`).
+    #[serde(default)]
+    pub goal: String,
     #[serde(default)]
     pub state_summary: String,
     #[serde(default)]
