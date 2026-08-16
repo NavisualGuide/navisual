@@ -22,8 +22,15 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
     let p = match model {
         // Anthropic
         m if m.starts_with("claude-haiku") => (1.0, 5.0),
-        "claude-sonnet-4-6" => (3.0, 15.0),
-        m if m.starts_with("claude-opus") => (5.0, 25.0),
+        // Sonnet 5 (2026-08-16 refresh) is a real price CUT from Sonnet 4.6's 3.0/15.0 —
+        // $2/$10 became Anthropic's PERMANENT rate 2026-08-10 (was introductory pricing
+        // through 2026-08-31, a scheduled increase to 3.0/15.0 was cancelled). Kept as an
+        // exact match, not a `starts_with`, because the OLD 4.6 rate must not silently apply
+        // to a differently-priced new generation — see model-comparison.md's 2026-08-16
+        // changelog for the source.
+        "claude-sonnet-5" => (2.0, 10.0),
+        "claude-sonnet-4-6" => (3.0, 15.0), // superseded; kept for historical logs
+        m if m.starts_with("claude-opus") => (5.0, 25.0), // opus-5 same rate as opus-4-7
         // Gemini
         "gemini-2.5-flash-lite" => (0.10, 0.40),
         "gemini-2.5-flash" => (0.30, 2.50),
@@ -38,16 +45,24 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // so no discount applies today. Revisit this row before January 2027.
         "gemini-3.7-flash" => (0.75, 3.75),
         m if m.starts_with("gemini-3.1-pro") || m.starts_with("gemini-3-pro") => (2.0, 12.0),
-        // OpenAI
-        "gpt-5.4-mini" => (0.75, 4.50),
-        "gpt-5.4" => (2.50, 15.0),
-        "gpt-5.5" => (5.0, 30.0),
+        // OpenAI — 5.6 family (2026-08-16 refresh) replaces 5.4/5.5, ~86% cheaper at the
+        // fast tier (Luna vs old 5.4-mini's 0.75/4.50). Old rows kept for historical logs.
+        "gpt-5.6-luna" => (0.10, 0.60),
+        "gpt-5.6-terra" => (2.50, 15.0),
+        "gpt-5.6-sol" => (5.0, 30.0),
+        "gpt-5.4-mini" => (0.75, 4.50), // superseded by gpt-5.6-luna
+        "gpt-5.4" => (2.50, 15.0),      // superseded by gpt-5.6-terra
+        "gpt-5.5" => (5.0, 30.0),       // superseded by gpt-5.6-sol
         // DeepSeek (text-only)
         "deepseek-v4-flash" => (0.14, 0.28),
         "deepseek-v4-pro" => (0.435, 0.87),
-        // Qwen
-        "qwen3.6-plus" => (0.16, 2.87),
-        "qwen3.6-flash" => (0.10, 1.00),
+        // Qwen — 3.8/3.7 (2026-08-16 refresh) supersede 3.6; 3.8-max is the first -max
+        // generation that's natively vision-capable, 3.7-flash is the cheapest vision pick
+        // in the whole table.
+        "qwen3.8-max" => (2.00, 6.00),
+        "qwen3.7-flash" => (0.03, 0.13),
+        "qwen3.6-plus" => (0.16, 2.87),  // superseded by qwen3.8-max
+        "qwen3.6-flash" => (0.10, 1.00), // superseded by qwen3.7-flash
         _ => return None,
     };
     Some(p)

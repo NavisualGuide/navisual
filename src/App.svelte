@@ -3048,13 +3048,13 @@ See the LICENSE file in the root of this repository for complete details.
                   value={customAnthropic ? "__custom__" : settingsForm.anthropic_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customAnthropic = false; settingsForm.anthropic_model = v; } else { customAnthropic = true; settingsForm.anthropic_model = ""; } }}>
                   <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fast)</option>
-                  <option value="claude-sonnet-4-6">claude-sonnet-4-6 (recommended)</option>
-                  <option value="claude-opus-4-7">claude-opus-4-7 (best quality)</option>
+                  <option value="claude-sonnet-5">claude-sonnet-5 (recommended)</option>
+                  <option value="claude-opus-5">claude-opus-5 (best quality)</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
                 {#if customAnthropic}
                   <input class="setting-input" type="text" bind:value={settingsForm.anthropic_model}
-                    placeholder="e.g. claude-sonnet-4-6" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. claude-sonnet-5" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
 
@@ -3081,15 +3081,15 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="gemini-model" class="setting-select"
                   value={customGemini ? "__custom__" : settingsForm.gemini_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customGemini = false; settingsForm.gemini_model = v; } else { customGemini = true; settingsForm.gemini_model = ""; } }}>
-                  <option value="gemini-2.5-flash">gemini-2.5-flash (recommended)</option>
+                  <option value="gemini-3.7-flash">gemini-3.7-flash (recommended)</option>
                   <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (fast)</option>
-                  <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (best quality)</option>
+                  <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
                 {#if customGemini}
                   <input class="setting-input" type="text" bind:value={settingsForm.gemini_model}
-                    placeholder="e.g. gemini-2.5-pro" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. gemini-3.7-flash" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
 
@@ -3145,13 +3145,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="openai-model" class="setting-select"
                   value={customOpenAI ? "__custom__" : settingsForm.openai_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customOpenAI = false; settingsForm.openai_model = v; } else { customOpenAI = true; settingsForm.openai_model = ""; } }}>
-                  <option value="gpt-5.5">gpt-5.5 (recommended)</option>
-                  <option value="gpt-5.4-mini">gpt-5.4-mini (fast)</option>
+                  <option value="gpt-5.6-terra">gpt-5.6-terra (recommended)</option>
+                  <option value="gpt-5.6-luna">gpt-5.6-luna (fast)</option>
+                  <option value="gpt-5.6-sol">gpt-5.6-sol (best quality)</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
                 {#if customOpenAI}
                   <input class="setting-input" type="text" bind:value={settingsForm.openai_model}
-                    placeholder="e.g. gpt-4o" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. gpt-5.6-terra" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
 
@@ -3211,13 +3212,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="qwen-model" class="setting-select"
                   value={customQwen ? "__custom__" : settingsForm.qwen_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customQwen = false; settingsForm.qwen_model = v; } else { customQwen = true; settingsForm.qwen_model = ""; } }}>
-                  <option value="qwen3.6-plus">qwen3.6-plus (recommended)</option>
+                  <option value="qwen3.8-max">qwen3.8-max (recommended)</option>
+                  <option value="qwen3.7-flash">qwen3.7-flash (fast, cheapest vision pick)</option>
                   <option value="qwen3.5-omni-plus">qwen3.5-omni-plus (multimodal)</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
                 {#if customQwen}
                   <input class="setting-input" type="text" bind:value={settingsForm.qwen_model}
-                    placeholder="e.g. qwen3.6-plus" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. qwen3.8-max" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
               <div class="setting-group">
