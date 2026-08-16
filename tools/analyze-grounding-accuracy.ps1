@@ -9,6 +9,17 @@
 #   .\tools\analyze-grounding-accuracy.ps1 -IncludeOcr        # see below
 #   .\tools\analyze-grounding-accuracy.ps1 -ShowOutliers
 #   .\tools\analyze-grounding-accuracy.ps1 -GroupByApp        # see below
+#   .\tools\analyze-grounding-accuracy.ps1 -Kind cells        # see below
+#
+# -Kind isolates which ground-truth channel counts, because the two regimes measure
+# genuinely different things and averaging them together dilutes both signals:
+#   -Kind cells (hit_adapter only) -- blank spreadsheet cells have no text, so this is
+#     the "pure" grounding score: the bbox is the ONLY signal, nothing to fall back on.
+#     Use for a controlled cell battery (model-comparison.md's evaluation methodology).
+#   -Kind ui (hit_selection + hit_a11y) -- labeled real-world UI, where target_text/A11y
+#     do the actual locating and the bbox is just a tiebreaker -- this is "how good is
+#     the bbox when the model didn't need it to be."
+#   -Kind all (default) -- current/historical behavior, all three channels combined.
 #
 # Requires: locate_log.jsonl logging enabled (Settings -> Developer, or
 # DEBUG_LOCATE_LOG_FILE_ENABLED=true in .env) and model/provider/token
@@ -46,7 +57,9 @@ param(
     [int]$Last = 0,          # 0 = all entries
     [switch]$IncludeOcr,
     [switch]$ShowOutliers,
-    [switch]$GroupByApp
+    [switch]$GroupByApp,
+    [ValidateSet("all", "cells", "ui")]
+    [string]$Kind = "all"
 )
 
 if (-not (Test-Path $Path)) {
@@ -81,12 +94,16 @@ function CenterInRect($cx, $cy, $rect) {
         -and ($cy -ge $rect.y) -and ($cy -le ($rect.y + $rect.height))
 }
 
-$groundTruthKinds = @("hit_adapter", "hit_selection", "hit_a11y")
+$groundTruthKinds = switch ($Kind) {
+    "cells" { @("hit_adapter") }
+    "ui"    { @("hit_selection", "hit_a11y") }
+    default { @("hit_adapter", "hit_selection", "hit_a11y") }
+}
 
 $candidates = @($entries | Where-Object {
     $kind = $_.final_decision.kind
     if ($groundTruthKinds -contains $kind) { return $true }
-    if ($IncludeOcr -and $kind -eq "hit_ocr") {
+    if ($IncludeOcr -and $Kind -eq "all" -and $kind -eq "hit_ocr") {
         $c = $_.ocr.corroboration
         return $c -and ($c.uia_interactive -or $c.isolation_ok -or $c.near_anchor)
     }
@@ -106,8 +123,8 @@ if ($candidates.Count -eq 0) {
 $groupLabel = if ($GroupByApp) { "provider|model|app" } else { "provider|model" }
 $nameWidth = if ($GroupByApp) { 46 } else { 34 }
 Write-Output "-- Per model ($groupLabel) --"
-Write-Output ("  {0,-$nameWidth} {1,5} {2,7} {3,7} {4,9} {5,9} {6,7} {7,7} {8,9} {9,6}" -f `
-    "model", "n", "bbox%", "hit%", "med-px", "p90-px", "in-tok", "out-tok", "med-ai-ms", "n-ai")
+Write-Output ("  {0,-$nameWidth} {1,5} {2,7} {3,7} {4,9} {5,9} {6,7} {7,7} {8,10} {9,10} {10,6}" -f `
+    "model", "n", "bbox%", "hit%", "med-px", "p90-px", "in-tok", "out-tok", "med-ttft-ms", "med-ai-ms", "n-ai")
 
 $candidates | Group-Object {
     $p = if ($_.provider) { $_.provider } else { "(unknown)" }
@@ -138,16 +155,17 @@ $candidates | Group-Object {
 
     $inTok = @($g | Where-Object { $null -ne $_.input_tokens } | ForEach-Object { $_.input_tokens })
     $outTok = @($g | Where-Object { $null -ne $_.output_tokens } | ForEach-Object { $_.output_tokens })
-    # ai_elapsed_ms is only set on guide()/send_correction() (real AI round-trips); a
-    # next_step() row reuses a prior response and carries no new AI-latency sample, so it's
+    # ai_elapsed_ms/ai_ttft_ms are only set on guide()/send_correction() (real AI round-trips);
+    # a next_step() row reuses a prior response and carries no new AI-latency sample, so it's
     # excluded here rather than silently coming through as 0.
     $aiMs = @($g | Where-Object { $null -ne $_.ai_elapsed_ms } | ForEach-Object { $_.ai_elapsed_ms })
+    $ttftMs = @($g | Where-Object { $null -ne $_.ai_ttft_ms } | ForEach-Object { $_.ai_ttft_ms })
 
-    Write-Output ("  {0,-$nameWidth} {1,5} {2,6:P0} {3,6:P0} {4,7}px {5,7}px {6,7} {7,7} {8,7}ms {9,6}" -f `
+    Write-Output ("  {0,-$nameWidth} {1,5} {2,6:P0} {3,6:P0} {4,7}px {5,7}px {6,7} {7,7} {8,8}ms {9,8}ms {10,6}" -f `
         $_.Name, $n, $bboxRate, $hitRate, `
         (Percentile $dists 0.5), (Percentile $dists 0.9), `
         (Percentile $inTok 0.5), (Percentile $outTok 0.5), `
-        (Percentile $aiMs 0.5), $aiMs.Count)
+        (Percentile $ttftMs 0.5), (Percentile $aiMs 0.5), $aiMs.Count)
 }
 Write-Output ""
 Write-Output "bbox% = target_bbox present & usable (model omitted it, or it was degenerate/"
@@ -158,12 +176,15 @@ Write-Output "med/p90-px = center-to-center distance in screen pixels; not norma
 Write-Output "        resolution, so only compare runs from similar screen setups."
 Write-Output "in/out-tok = median tokens for the AI call that produced this step (None for"
 Write-Output "        next_step -- it makes no AI call, so nothing new to attribute)."
-Write-Output "med-ai-ms = AI round-trip latency (ai_elapsed_ms -- the same number"
-Write-Output "        model_timings.csv records, attached directly to this locate). NOT locate"
-Write-Output "        latency (A11y/OCR/etc.) -- that's the separate elapsed_ms field, and"
-Write-Output "        usually much smaller. n-ai is the sample size behind med-ai-ms -- entries"
-Write-Output "        logged before 2026-07-09 (or via next_step) have no ai_elapsed_ms, so n-ai"
-Write-Output "        can be smaller than the model's total n above."
+Write-Output "med-ttft-ms = time to FIRST streamed token (ai_ttft_ms) -- when the caption text"
+Write-Output "        starts appearing. This is the number to use for a 'speed' comparison"
+Write-Output "        instead of a qualitative fast/medium/slow label."
+Write-Output "med-ai-ms = full AI round-trip latency (ai_elapsed_ms -- the same number"
+Write-Output "        model_timings.csv records) -- when the pointer appears, not the caption."
+Write-Output "        NOT locate latency (A11y/OCR/etc.) -- that's the separate elapsed_ms field,"
+Write-Output "        and usually much smaller. n-ai is the sample size behind both latency"
+Write-Output "        columns -- entries logged before 2026-07-09 (or via next_step) have"
+Write-Output "        neither field, so n-ai can be smaller than the model's total n above."
 Write-Output ""
 
 # -- Worst individual misses (optional) --------------------------------------
