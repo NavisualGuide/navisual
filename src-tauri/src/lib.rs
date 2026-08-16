@@ -291,6 +291,26 @@ mod context_cache {
         let Some(identity) = identity_of(hwnd) else {
             return; // window already gone — nothing worth banking
         };
+        // Starved-read guard (2026-08-15 evening, from a live session): Word's lazy tree makes
+        // the materialising walk itself intermittent — the same window yielded 107 elements at
+        // one read and 20 at the next, and the 20 OVERWROTE the 107, so the only cache hit of
+        // the session served the starved list. A read less than half the size of a still-fresh
+        // richer bank for the same window identity is treated as a failed read, not a real UI
+        // collapse: real collapses replace the window (identity guard) or drift the signature
+        // past the serve gates. The richer entry keeps its own honest age and signature.
+        if let Some(old) = m.get(&hwnd) {
+            if old.identity == identity
+                && old.captured_at.elapsed() <= TTL
+                && elements.len() * 2 < old.elements.len()
+            {
+                log::info!(
+                    "[context] bank kept: new read has {} elements vs {} banked — keeping the richer one",
+                    elements.len(),
+                    old.elements.len()
+                );
+                return;
+            }
+        }
         m.insert(
             hwnd,
             Cached {
@@ -455,6 +475,45 @@ fn context_cache_refresh_in_background(hwnd: usize) {
 #[cfg(not(windows))]
 fn context_cache_refresh_in_background(_hwnd: usize) {}
 
+/// Loose drift gate for the TIMEOUT-fallback serve only. The strict gate
+/// (`CACHE_SIG_MAX_CELLS` = 8) answers "is the screen identical enough to skip enumerating at
+/// all?"; this one answers "we already failed to enumerate — is the banked list still worth
+/// more than nothing?". Measured drifts from a live session: a menu closing moved 14 cells, a
+/// ribbon-tab switch 86–126. 64 serves through menu-scale churn while still refusing a
+/// tab-switch, whose element set genuinely differs.
+#[cfg(windows)]
+const CACHE_TIMEOUT_SIG_MAX_CELLS: u32 = 64;
+
+/// Timeout fallback: serve the banked list under the loose gate. Runs only after a full
+/// enumeration attempt already burned the outer net, so its ~300 ms signature capture is
+/// noise by the time it is paid.
+#[cfg(windows)]
+fn context_cache_take_on_timeout(hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    let (elements, stored_sig, age_secs, _cost) = context_cache::peek(hwnd)?;
+    let stored_sig = stored_sig?;
+    let now_sig = screen_sig_of_screen(Some(hwnd))?;
+    let moved = changed_cells(&stored_sig, &now_sig);
+    if moved > CACHE_TIMEOUT_SIG_MAX_CELLS {
+        log::info!(
+            "[context] timeout fallback refused: screen moved {moved} cells since capture \
+             (max {CACHE_TIMEOUT_SIG_MAX_CELLS}) | {}",
+            context_diag(hwnd)
+        );
+        return None;
+    }
+    log::info!(
+        "[context] timeout fallback served: {} elements, {age_secs}s old, {moved} cells moved | {}",
+        elements.len(),
+        context_diag(hwnd)
+    );
+    Some((*elements).clone())
+}
+
+#[cfg(not(windows))]
+fn context_cache_take_on_timeout(_hwnd: usize) -> Option<Vec<locator::ContextElement>> {
+    None
+}
+
 /// A cached list is served only if it is both recent enough (TTL, inside `peek`) and still a
 /// fair description of what is on screen.
 ///
@@ -561,12 +620,19 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
         }
     }
     // This outer timeout is only the uninterruptible-COM safety net — the inner
-    // `enumerate_context_elements` enforces the same budget itself, but can only check it
-    // *after* the blocking COM call returns, so a call that never returns needs this. One
-    // shared value since 2026-08-15: while Excel had its own larger budget, this net had to
-    // be the max of the two or it killed Excel before Excel's own budget fired (found
-    // 2026-07-13) — a footgun that no longer exists now there is only one number.
-    let budget = std::time::Duration::from_millis(locator::a11y::CONTEXT_BUDGET_MS as u64);
+    // `enumerate_context_elements` enforces its own per-pass budget, but can only check it
+    // *after* a blocking COM call returns, so a call that never returns needs this.
+    //
+    // The net is deliberately LARGER than the inner budget (changed 2026-08-15, evening). A
+    // lazy-tree window needs bulk + the materialising walk rescue, measured live at
+    // 2.4–3.5 s end to end — and with the net at the old 1,500 ms, every one of those
+    // enumerations completed *after* the caller stopped waiting: an 80–107-element list was
+    // built, banked, and never sent, request after request ("it was better initially but
+    // after several steps no more hit selection"). Waiting ~3 s for selection-grade grounding
+    // is the right trade against the multi-second AI call that follows; fast windows are
+    // unaffected (they return in well under a second), and a genuinely hung window still
+    // falls through here and is handled by the strike gate on unproductive completions.
+    let budget = std::time::Duration::from_millis(CONTEXT_NET_BUDGET_MS);
     // The guard moves INTO the closure, so the flag clears when the COM call really returns —
     // not when the timeout below stops waiting for it. That distinction is the entire point.
     let drain = locator::a11y::context_begin_inflight(hwnd);
@@ -625,10 +691,26 @@ async fn enumerate_context_snapshot_bounded(hwnd: usize) -> Option<Vec<locator::
                 budget.as_millis(),
                 context_diag(hwnd)
             );
-            None
+            // Timeout fallback: a recent banked list under the LOOSE drift gate. This is the
+            // user's original design — "send the structured context at budget timeout, partial
+            // or full" — and by this point the choice is between a slightly-old list and no
+            // list at all, which the 593-pair overlap measurement already settled (0.934 median
+            // overlap; a stale entry fails positional verification and falls through, so the
+            // floor is the status quo). The strict 8-cell gate stays on the serve-AHEAD path;
+            // it exists to answer a different question ("is this identical enough to skip
+            // enumerating fresh?").
+            context_cache_take_on_timeout(hwnd)
         }
     }
 }
+
+/// Outer wall-clock net for one enumeration attempt, covering bulk + the walk rescue.
+/// Sized from live measurement: rescue-complete enumerations on a lazy Word run 2.4–3.5 s,
+/// so 4 s captures effectively all of them; the old 1,500 ms net abandoned every single one
+/// after the work was already done. Bounded worst case: a hung window costs one wait of this
+/// length per attempt until the strike gate (unproductive completions) removes it.
+#[cfg(windows)]
+const CONTEXT_NET_BUDGET_MS: u64 = 4_000;
 
 #[cfg(not(windows))]
 async fn enumerate_context_snapshot_bounded(
@@ -1272,6 +1354,32 @@ mod context_cache_tests {
             context_cache::peek(hwnd).is_none(),
             "invalidate must drop the entry — this is the post-step trigger"
         );
+    }
+
+    #[test]
+    fn a_starved_read_does_not_overwrite_a_rich_bank() {
+        // Live case: a 20-element failed read overwrote a fresh 107-element bank, so the only
+        // cache hit of the session served the starved list. Less than half the banked size for
+        // the same window identity = a failed read, kept out.
+        //
+        // Keys on the SHELL window, not the desktop window: these tests run in parallel and
+        // `stores_and_returns_within_ttl` owns the desktop hwnd — sharing a key makes the two
+        // tests race each other's stores.
+        let hwnd =
+            unsafe { windows::Win32::UI::WindowsAndMessaging::GetShellWindow().0 as usize };
+        assert!(hwnd != 0, "no shell window — cannot run this test");
+        context_cache::invalidate(hwnd);
+        let rich: Vec<_> = (1..=100).map(|i| el(i, "x")).collect();
+        context_cache::store(hwnd, rich, None, 900);
+        context_cache::store(hwnd, vec![el(1, "x")], None, 900); // starved: 1 vs 100
+        let (els, _, _, _) = context_cache::peek(hwnd).expect("entry kept");
+        assert_eq!(els.len(), 100, "the richer bank must survive a starved read");
+        // A modest shrink is a real UI change and must be accepted.
+        let smaller: Vec<_> = (1..=60).map(|i| el(i, "x")).collect();
+        context_cache::store(hwnd, smaller, None, 900);
+        let (els, _, _, _) = context_cache::peek(hwnd).expect("entry kept");
+        assert_eq!(els.len(), 60, "a >=half-size read is a legitimate replacement");
+        context_cache::invalidate(hwnd);
     }
 
     #[test]
