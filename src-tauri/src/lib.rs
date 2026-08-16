@@ -403,8 +403,13 @@ mod context_cache {
 /// re-querying the AI about?"): here the question is "is this element list still a fair
 /// description of the screen?", and the cost of being wrong is a list that describes a UI the
 /// user is no longer looking at.
+///
+/// 8 → 12 (2026-08-16): a live session logged refusals at 9/9/9/10 cells — caret-blink and
+/// cursor-churn scale, each costing a full fresh enumeration for a list the 593-pair overlap
+/// measurement (0.934 median at any drift) says would have served fine. Real state changes in
+/// the same log measured 18–120 cells, comfortably above 12.
 #[cfg(windows)]
-const CACHE_SIG_MAX_CELLS: u32 = 8;
+const CACHE_SIG_MAX_CELLS: u32 = 12;
 
 // Autopilot asks "did something happen worth re-querying the AI about?"; the cache asks "is this
 // element list still a fair description of the screen?". The second question must stay the more
