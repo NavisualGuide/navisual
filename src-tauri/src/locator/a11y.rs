@@ -871,9 +871,23 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     // collecting walk instead. Every other app keeps the fast bulk path. The budget is the
     // same for both since 2026-08-15 (see CONTEXT_BUDGET_MS): heavy trees are not an Excel
     // property, so they don't get an Excel-shaped exception.
-    let is_excel = roots
-        .iter()
-        .any(|r| matches!(r.get_classname(), Ok(c) if c == EXCEL_MAIN_WINDOW_CLASS));
+    // Guard 1 of 2: would a bulk `FindAll(Descendants)` DETONATE on this window?
+    //
+    // This is the one surviving app-identity check in the enumeration path, and it is
+    // irreducible with today's UIA API rather than a shortcut. Excel's broken `NUIScrollbar`
+    // provider self-nests, so a bulk Descendants returns **23,320 duplicate NetUIRepeatButton
+    // over 138 s** and zero useful elements. A bulk query is ONE uncancellable COM call that
+    // yields nothing until it returns, so there is no way to try-and-abort: abandoning the wait
+    // still leaves a 138-second thread holding the drain flag, which would starve the window for
+    // over two minutes. Detecting it behaviourally would therefore require detonating first.
+    //
+    // Kept as a LIST, not an `is_excel` bool, so a newly-discovered detonator is one entry rather
+    // than a new branch — and so the name says what the property is (bulk is unsafe here), not
+    // which vendor happens to have it. Everything else in this module stays behavioural.
+    const BULK_UNSAFE_CLASSES: &[&str] = &[EXCEL_MAIN_WINDOW_CLASS];
+    let bulk_detonates = roots.iter().any(|r| {
+        matches!(r.get_classname(), Ok(c) if BULK_UNSAFE_CLASSES.iter().any(|u| c == *u))
+    });
     let budget_ms = CONTEXT_BUDGET_MS;
 
     let cond = {
@@ -901,66 +915,26 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let _ = cache.add_property(UIProperty::ClassName); // for the Excel walk's dedup
     let _ = cache.add_property(UIProperty::IsEnabled); // greyed-out marker for the prompt
 
-    // Gather candidate elements (context-type, with the cache attached). Two ways in:
-    // Excel → the pruned collecting walk; everything else → the original bulk Descendants
-    // search per root. Both yield the SAME 12 context control types, so the filter below
-    // is identical for both.
+    // ONE gather pipeline with two independent guards (restructured 2026-08-16). It used to be
+    // two mutually-exclusive branches — "Excel walks INSTEAD, everyone else bulks" — and then
+    // the walk rescue bolted a third case on top ("...and sometimes bulk ALSO walks"), which
+    // made a simple thing read as a special case with an exception. There is really only:
+    //
+    //     candidates = bulk (unless the bulk query would detonate) + walk (if either guard says so)
+    //
+    // Both gathers yield the SAME 12 context control types through the SAME filter below, so
+    // merging is safe by construction and the union is never worse than either half.
     let gather_started = Instant::now();
-    let candidates: Vec<UIElement> = if is_excel {
-        let mut out = Vec::new();
-        if let Ok(true_cond) = automation.create_true_condition() {
-            let mut seen: std::collections::HashSet<ClassRectSignature> =
-                std::collections::HashSet::new();
-            let deadline = started + Duration::from_millis(budget_ms as u64);
-            for root in &roots {
-                // grid_cond: None DISABLES the ExcelGrid flat-Descendants escape hatch for
-                // enumeration (audit 2026-07-13, confirmed by the excel_enum_histogram_live
-                // probe against a live 209-cell CSV). That escape hatch — a raw
-                // find_all_build_cache(Descendants) on the ExcelGrid pane — never prunes the
-                // broken scrollbar the way this walk's own body does, so on any sheet with an
-                // active scrollbar the NUIScrollbar self-nesting explodes it: measured **23,320
-                // duplicate NetUIRepeatButton over 138 s**, and zero useful elements (no sheet
-                // tabs). Even the foreground-abandoned attempts each leave a 138 s uninterruptible
-                // COM task running. The normal recursion below (`excel_pruned_walk` at the child
-                // level) already prunes the NUIScrollbar *container*, so it never reaches those
-                // buttons — enumeration stays fast (~90 ms measured). Cost: the sheet-tab strip,
-                // reachable only via that flat Descendants, drops out of the enumerated list on
-                // sheets where it existed — a rare target that falls back to A11y/OCR, an
-                // acceptable trade for never exploding. The adapter's find_grid keeps the escape
-                // hatch (its grid_cond targets XLSpreadsheetGrid, one element, not the 12 context
-                // types, so it can't collect the scrollbar buttons).
-                excel_pruned_walk(
-                    root,
-                    SCROLLBAR_SCAN_DEPTH,
-                    &true_cond,
-                    None,
-                    &cache,
-                    &mut seen,
-                    deadline,
-                    &mut |el, _class_name| {
-                        if matches!(el.get_cached_control_type(), Ok(ct) if is_context_ct(ct)) {
-                            out.push(el.clone());
-                        }
-                    },
-                );
-            }
-        }
-        log::info!(
-            "[context] excel: collecting walk gathered {} candidate(s) in {} ms",
-            out.len(),
-            gather_started.elapsed().as_millis()
-        );
-        out
-    } else {
-        let mut out = Vec::new();
+    let mut candidates: Vec<UIElement> = Vec::new();
+    if !bulk_detonates {
         for root in &roots {
             // A dead popup root must not kill the main window's list.
             if let Ok(els) = root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
-                out.extend(els);
+                candidates.extend(els);
             }
         }
-        out
-    };
+    }
+    let bulk_ms = gather_started.elapsed().as_millis();
 
     // NOTE (2026-08-15): there used to be a `budget exceeded → return Err` check right here.
     // It fired *after* the expensive COM enumeration had fully returned and `candidates` was
@@ -1058,24 +1032,30 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
         apply_filter(el, &mut out, &mut seen, &mut total_qualifying);
     }
 
-    // Walk rescue for LAZY trees (2026-08-15, found live on Word). Word materialises its UIA
-    // tree per-subtree on demand: a bulk `FindAll` sees only what is already built, while the
-    // painted screen carries the full ribbon. Measured on one live window, minutes apart, the
-    // bulk query filtered to 15–33 elements with the ribbon entirely absent — yet Pass 1 A11y
-    // (which primes, retries and walks) found those same ribbon controls seconds later, which
-    // is exactly the "we have a11y info when grounding but never sent it" asymmetry reported
-    // from live use. The pruned walk cures it as a side effect of HOW it reads: one
-    // children-scoped query per container forces each level to materialise, and its
-    // (class, rect) dedup prunes provider explosions by construction — the same live window
-    // carried an MsoDockLeft (Navigation pane) subtree exploded to 10,831 descendants, and the
-    // walk still finished in ~300 ms. Bulk and walk are COMPLEMENTARY on a lazy tree (bulk
-    // sees built-but-deep content the depth-capped walk misses; the walk materialises unbuilt
-    // chrome), so the rescue merges both through the same filter rather than replacing one
-    // with the other.
+    // Guard 2 of 2: run the materialising walk — either because bulk never ran, or because what
+    // it returned is implausibly small.
     //
-    // Behavioural trigger, no app identity: an implausibly small filtered result. Windows that
-    // are genuinely tiny walk in single-digit milliseconds, so a false trigger costs nothing.
-    if !is_excel && out.len() < CONTEXT_WALK_RESCUE_FLOOR {
+    // WHY A WALK MATERIALISES ANYTHING (2026-08-15, found live on Word): Word builds its UIA
+    // tree per-subtree ON DEMAND. A bulk `FindAll` reads what is already built and materialises
+    // nothing, so it returned 15–33 elements with the ribbon entirely absent while that ribbon
+    // was fully painted on screen — yet Pass 1 A11y (which primes, retries, walks and
+    // point-probes, all of which materialise what they touch) resolved those same ribbon
+    // controls seconds later. That is exactly the "we have a11y info when grounding but never
+    // sent it" asymmetry reported from live use. One children-scoped query per container forces
+    // each level to materialise, which is the cure — and it also happens to be immune to Word's
+    // exploded Navigation pane, whose ~11k phantom nodes exist only in the Descendants index and
+    // are reachable by no parent→child path (see locator-testing.md item 0f).
+    //
+    // WHY BOTH, NOT EITHER: measured, they miss different things. On a lazy tree the walk
+    // materialises unbuilt chrome that bulk cannot see; on a healthy tree bulk is a strict
+    // superset (Word 122 vs 108) because the walk is depth-capped and misses built-but-deep
+    // content. On Chromium the walk is nearly blind for the same reason (VS Code: bulk 70 names,
+    // walk 3) — which is precisely why this is gated rather than unconditional.
+    //
+    // THE TRIGGER is behavioural and carries no app identity: an implausibly small filtered
+    // result. A genuinely tiny window walks in single-digit milliseconds (Explorer: 12 ms), so a
+    // false trigger costs nothing measurable.
+    if bulk_detonates || out.len() < CONTEXT_WALK_RESCUE_FLOOR {
         if let Ok(true_cond) = automation.create_true_condition() {
             let before = out.len();
             let mut walk_seen: std::collections::HashSet<ClassRectSignature> =
@@ -1085,6 +1065,16 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
             // the outer timeout regardless (an over-budget completion still banks its result).
             let deadline = Instant::now() + Duration::from_millis(budget_ms as u64);
             for root in &roots {
+                // grid_cond: None DISABLES the ExcelGrid flat-Descendants escape hatch here
+                // (audit 2026-07-13, confirmed by `excel_enum_histogram_live` against a live
+                // 209-cell CSV). That hatch is a raw Descendants query on the ExcelGrid pane and
+                // never prunes the broken scrollbar the way this walk's own body does, so it
+                // re-detonates the very explosion this path exists to avoid. Cost: the sheet-tab
+                // strip, reachable only through that hatch, drops out of the enumerated list — a
+                // rare target that falls back to A11y/OCR, an acceptable trade for never
+                // exploding. The Excel *adapter*'s find_grid keeps the hatch, because its
+                // grid_cond targets one XLSpreadsheetGrid rather than the 12 context types and
+                // therefore cannot collect the scrollbar's buttons.
                 excel_pruned_walk(
                     root,
                     SCROLLBAR_SCAN_DEPTH,
@@ -1100,10 +1090,16 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                     },
                 );
             }
+            let why = if bulk_detonates {
+                "bulk skipped (unsafe on this window class)"
+            } else {
+                "bulk result implausibly small"
+            };
             log::info!(
-                "[context] walk rescue: bulk filtered to {before} (< {CONTEXT_WALK_RESCUE_FLOOR}) — \
-                 the materialising walk added {} more",
-                out.len() - before
+                "[context] materialising walk ran — {why}: {before} filtered (floor {CONTEXT_WALK_RESCUE_FLOOR}, \
+                 bulk {bulk_ms} ms) — walk added {} more, {} ms total so far",
+                out.len() - before,
+                started.elapsed().as_millis()
             );
         }
     }
