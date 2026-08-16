@@ -2671,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "navisual-backend"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "anyhow",
  "arboard",
