@@ -4,6 +4,7 @@ use reqwest::{header, Client};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+use crate::ai::managed::navigate_step_tool;
 use crate::ai::prompts::SYSTEM_PROMPT;
 use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType, Role};
 
@@ -93,6 +94,21 @@ impl DeepSeekClient {
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
+        // TEST SPIKE (2026-08-19): all OpenAI BYOK models via /v1/responses instead
+        // of /v1/chat/completions. Originally scoped to gpt-5.6* only (the one
+        // family where /v1/chat/completions outright rejects reasoning + forced
+        // function tools together — see the relay's reasoning_effort:'none' fix,
+        // same day, model-comparison.md), widened to every OpenAI model per
+        // explicit instruction — real tool-calling should be strictly better than
+        // the prompt-JSON path for any model that supports it, not just the ones
+        // /v1/chat/completions structurally blocks. BYOK only — validate here
+        // before touching the relay's harder passthrough-response constraint.
+        if self.name == "OpenAI" {
+            return self
+                .send_message_responses_api(messages, effective_model, on_chunk)
+                .await;
+        }
+
         // include_usage: OpenAI (and DashScope) only put a `usage` field in the
         // stream when asked — without it the final chunk never carries token
         // counts and the usage display records 0. DeepSeek sends usage by
@@ -129,6 +145,169 @@ impl DeepSeekClient {
             }
         }
         bail!("{} returned an empty response", self.name);
+    }
+
+    /// TEST SPIKE (2026-08-19) — all OpenAI BYOK models via `/v1/responses`. Real
+    /// tool-calling (`tools`+`tool_choice`, flattened per this endpoint's shape —
+    /// no nested `function` wrapper, unlike Chat Completions) instead of the
+    /// prompted-JSON approach every other BYOK model on this client uses, so the
+    /// model gets to reason (no `reasoning_effort` sent — provider default)
+    /// without the function-tools/reasoning_effort conflict Chat Completions
+    /// raises for the gpt-5.6 family specifically. Streamed — see
+    /// `stream_once_responses_api` for the event-accumulation logic. See
+    /// `messages_to_responses_input` for the request-shape conversion.
+    async fn send_message_responses_api(
+        &self,
+        messages: Vec<Value>,
+        effective_model: &str,
+        on_chunk: &mut impl FnMut(&str, usize),
+    ) -> Result<(NavigateStepResponse, u64, u64)> {
+        let (instructions, input) = messages_to_responses_input(&messages);
+
+        let tool = navigate_step_tool();
+        let flat_tool = json!({
+            "type": "function",
+            "name": tool["function"]["name"],
+            "description": tool["function"]["description"],
+            "parameters": tool["function"]["parameters"],
+        });
+
+        let payload = json!({
+            "model": effective_model,
+            "instructions": instructions,
+            "input": input,
+            "tools": [flat_tool],
+            "tool_choice": {"type": "function", "name": "navigate_step"},
+            "stream": true,
+        });
+
+        self.stream_once_responses_api(&payload, on_chunk).await
+    }
+
+    /// SSE parser for `/v1/responses`. Genuinely different event vocabulary from
+    /// Chat Completions (see `stream_once`) — no `choices[].delta`, instead typed
+    /// `type`-tagged events. The only one that matters for us is
+    /// `response.function_call_arguments.delta` (`delta` field, accumulated —
+    /// forcing exactly one tool via `tool_choice` means there's only ever one
+    /// function_call item, so no need to key deltas by `item_id`/`output_index`).
+    /// Live-caption extraction reuses the exact same `instruction_delta` scan
+    /// `stream_once` uses on Chat Completions' `content` — same partial-JSON
+    /// shape, same technique. `response.completed` carries the full final
+    /// `response` object (incl. `usage`) as a cross-check / token-count source;
+    /// the accumulated `delta` buffer is what's actually parsed, since it's
+    /// confirmed byte-identical to the completed event's own copy.
+    async fn stream_once_responses_api(
+        &self,
+        payload: &Value,
+        on_chunk: &mut impl FnMut(&str, usize),
+    ) -> Result<(NavigateStepResponse, u64, u64)> {
+        let response = self
+            .client
+            .post("https://api.openai.com/v1/responses")
+            .bearer_auth(&self.api_key)
+            .json(payload)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await?;
+            bail!("{} Responses API error ({}): {}", self.name, status, body);
+        }
+
+        let mut arguments = String::new();
+        let mut input_tokens = 0u64;
+        let mut output_tokens = 0u64;
+        let mut in_instruction = false;
+        let mut emitted_instruction_len = 0usize;
+        let mut line_buf = String::new();
+        let mut usage_logged = false;
+
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            line_buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(nl) = line_buf.find('\n') {
+                let line = line_buf[..nl].trim().to_string();
+                line_buf = line_buf[nl + 1..].to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                let data_str = match line.strip_prefix("data: ") {
+                    Some(s) => s.trim(),
+                    None => continue,
+                };
+                if data_str == "[DONE]" {
+                    break;
+                }
+                let data: Value = match serde_json::from_str(data_str) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                match data["type"].as_str() {
+                    Some("response.function_call_arguments.delta") => {
+                        if let Some(delta) = data["delta"].as_str() {
+                            arguments.push_str(delta);
+
+                            let prefix = r#""instruction":""#;
+                            let prefix_sp = r#""instruction": ""#;
+                            if !in_instruction
+                                && (arguments.contains(prefix) || arguments.contains(prefix_sp))
+                            {
+                                in_instruction = true;
+                            }
+                            if in_instruction {
+                                let (d, new_len) = crate::ai::streaming::instruction_delta(
+                                    &arguments,
+                                    emitted_instruction_len,
+                                );
+                                if !d.is_empty() {
+                                    on_chunk(&d, crate::ai::streaming::count_streamed_steps(&arguments));
+                                }
+                                emitted_instruction_len = new_len;
+                            }
+                        }
+                    }
+                    Some("error") => {
+                        bail!("{} Responses API stream error: {}", self.name, data);
+                    }
+                    Some("response.completed") => {
+                        if let Some(usage) = data["response"]["usage"].as_object() {
+                            input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if !usage_logged {
+                                log::info!("[tokens] responses-api raw usage (once): {}", data["response"]["usage"]);
+                                usage_logged = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if arguments.trim().is_empty() {
+            bail!("{}: Responses API stream produced no function_call_arguments", self.name);
+        }
+
+        let resp: NavigateStepResponse = serde_json::from_str(&arguments).map_err(|e| {
+            anyhow::anyhow!(
+                "{}: function_call arguments didn't match the schema: {} — raw: {}",
+                self.name,
+                e,
+                arguments
+            )
+        })?;
+
+        if emitted_instruction_len == 0 {
+            if let Some(step) = resp.steps.first() {
+                on_chunk(&step.instruction, resp.steps.len().max(1));
+            }
+        }
+
+        Ok((resp, input_tokens, output_tokens))
     }
 
     /// One streamed request. Returns `Ok(None)` when the model produced no usable
@@ -322,6 +501,55 @@ impl DeepSeekClient {
 
         Ok(None)
     }
+}
+
+/// Converts the Chat-Completions-shaped `messages` this client normally builds
+/// (via `build_openai_messages`) into `/v1/responses`' shape: the leading
+/// `role:"system"` message becomes the top-level `instructions` string, and
+/// every remaining turn becomes an `input` item with its content items
+/// renamed (`text`->`input_text`, `image_url`->`input_image` with the URL
+/// flattened out of its nested `{url:...}` wrapper). Plain-string content
+/// (text-only turns) is normalized to a one-item array — Responses' examples
+/// only ever show array content, not bothering to confirm the string form is
+/// also accepted.
+fn messages_to_responses_input(messages: &[Value]) -> (String, Vec<Value>) {
+    let mut instructions = String::new();
+    let mut input = Vec::new();
+
+    for msg in messages {
+        let role = msg["role"].as_str().unwrap_or("user");
+        if role == "system" {
+            if let Some(s) = msg["content"].as_str() {
+                instructions = s.to_string();
+            }
+            continue;
+        }
+
+        let content = &msg["content"];
+        let items: Vec<Value> = if let Some(s) = content.as_str() {
+            vec![json!({"type": "input_text", "text": s})]
+        } else if let Some(arr) = content.as_array() {
+            arr.iter()
+                .map(|part| match part["type"].as_str() {
+                    Some("text") => json!({
+                        "type": "input_text",
+                        "text": part["text"].as_str().unwrap_or("")
+                    }),
+                    Some("image_url") => json!({
+                        "type": "input_image",
+                        "image_url": part["image_url"]["url"].as_str().unwrap_or("")
+                    }),
+                    _ => part.clone(),
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
+        input.push(json!({ "role": role, "content": items }));
+    }
+
+    (instructions, input)
 }
 
 /// Parse the first complete `NavigateStepResponse` from `text`, tolerating code

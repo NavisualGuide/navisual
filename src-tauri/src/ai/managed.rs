@@ -191,6 +191,14 @@ impl ManagedClient {
         if let Some(dh) = crate::server::device_hash() {
             req = req.header("X-Device-Hash", dh);
         }
+        // Presence-only signal for the relay's dual-provider OpenAI dispatch
+        // (relay/index.ts, callProviderForClient) — this client understands
+        // /v1/responses' shape (see the branch below), so route OpenAI calls
+        // there instead of the reasoning_effort:'none' Chat Completions path.
+        // Never a version *comparison* on either side — any client old enough
+        // to lack this line never sends the header at all, which the relay
+        // reads as "old" unambiguously. Bump only if this contract changes.
+        req = req.header("X-App-Version", env!("CARGO_PKG_VERSION"));
         let resp = req.json(&payload).send().await.map_err(|e| {
             log::warn!("[managed] relay request failed to send: {e}");
             e
@@ -305,30 +313,49 @@ impl ManagedClient {
         log::info!("[managed] routed={routed:?}");
         self.account.lock().last_model = routed;
 
-        // Token usage. The relay forwards the upstream body verbatim, and both
-        // OpenRouter (free) and Gemini/OpenAI (paid) include an OpenAI-style `usage`
-        // object — read it so the debug meta shows real counts instead of a
-        // misleading "0 in · 0 out". (Managed rows are still filtered out of the
-        // BYOK token table by provider name, so this never affects billing.)
-        let in_tokens = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-        let out_tokens = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+        // Dual-provider (2026-08-19): the relay routes OpenAI calls to either
+        // /v1/chat/completions (old, unchanged) or /v1/responses (new — real
+        // reasoning + tool-calling) depending on whether THIS request carried
+        // X-App-Version — but Gemini/Qwen cross-provider fallback means either
+        // shape can legitimately answer any given call regardless of which
+        // path was requested, so detect the shape from the body itself rather
+        // than assuming. See relay/index.ts's callProviderForClient for the
+        // full reasoning (model-comparison.md, 2026-08-19).
+        let is_responses_shape = body.get("output").is_some();
+
+        // Token usage. The relay forwards the upstream body verbatim; field names
+        // differ by shape (Chat Completions: prompt_tokens/completion_tokens;
+        // Responses: input_tokens/output_tokens) — read the debug meta shows real
+        // counts instead of a misleading "0 in · 0 out". (Managed rows are still
+        // filtered out of the BYOK token table by provider name, so this never
+        // affects billing.)
+        let (in_tokens, out_tokens, cached) = if is_responses_shape {
+            let u = &body["usage"];
+            (
+                u["input_tokens"].as_u64().unwrap_or(0),
+                u["output_tokens"].as_u64().unwrap_or(0),
+                u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+            )
+        } else {
+            let u = &body["usage"];
+            (
+                u["prompt_tokens"].as_u64().unwrap_or(0),
+                u["completion_tokens"].as_u64().unwrap_or(0),
+                u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+            )
+        };
         // Automatic prompt caching (OpenAI-compat providers discount an identical prefix —
         // ours is the constant SYSTEM_PROMPT, which sits first). Nothing here *requests*
         // caching; this only reveals whether we are already getting it for free, which is
         // the question that decides whether explicit caching is worth wiring. Input
         // dominates this workload (measured 6203 in / 167 out), so the answer matters.
-        let cached = body["usage"]["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .unwrap_or(0);
         if let Some(pct) = (cached * 100).checked_div(in_tokens) {
             log::info!("[tokens] in={in_tokens} out={out_tokens} cached={cached} ({pct}% of input)");
         }
         // `cached == 0` is ambiguous: the upstream may not be caching, OR it may be caching and
-        // simply not reporting it under the OpenAI field name. The relay reaches Gemini through
-        // Google's *OpenAI-compatibility* endpoint and forwards the body verbatim, so the field
-        // set is whatever that shim emits — not something we can look up reliably. Dump the raw
-        // usage object once per process so the real field names are on record; the answer
-        // decides whether ~20-35% of request cost is already being discounted invisibly.
+        // simply not reporting it under the field name this shape uses. Dump the raw usage
+        // object once per process so the real field names are on record; the answer decides
+        // whether a real chunk of request cost is already being discounted invisibly.
         if cached == 0 {
             static DUMPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -336,8 +363,24 @@ impl ManagedClient {
             }
         }
 
-        let message = &body["choices"][0]["message"];
-        let nav_response: NavigateStepResponse =
+        let nav_response: NavigateStepResponse = if is_responses_shape {
+            // /v1/responses shape — output[] of typed items, one of which is
+            // the function_call (forced via tool_choice, so exactly one).
+            // No leaked-plain-text recovery path here: that failure mode
+            // (a model answering outside the tool-call channel) was specific
+            // to Gemini's OpenAI-compat tool_choice handling, not something
+            // observed on this native OpenAI endpoint.
+            let output = body["output"].as_array().cloned().unwrap_or_default();
+            let call = output.iter().find(|item| item["type"] == "function_call");
+            let arguments = call
+                .and_then(|c| c["arguments"].as_str())
+                .ok_or_else(|| anyhow!("Responses API returned no function_call in output"))?;
+            serde_json::from_str(arguments).map_err(|e| {
+                log::warn!("[managed] responses-api navigate_step parse error: {e}\njson: {arguments}");
+                anyhow!("The model returned an unreadable response. Please try again.")
+            })?
+        } else {
+            let message = &body["choices"][0]["message"];
             match message["tool_calls"][0]["function"]["arguments"].as_str() {
                 // Free models occasionally emit malformed tool args (leaked </think>,
                 // whitespace runaway → truncated JSON). Surface a friendly retry, keep
@@ -404,7 +447,8 @@ impl ManagedClient {
                         }
                     }
                 }
-            };
+            }
+        };
 
         // Emit the first instruction as a single chunk (managed tier is non-streaming).
         if let Some(step) = nav_response.steps.first() {
@@ -579,7 +623,7 @@ pub fn build_messages(
     messages
 }
 
-fn navigate_step_tool() -> Value {
+pub(crate) fn navigate_step_tool() -> Value {
     json!({
         "type": "function",
         "function": {
