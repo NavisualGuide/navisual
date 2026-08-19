@@ -39,6 +39,11 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // recomputed per-request cost came out LOWER despite measurably more tokens).
         // Cached input would be 0.15, but the default path is measurably not caching.
         "gemini-3.5-flash" | "gemini-3-flash-preview" => (1.50, 9.00),
+        // Source: ai.google.dev/gemini-api/docs/pricing (screenshot-verified 2026-08-16,
+        // the standard/non-batch tier — "our most cost-efficient GA model"). Output price
+        // already includes thinking tokens per the page, unlike 3.5-flash above which needed
+        // a separate reasoning-token add-on (see gemini.rs) — no such adjustment needed here.
+        "gemini-3.5-flash-lite" => (0.30, 2.50),
         // ⚠️ PROMOTIONAL PRICING, ends 2026-12-31 — reverts to (1.50, 7.50) on 2027-01-01.
         // Half 3.5-flash's input and ~42% of its output while it lasts. Cached input 0.075
         // (0.15 after), though our ~2,924-token prefix is under Gemini's 4,096 cache minimum
