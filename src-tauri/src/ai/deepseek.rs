@@ -512,6 +512,16 @@ impl DeepSeekClient {
 /// (text-only turns) is normalized to a one-item array — Responses' examples
 /// only ever show array content, not bothering to confirm the string form is
 /// also accepted.
+///
+/// Assistant-role content items use a DIFFERENT type vocabulary than
+/// user-role ones (`output_text`/`refusal` vs `input_text`/`input_image`) —
+/// live 400 caught 2026-08-19 on the relay's copy of this same function, on
+/// the second call of any conversation ("Invalid value: 'input_text'.
+/// Supported values are: 'output_text' and 'refusal'.", param
+/// input[1].content[0]): every single-turn validation this session used a
+/// fresh session with no prior assistant turn, so this never surfaced until
+/// real multi-turn history hit it live. Mirror the relay's fix here too —
+/// keep the two in sync.
 fn messages_to_responses_input(messages: &[Value]) -> (String, Vec<Value>) {
     let mut instructions = String::new();
     let mut input = Vec::new();
@@ -524,18 +534,20 @@ fn messages_to_responses_input(messages: &[Value]) -> (String, Vec<Value>) {
             }
             continue;
         }
+        let is_assistant = role == "assistant";
+        let text_type = if is_assistant { "output_text" } else { "input_text" };
 
         let content = &msg["content"];
         let items: Vec<Value> = if let Some(s) = content.as_str() {
-            vec![json!({"type": "input_text", "text": s})]
+            vec![json!({"type": text_type, "text": s})]
         } else if let Some(arr) = content.as_array() {
             arr.iter()
                 .map(|part| match part["type"].as_str() {
                     Some("text") => json!({
-                        "type": "input_text",
+                        "type": text_type,
                         "text": part["text"].as_str().unwrap_or("")
                     }),
-                    Some("image_url") => json!({
+                    Some("image_url") if !is_assistant => json!({
                         "type": "input_image",
                         "image_url": part["image_url"]["url"].as_str().unwrap_or("")
                     }),
