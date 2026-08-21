@@ -22,7 +22,7 @@
 #[cfg(windows)]
 mod imp {
     use parking_lot::Mutex;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
     use uiautomation::UIElement;
@@ -32,16 +32,28 @@ mod imp {
         MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_LBUTTONDOWN,
     };
 
+    /// `resolved` is filled in by a short-lived background thread spawned right after the
+    /// click is recorded (see `hook_proc`) — NOT lazily when `describe()` is finally called.
+    /// This matters for anything that live-updates at a fixed screen position (a chat app's
+    /// message list, a feed): resolving late means `element_from_point` answers "what's at
+    /// (x,y) *now*", which can be a different item than what was actually under the cursor
+    /// at click time if the app has since scrolled or inserted new content there. Live-caught
+    /// on WeChat: a click was reported to the AI as a different, unrelated ListItem than what
+    /// the user actually clicked, because the Official Accounts feed had refreshed by the time
+    /// the next AI turn ran `describe()` — which can be arbitrarily long after the click in an
+    /// event-driven app. `gen` guards against an out-of-order write: if a second click lands
+    /// before the first's resolution thread finishes, the stale thread's result is dropped.
     struct Click {
-        x: i32,
-        y: i32,
+        resolved: Option<(String, String)>,
         at: Instant,
+        gen: u64,
     }
 
     static LAST: OnceLock<Mutex<Option<Click>>> = OnceLock::new();
     /// PID of the app currently being guided. 0 disarms the hook entirely — the default,
     /// so nothing is ever recorded until a session explicitly arms it.
     static TARGET_PID: AtomicU32 = AtomicU32::new(0);
+    static NEXT_GEN: AtomicU64 = AtomicU64::new(1);
 
     fn slot() -> &'static Mutex<Option<Click>> {
         LAST.get_or_init(|| Mutex::new(None))
@@ -63,8 +75,10 @@ mod imp {
     }
 
     /// Low-level mouse hook. Runs on the tracker thread's message pump for every click
-    /// system-wide, so it must stay trivial: two cheap Win32 calls and an early return.
-    /// No UIA, no allocation, no locking beyond the one short store.
+    /// system-wide, so it must stay trivial: two cheap Win32 calls, a slot store, and a
+    /// thread spawn (a fast syscall that returns immediately — the actual UIA resolution
+    /// happens on that new thread, never inside this callback). Windows silently drops a
+    /// `WH_MOUSE_LL` hook that blocks too long, which is why the resolution can't happen here.
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 && wparam.0 as u32 == WM_LBUTTONDOWN {
             let target = TARGET_PID.load(Ordering::Relaxed);
@@ -81,11 +95,13 @@ mod imp {
                     let mut pid: u32 = 0;
                     GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
                     if pid == target {
+                        let gen = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
                         *slot().lock() = Some(Click {
-                            x: pt.x,
-                            y: pt.y,
+                            resolved: None,
                             at: Instant::now(),
+                            gen,
                         });
+                        std::thread::spawn(move || resolve_and_store(pt.x, pt.y, gen));
                     }
                 }
             }
@@ -93,41 +109,32 @@ mod imp {
         CallNextHookEx(None, code, wparam, lparam)
     }
 
-    /// Install the hook. MUST be called from a thread that runs a message pump — a
-    /// `WH_MOUSE_LL` hook is dispatched via the installing thread's queue and is silently
-    /// dead without one. Called from the tracker thread, which already pumps for its
-    /// WinEvent hooks.
-    pub fn install() {
-        unsafe {
-            match SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), None, 0) {
-                Ok(_h) => log::info!("[click] low-level mouse hook installed"),
-                Err(e) => log::warn!("[click] hook install failed: {e}"),
+    /// Resolves (x, y) to a named control, as close to click time as the OS scheduler allows,
+    /// and writes the result back — but only if this click is still the current one (`gen`
+    /// still matches). A later click racing ahead of this resolution finishing must win; this
+    /// thread's answer describes a click that is no longer "what the user just did".
+    fn resolve_and_store(x: i32, y: i32, gen: u64) {
+        let resolved = resolve_point(x, y);
+        let mut guard = slot().lock();
+        if let Some(c) = guard.as_mut() {
+            if c.gen == gen {
+                c.resolved = resolved;
             }
         }
     }
 
-    /// Resolve the last recorded click to a control and render the prompt line.
-    /// `None` when there is no click, it is older than `max_age`, or it cannot be resolved
-    /// to something nameable — an unresolvable click is silently dropped rather than
-    /// reported as bare coordinates.
-    pub fn describe(max_age: Duration) -> Option<String> {
+    /// Walk up from the leaf under (x, y) to the nearest ancestor with a usable name — the
+    /// leaf is often an unnamed Text run or Pane inside the real control (same shape as
+    /// `verify_role`). Never reports the contents of a protected field: the *name* of a
+    /// password box is its label ("Password"), which is harmless, but if the provider marks
+    /// the element as a password field, that's reported instead of trusting the name as-is.
+    fn resolve_point(x: i32, y: i32) -> Option<(String, String)> {
         use uiautomation::types::Point;
         use uiautomation::UIAutomation;
-
-        let (x, y) = {
-            let guard = slot().lock();
-            let c = guard.as_ref()?;
-            if c.at.elapsed() > max_age {
-                return None;
-            }
-            (c.x, c.y)
-        };
 
         let automation = UIAutomation::new().ok()?;
         let mut el = automation.element_from_point(Point::new(x, y)).ok()?;
 
-        // Walk up to something with a usable name — the leaf under the cursor is often an
-        // unnamed Text run or Pane inside the real control (same shape as `verify_role`).
         let walker = automation.get_control_view_walker().ok();
         let mut named: Option<(String, String)> = None;
         for _ in 0..4 {
@@ -147,14 +154,39 @@ mod imp {
         }
         let (role, name) = named?;
 
-        // Never report the contents of a protected field. The *name* of a password box is
-        // its label ("Password"), which is harmless — but if the provider marks it, say so
-        // and stop rather than risk a provider that puts anything else in the name.
         let name = if is_password(&el) {
             "(password field)".to_string()
         } else {
             sanitize(&name)
         };
+        Some((role, name))
+    }
+
+    /// Install the hook. MUST be called from a thread that runs a message pump — a
+    /// `WH_MOUSE_LL` hook is dispatched via the installing thread's queue and is silently
+    /// dead without one. Called from the tracker thread, which already pumps for its
+    /// WinEvent hooks.
+    pub fn install() {
+        unsafe {
+            match SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), None, 0) {
+                Ok(_h) => log::info!("[click] low-level mouse hook installed"),
+                Err(e) => log::warn!("[click] hook install failed: {e}"),
+            }
+        }
+    }
+
+    /// Render the prompt line for the last recorded click. `None` when there is no click, it
+    /// is older than `max_age`, or resolution hasn't produced a nameable control (either it
+    /// genuinely can't be resolved, or — rarely — the background resolve from `hook_proc`
+    /// hasn't finished yet; either way, an unresolved click is silently dropped rather than
+    /// reported as bare coordinates or guessed at).
+    pub fn describe(max_age: Duration) -> Option<String> {
+        let guard = slot().lock();
+        let c = guard.as_ref()?;
+        if c.at.elapsed() > max_age {
+            return None;
+        }
+        let (role, name) = c.resolved.clone()?;
 
         Some(format!(
             "\n[Last user action] The user clicked {role} \"{name}\". Treat this as what \
