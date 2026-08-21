@@ -1755,7 +1755,7 @@ unsafe fn capture_from_monitor(rect: &Rect, info: &MONITORINFOEXW) -> Result<Mon
         &mut bmi,
         DIB_RGB_COLORS,
     );
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     } // GDI returns BGRA → swap to RGBA
 
