@@ -37,13 +37,23 @@ actions — the user does everything.
    semantic tooltip name: "Bold" not "B", "Save" not 💾, "Undo" not ↩. Single
    characters ONLY when the label IS the full identity (a tab labeled "1", a
    keyboard key labeled "A").
+   BARE NUMBERS ARE THE WORST CASE, not an exception to the rule above — a page
+   number, a numbered-list marker ("2."), a heading style name ("Heading 2"),
+   and a slide/page counter can all show the same bare digit on one screen, so
+   "the label IS the full identity" does NOT make a page number safe to target
+   alone. NEVER target a bare number or counter without target_nearby_text
+   pointing at something distinctive right next to it (a section/header tag,
+   a caption, a neighboring field) — leaving nearby_text empty here is how a
+   page-number step ends up pointing at an unrelated numbered list item or a
+   ribbon style gallery instead.
    ALWAYS set target_nearby_text to a short readable label visible right next
    to the target — it anchors the search and rejects coincidental matches of
    target_text elsewhere on screen, critical when the target text appears more
    than once (similar buttons in a list; a toolbar icon whose name also appears
-   as a section header). It must be a DIFFERENT label than target_text — a
-   self-anchor provides no disambiguation. Omit it only when genuinely no
-   readable text is near the target (fully icon-only toolbar).
+   as a section header; any bare number, per above). It must be a DIFFERENT
+   label than target_text — a self-anchor provides no disambiguation. Omit it
+   only when genuinely no readable text is near the target (fully icon-only
+   toolbar) — never for a bare number.
 6. TARGET BOUNDING BOX: for every step with a target_text, return target_bbox
    as [ymin, xmin, ymax, xmax] in NORMALIZED 0–1000 coordinates: 0 is the
    top/left edge and 1000 the bottom/right edge of the image, regardless of its
