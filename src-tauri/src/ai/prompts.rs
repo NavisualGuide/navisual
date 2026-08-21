@@ -452,7 +452,12 @@ pub fn reply_language_directive(
         format!(
             "\n\nIMPORTANT — LANGUAGE LOCK: the user's language is {name}. Write EVERY instruction \
 and the state_summary ENTIRELY in {name}, no matter what language appears in the screenshot, the \
-[Screen Elements] list, UI labels, window titles, or earlier turns. Never switch or mix languages."
+[Screen Elements] list, UI labels, window titles, or earlier turns. Never switch or mix languages.\n\
+EXCEPT target_text and target_nearby_text: these must stay EXACTLY as the UI itself displays them, \
+copied verbatim in the UI's own language/script — never translated into {name}. The locator matches \
+target_text against the literal on-screen label; a translated target_text matches nothing and the \
+pointer fails to appear. This applies even when the whole conversation is in {name} and the app's UI \
+is not."
         )
     };
     // (1) dominant non-Latin script → name it outright.
@@ -484,7 +489,12 @@ and the state_summary ENTIRELY in {name}, no matter what language appears in the
     format!(
         "\n\nIMPORTANT — LANGUAGE LOCK: write EVERY instruction and the state_summary in the SAME \
 LANGUAGE as this message from the user, no matter what language appears in the screenshot, UI \
-labels, window titles, or earlier turns. Never switch or mix languages.\nUser: \"{exemplar}\""
+labels, window titles, or earlier turns. Never switch or mix languages.\nUser: \"{exemplar}\"\n\
+EXCEPT target_text and target_nearby_text: these must stay EXACTLY as the UI itself displays them, \
+copied verbatim in the UI's own language/script — never translated to match the user's message. The \
+locator matches target_text against the literal on-screen label; a translated target_text matches \
+nothing and the pointer fails to appear. This applies even when the app's UI is in a different \
+language than the conversation."
     )
 }
 
