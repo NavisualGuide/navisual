@@ -596,6 +596,27 @@ See the LICENSE file in the root of this repository for complete details.
     showTargetHint = false;
   }
 
+  // One-time coach mark on the header's collapse button — a real test user
+  // (not a developer, didn't read the README) never discovered the panel could
+  // shrink to a small floating icon, and found the full panel hard to work
+  // around on a single monitor. Shown once ever, fired the moment the FIRST
+  // real guidance response lands — that's exactly when the panel is full of
+  // content and most likely to be in the user's way, so the tip appears right
+  // when it becomes useful rather than as an unread launch-time splash.
+  // Clicking the bubble collapses the panel directly, same as the target hint.
+  const COLLAPSE_HINT_KEY = "navisual-collapse-hint-v1";
+  let showCollapseHint = $state(false);
+  function maybeShowCollapseHint() {
+    if (showCollapseHint) return;
+    if (localStorage.getItem(COLLAPSE_HINT_KEY)) return;
+    localStorage.setItem(COLLAPSE_HINT_KEY, "1");
+    showCollapseHint = true;
+    setTimeout(() => (showCollapseHint = false), 12_000);
+  }
+  function dismissCollapseHint() {
+    showCollapseHint = false;
+  }
+
   async function selectTarget(hwnd: number | null) {
     targetPickerOpen = false;
     fullScreenTarget = false;
@@ -1120,6 +1141,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   async function collapseToIcon() {
+    dismissCollapseHint(); // they found it — the coach mark is no longer needed
     iconMode = true;
     try { await getCurrentWindow().setSize(new LogicalSize(ICON_SIZE, ICON_SIZE)); }
     catch (e) { console.error("collapseToIcon:", e); }
@@ -1458,6 +1480,7 @@ See the LICENSE file in the root of this repository for complete details.
     if (res.model) routedModel = res.model;
     sessionGoal = res.goal ?? "";
     phase = res.needs_input ? "needs_input" : "guiding";
+    if (phase === "guiding") maybeShowCollapseHint();
     if (res.instruction) {
       const cleanInstruction = res.instruction;
       let meta: string | undefined;
@@ -2298,6 +2321,21 @@ See the LICENSE file in the root of this repository for complete details.
           {#if steps[stepIndex]?.clipboard}
             <span class="badge badge-clip" title="Text copied to clipboard">📋 copied</span>
           {/if}
+          <!-- Promoted out of the ··· quick-menu (2026-08-20): a real test user never
+               found "Clear" hidden behind ···, and the pointer/caption covering the
+               screen was exactly what she wanted to dismiss. Always visible here
+               instead, right where the thing it clears is showing. -->
+          {#if !isThinking}
+            {#if isOverlayCleared}
+              <button class="clear-toggle-btn" onclick={quickShowScreen} title="Show the pointer and caption again">
+                👁 Show
+              </button>
+            {:else}
+              <button class="clear-toggle-btn" onclick={quickClearScreen} title="Hide the pointer and caption so you can see the screen clearly">
+                ✕ Clear
+              </button>
+            {/if}
+          {/if}
         </div>
         <!-- The goal the AI is working toward. Visible because a memory the user can't see is
              one they can't correct — previously the model quietly decided what to remember and
@@ -2707,15 +2745,6 @@ See the LICENSE file in the root of this repository for complete details.
         <button class="qm-btn" class:qm-active={settingsForm.subtitle_enabled} onclick={quickToggleSubtitle}>
           💬 {settingsForm.subtitle_enabled ? "Caption: on" : "Caption: off"}
         </button>
-        {#if isOverlayCleared}
-          <button class="qm-btn" onclick={quickShowScreen}>
-            👁 Show
-          </button>
-        {:else}
-          <button class="qm-btn" onclick={quickClearScreen}>
-            ✕ Clear
-          </button>
-        {/if}
       </div>
     {/if}
 
@@ -2824,6 +2853,15 @@ See the LICENSE file in the root of this repository for complete details.
     <button class="target-hint" onclick={openTargetPicker}>
       <span class="target-hint-arrow"></span>
       Click here to select the app you want me to assist with.
+    </button>
+  {/if}
+
+  <!-- One-time coach mark pointing at the collapse button; clicking it -->
+  <!-- collapses the panel directly, same as the button it describes. -->
+  {#if showCollapseHint && !iconMode && !showPrivacyDisclosure}
+    <button class="collapse-hint" onclick={collapseToIcon}>
+      <span class="collapse-hint-arrow"></span>
+      In your way? Click here to shrink Navisual to a small floating icon.
     </button>
   {/if}
 
@@ -3868,6 +3906,41 @@ See the LICENSE file in the root of this repository for complete details.
     border-left: 1px solid rgba(255, 107, 53, 0.45);
     border-top: 1px solid rgba(255, 107, 53, 0.45);
   }
+  /* One-time coach mark anchored under the header's collapse button (2nd
+     icon from the right, before Close). Same treatment as .target-hint. */
+  .collapse-hint {
+    position: fixed;
+    top: 38px;
+    right: 8px;
+    max-width: 220px;
+    text-align: left;
+    background: var(--surface-2);
+    border: 1px solid rgba(255, 107, 53, 0.45);
+    border-radius: 8px;
+    padding: 9px 11px;
+    font-size: 11.5px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    z-index: 997;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    cursor: pointer;
+  }
+  .collapse-hint:hover {
+    color: var(--text-primary);
+    border-color: rgba(255, 107, 53, 0.7);
+  }
+  .collapse-hint-arrow {
+    position: absolute;
+    top: -5px;
+    right: 40px;
+    width: 8px;
+    height: 8px;
+    transform: rotate(45deg);
+    background: var(--surface-2);
+    border-left: 1px solid rgba(255, 107, 53, 0.45);
+    border-top: 1px solid rgba(255, 107, 53, 0.45);
+  }
   .target-picker {
     position: fixed;
     top: 34px;
@@ -4045,6 +4118,26 @@ See the LICENSE file in the root of this repository for complete details.
     text-transform: uppercase;
     letter-spacing: 0.08em;
     flex-shrink: 0;
+  }
+
+  /* Promoted out of the ··· quick-menu — always visible whenever there's a
+     pointer/caption on screen to hide or bring back. */
+  .clear-toggle-btn {
+    margin-left: auto;
+    flex-shrink: 0;
+    background: var(--surface-3);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .clear-toggle-btn:hover {
+    background: var(--surface-2, #2d2d33);
+    color: var(--text-primary);
   }
 
   .latest-text {
