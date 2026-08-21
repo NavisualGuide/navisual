@@ -106,6 +106,12 @@ impl AnthropicClient {
                         }
                     },
                     "goal": {"type": "string", "description": "The user's overall objective, carried across turns. Set it from their first request. When they add detail or a constraint later, MERGE it into the existing goal rather than replacing it - 'centre them at the bottom' REFINES 'add page numbers starting on page 3', it is not a new goal. Replace the goal outright only when the user genuinely switches to a different task. Omit or leave empty to keep the current goal unchanged."},
+                    "plan_outline": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 8,
+                        "description": "A short route overview toward the goal — like a map app's route overview, not turn-by-turn directions (that's steps/instruction). 2-8 short plain-language milestones, e.g. ['Open the Insert tab', 'Add page numbers', 'Set them to start at page 3', 'Skip the title page']. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append to it) whenever your understanding of the route changes — it is expected to change as you learn more. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task where a route overview would add nothing."
+                    },
                     "state_summary": {"type": "string", "description": "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED. Never assume an earlier turn is still visible."},
                     "needs_input": {"type": "boolean"},
                     "suggested_tasks": {

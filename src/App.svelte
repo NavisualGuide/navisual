@@ -44,6 +44,10 @@ See the LICENSE file in the root of this repository for complete details.
     /** The goal the backend is working toward (stage 4). Reflects a goal promoted from a
      *  needs_input reply, not necessarily the opening message. */
     goal: string;
+    /** A short route overview toward `goal` — the map-app "whole trip" view, not
+     *  turn-by-turn (that's `steps`). Model-maintained; empty until the model has
+     *  offered one. Shown when the user clicks the goal card. */
+    plan_outline: string[];
     provider: string;
     model: string | null;
     input_tokens: number | null;
@@ -292,6 +296,23 @@ See the LICENSE file in the root of this repository for complete details.
   // Stage 4: the goal the backend is working toward, surfaced so drift is a one-glance
   // catch instead of a three-wrong-steps discovery.
   let sessionGoal = $state("");
+  // Nav-app "route overview" for the goal above — a handful of model-maintained
+  // milestones, distinct from the turn-by-turn steps[]. Empty until the model has
+  // offered one (small/one-step tasks may never get one, by design). Revised
+  // wholesale by the backend, never accumulated — see Session::set_plan_outline.
+  let sessionPlanOutline = $state<string[]>([]);
+  let planOverviewOpen = $state(false);
+  // Pinned = the route overview stays inline under the goal card permanently instead
+  // of needing a click to reopen every time. A standing preference, not per-task —
+  // survives new tasks/sessions and restarts (localStorage), same as other one-off
+  // UI prefs here (PANEL_SIZE_KEY, PRIVACY_DISCLOSURE_KEY).
+  const PLAN_PINNED_KEY = "navisual-plan-pinned-v1";
+  let planPinned = $state(false);
+  function togglePlanPinned(pin: boolean) {
+    planPinned = pin;
+    try { localStorage.setItem(PLAN_PINNED_KEY, pin ? "1" : "0"); } catch (_) {}
+    if (pin) planOverviewOpen = false; // the inline card replaces the popover
+  }
   // Managed provider (S.1 / S.2) state now lives in the billing store
   // (src/lib/billing.svelte.ts) — billing.freeRemaining/coinBalanceMicro/tier used to be
   // three $states here written from 6+ places, the root of the F1/F6 bug class.
@@ -1409,6 +1430,8 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function newSession() {
     isOverlayCleared = false;
+    planOverviewOpen = false;
+    sessionPlanOutline = [];
     cancelRequest();
     // Reset Rust-side session state including target_hwnd so the next Guide me
     // call re-discovers the foreground window instead of reusing a stale target.
@@ -1479,6 +1502,7 @@ See the LICENSE file in the root of this repository for complete details.
     if (res.provider) provider = res.provider;
     if (res.model) routedModel = res.model;
     sessionGoal = res.goal ?? "";
+    sessionPlanOutline = res.plan_outline ?? [];
     phase = res.needs_input ? "needs_input" : "guiding";
     if (phase === "guiding") maybeShowCollapseHint();
     if (res.instruction) {
@@ -1959,6 +1983,9 @@ See the LICENSE file in the root of this repository for complete details.
         showPrivacyDisclosure = true;
       }
     } catch (_) {}
+    try {
+      planPinned = localStorage.getItem(PLAN_PINNED_KEY) === "1";
+    } catch (_) {}
 
     // Position bottom-right then show — panel starts hidden (visible:false in
     // tauri.conf.json) so the user never sees a blank frame at 0,0 while
@@ -2307,6 +2334,59 @@ See the LICENSE file in the root of this repository for complete details.
       </div>
     </div>
 
+    <!-- The goal the AI is working toward, and its route overview. Deliberately OUTSIDE
+         latest-box: submitTask/nextStep/correction all blank currentInstruction the
+         instant "thinking" starts (so the old instruction doesn't linger next to a new
+         one being streamed), which used to take this whole dashboard down with it —
+         reported live: it vanished on every single "Next"/"Follow up" click, not just
+         while genuinely idle. Gated on sessionGoal alone so it survives across the
+         entire session, updating in place once each response lands, exactly like the
+         "revise, don't erase" goal/plan_outline fields it displays. -->
+    <!-- Nav-app "route overview": the goal card is deliberately more prominent than a
+         status line — seeing the path forward ahead of time is what builds trust, the
+         same reason a map app shows the whole route before turn-by-turn starts. Click
+         it to see the plan; the plan itself is expected to change as Navisual learns
+         more (it's part of the memory system, not a fixed itinerary computed once). -->
+    {#if sessionGoal}
+      <button
+        class="goal-card"
+        onclick={() => { if (!planPinned) planOverviewOpen = !planOverviewOpen; }}
+        title={planPinned ? "What Navisual thinks you're trying to do — pinned below" : "What Navisual thinks you're trying to do — click to see the planned route"}
+      >
+        <span class="goal-card-icon" aria-hidden="true">🗺️</span>
+        <span class="goal-card-body">
+          <span class="goal-label">Working on</span>
+          <span class="goal-text">{sessionGoal}</span>
+        </span>
+        {#if planPinned}
+          <span class="goal-card-pinned" aria-hidden="true">📌</span>
+        {:else}
+          <span class="goal-card-chevron" class:goal-card-chevron-open={planOverviewOpen}>›</span>
+        {/if}
+      </button>
+    {/if}
+
+    <!-- Pinned route overview — always visible in place of needing to reopen the
+         popover every time. -->
+    {#if planPinned && sessionGoal}
+      <div class="plan-inline">
+        <div class="plan-inline-header">
+          <span class="plan-inline-title">🗺️ Planned route</span>
+          <button class="plan-inline-unpin" onclick={() => togglePlanPinned(false)} title="Unpin — go back to click-to-view">📌 Unpin</button>
+        </div>
+        {#if sessionPlanOutline.length > 0}
+          <ol class="plan-overview-list">
+            {#each sessionPlanOutline as milestone, i (i)}
+              <li>{milestone}</li>
+            {/each}
+          </ol>
+          <p class="plan-overview-footnote">This adapts as Navisual learns more — not a fixed route.</p>
+        {:else}
+          <p class="plan-overview-empty">No route mapped out yet — it'll appear here once Navisual has a clearer picture of the steps ahead.</p>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Latest instruction (visible when guiding) -->
     {#if currentInstruction && (phase === "guiding" || phase === "needs_input" || (isThinking && currentInstruction))}
       <section class="latest-box">
@@ -2337,16 +2417,6 @@ See the LICENSE file in the root of this repository for complete details.
             {/if}
           {/if}
         </div>
-        <!-- The goal the AI is working toward. Visible because a memory the user can't see is
-             one they can't correct — previously the model quietly decided what to remember and
-             the user only found out after a few wrong steps. If it's wrong, saying so is just a
-             normal message, which the backend promotes into the goal. -->
-        {#if sessionGoal && phase !== "thinking"}
-          <div class="goal-line" title="What Navisual thinks you're trying to do. If it's wrong, just say so.">
-            <span class="goal-label">Working on</span>
-            <span class="goal-text">{sessionGoal}</span>
-          </div>
-        {/if}
         {#if staleResponse && phase !== "thinking"}
           <div class="stale-banner" role="status">
             <span class="stale-icon">⚠</span>
@@ -2843,6 +2913,32 @@ See the LICENSE file in the root of this repository for complete details.
           <span class="target-pick-name">🖥️ Entire desktop</span>
           <span class="target-pick-sub">share the whole screen — all windows</span>
         </button>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- Plan overview — the nav-app "whole route" popover opened from the goal
+       card. A model that hasn't offered a route yet gets an honest placeholder
+       rather than an empty list, so the affordance never looks broken. -->
+  {#if planOverviewOpen && !planPinned}
+    <div class="plan-overview-backdrop" role="presentation" onclick={() => (planOverviewOpen = false)}></div>
+    <div class="plan-overview">
+      <div class="plan-overview-header">
+        <span class="plan-overview-title">🗺️ Planned route</span>
+        <div class="plan-overview-header-actions">
+          <button class="plan-overview-pin" onclick={() => togglePlanPinned(true)} title="Pin here so it's always visible, no need to reopen it">📌 Pin</button>
+          <button class="plan-overview-close" onclick={() => (planOverviewOpen = false)} title="Close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      {#if sessionPlanOutline.length > 0}
+        <ol class="plan-overview-list">
+          {#each sessionPlanOutline as milestone, i (i)}
+            <li>{milestone}</li>
+          {/each}
+        </ol>
+        <p class="plan-overview-footnote">This adapts as Navisual learns more — not a fixed route.</p>
+      {:else}
+        <p class="plan-overview-empty">No route mapped out yet — Navisual will share one here once it has a clearer picture of the steps ahead.</p>
       {/if}
     </div>
   {/if}
@@ -4089,28 +4185,183 @@ See the LICENSE file in the root of this repository for complete details.
     margin-bottom: 5px;
   }
 
-  .goal-line {
+  /* The goal card — deliberately more significant than a status line (was
+     .goal-line: a thin baseline-aligned row that read as metadata, easy to
+     miss entirely). Clickable: opens the plan-overview popover. */
+  .goal-card {
     display: flex;
-    gap: 6px;
-    align-items: baseline;
-    margin: 2px 0 8px 0;
-    font-size: 0.82em;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin: 2px 0 10px 0;
+    padding: 8px 10px;
+    background: rgba(255, 107, 53, 0.08);
+    border: 1px solid rgba(255, 107, 53, 0.25);
+    border-radius: 8px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .goal-card:hover {
+    background: rgba(255, 107, 53, 0.14);
+    border-color: rgba(255, 107, 53, 0.4);
+  }
+  .goal-card-icon {
+    flex-shrink: 0;
+    font-size: 16px;
+    line-height: 1;
+  }
+  .goal-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+  }
+  .goal-card-chevron {
+    flex-shrink: 0;
+    font-size: 18px;
     color: var(--text-tertiary);
-    line-height: 1.35;
+    transition: transform 0.15s;
+  }
+  .goal-card-chevron-open {
+    transform: rotate(90deg);
   }
   .goal-label {
     flex: 0 0 auto;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 0.9em;
+    font-size: 0.72em;
     opacity: 0.75;
+    color: var(--text-tertiary);
   }
   .goal-text {
-    color: var(--text-secondary);
+    color: var(--text-primary);
+    font-size: 0.92em;
+    font-weight: 600;
+    line-height: 1.35;
     /* Long goals wrap rather than truncate — a clipped goal is exactly as unverifiable
        as no goal, which would defeat showing it. */
     overflow-wrap: anywhere;
   }
+
+  /* Plan overview — the map-app "whole route" popover, opened from the goal card. */
+  .plan-overview-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 1000;
+  }
+  .plan-overview {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 240px;
+    max-width: 320px;
+    max-height: 70vh;
+    overflow-y: auto;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    z-index: 1001;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  }
+  .plan-overview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .plan-overview-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .plan-overview-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .plan-overview-pin {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 7px;
+  }
+  .plan-overview-pin:hover { color: var(--text-primary); border-color: var(--text-tertiary); }
+  .plan-overview-close {
+    background: none;
+    border: none;
+    color: var(--text-tertiary);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 2px 4px;
+  }
+  .plan-overview-close:hover { color: var(--text-primary); }
+  .plan-overview-list {
+    margin: 0;
+    padding-left: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--text-primary);
+  }
+  .plan-overview-footnote {
+    margin: 10px 0 0;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+  }
+  .plan-overview-empty {
+    margin: 4px 0 0;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+  .goal-card-pinned {
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1;
+    opacity: 0.8;
+  }
+  /* Pinned route overview — same content as .plan-overview, laid out inline (in the
+     normal document flow, right under the goal card) instead of a floating modal. */
+  .plan-inline {
+    margin: 0 0 10px 0;
+    padding: 10px 12px;
+    background: rgba(255, 107, 53, 0.05);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .plan-inline-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .plan-inline-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .plan-inline-unpin {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-tertiary);
+    font-size: 10.5px;
+    cursor: pointer;
+    padding: 2px 7px;
+  }
+  .plan-inline-unpin:hover { color: var(--text-primary); border-color: var(--text-tertiary); }
   .step-counter {
     font-size: 10px;
     font-weight: 600;

@@ -160,6 +160,14 @@ actions — the user does everything.
     (rule 13). Optional prefill candidates only — never instructions, never
     auto-executed. Do NOT include them mid-sequence while steps remain, and
     never suggest anything involving the instruction panel.
+18. PLAN OUTLINE: set plan_outline (top-level) to 2-8 short plain-language
+    milestones toward the goal — a route overview the user can open from a
+    "Working on: ..." panel, like a map app showing the whole trip rather
+    than only the next turn. Not turn-by-turn (steps/instruction already
+    cover that) and not required for a simple one-step task. REVISE the
+    whole list — replace it, don't append — whenever a step succeeds, fails,
+    or your understanding of the route otherwise changes; a stale plan is
+    worse than none. Omit the field to leave whatever you set last unchanged.
 
 Use the navigate_step tool for all responses."#;
 

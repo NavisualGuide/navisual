@@ -243,6 +243,7 @@ impl OllamaClient {
         // Last resort: wrap raw text as a single checkpoint step.
         let fallback = NavigateStepResponse {
             goal: String::new(),
+            plan_outline: Vec::new(),
             steps: vec![GuidanceStep {
                 instruction: text.clone(),
                 target_text: None,

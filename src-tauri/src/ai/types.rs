@@ -321,6 +321,14 @@ pub struct NavigateStepResponse {
     /// parse anywhere else here (`lax_bbox`, `lax_overlay`, `lax_suggestions`).
     #[serde(default)]
     pub goal: String,
+    /// A short, human-readable route overview toward `goal` — the nav-app "here's the
+    /// whole trip" view, not turn-by-turn (that's `steps`/`instruction`). Same mutability
+    /// contract as `goal`: maintained by the model, empty means "unchanged" (a model that
+    /// never emits it just never shows a plan), and it is expected to be REVISED, not
+    /// appended to, whenever the model's understanding of the route changes — the user
+    /// explicitly wants this dynamic rather than a fixed itinerary fixed at turn 1.
+    #[serde(default, deserialize_with = "lax_plan_outline")]
+    pub plan_outline: Vec<String>,
     #[serde(default)]
     pub state_summary: String,
     #[serde(default)]
@@ -365,6 +373,37 @@ where
         }
         out.push(s.to_string());
         if out.len() == MAX_SUGGESTIONS {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Lax `plan_outline` deserializer — same shape as [`lax_suggestions`] (dedupe,
+/// length-capped, malformed-or-non-array becomes empty, never a parse failure), with
+/// its own caps: a route overview is a handful of milestones, not a task list, so it
+/// gets more entries than `suggested_tasks` but a tighter per-entry length (this is
+/// read at a glance, not read aloud).
+fn lax_plan_outline<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    const MAX_ITEMS: usize = 8;
+    const MAX_CHARS: usize = 70;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let Some(arr) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<String> = Vec::new();
+    for v in arr {
+        let Some(s) = v.as_str().map(str::trim) else {
+            continue;
+        };
+        if s.is_empty() || s.chars().count() > MAX_CHARS {
+            continue;
+        }
+        out.push(s.to_string());
+        if out.len() == MAX_ITEMS {
             break;
         }
     }

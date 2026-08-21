@@ -2088,6 +2088,23 @@ fn session_goal(state: &AppState) -> String {
         .unwrap_or_default()
 }
 
+/// The session's current route overview, for `GuideResponse.plan_outline`. Same
+/// try_lock rationale as `session_goal` — display-only, never worth blocking a
+/// response on.
+fn session_plan_outline(state: &AppState) -> Vec<String> {
+    state
+        .ai_router
+        .try_lock()
+        .ok()
+        .and_then(|r| {
+            r.session_manager
+                .current_session
+                .as_ref()
+                .map(|s| s.plan_outline.clone())
+        })
+        .unwrap_or_default()
+}
+
 /// Exe filename stem for `LocateTrace.app_name` — PII-free app identity (see the field's
 /// doc comment for why this is the exe stem and not the resolved display title).
 fn trace_app_name(hwnd_opt: Option<usize>) -> Option<String> {
@@ -2413,6 +2430,11 @@ struct GuideResponse {
     /// wrong steps later. Empty before a goal exists. This is the product's own slogan
     /// applied to memory: the AI guides, you decide.
     goal: String,
+    /// Model-maintained route overview toward `goal` (the nav-app "route overview" the
+    /// panel's goal line expands into on click). Empty when the model hasn't offered one
+    /// yet; never cleared once set except by a model-issued revision (see
+    /// `Session::set_plan_outline`).
+    plan_outline: Vec<String>,
     provider: String,
     /// The model that actually handled this request. For managed this is the concrete
     /// model OpenRouter routed to (the relay sends the `openrouter/free` router); for
@@ -2849,6 +2871,7 @@ async fn guide(
                     .unwrap_or_else(|| "The pinned app".to_string());
                 return Ok(GuideResponse {
                     goal: session_goal(&state),
+                    plan_outline: session_plan_outline(&state),
                     ok: false,
                     session_id,
                     request_id: None,
@@ -3023,6 +3046,7 @@ async fn guide(
         Err(()) => {
             return Ok(GuideResponse {
                 goal: session_goal(&state),
+                plan_outline: session_plan_outline(&state),
                 ok: false,
                 session_id,
                 request_id: None,
@@ -3373,6 +3397,7 @@ async fn guide(
             }
             return Ok(GuideResponse {
                 goal: session_goal(&state),
+                plan_outline: session_plan_outline(&state),
                 ok: false,
                 session_id,
                 request_id: Some(request_id),
@@ -3411,6 +3436,7 @@ async fn guide(
     let steps = steps;
     let state_summary = response.state_summary;
     let response_goal = response.goal.clone();
+    let response_plan_outline = response.plan_outline.clone();
     let needs_input = response.needs_input;
     // Workstream P: the toggle gates the data at the source — when off, suggestions
     // never reach the frontend (the static prompt rule stays; making it dynamic
@@ -3434,6 +3460,13 @@ async fn guide(
                 response_goal
             );
             session.set_task_description(response_goal.trim().to_string());
+        }
+        // Same contract as goal: empty means "unchanged". Unlike goal, a non-empty
+        // outline always replaces rather than being compared first — a revised route
+        // is the expected, routine case (the model is meant to redraw it as the plan
+        // develops), not a rare correction worth logging every time.
+        if !response_plan_outline.is_empty() {
+            session.set_plan_outline(response_plan_outline);
         }
         session.update_state(state_summary.clone());
         let user_turn_text = if task.is_empty() {
@@ -3498,6 +3531,7 @@ async fn guide(
         emit_stale_if_drifted(&app, pre_hash, stale_hash);
         return Ok(GuideResponse {
             goal: session_goal(&state),
+            plan_outline: session_plan_outline(&state),
             ok: true,
             session_id,
             request_id: Some(request_id),
@@ -3599,6 +3633,7 @@ async fn guide(
 
     Ok(GuideResponse {
         goal: session_goal(&state),
+        plan_outline: session_plan_outline(&state),
         ok: true,
         session_id,
         request_id: Some(request_id),
@@ -3741,6 +3776,7 @@ async fn next_step(
 
     Ok(GuideResponse {
         goal: session_goal(&state),
+        plan_outline: session_plan_outline(&state),
         ok: true,
         session_id,
         request_id,
@@ -3935,6 +3971,7 @@ async fn retry_locate(
 
     Ok(GuideResponse {
         goal: session_goal(&state),
+        plan_outline: session_plan_outline(&state),
         ok: true,
         session_id,
         request_id,
@@ -4363,6 +4400,7 @@ async fn send_correction(
     let steps = steps;
     let state_summary = response.state_summary;
     let response_goal = response.goal.clone();
+    let response_plan_outline = response.plan_outline.clone();
     let needs_input = response.needs_input;
     // Workstream P: same source-gating as guide().
     let suggested_tasks = if router.config.task_suggestions {
@@ -4384,6 +4422,10 @@ async fn send_correction(
                 response_goal
             );
             session.set_task_description(response_goal.trim().to_string());
+        }
+        // Same contract as guide() — see the comment there.
+        if !response_plan_outline.is_empty() {
+            session.set_plan_outline(response_plan_outline);
         }
         session.update_state(state_summary.clone());
         session.add_turn("user", user_text.to_string(), None);
@@ -4427,6 +4469,7 @@ async fn send_correction(
         emit_stale_if_drifted(&app, pre_hash, stale_hash);
         return Ok(GuideResponse {
             goal: session_goal(&state),
+            plan_outline: session_plan_outline(&state),
             ok: true,
             session_id,
             request_id: Some(request_id),
@@ -4527,6 +4570,7 @@ async fn send_correction(
 
     Ok(GuideResponse {
         goal: session_goal(&state),
+        plan_outline: session_plan_outline(&state),
         ok: true,
         session_id,
         request_id: Some(request_id),

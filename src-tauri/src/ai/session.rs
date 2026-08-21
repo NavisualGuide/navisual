@@ -43,6 +43,11 @@ pub struct Turn {
 pub struct Session {
     pub id: Uuid,
     pub task_description: String,
+    /// Model-maintained route overview toward `task_description` — see
+    /// `NavigateStepResponse::plan_outline`. `#[serde(default)]` so sessions saved
+    /// before this field existed load as an empty (no-plan-shown) list.
+    #[serde(default)]
+    pub plan_outline: Vec<String>,
     #[serde(default)]
     pub conversation: Vec<Turn>,
     pub current_state_summary: Option<StateSummary>,
@@ -68,6 +73,7 @@ impl Session {
         Self {
             id: Uuid::new_v4(),
             task_description,
+            plan_outline: Vec::new(),
             conversation: Vec::new(),
             current_state_summary: None,
             current_step_sequence: Vec::new(),
@@ -111,6 +117,16 @@ impl Session {
         if !task.trim().is_empty() {
             self.task_description = task;
         }
+    }
+
+    /// Replaces the stored route overview wholesale — a REVISION, not an append.
+    /// Deliberately not merged/accumulated: a plan that only grows would show every
+    /// abandoned direction alongside the current one, which is worse than no plan.
+    /// Called only when the model actually returned a non-empty list (see
+    /// `NavigateStepResponse::plan_outline`); empty means "unchanged" and never
+    /// reaches here.
+    pub fn set_plan_outline(&mut self, outline: Vec<String>) {
+        self.plan_outline = outline;
     }
 
     /// Keep only the most recent `MAX_PINNED_TURNS` pins, un-pinning older ones.
@@ -310,6 +326,20 @@ mod tests {
         // A blank/whitespace answer must not wipe it.
         s.set_task_description("   ".into());
         assert_eq!(s.task_description, "add page numbers from page 3");
+    }
+
+    #[test]
+    fn plan_outline_is_replaced_wholesale_not_merged() {
+        let mut s = Session::new("add page numbers".into());
+        s.set_plan_outline(vec!["Open Insert tab".into(), "Add page numbers".into()]);
+        // The model revises its route (e.g. the user asked to also centre them) —
+        // the new list must fully replace the old one, not accumulate alongside it.
+        s.set_plan_outline(vec![
+            "Open Insert tab".into(),
+            "Add page numbers".into(),
+            "Centre them at the bottom".into(),
+        ]);
+        assert_eq!(s.plan_outline.len(), 3, "revision replaces, it doesn't append");
     }
 
     #[test]
