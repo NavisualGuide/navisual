@@ -329,6 +329,15 @@ pub struct NavigateStepResponse {
     /// explicitly wants this dynamic rather than a fixed itinerary fixed at turn 1.
     #[serde(default, deserialize_with = "lax_plan_outline")]
     pub plan_outline: Vec<String>,
+    /// How many of `plan_outline`'s milestones are already done, 0-based-index-of-
+    /// current == this count. `None` (the JSON key omitted, or a malformed value —
+    /// `lax_option` swallows both) means "unchanged", same convention as `goal` and
+    /// `plan_outline` — the model is not required to restate progress every turn.
+    /// Never trusted as an in-bounds index on its own: `Session::set_plan_completed_count`
+    /// clamps to `plan_outline.len()`, since a stale count from before a plan revision
+    /// (or a model simply overcounting) must never index past the end of the list.
+    #[serde(default, deserialize_with = "lax_option")]
+    pub plan_completed_count: Option<usize>,
     #[serde(default)]
     pub state_summary: String,
     #[serde(default)]

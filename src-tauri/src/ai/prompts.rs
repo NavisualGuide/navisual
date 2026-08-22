@@ -168,6 +168,12 @@ actions — the user does everything.
     whole list — replace it, don't append — whenever a step succeeds, fails,
     or your understanding of the route otherwise changes; a stale plan is
     worse than none. Omit the field to leave whatever you set last unchanged.
+    Also set plan_completed_count (top-level, next to plan_outline) to how
+    many of its milestones are already done, counting from the first (0 =
+    still on the first one). Update it as milestones finish, and again
+    whenever you revise plan_outline itself — count against the NEW list,
+    not the old one. Omit to leave the previous count unchanged; it means
+    nothing without plan_outline, so omit both together.
 
 Use the navigate_step tool for all responses."#;
 

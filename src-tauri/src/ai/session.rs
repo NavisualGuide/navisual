@@ -48,6 +48,10 @@ pub struct Session {
     /// before this field existed load as an empty (no-plan-shown) list.
     #[serde(default)]
     pub plan_outline: Vec<String>,
+    /// How many leading `plan_outline` milestones are done — index of the CURRENT
+    /// one (0-based). Always in `0..=plan_outline.len()`; see `set_plan_completed_count`.
+    #[serde(default)]
+    pub plan_completed_count: usize,
     #[serde(default)]
     pub conversation: Vec<Turn>,
     pub current_state_summary: Option<StateSummary>,
@@ -74,6 +78,7 @@ impl Session {
             id: Uuid::new_v4(),
             task_description,
             plan_outline: Vec::new(),
+            plan_completed_count: 0,
             conversation: Vec::new(),
             current_state_summary: None,
             current_step_sequence: Vec::new(),
@@ -127,6 +132,17 @@ impl Session {
     /// reaches here.
     pub fn set_plan_outline(&mut self, outline: Vec<String>) {
         self.plan_outline = outline;
+        // A revision can shrink the list out from under a previously-valid progress
+        // count (or grow it — either way the old count is still a safe lower bound).
+        self.plan_completed_count = self.plan_completed_count.min(self.plan_outline.len());
+    }
+
+    /// How far along `plan_outline` the model says the session has progressed.
+    /// Clamped to the list's current length so a stale/overcounted value from the
+    /// model can never index past the end — the frontend trusts this number as an
+    /// in-bounds array index/highlight cutoff without re-checking it.
+    pub fn set_plan_completed_count(&mut self, count: usize) {
+        self.plan_completed_count = count.min(self.plan_outline.len());
     }
 
     /// Keep only the most recent `MAX_PINNED_TURNS` pins, un-pinning older ones.
@@ -340,6 +356,27 @@ mod tests {
             "Centre them at the bottom".into(),
         ]);
         assert_eq!(s.plan_outline.len(), 3, "revision replaces, it doesn't append");
+    }
+
+    #[test]
+    fn plan_completed_count_is_clamped_to_outline_length() {
+        let mut s = Session::new("add page numbers".into());
+        s.set_plan_outline(vec!["Open Insert tab".into(), "Add page numbers".into()]);
+        // A model that overcounts (or a stale count from before) must never index
+        // past the end of the list.
+        s.set_plan_completed_count(5);
+        assert_eq!(s.plan_completed_count, 2);
+    }
+
+    #[test]
+    fn plan_completed_count_is_reclamped_when_outline_shrinks() {
+        let mut s = Session::new("add page numbers".into());
+        s.set_plan_outline(vec!["a".into(), "b".into(), "c".into(), "d".into()]);
+        s.set_plan_completed_count(3);
+        // The model revises down to a shorter route — the old count must not
+        // survive pointing past the new, shorter list.
+        s.set_plan_outline(vec!["a".into(), "b".into()]);
+        assert_eq!(s.plan_completed_count, 2);
     }
 
     #[test]

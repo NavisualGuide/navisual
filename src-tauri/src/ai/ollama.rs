@@ -244,6 +244,7 @@ impl OllamaClient {
         let fallback = NavigateStepResponse {
             goal: String::new(),
             plan_outline: Vec::new(),
+            plan_completed_count: None,
             steps: vec![GuidanceStep {
                 instruction: text.clone(),
                 target_text: None,

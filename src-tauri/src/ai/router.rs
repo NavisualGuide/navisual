@@ -372,13 +372,19 @@ impl AiRouter {
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
             Some(ApiClient::DeepSeek(c)) => {
-                // CONFIRMED 2026-05-24: api.deepseek.com rejects image_url with HTTP 400
-                // ("unknown variant `image_url`, expected `text`") for both
-                // deepseek-v4-flash and deepseek-v4-pro. DeepSeek V4 is text-only via
-                // the official API — it cannot see the screen, so guidance is inferred
-                // from the task text + history. For a China-native VISION option, use
-                // Qwen (Qwen3-VL via DashScope), which accepts the screenshot below.
-                let msgs = build_deepseek(user_text, screenshot_b64, state_summary, &conversation);
+                // CONFIRMED 2026-05-24 (reconfirmed 2026-07-09): api.deepseek.com rejects
+                // image_url with HTTP 400 ("unknown variant `image_url`, expected `text`")
+                // for deepseek-v4-flash and deepseek-v4-pro — those two stay on the
+                // text-only builder. DeepSeek's own announcement (news260821) shipped a
+                // THIRD, vision-capable model the same API now accepts images for:
+                // deepseek-v4-flash-vision-exp ("Supports mixed text + image input").
+                // Gated on the exact model string, not the provider, so the two confirmed
+                // text-only models can never accidentally get an image_url they'd 400 on.
+                let msgs = if c.model == "deepseek-v4-flash-vision-exp" {
+                    build_openai(user_text, screenshot_b64, state_summary, &conversation)
+                } else {
+                    build_deepseek(user_text, screenshot_b64, state_summary, &conversation)
+                };
                 c.send_message(msgs, None, &mut on_chunk).await?
             }
             Some(ApiClient::OpenAI(c)) | Some(ApiClient::Qwen(c)) | Some(ApiClient::Custom(c)) => {

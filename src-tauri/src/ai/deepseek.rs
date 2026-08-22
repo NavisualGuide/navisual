@@ -47,7 +47,8 @@ Top-level fields (outside "steps", required):
 
 Optional top-level fields:
 - suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence
-- plan_outline: a short route overview toward the goal — like a map app's route overview, not turn-by-turn (that's steps/instruction). 2-8 short plain-language milestones, e.g. ["Open the Insert tab", "Add page numbers", "Set them to start at page 3"]. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append) whenever your understanding of the route changes. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task"#;
+- plan_outline: a short route overview toward the goal — like a map app's route overview, not turn-by-turn (that's steps/instruction). 2-8 short plain-language milestones, e.g. ["Open the Insert tab", "Add page numbers", "Set them to start at page 3"]. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append) whenever your understanding of the route changes. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task
+- plan_completed_count: how many of plan_outline's milestones (counting from the first) are already done — 0 means still on the first one, 1 means the first is done and you're on the second, etc. Update as milestones finish, and again whenever you revise plan_outline (count against the NEW list). Omit to leave the previous count unchanged; meaningless without plan_outline, so omit both together"#;
 
 pub struct DeepSeekClient {
     client: Client,
@@ -622,6 +623,7 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
     NavigateStepResponse {
         goal: String::new(),
         plan_outline: Vec::new(),
+        plan_completed_count: None,
         steps: vec![GuidanceStep {
             instruction: text.to_string(),
             target_text: None,

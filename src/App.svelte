@@ -48,6 +48,10 @@ See the LICENSE file in the root of this repository for complete details.
      *  turn-by-turn (that's `steps`). Model-maintained; empty until the model has
      *  offered one. Shown when the user clicks the goal card. */
     plan_outline: string[];
+    /** How many leading `plan_outline` milestones are already done — always
+     *  <= plan_outline.length. Drives the current-milestone highlight and the
+     *  goal card's progress bar. */
+    plan_completed_count: number;
     provider: string;
     model: string | null;
     input_tokens: number | null;
@@ -301,18 +305,14 @@ See the LICENSE file in the root of this repository for complete details.
   // offered one (small/one-step tasks may never get one, by design). Revised
   // wholesale by the backend, never accumulated — see Session::set_plan_outline.
   let sessionPlanOutline = $state<string[]>([]);
-  let planOverviewOpen = $state(false);
-  // Pinned = the route overview stays inline under the goal card permanently instead
-  // of needing a click to reopen every time. A standing preference, not per-task —
-  // survives new tasks/sessions and restarts (localStorage), same as other one-off
-  // UI prefs here (PANEL_SIZE_KEY, PRIVACY_DISCLOSURE_KEY).
-  const PLAN_PINNED_KEY = "navisual-plan-pinned-v1";
-  let planPinned = $state(false);
-  function togglePlanPinned(pin: boolean) {
-    planPinned = pin;
-    try { localStorage.setItem(PLAN_PINNED_KEY, pin ? "1" : "0"); } catch (_) {}
-    if (pin) planOverviewOpen = false; // the inline card replaces the popover
-  }
+  // How many leading sessionPlanOutline entries are done — drives the current-
+  // milestone highlight (expanded view) and the goal card's progress bar
+  // (collapsed view). Always <= sessionPlanOutline.length (backend-clamped).
+  let sessionPlanCompletedCount = $state(0);
+  // Whether the route overview is expanded in place under the goal card. No
+  // persisted "pin" state (simplified 2026-08-22, see the markup comment) — just
+  // an open/closed toggle, reset per session same as the rest of this dashboard.
+  let planExpanded = $state(false);
   // Managed provider (S.1 / S.2) state now lives in the billing store
   // (src/lib/billing.svelte.ts) — billing.freeRemaining/coinBalanceMicro/tier used to be
   // three $states here written from 6+ places, the root of the F1/F6 bug class.
@@ -742,7 +742,7 @@ See the LICENSE file in the root of this repository for complete details.
   const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-4-6","claude-opus-4-7"];
   const MODEL_PRESETS_GEMINI    = ["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-3.5-flash","gemini-3.1-pro-preview"];
   const MODEL_PRESETS_OPENAI    = ["gpt-5.5","gpt-5.4-mini"];
-  const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro"];
+  const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp"];
   const MODEL_PRESETS_QWEN      = ["qwen3.6-plus","qwen3.5-omni-plus"];
   // Qwen DashScope OpenAI-compatible endpoints by region. Picking a region in the
   // Settings "Endpoint" dropdown auto-fills qwen_base_url; "Custom" reveals a free
@@ -1291,6 +1291,22 @@ See the LICENSE file in the root of this repository for complete details.
     await setPanelOnTop(true); // back from the browser — restore always-on-top
   }
 
+  // Live-reported: switching Provider to Managed mid-session (started on a BYOK
+  // provider, e.g. via .env) left every paid quality tier stuck on "not enough
+  // coins" — billing.coinBalanceMicro stays null forever because the ONLY balance
+  // fetch was gated behind `api_provider === "managed"` at cold-start (onMount),
+  // which this session's provider never was. Switching to the Billing tab (which
+  // fetches its own balance on mount) and back "fixed" it, confirming the data was
+  // reachable, just never asked for. Mirrors the cold-start sign-in+refresh here so
+  // a live provider switch gets the same treatment a fresh launch on Managed does.
+  async function handleProviderChange() {
+    if (settingsForm.api_provider === "ollama" && ollamaModels.length === 0) refreshOllamaModels();
+    if (settingsForm.api_provider === "managed" && billing.coinBalanceMicro == null) {
+      try { await invoke("sign_in_anon"); } catch (_) {}
+      await billing.refresh();
+    }
+  }
+
   // ── Account management (S.2.1) ──────────────────────────────────────────────
   // The identity/view state and every acct* handler moved to
   // src/AccountPanel.svelte + src/lib/account.svelte.ts (componentization pass,
@@ -1430,8 +1446,9 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function newSession() {
     isOverlayCleared = false;
-    planOverviewOpen = false;
+    planExpanded = false;
     sessionPlanOutline = [];
+    sessionPlanCompletedCount = 0;
     cancelRequest();
     // Reset Rust-side session state including target_hwnd so the next Guide me
     // call re-discovers the foreground window instead of reusing a stale target.
@@ -1503,6 +1520,7 @@ See the LICENSE file in the root of this repository for complete details.
     if (res.model) routedModel = res.model;
     sessionGoal = res.goal ?? "";
     sessionPlanOutline = res.plan_outline ?? [];
+    sessionPlanCompletedCount = res.plan_completed_count ?? 0;
     phase = res.needs_input ? "needs_input" : "guiding";
     if (phase === "guiding") maybeShowCollapseHint();
     if (res.instruction) {
@@ -1983,9 +2001,6 @@ See the LICENSE file in the root of this repository for complete details.
         showPrivacyDisclosure = true;
       }
     } catch (_) {}
-    try {
-      planPinned = localStorage.getItem(PLAN_PINNED_KEY) === "1";
-    } catch (_) {}
 
     // Position bottom-right then show — panel starts hidden (visible:false in
     // tauri.conf.json) so the user never sees a blank frame at 0,0 while
@@ -2350,34 +2365,47 @@ See the LICENSE file in the root of this repository for complete details.
     {#if sessionGoal}
       <button
         class="goal-card"
-        onclick={() => { if (!planPinned) planOverviewOpen = !planOverviewOpen; }}
-        title={planPinned ? "What Navisual thinks you're trying to do — pinned below" : "What Navisual thinks you're trying to do — click to see the planned route"}
+        onclick={() => (planExpanded = !planExpanded)}
+        title={planExpanded ? "Hide the planned route" : "What Navisual thinks you're trying to do — click to see the planned route"}
       >
         <span class="goal-card-icon" aria-hidden="true">🗺️</span>
         <span class="goal-card-body">
           <span class="goal-label">Working on</span>
           <span class="goal-text">{sessionGoal}</span>
+          <!-- Collapsed: the list itself isn't visible here, so a compact bar stands
+               in for it — "how long is the journey" at a glance. Hidden once expanded,
+               since the full highlighted list right below already shows this. -->
+          {#if !planExpanded && sessionPlanOutline.length > 0}
+            <span class="goal-card-progress">
+              <span class="goal-card-progress-track">
+                <span class="goal-card-progress-fill" style={`width: ${(sessionPlanCompletedCount / sessionPlanOutline.length) * 100}%`}></span>
+              </span>
+              <span class="goal-card-progress-label">{Math.min(sessionPlanCompletedCount + 1, sessionPlanOutline.length)} of {sessionPlanOutline.length}</span>
+            </span>
+          {/if}
         </span>
-        {#if planPinned}
-          <span class="goal-card-pinned" aria-hidden="true">📌</span>
-        {:else}
-          <span class="goal-card-chevron" class:goal-card-chevron-open={planOverviewOpen}>›</span>
-        {/if}
+        <span class="goal-card-chevron" class:goal-card-chevron-open={planExpanded}>›</span>
       </button>
     {/if}
 
-    <!-- Pinned route overview — always visible in place of needing to reopen the
-         popover every time. -->
-    {#if planPinned && sessionGoal}
+    <!-- Route overview — expands in place under the goal card on click, collapses
+         back to the progress bar above on close. No separate "pin" concept: a
+         simplification (2026-08-22) over the earlier click-opens-a-modal-popover +
+         pin-to-make-it-stay design, which needed two controls to do what one
+         expand/collapse toggle already does. -->
+    {#if planExpanded && sessionGoal}
       <div class="plan-inline">
         <div class="plan-inline-header">
           <span class="plan-inline-title">🗺️ Planned route</span>
-          <button class="plan-inline-unpin" onclick={() => togglePlanPinned(false)} title="Unpin — go back to click-to-view">📌 Unpin</button>
+          <button class="plan-inline-close" onclick={() => (planExpanded = false)} title="Close" aria-label="Close">✕</button>
         </div>
         {#if sessionPlanOutline.length > 0}
           <ol class="plan-overview-list">
             {#each sessionPlanOutline as milestone, i (i)}
-              <li>{milestone}</li>
+              <li class:plan-item-done={i < sessionPlanCompletedCount} class:plan-item-current={i === sessionPlanCompletedCount}>
+                <span class="plan-item-marker" aria-hidden="true">{i < sessionPlanCompletedCount ? "✓" : i === sessionPlanCompletedCount ? "▸" : ""}</span>
+                {milestone}
+              </li>
             {/each}
           </ol>
           <p class="plan-overview-footnote">This adapts as Navisual learns more — not a fixed route.</p>
@@ -2917,32 +2945,6 @@ See the LICENSE file in the root of this repository for complete details.
     </div>
   {/if}
 
-  <!-- Plan overview — the nav-app "whole route" popover opened from the goal
-       card. A model that hasn't offered a route yet gets an honest placeholder
-       rather than an empty list, so the affordance never looks broken. -->
-  {#if planOverviewOpen && !planPinned}
-    <div class="plan-overview-backdrop" role="presentation" onclick={() => (planOverviewOpen = false)}></div>
-    <div class="plan-overview">
-      <div class="plan-overview-header">
-        <span class="plan-overview-title">🗺️ Planned route</span>
-        <div class="plan-overview-header-actions">
-          <button class="plan-overview-pin" onclick={() => togglePlanPinned(true)} title="Pin here so it's always visible, no need to reopen it">📌 Pin</button>
-          <button class="plan-overview-close" onclick={() => (planOverviewOpen = false)} title="Close" aria-label="Close">✕</button>
-        </div>
-      </div>
-      {#if sessionPlanOutline.length > 0}
-        <ol class="plan-overview-list">
-          {#each sessionPlanOutline as milestone, i (i)}
-            <li>{milestone}</li>
-          {/each}
-        </ol>
-        <p class="plan-overview-footnote">This adapts as Navisual learns more — not a fixed route.</p>
-      {:else}
-        <p class="plan-overview-empty">No route mapped out yet — Navisual will share one here once it has a clearer picture of the steps ahead.</p>
-      {/if}
-    </div>
-  {/if}
-
   <!-- One-time coach mark pointing at the target-app chip; clicking it opens
        the picker it describes, and it fades on its own after a few seconds. -->
   {#if showTargetHint && sharedApp && !showPrivacyDisclosure && !targetPickerOpen}
@@ -3084,7 +3086,7 @@ See the LICENSE file in the root of this repository for complete details.
               <label class="setting-label" for="provider-select">Provider</label>
               <select id="provider-select" class="setting-select"
                 bind:value={settingsForm.api_provider}
-                onchange={() => { if (settingsForm.api_provider === "ollama" && ollamaModels.length === 0) refreshOllamaModels(); }}>
+                onchange={handleProviderChange}>
                 <optgroup label="Navisual (hosted)">
                   <option value="managed">Managed — free + paid</option>
                 </optgroup>
@@ -3313,8 +3315,9 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="deepseek-model" class="setting-select"
                   value={customDeepSeek ? "__custom__" : settingsForm.deepseek_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customDeepSeek = false; settingsForm.deepseek_model = v; } else { customDeepSeek = true; settingsForm.deepseek_model = ""; } }}>
-                  <option value="deepseek-v4-flash">deepseek-v4-flash (recommended)</option>
-                  <option value="deepseek-v4-pro">deepseek-v4-pro (best quality)</option>
+                  <option value="deepseek-v4-flash">deepseek-v4-flash (recommended, text-only)</option>
+                  <option value="deepseek-v4-pro">deepseek-v4-pro (best quality, text-only)</option>
+                  <option value="deepseek-v4-flash-vision-exp">deepseek-v4-flash-vision-exp (experimental, sees the screen)</option>
                   <option value="__custom__">Custom model…</option>
                 </select>
                 {#if customDeepSeek}
@@ -4245,65 +4248,38 @@ See the LICENSE file in the root of this repository for complete details.
        as no goal, which would defeat showing it. */
     overflow-wrap: anywhere;
   }
-
-  /* Plan overview — the map-app "whole route" popover, opened from the goal card. */
-  .plan-overview-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.35);
-    z-index: 1000;
-  }
-  .plan-overview {
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    min-width: 240px;
-    max-width: 320px;
-    max-height: 70vh;
-    overflow-y: auto;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px 14px;
-    z-index: 1001;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-  }
-  .plan-overview-header {
+  /* "How long is the journey" at a glance, unpinned only — the pinned inline card
+     shows the same information as a highlighted list instead. */
+  .goal-card-progress {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
+    gap: 6px;
+    margin-top: 4px;
   }
-  .plan-overview-header-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
+  .goal-card-progress-track {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 107, 53, 0.18);
+    overflow: hidden;
   }
-  .plan-overview-title {
-    font-size: 13px;
+  .goal-card-progress-fill {
+    display: block;
+    height: 100%;
+    background: var(--accent-500, #ff6b35);
+    border-radius: 2px;
+    transition: width 0.2s ease-out;
+  }
+  .goal-card-progress-label {
+    flex-shrink: 0;
+    font-size: 0.68em;
     font-weight: 600;
-    color: var(--text-primary);
-  }
-  .plan-overview-pin {
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    color: var(--text-secondary);
-    font-size: 11px;
-    cursor: pointer;
-    padding: 2px 7px;
-  }
-  .plan-overview-pin:hover { color: var(--text-primary); border-color: var(--text-tertiary); }
-  .plan-overview-close {
-    background: none;
-    border: none;
     color: var(--text-tertiary);
-    font-size: 13px;
-    cursor: pointer;
-    padding: 2px 4px;
+    font-variant-numeric: tabular-nums;
   }
-  .plan-overview-close:hover { color: var(--text-primary); }
+
+  /* Route overview — the map-app "whole route" list, shown inline under the
+     goal card once expanded. */
   .plan-overview-list {
     margin: 0;
     padding-left: 20px;
@@ -4313,6 +4289,26 @@ See the LICENSE file in the root of this repository for complete details.
     font-size: 13px;
     line-height: 1.4;
     color: var(--text-primary);
+  }
+  /* Progress highlight — "where we are" on the route, per the user's request that
+     pinning the plan should show current position, not just a static list. */
+  .plan-item-marker {
+    display: inline-block;
+    width: 14px;
+    font-weight: 700;
+  }
+  .plan-item-done {
+    color: var(--text-tertiary);
+  }
+  .plan-item-done .plan-item-marker {
+    color: var(--accent-500, #ff6b35);
+  }
+  .plan-item-current {
+    color: var(--text-primary);
+    font-weight: 700;
+  }
+  .plan-item-current .plan-item-marker {
+    color: var(--accent-500, #ff6b35);
   }
   .plan-overview-footnote {
     margin: 10px 0 0;
@@ -4326,14 +4322,8 @@ See the LICENSE file in the root of this repository for complete details.
     color: var(--text-secondary);
     line-height: 1.5;
   }
-  .goal-card-pinned {
-    flex-shrink: 0;
-    font-size: 13px;
-    line-height: 1;
-    opacity: 0.8;
-  }
-  /* Pinned route overview — same content as .plan-overview, laid out inline (in the
-     normal document flow, right under the goal card) instead of a floating modal. */
+  /* Route overview, expanded in place — normal document flow, right under the
+     goal card, instead of a floating modal. */
   .plan-inline {
     margin: 0 0 10px 0;
     padding: 10px 12px;
@@ -4352,16 +4342,15 @@ See the LICENSE file in the root of this repository for complete details.
     font-weight: 600;
     color: var(--text-primary);
   }
-  .plan-inline-unpin {
+  .plan-inline-close {
     background: none;
-    border: 1px solid var(--border);
-    border-radius: 5px;
+    border: none;
     color: var(--text-tertiary);
-    font-size: 10.5px;
+    font-size: 12px;
     cursor: pointer;
-    padding: 2px 7px;
+    padding: 2px 4px;
   }
-  .plan-inline-unpin:hover { color: var(--text-primary); border-color: var(--text-tertiary); }
+  .plan-inline-close:hover { color: var(--text-primary); }
   .step-counter {
     font-size: 10px;
     font-weight: 600;
