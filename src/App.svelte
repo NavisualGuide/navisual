@@ -676,6 +676,13 @@ See the LICENSE file in the root of this repository for complete details.
   let pendingUpdate = $state<Update | null>(null);
   let updateStatus = $state<"idle" | "checking" | "downloading" | "done">("idle");
   let updateProgress = $state(0);
+  // True when running under MSIX package identity (Microsoft Store / sideloaded
+  // MSIX) rather than the NSIS install or dev. The Store requires updates to flow
+  // through the Store, so a packaged build must never self-update — this gates the
+  // whole updater path off at runtime, which is why ONE binary can serve both
+  // channels instead of maintaining a separate Store build. See the Rust
+  // `is_packaged` command + navisual-internal/docs/msix-store-spike.md.
+  let isPackaged = $state(false);
   let settingsTab = $state<SettingsTab>("provider");
 
   // Info (About) dialog → Usage tab
@@ -994,6 +1001,9 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   async function checkForUpdates(manual = false) {
+    // Store builds never self-update — see isPackaged. Guarded here rather than
+    // only at the call sites so no future caller can reintroduce the network hit.
+    if (isPackaged) return;
     if (updateStatus === "checking" || updateStatus === "downloading") return;
     updateStatus = "checking";
     try {
@@ -1991,7 +2001,10 @@ See the LICENSE file in the root of this repository for complete details.
 
   onMount(async () => {
     getVersion().then(v => { appVersion = v; }).catch(() => {});
-    setTimeout(() => checkForUpdates(), 5000);
+    // Resolve packaging BEFORE arming the update check — awaited, not fire-and-forget,
+    // so a Store build can't race the 5s timer and phone home once on launch.
+    try { isPackaged = await invokeReady<boolean>("is_packaged"); } catch (_) {}
+    if (!isPackaged) setTimeout(() => checkForUpdates(), 5000);
 
     // S5 — first-run privacy disclosure. Shown once per install; the user's
     // acknowledgement is persisted in localStorage (lives in WebView2 user
@@ -3670,9 +3683,13 @@ See the LICENSE file in the root of this repository for complete details.
             <button class="about-link" onclick={openFeedbackEmail}>Send feedback</button>
           </div>
 
-          <!-- Update section -->
+          <!-- Update section. A Store build manages updates through the Store, so
+               it gets a plain statement of fact instead of a control that would
+               either do nothing or violate Store policy. -->
           <div class="about-update">
-            {#if updateStatus === "downloading"}
+            {#if isPackaged}
+              <span class="update-status">Updates are managed by the Microsoft Store.</span>
+            {:else if updateStatus === "downloading"}
               <span class="update-status">Downloading… {updateProgress}%</span>
               <div class="update-progress-bar"><div class="update-progress-fill" style="width:{updateProgress}%"></div></div>
             {:else if updateStatus === "done"}

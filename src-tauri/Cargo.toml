@@ -89,6 +89,9 @@ windows = { version = "0.62", features = [
   "Win32_System_LibraryLoader",
   # CredWriteW/CredReadW — BYOK API keys in the Windows Credential Manager (credvault.rs)
   "Win32_Security_Credentials",
+  # GetCurrentPackageFullName — "am I running under MSIX package identity?", which
+  # gates the self-updater off for a Microsoft Store build (see running_packaged()).
+  "Win32_Storage_Packaging_Appx",
 ] }
 uiautomation = { version = "0.24.4", features = ["process", "event", "pattern"] }
 

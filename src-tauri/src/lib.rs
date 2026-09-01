@@ -5882,6 +5882,50 @@ fn exit_for_update(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+/// Whether this process is running under MSIX **package identity** (a Microsoft
+/// Store / sideloaded MSIX install) rather than as a plain unpackaged binary
+/// (the NSIS installer, or `cargo run` in dev).
+///
+/// One binary serves both distribution channels — deliberately NOT two build
+/// variants. The only behavioural difference the Store requires is that the app
+/// must not update itself (updates flow through the Store), and that is a
+/// *runtime* decision this answers directly. Store policy is about behaviour, so
+/// leaving the updater plugin registered-but-never-invoked is fine; what matters
+/// is that a packaged install never phones home. Verified live during the MSIX
+/// spike (2026-08-31, navisual-internal/docs/msix-store-spike.md): the packaged
+/// build logged `checking for updates https://github.com/...` on launch, which is
+/// exactly what this gate exists to stop.
+///
+/// `GetCurrentPackageFullName` is the documented way to ask: it returns
+/// `ERROR_SUCCESS` under package identity and `APPMODEL_ERROR_NO_PACKAGE` (15700)
+/// when unpackaged. We only need the classification, not the name, so the buffer
+/// stays empty and `ERROR_INSUFFICIENT_BUFFER` also counts as "packaged" (it means
+/// a real name existed and simply didn't fit).
+#[cfg(windows)]
+fn running_packaged() -> bool {
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+
+    let mut len: u32 = 0;
+    // SAFETY: passing a null name buffer with len=0 is the documented probe form —
+    // the API reports the required length instead of writing anything.
+    let rc = unsafe { GetCurrentPackageFullName(&mut len, None) };
+    rc == ERROR_SUCCESS || rc == ERROR_INSUFFICIENT_BUFFER
+}
+
+#[cfg(not(windows))]
+fn running_packaged() -> bool {
+    false
+}
+
+/// Frontend gate for the self-updater — see [`running_packaged`].
+#[tauri::command]
+fn is_packaged() -> bool {
+    let packaged = running_packaged();
+    log::info!("[packaging] running_packaged={packaged} (self-updater {} )", if packaged { "DISABLED — Store build" } else { "enabled" });
+    packaged
+}
+
 /// Return whether the app currently has a Supabase session.
 #[tauri::command]
 async fn get_session_status(state: State<'_, AppState>) -> Result<SessionStatus, String> {
@@ -6161,6 +6205,7 @@ pub fn run() {
             delete_account,
             submit_feedback,
             exit_for_update,
+            is_packaged,
             list_target_windows,
             list_monitors,
             pin_target_window,
