@@ -120,15 +120,24 @@ pub enum PointerState {
     Hint { rect: [i32; 4] },
     /// Nothing was drawn. Recoverable: the export preview can place one (§0.4).
     Miss,
-    /// The locator DID find the control, but it sits outside this frame — on
-    /// another monitor, typically a dialog that opened over there.
+    /// The locator returned a rect, but it sits outside this frame.
     ///
     /// Distinct from `Miss` because the record must not claim the locator failed
-    /// when it succeeded. Live 2026-09-04: a File Explorer session on a negative-x
-    /// secondary monitor produced a step logged `pointer: miss` alongside
-    /// `locator: HitA11y`, which is a straight contradiction for anyone reading
-    /// the export. Nothing is drawn either way — a clamped marker would be a
-    /// confident pointer at the wrong control (§4.3).
+    /// when it returned something. Nothing is drawn either way — a clamped marker
+    /// would be a confident pointer at the wrong control (§4.3).
+    ///
+    /// **This state is also a signal, not just bookkeeping.** Live 2026-09-04, a
+    /// File Explorer session (window at x −1927..−475 on the secondary monitor)
+    /// logged `HitA11y` for `target_text: "..."` at **x=1630, y=1048, 17×17** —
+    /// on the *primary* monitor, bottom-right, and far too small to be the
+    /// toolbar button the step meant. The locate did not find the target; it
+    /// found some other "..." glyph entirely, and the pointer the user saw was
+    /// either absent or wrong.
+    ///
+    /// The export did the right thing by refusing to draw it. What it also did
+    /// was make a locator fault visible that leaves no other trace — the user
+    /// reported the session as fine. Treat a run of `OffFrame` steps as worth
+    /// investigating in the locator, not as noise in the export.
     OffFrame,
     /// The user rejected a pointer and a retry produced a different one.
     ///
