@@ -103,20 +103,45 @@ foreach ($turn in $session.turns) {
     }
 
     if (-not $NoCaption -and $step.instruction) {
-      # A real system font, so Chinese and other non-Latin instructions render.
+      # Same shape as the app's on-screen caption (Overlay.svelte drawSubtitle)
+      # and as the Rust exporter: a rounded strip fitted to the text, centred,
+      # rgba(0,0,0,0.52), white centred text, floated just above the bottom edge.
+      # Someone comparing an exported figure with their own screen should see the
+      # same thing.
+      #
+      # Microsoft YaHei so Chinese instructions render — the app replies in the
+      # user's language, so a Latin-only font would be useless to many of them.
       $size = [Math]::Max(14, [Math]::Min(40, [int]($bmp.Height * 0.022)))
       $font = New-Object System.Drawing.Font("Microsoft YaHei", $size, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
-      $pad = [int]($size * 0.7)
-      $maxW = $bmp.Width - $pad * 4
       $fmt = New-Object System.Drawing.StringFormat
+      $fmt.Alignment = 'Center'
+      $fmt.LineAlignment = 'Center'
+
+      $maxW    = [int]($bmp.Width * 0.78)
+      $hPad    = [int]($size * 1.2)
+      $vPad    = [int]($size * 0.65)
       $measured = $g.MeasureString($step.instruction, $font, $maxW, $fmt)
-      $bandH = [int]$measured.Height + $pad * 2
-      $band = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(190, 0, 0, 0))
-      $g.FillRectangle($band, 0, $bmp.Height - $bandH, $bmp.Width, $bandH)
-      $white = [System.Drawing.Brushes]::White
-      $rect = New-Object System.Drawing.RectangleF(($pad * 2), ($bmp.Height - $bandH + $pad), $maxW, ($bandH - $pad))
-      $g.DrawString($step.instruction, $font, $white, $rect, $fmt)
-      $band.Dispose(); $font.Dispose(); $fmt.Dispose()
+      $stripW  = [Math]::Min([int]$measured.Width + $hPad * 2, $bmp.Width)
+      $stripH  = [int]$measured.Height + $vPad * 2
+      $stripX  = [int](($bmp.Width - $stripW) / 2)
+      $stripY  = $bmp.Height - $stripH - [int]($size * 0.6)
+      $radius  = [int]($size * 0.55)
+
+      # Rounded rect via a path, so the corners match the app's 10px radius look.
+      $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+      $d = $radius * 2
+      $path.AddArc($stripX, $stripY, $d, $d, 180, 90)
+      $path.AddArc($stripX + $stripW - $d, $stripY, $d, $d, 270, 90)
+      $path.AddArc($stripX + $stripW - $d, $stripY + $stripH - $d, $d, $d, 0, 90)
+      $path.AddArc($stripX, $stripY + $stripH - $d, $d, $d, 90, 90)
+      $path.CloseFigure()
+      # 0.52 alpha = 133/255, the overlay's own value.
+      $band = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(133, 0, 0, 0))
+      $g.FillPath($band, $path)
+
+      $rect = New-Object System.Drawing.RectangleF($stripX, $stripY, $stripW, $stripH)
+      $g.DrawString($step.instruction, $font, [System.Drawing.Brushes]::White, $rect, $fmt)
+      $band.Dispose(); $path.Dispose(); $font.Dispose(); $fmt.Dispose()
     }
 
     $g.Dispose()

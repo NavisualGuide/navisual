@@ -913,10 +913,18 @@ fn caption_font() -> Option<&'static ab_glyph::FontVec> {
     None
 }
 
-/// Burn the instruction along the bottom of the frame, on a translucent band.
+/// Burn the instruction into the frame, matching the app's on-screen caption.
 ///
-/// Sized relative to the image rather than in fixed pixels, so the same code
-/// reads correctly on a 1080p capture and on a 4K one.
+/// **Deliberately the same shape as `drawSubtitle` in `Overlay.svelte`**: a
+/// rounded strip fitted to the text, centred horizontally, `rgba(0,0,0,0.52)`,
+/// white centred text, sitting just above the bottom edge. A full-width
+/// left-aligned band shipped first and read as a different product — someone
+/// comparing an exported figure with their own screen should see the same thing.
+///
+/// The one deliberate divergence is size. The app draws 18 logical px because it
+/// is read at 1:1 on the monitor; an exported frame is a 1920-wide image shown a
+/// few hundred pixels wide in an article, so the caption is scaled to the frame
+/// instead and survives that reduction.
 fn draw_caption(img: &mut image::RgbaImage, text: &str) {
     use ab_glyph::{Font, ScaleFont};
 
@@ -929,13 +937,13 @@ fn draw_caption(img: &mut image::RgbaImage, text: &str) {
     let (w, h) = (img.width(), img.height());
     let px = (h as f32 * 0.022).clamp(14.0, 40.0);
     let scaled = font.as_scaled(px);
-    let pad = (px * 0.7).round() as i32;
     let line_h = scaled.height().ceil() as i32;
 
     // Wrap on whole words where the language has them, and on any character
     // where it does not — CJK has no spaces, and a word-only wrapper would emit
     // one unbreakable line straight off the edge of the frame.
-    let max_w = w as f32 - (pad * 4) as f32;
+    // 78% of the frame, the same proportion the overlay wraps at.
+    let max_w = w as f32 * 0.78;
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     let mut line_w = 0.0f32;
@@ -971,23 +979,31 @@ fn draw_caption(img: &mut image::RgbaImage, text: &str) {
         return;
     }
 
-    let band_h = line_h * lines.len() as i32 + pad * 2;
-    let band_top = h as i32 - band_h;
+    // Strip fitted to the widest line and centred, exactly as the overlay does —
+    // a full-width band is a different visual object and reads as a different
+    // product when a reader compares the figure with their own screen.
+    let line_w_of = |l: &str| -> f32 {
+        l.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum()
+    };
+    let widest = lines.iter().map(|l| line_w_of(l)).fold(0.0f32, f32::max);
+    let h_pad = (px * 1.2).round() as i32;
+    let v_pad = (px * 0.65).round() as i32;
+    let strip_w = (widest.ceil() as i32 + h_pad * 2).min(w as i32);
+    let strip_h = line_h * lines.len() as i32 + v_pad * 2;
+    let strip_x = (w as i32 - strip_w) / 2;
+    // Floated just clear of the bottom edge, like the overlay's 10px gap.
+    let bottom_gap = (px * 0.6).round() as i32;
+    let strip_y = (h as i32 - strip_h - bottom_gap).max(0);
+    let radius = (px * 0.55).round() as i32;
 
-    // Translucent rather than opaque: the caption must not hide the part of the
-    // screen it is describing.
-    for y in band_top.max(0)..h as i32 {
-        for x in 0..w as i32 {
-            let p = img.get_pixel_mut(x as u32, y as u32);
-            for k in 0..3 {
-                p.0[k] = (p.0[k] as f32 * 0.28) as u8;
-            }
-        }
-    }
+    // rgba(0,0,0,0.52) — the overlay's own value. Translucent on purpose: the
+    // caption must not hide the part of the screen it is describing.
+    fill_round_rect(img, strip_x, strip_y, strip_w, strip_h, radius, 0.52);
 
     for (i, l) in lines.iter().enumerate() {
-        let baseline = band_top + pad + line_h * i as i32 + scaled.ascent() as i32;
-        let mut cx = pad as f32 * 2.0;
+        let baseline = strip_y + v_pad + line_h * i as i32 + scaled.ascent() as i32;
+        // Each line centred within the strip, not left-aligned to it.
+        let mut cx = strip_x as f32 + (strip_w as f32 - line_w_of(l)) / 2.0;
         for ch in l.chars() {
             let gid = font.glyph_id(ch);
             let glyph = gid.with_scale_and_position(px, ab_glyph::point(cx, baseline as f32));
@@ -1024,6 +1040,57 @@ fn draw_pointer(img: &mut image::RgbaImage, x: i32, y: i32, w: i32, h: i32) {
         let alpha = [90u8, 170, 255][i];
         let r = [x - pad - ring * 2, y - pad - ring * 2, w + (pad + ring * 2) * 2, h + (pad + ring * 2) * 2];
         stroke_rect(img, r[0], r[1], r[2], r[3], [ACCENT[0], ACCENT[1], ACCENT[2], alpha], 2);
+    }
+}
+
+/// Darken a rounded rectangle to `alpha` black, matching the overlay's caption
+/// strip. Corners are anti-aliased by sampling coverage, so the rounding reads
+/// cleanly at the sizes an exported frame is viewed at.
+fn fill_round_rect(
+    img: &mut image::RgbaImage,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: i32,
+    alpha: f32,
+) {
+    let (iw, ih) = (img.width() as i32, img.height() as i32);
+    let r = radius.min(w / 2).min(h / 2).max(0) as f32;
+    for py in y.max(0)..(y + h).min(ih) {
+        for px_ in x.max(0)..(x + w).min(iw) {
+            // Distance into the nearest corner's circle; 1.0 inside the straight
+            // edges, tapering across the corner arc.
+            let (from_l, from_r) = ((px_ - x) as f32, ((x + w - 1) - px_) as f32);
+            let (from_t, from_b) = ((py - y) as f32, ((y + h - 1) - py) as f32);
+            let dx = if from_l < r {
+                r - from_l
+            } else if from_r < r {
+                r - from_r
+            } else {
+                0.0
+            };
+            let dy = if from_t < r {
+                r - from_t
+            } else if from_b < r {
+                r - from_b
+            } else {
+                0.0
+            };
+            let cov = if dx > 0.0 && dy > 0.0 {
+                (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if cov <= 0.0 {
+                continue;
+            }
+            let a = alpha * cov;
+            let p = img.get_pixel_mut(px_ as u32, py as u32);
+            for k in 0..3 {
+                p.0[k] = (p.0[k] as f32 * (1.0 - a)) as u8;
+            }
+        }
     }
 }
 
@@ -1511,6 +1578,32 @@ mod tests {
         draw_caption(&mut latin, "Click the three-dots button");
         assert_ne!(latin.as_raw(), base.as_raw());
         assert_ne!(cjk.as_raw(), latin.as_raw(), "different text, different pixels");
+    }
+
+    /// Writes a sample image for visual review. Ignored by default — it asserts
+    /// nothing, and exists so the caption's look can be compared against the
+    /// app's own without running a whole session.
+    #[test]
+    #[ignore = "visual check; run with --ignored"]
+    fn caption_style_sample() {
+        if caption_font().is_none() {
+            return;
+        }
+        let out = std::env::temp_dir().join("navisual-caption-sample.png");
+        let mut img = image::RgbaImage::from_pixel(1920, 1080, image::Rgba([24, 26, 32, 255]));
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            if (x / 60 + y / 60) % 2 == 0 {
+                p.0 = [38, 41, 50, 255];
+            }
+        }
+        draw_pointer(&mut img, 700, 300, 120, 40);
+        draw_caption(
+            &mut img,
+            "You are now on the customization page! You can adjust the font size using \
+             the slider, select an accent color under 颜色, or switch your background theme.",
+        );
+        img.save(&out).unwrap();
+        println!("wrote {}", out.display());
     }
 
     #[test]
