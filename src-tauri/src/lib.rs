@@ -5164,13 +5164,16 @@ async fn pick_export_folder(state: State<'_, AppState>) -> Result<Option<String>
 /// promise ("nothing is written unless you choose to save it") true rather than
 /// aspirational.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn export_session(
     state: State<'_, AppState>,
     destination: Option<String>,
     title: String,
     slug: Option<String>,
     crop_to_app: bool,
+    save_clean: bool,
     draw_pointer: bool,
+    draw_caption: bool,
     redacted_steps: Vec<usize>,
 ) -> Result<String, String> {
     let dest = destination
@@ -5182,7 +5185,9 @@ fn export_session(
     let opts = session_export::ExportOptions {
         crop_to_app,
         crop_steps: Vec::new(),
+        save_clean,
         draw_pointer,
+        draw_caption,
         title: title.clone(),
         slug: slug.unwrap_or_default(),
     };

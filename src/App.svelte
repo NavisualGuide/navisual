@@ -820,7 +820,12 @@ See the LICENSE file in the root of this repository for complete details.
   let exportTitle = $state("");
   let exportDest = $state("");
   let exportCropToApp = $state(false);
+  // All three default ON — "save everything, decide later". The clean copy is the
+  // only artifact that cannot be regenerated, and the annotated one is what you
+  // actually paste into a walkthrough, so the useful default is both.
+  let exportSaveClean = $state(true);
   let exportDrawPointer = $state(true);
+  let exportDrawCaption = $state(true);
   let exportRedacted = $state<number[]>([]);
   let exportBusy = $state(false);
   let exportError = $state("");
@@ -864,7 +869,9 @@ See the LICENSE file in the root of this repository for complete details.
         title: exportTitle,
         slug: null,
         cropToApp: exportCropToApp,
+        saveClean: exportSaveClean,
         drawPointer: exportDrawPointer,
+        drawCaption: exportDrawCaption,
         redactedSteps: exportRedacted,
       });
       exportDone = out;
@@ -3083,9 +3090,15 @@ See the LICENSE file in the root of this repository for complete details.
             Saved to<br /><code>{exportDone}</code>
           </p>
           <p class="export-note">
-            The folder holds one image per step, a readable <code>session.md</code>, and the full
-            record in <code>session.json</code>. Look through it before sending it to anyone —
-            the screenshots are pictures of your screen.
+            <code>steps/</code> holds the untouched screenshots and
+            <code>steps-annotated/</code> the marked-up ones, alongside a readable
+            <code>session.md</code> and the full record in <code>session.json</code>.
+            You can redo the pointer or caption any time with
+            <code>tools/annotate-session.ps1</code> — nothing needs re-running.
+          </p>
+          <p class="export-note">
+            Look through the folder before sending it to anyone: the screenshots are
+            pictures of your screen.
           </p>
         {:else if exportStatus && exportStatus.empty}
           <p class="export-note">Nothing recorded yet. Run a step or two first.</p>
@@ -3116,9 +3129,32 @@ See the LICENSE file in the root of this repository for complete details.
           </label>
 
           <div class="export-opts">
-            <label><input type="checkbox" bind:checked={exportDrawPointer} /> Draw the pointer on each screenshot</label>
-            <label><input type="checkbox" bind:checked={exportCropToApp} /> Crop to the app (hides the Navisual panel)</label>
+            <label>
+              <input type="checkbox" bind:checked={exportSaveClean} />
+              Save the plain screenshots <span class="export-hint">— steps/, untouched</span>
+            </label>
+            <label>
+              <input type="checkbox" bind:checked={exportDrawPointer} />
+              Add the pointer <span class="export-hint">— steps-annotated/</span>
+            </label>
+            <label>
+              <input type="checkbox" bind:checked={exportDrawCaption} />
+              Add the instruction as a caption <span class="export-hint">— steps-annotated/</span>
+            </label>
+            <label>
+              <input type="checkbox" bind:checked={exportCropToApp} />
+              Crop to the app <span class="export-hint">— hides the Navisual panel</span>
+            </label>
           </div>
+          {#if !exportSaveClean}
+            <!-- Worth saying out loud: the annotated copies are derived, the plain
+                 ones are not. Turning this off is the one choice here that cannot
+                 be undone later without re-running the session. -->
+            <p class="export-thin">
+              Without the plain screenshots you cannot re-do the pointer or caption later —
+              those are rebuilt from the untouched originals.
+            </p>
+          {/if}
 
           <div class="export-list">
             {#each exportStatus.detail as d (d.index)}
@@ -5175,7 +5211,11 @@ See the LICENSE file in the root of this repository for complete details.
     color: inherit;
     cursor: pointer;
   }
-  .export-opts { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+  .export-opts { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+  .export-opts label { display: flex; align-items: baseline; gap: 6px; }
+  /* Names the folder each option writes to, so the checkbox and the result on
+     disk are obviously the same thing. */
+  .export-hint { color: var(--text-tertiary, #8a8a92); font-size: 11px; }
   .export-list {
     display: flex;
     flex-direction: column;

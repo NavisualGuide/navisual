@@ -482,6 +482,11 @@ pub fn to_frame_coords(
 // Export (§4, §9)
 // ---------------------------------------------------------------------------
 
+/// Subfolder holding the untouched captures.
+pub const CLEAN_DIR: &str = "steps";
+/// Subfolder holding pointer/caption composites.
+pub const ANNOTATED_DIR: &str = "steps-annotated";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportOptions {
     /// Crop each frame to its `app_rect`, dropping the Navisual panel. Per-step
@@ -489,11 +494,29 @@ pub struct ExportOptions {
     pub crop_to_app: bool,
     /// Step indices (flattened across turns) to crop, overriding `crop_to_app`.
     pub crop_steps: Vec<usize>,
-    /// Draw the pointer onto exported frames. §0.4 wants one on every screenshot;
-    /// it is an option because a frame can legitimately be context-only.
+    /// Write the untouched captures to `steps/`.
+    ///
+    /// **On by default and worth keeping on.** The clean frame is the only
+    /// irreplaceable artifact here: a pointer or caption can be re-rendered from
+    /// `session.json` at any time, but a screenshot that was annotated on the way
+    /// out cannot be un-annotated. Keeping it is what makes annotation a
+    /// re-doable post-process rather than a one-shot decision at save time.
+    pub save_clean: bool,
+    /// Draw the pointer into the `steps-annotated/` copies.
     pub draw_pointer: bool,
+    /// Burn the step's instruction along the bottom of the annotated copies.
+    pub draw_caption: bool,
     pub title: String,
     pub slug: String,
+}
+
+impl ExportOptions {
+    /// Whether an annotated copy differs from the clean one. With both
+    /// annotations off there is nothing to add, and writing a byte-identical
+    /// second folder would only be confusing.
+    pub fn wants_annotated(&self) -> bool {
+        self.draw_pointer || self.draw_caption
+    }
 }
 
 impl Default for ExportOptions {
@@ -501,7 +524,9 @@ impl Default for ExportOptions {
         Self {
             crop_to_app: false,
             crop_steps: Vec::new(),
+            save_clean: true,
             draw_pointer: true,
+            draw_caption: true,
             title: String::new(),
             slug: String::new(),
         }
@@ -565,7 +590,23 @@ impl ExportBuffer {
         };
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let dir = parent.join(format!("navisual-{stamp}-{slug}"));
-        std::fs::create_dir_all(dir.join("steps"))?;
+
+        // Both folders are written by default. `steps/` is the archive — the only
+        // thing here that cannot be regenerated — and `steps-annotated/` is a
+        // derived view that `tools/annotate-session.ps1` can rebuild differently
+        // at any time from the clean frames plus session.json.
+        let want_annotated = opts.wants_annotated();
+        if opts.save_clean {
+            std::fs::create_dir_all(dir.join(CLEAN_DIR))?;
+        }
+        if want_annotated {
+            std::fs::create_dir_all(dir.join(ANNOTATED_DIR))?;
+        }
+        if !opts.save_clean && !want_annotated {
+            return Err(anyhow!(
+                "nothing selected to save — enable the clean screenshots, the pointer, or the caption"
+            ));
+        }
 
         let mut manifest = Vec::new();
         let mut flat = 0usize;
@@ -575,7 +616,7 @@ impl ExportBuffer {
                 let written = if step.redacted {
                     None
                 } else {
-                    self.write_step_image(&dir, &name, step, flat, opts)?
+                    self.write_step_images(&dir, &name, step, flat, opts)?
                 };
                 manifest.push((turn.n, si, flat, written));
                 flat += 1;
@@ -588,8 +629,11 @@ impl ExportBuffer {
         Ok(dir)
     }
 
-    /// Composite and write one step image. Returns the filename if one was written.
-    fn write_step_image(
+    /// Write one step's clean and/or annotated image.
+    ///
+    /// Returns the filename (shared by both folders) if anything was written, so
+    /// the manifest can reference it without caring which folders exist.
+    fn write_step_images(
         &self,
         dir: &Path,
         name: &str,
@@ -620,13 +664,26 @@ impl ExportBuffer {
             }
         }
 
-        if opts.draw_pointer {
-            if let Some([px, py, pw, ph]) = step.pointer.draw_rect() {
-                draw_pointer(&mut img, px - origin.0, py - origin.1, pw, ph);
-            }
+        // The clean copy goes out first, before a single pixel is annotated.
+        // Ordering matters: if annotation panics or the font is missing, the
+        // irreplaceable artifact is already safe on disk.
+        if opts.save_clean {
+            img.save(dir.join(CLEAN_DIR).join(name))?;
         }
 
-        img.save(dir.join("steps").join(name))?;
+        if opts.wants_annotated() {
+            let mut annotated = img;
+            if opts.draw_pointer {
+                if let Some([px, py, pw, ph]) = step.pointer.draw_rect() {
+                    draw_pointer(&mut annotated, px - origin.0, py - origin.1, pw, ph);
+                }
+            }
+            if opts.draw_caption {
+                draw_caption(&mut annotated, &step.instruction);
+            }
+            annotated.save(dir.join(ANNOTATED_DIR).join(name))?;
+        }
+
         Ok(Some(name.to_string()))
     }
 
@@ -640,7 +697,11 @@ impl ExportBuffer {
                 .iter()
                 .find(|(tn, si, _, _)| *tn == t && *si == s)
                 .and_then(|(_, _, _, f)| f.clone())
-                .map(|f| format!("steps/{f}"))
+                .map(|f| {
+                    let folder =
+                        if opts.wants_annotated() { ANNOTATED_DIR } else { CLEAN_DIR };
+                    format!("{folder}/{f}")
+                })
         };
         let turns: Vec<serde_json::Value> = self
             .turns
@@ -767,7 +828,13 @@ impl ExportBuffer {
                 n += 1;
                 out.push_str(&format!("## {n}. {}\n\n", step.instruction));
                 match file_for(turn.n, si) {
-                    Some(f) => out.push_str(&format!("![Step {n}](steps/{f})\n\n")),
+                    Some(f) => {
+                        let folder =
+                            if opts.wants_annotated() { ANNOTATED_DIR } else { CLEAN_DIR };
+                        out.push_str(&format!("![Step {n}]({folder}/{f})
+
+"))
+                    }
                     None if step.redacted => out.push_str("*(screenshot removed)*\n\n"),
                     None => {}
                 }
@@ -801,6 +868,150 @@ fn yaml_scalar(s: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// The caption font, loaded once from the OS.
+///
+/// **Microsoft YaHei, not a bundled file and not a Latin-only bitmap.**
+/// Instructions are written in the user's own language (`reply_language_directive`
+/// pins the reply to it), so a caption renderer that cannot draw Chinese would be
+/// unusable for a large part of the intended audience — including this project's
+/// own author. YaHei covers Latin and CJK from one face, ships with every Windows
+/// install since Vista, and costs nothing to bundle because we do not bundle it.
+///
+/// `None` when the font cannot be read, in which case captions are silently
+/// skipped: a missing caption is a far better outcome than a failed export.
+#[cfg(windows)]
+fn caption_font() -> Option<&'static ab_glyph::FontVec> {
+    use std::sync::OnceLock;
+    static FONT: OnceLock<Option<ab_glyph::FontVec>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        // Ordered by coverage, not preference: the first two are full CJK faces,
+        // the rest are Latin fallbacks for a stripped-down Windows image.
+        for name in ["msyh.ttc", "simsun.ttc", "segoeui.ttf", "arial.ttf", "tahoma.ttf"] {
+            let path = std::path::Path::new(r"C:\Windows\Fonts").join(name);
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            // .ttc is a collection; index 0 is the regular face in both of ours.
+            let font = if name.ends_with(".ttc") {
+                ab_glyph::FontVec::try_from_vec_and_index(bytes, 0)
+            } else {
+                ab_glyph::FontVec::try_from_vec(bytes)
+            };
+            if let Ok(f) = font {
+                log::debug!("[export] caption font: {name}");
+                return Some(f);
+            }
+        }
+        log::warn!("[export] no usable caption font found — captions will be skipped");
+        None
+    })
+    .as_ref()
+}
+
+#[cfg(not(windows))]
+fn caption_font() -> Option<&'static ab_glyph::FontVec> {
+    None
+}
+
+/// Burn the instruction along the bottom of the frame, on a translucent band.
+///
+/// Sized relative to the image rather than in fixed pixels, so the same code
+/// reads correctly on a 1080p capture and on a 4K one.
+fn draw_caption(img: &mut image::RgbaImage, text: &str) {
+    use ab_glyph::{Font, ScaleFont};
+
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let Some(font) = caption_font() else { return };
+
+    let (w, h) = (img.width(), img.height());
+    let px = (h as f32 * 0.022).clamp(14.0, 40.0);
+    let scaled = font.as_scaled(px);
+    let pad = (px * 0.7).round() as i32;
+    let line_h = scaled.height().ceil() as i32;
+
+    // Wrap on whole words where the language has them, and on any character
+    // where it does not — CJK has no spaces, and a word-only wrapper would emit
+    // one unbreakable line straight off the edge of the frame.
+    let max_w = w as f32 - (pad * 4) as f32;
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut line_w = 0.0f32;
+    for ch in text.chars() {
+        let adv = scaled.h_advance(font.glyph_id(ch));
+        let breakable = ch == ' ' || !ch.is_ascii();
+        if line_w + adv > max_w && !line.is_empty() {
+            if breakable || !line.contains(' ') {
+                lines.push(std::mem::take(&mut line));
+                line_w = 0.0;
+            } else {
+                // Back up to the last space so a Latin word is not split.
+                let cut = line.rfind(' ').unwrap_or(0);
+                let rest = line.split_off(cut).trim_start().to_string();
+                lines.push(std::mem::take(&mut line));
+                line_w = rest.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum();
+                line = rest;
+            }
+        }
+        if ch == ' ' && line.is_empty() {
+            continue;
+        }
+        line.push(ch);
+        line_w += adv;
+        if lines.len() >= 3 {
+            break;
+        }
+    }
+    if !line.is_empty() && lines.len() < 3 {
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return;
+    }
+
+    let band_h = line_h * lines.len() as i32 + pad * 2;
+    let band_top = h as i32 - band_h;
+
+    // Translucent rather than opaque: the caption must not hide the part of the
+    // screen it is describing.
+    for y in band_top.max(0)..h as i32 {
+        for x in 0..w as i32 {
+            let p = img.get_pixel_mut(x as u32, y as u32);
+            for k in 0..3 {
+                p.0[k] = (p.0[k] as f32 * 0.28) as u8;
+            }
+        }
+    }
+
+    for (i, l) in lines.iter().enumerate() {
+        let baseline = band_top + pad + line_h * i as i32 + scaled.ascent() as i32;
+        let mut cx = pad as f32 * 2.0;
+        for ch in l.chars() {
+            let gid = font.glyph_id(ch);
+            let glyph = gid.with_scale_and_position(px, ab_glyph::point(cx, baseline as f32));
+            if let Some(outline) = font.outline_glyph(glyph) {
+                let bounds = outline.px_bounds();
+                outline.draw(|gx, gy, cov| {
+                    if cov <= 0.01 {
+                        return;
+                    }
+                    let x = bounds.min.x as i32 + gx as i32;
+                    let y = bounds.min.y as i32 + gy as i32;
+                    if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+                        return;
+                    }
+                    let p = img.get_pixel_mut(x as u32, y as u32);
+                    let a = cov.min(1.0);
+                    for k in 0..3 {
+                        p.0[k] = (p.0[k] as f32 * (1.0 - a) + 255.0 * a) as u8;
+                    }
+                });
+            }
+            cx += scaled.h_advance(gid);
+        }
+    }
 }
 
 /// Draw the pointer annotation: a bright ring plus a soft halo, sized to the
@@ -928,9 +1139,15 @@ fn about_text(dir: &Path) -> String {
          A record of one Navisual session: what you asked, what Navisual answered,\n\
          and a screenshot for each step with the pointer drawn where it pointed.\n\n\
          WHAT IS IN IT\n\
-           session.md    a readable walkthrough you can paste anywhere\n\
-           session.json  the full record, including the conversation\n\
-           steps/        one image per step\n\n\
+           session.md         a readable walkthrough you can paste anywhere\n\
+           session.json       the full record, including the conversation\n\
+           steps/             the screenshots exactly as captured\n\
+           steps-annotated/   the same shots with the pointer and/or caption drawn\n\n\
+         REDOING THE MARKUP\n\
+         steps/ is never written on. The pointer position and the instruction text\n\
+         both live in session.json, so the annotated copies can be rebuilt at any\n\
+         time, with different choices, without re-running anything:\n\n\
+           tools\\annotate-session.ps1 -Path \"<this folder>\"\n\n\
          PRIVACY — READ THIS BEFORE SHARING\n\
          These screenshots are pictures of YOUR SCREEN at the moment each step ran.\n\
          They can contain file names, message contents, account names and anything\n\
@@ -1185,28 +1402,142 @@ mod tests {
     }
 
     #[test]
-    fn the_pointer_is_composited_at_export_not_burned_in_at_capture() {
-        // §0.4's core decision. The stored frame is clean; drawing must happen here,
-        // and turning it off must leave the pixels untouched.
-        let dir = temp_dir("pointer");
+    fn the_clean_folder_is_never_annotated() {
+        // The whole point of the split: `steps/` must be byte-identical whatever
+        // the annotation options say, because it is the only artifact here that
+        // cannot be regenerated from session.json.
+        let dir = temp_dir("clean");
         let b = buffer_with_one_framed_step(PointerState::Hit { rect: [10, 10, 8, 6] });
 
-        let drawn = b
-            .write_folder(&dir, &ExportOptions { title: "a".into(), draw_pointer: true, ..Default::default() })
+        let all = b
+            .write_folder(&dir, &ExportOptions { title: "a".into(), ..Default::default() })
             .unwrap();
-        let plain = b
-            .write_folder(&dir, &ExportOptions { title: "b".into(), draw_pointer: false, ..Default::default() })
+        let none = b
+            .write_folder(
+                &dir,
+                &ExportOptions {
+                    title: "b".into(),
+                    draw_pointer: false,
+                    draw_caption: false,
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
-        let pick = |d: &Path| {
-            let f = std::fs::read_dir(d.join("steps")).unwrap().flatten().next().unwrap();
-            image::open(f.path()).unwrap().to_rgba8()
+        let clean = |d: &Path| {
+            let f = std::fs::read_dir(d.join(CLEAN_DIR)).unwrap().flatten().next().unwrap();
+            std::fs::read(f.path()).unwrap()
+        };
+        assert_eq!(clean(&all), clean(&none), "the archive copy must never be touched");
+        // And with nothing to add, no annotated folder is created at all.
+        assert!(!none.join(ANNOTATED_DIR).exists());
+        assert!(all.join(ANNOTATED_DIR).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pointer_is_composited_at_export_not_burned_in_at_capture() {
+        // §0.4's core decision. The stored frame is clean; drawing happens here,
+        // so the annotated copy must differ from the archive copy.
+        let dir = temp_dir("pointer");
+        let b = buffer_with_one_framed_step(PointerState::Hit { rect: [10, 10, 8, 6] });
+        let out = b
+            .write_folder(
+                &dir,
+                &ExportOptions {
+                    title: "a".into(),
+                    draw_pointer: true,
+                    draw_caption: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let read = |sub: &str| {
+            let f = std::fs::read_dir(out.join(sub)).unwrap().flatten().next().unwrap();
+            image::open(f.path()).unwrap().to_rgba8().into_raw()
         };
         assert_ne!(
-            pick(&drawn).into_raw(),
-            pick(&plain).into_raw(),
-            "drawing the pointer must change the exported pixels"
+            read(ANNOTATED_DIR),
+            read(CLEAN_DIR),
+            "drawing the pointer must change the annotated pixels"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_caption_changes_the_annotated_copy_only() {
+        let dir = temp_dir("caption");
+        let b = buffer_with_one_framed_step(PointerState::Miss);
+        let out = b
+            .write_folder(
+                &dir,
+                &ExportOptions {
+                    title: "c".into(),
+                    draw_pointer: false,
+                    draw_caption: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let read = |sub: &str| {
+            let f = std::fs::read_dir(out.join(sub)).unwrap().flatten().next().unwrap();
+            image::open(f.path()).unwrap().to_rgba8().into_raw()
+        };
+        // Skipped rather than failed when no system font is available, since
+        // draw_caption degrades to a no-op by design — a missing caption is a far
+        // better outcome than a failed export.
+        if caption_font().is_some() {
+            assert_ne!(read(ANNOTATED_DIR), read(CLEAN_DIR), "the caption must be drawn");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn captions_render_non_latin_text() {
+        // The reason the font is loaded from the OS rather than being a bundled
+        // Latin bitmap. Instructions follow the user's own language, so a caption
+        // renderer that cannot draw Chinese is useless to a large share of the
+        // audience — including this project's author.
+        let Some(_) = caption_font() else { return };
+        let base = image::RgbaImage::from_pixel(600, 200, image::Rgba([30, 30, 30, 255]));
+
+        let mut cjk = base.clone();
+        draw_caption(&mut cjk, "点击顶部工具栏中的三点按钮");
+        assert_ne!(cjk.as_raw(), base.as_raw(), "Chinese must actually rasterise");
+
+        let mut latin = base.clone();
+        draw_caption(&mut latin, "Click the three-dots button");
+        assert_ne!(latin.as_raw(), base.as_raw());
+        assert_ne!(cjk.as_raw(), latin.as_raw(), "different text, different pixels");
+    }
+
+    #[test]
+    fn an_empty_caption_leaves_the_frame_alone() {
+        let base = image::RgbaImage::from_pixel(400, 120, image::Rgba([10, 10, 10, 255]));
+        let mut img = base.clone();
+        draw_caption(&mut img, "   ");
+        assert_eq!(img.as_raw(), base.as_raw(), "no text, no band");
+    }
+
+    #[test]
+    fn saving_nothing_at_all_is_refused() {
+        let dir = temp_dir("nothing");
+        let b = buffer_with_one_framed_step(PointerState::Miss);
+        let err = b
+            .write_folder(
+                &dir,
+                &ExportOptions {
+                    title: "d".into(),
+                    save_clean: false,
+                    draw_pointer: false,
+                    draw_caption: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("nothing selected"), "got: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

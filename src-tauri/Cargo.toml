@@ -46,6 +46,14 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # Chosen over OpenCV to keep the "built-in, nothing to download" locator (Design Decision #7).
 # `rayon` parallelises the NCC scan across cores (~5-8x) — pure-Rust, no C++/bundling cost.
 imageproc = { version = "0.25", default-features = false, features = ["rayon"] }
+# Caption rendering for session exports. Already present in the tree as an
+# imageproc dependency, so declaring it adds no download and no new vendor.
+#
+# The FONT is loaded from the OS at runtime, never bundled — Microsoft YaHei
+# covers Latin and CJK from one file, which matters because instructions are
+# written in the user's own language and a caption that cannot render Chinese
+# would be useless to half the intended audience.
+ab_glyph = "0.2"
 base64 = "0.22"
 sha2 = "0.10"
 regex = "1"
