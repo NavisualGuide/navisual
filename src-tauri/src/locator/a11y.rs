@@ -189,14 +189,38 @@ fn strip_paren_suffix(s: &str) -> String {
     re.replace(s, "").trim().to_string()
 }
 
+/// Whether `target` leaves anything to anchor a UIA name match on.
+///
+/// False when the target is entirely punctuation (`"..."`, `"—"`, `"»"`), because
+/// [`build_name_regex`] strips a trailing ellipsis as a truncation marker and such
+/// a target collapses to an empty pattern that matches every unnamed element.
+///
+/// Deliberately checks the string AFTER the same stripping the regex builder
+/// applies, so the two can never disagree about what is left to match.
+pub(crate) fn target_has_matchable_name(target: &str) -> bool {
+    let (core, _) = super::strip_trailing_ellipsis(target);
+    core.chars().any(|c| c.is_alphanumeric())
+}
+
 /// Build the anchored regex used for name matching.
 /// `^[\W_]*<escaped_target>[\W_]*$`, case-insensitive.
+///
+/// Errors when nothing is left to anchor on, rather than emitting a pattern that
+/// matches everything — see [`target_has_matchable_name`]. Callers are expected to
+/// check first and skip the name pass; this is the backstop that stops a future
+/// caller from reintroducing the same bug silently.
 fn build_name_regex(target: &str) -> Result<Regex> {
     // Truncated labels (model copied a clipped "…" name) become a prefix match:
     // UIA accessible names are never visually truncated, so anchoring with `$`
     // on the clipped text would never match the real full name.
     let (core, prefix) = super::strip_trailing_ellipsis(target);
     let target_norm = norm_dashes(&core.to_ascii_lowercase());
+    if !target_norm.chars().any(|c| c.is_alphanumeric()) {
+        return Err(anyhow!(
+            "target {target:?} has no name-matchable substance after ellipsis stripping — \
+             an anchored pattern built from it would match every unnamed element"
+        ));
+    }
     let escaped = regex::escape(&target_norm);
     let pattern = if prefix {
         format!(r"(?i)^[\W_]*{}", escaped)
@@ -1392,6 +1416,25 @@ pub fn find_element(
     };
 
     if target_text.trim().is_empty() {
+        return Ok((None, trace));
+    }
+
+    // A target the NAME matcher cannot anchor on. Same early return as an empty
+    // target: A11y contributes nothing, and the pipeline falls through to OCR and
+    // the AI bbox, which are the channels that can actually find a glyph.
+    //
+    // This is not hypothetical. Live 2026-09-04, File Explorer, `target_text: "..."`
+    // for the toolbar overflow button. `build_name_regex` strips a trailing
+    // ellipsis because a model copying a CLIPPED label ("Sum of Output…") must
+    // still match the full UIA name — but when the target is ENTIRELY that marker,
+    // stripping leaves nothing, and the pattern collapsed to `^[\W_]*[\W_]*$`.
+    // That matches the empty string, so it matched five unnamed 17x17 `Text` nodes
+    // in the notification area on the OTHER monitor, and `hit_a11y` returned one
+    // of them 2,500 px from a correctly-grounded AI bbox. The user saw no pointer.
+    if !target_has_matchable_name(target_text) {
+        log::debug!(
+            "[a11y] target {target_text:?} has no name-matchable substance — skipping the name pass"
+        );
         return Ok((None, trace));
     }
 
@@ -2871,6 +2914,49 @@ mod incremental_walk_live_tests {
 #[cfg(test)]
 mod tests {
     use super::{build_name_regex, norm_dashes, strip_accelerator, walk_name_matches};
+    use super::target_has_matchable_name;
+
+    /// Live 2026-09-04, File Explorer: the AI asked for the toolbar overflow button
+    /// by its visible label, "...". Every character is a non-word character, and
+    /// `build_name_regex` strips a trailing ellipsis as a truncation marker, so the
+    /// target collapsed to nothing and the pattern became `^[\W_]*[\W_]*$` — which
+    /// matches the EMPTY STRING. It matched five unnamed 17x17 Text nodes in the
+    /// notification area on the other monitor and returned `hit_a11y` 2,500 px away
+    /// from a correctly-grounded AI bbox. The user saw no pointer and nothing in the
+    /// UI said why.
+    #[test]
+    fn all_punctuation_targets_are_not_name_matchable() {
+        for t in ["...", "…", "  ...  ", "-", "—", "»", "::", "()"] {
+            assert!(
+                !target_has_matchable_name(t),
+                "{t:?} has nothing to anchor a name match on"
+            );
+            assert!(
+                build_name_regex(t).is_err(),
+                "{t:?} must not produce a pattern; it would match every unnamed element"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_targets_are_still_matchable() {
+        // The guard must not disturb the cases the name pass exists for, including
+        // the clipped-label prefix match it was originally written to support.
+        for t in ["Insert", "OK", "2", "Sum of Output USD per…", "Layers", "文件"] {
+            assert!(target_has_matchable_name(t), "{t:?} should still match by name");
+            assert!(build_name_regex(t).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_degenerate_pattern_would_have_matched_an_empty_name() {
+        // Pins the mechanism itself, so nobody "simplifies" the guard away without
+        // seeing what it prevents. This is the exact regex from the live log.
+        let degenerate = regex::Regex::new(r"(?i)^[\W_]*[\W_]*$").unwrap();
+        assert!(degenerate.is_match(""), "this is why the guard exists");
+        assert!(degenerate.is_match("..."));
+    }
+
 
     #[test]
     fn walk_match_rejects_insubstantial_fragment_names() {
