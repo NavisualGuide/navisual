@@ -36,10 +36,6 @@ use crate::capture::Rect;
 /// steps hold the frames and therefore all of the memory.
 pub const MAX_STEPS: usize = 30;
 
-/// JPEG quality for stored frames. Matches the AI-capture setting the retention
-/// measurement in §2 was taken against, so the numbers in that section stay true.
-const FRAME_QUALITY: u8 = 75;
-
 // ---------------------------------------------------------------------------
 // Conversation model (§0.7)
 // ---------------------------------------------------------------------------
@@ -124,6 +120,16 @@ pub enum PointerState {
     Hint { rect: [i32; 4] },
     /// Nothing was drawn. Recoverable: the export preview can place one (§0.4).
     Miss,
+    /// The locator DID find the control, but it sits outside this frame — on
+    /// another monitor, typically a dialog that opened over there.
+    ///
+    /// Distinct from `Miss` because the record must not claim the locator failed
+    /// when it succeeded. Live 2026-09-04: a File Explorer session on a negative-x
+    /// secondary monitor produced a step logged `pointer: miss` alongside
+    /// `locator: HitA11y`, which is a straight contradiction for anyone reading
+    /// the export. Nothing is drawn either way — a clamped marker would be a
+    /// confident pointer at the wrong control (§4.3).
+    OffFrame,
     /// The user rejected a pointer and a retry produced a different one.
     ///
     /// **Both rects are kept deliberately.** The rejected one is not noise: a
@@ -138,7 +144,7 @@ impl PointerState {
         match self {
             Self::Hit { rect } | Self::Hint { rect } => Some(*rect),
             Self::Corrected { accepted, .. } => *accepted,
-            Self::Miss => None,
+            Self::Miss | Self::OffFrame => None,
         }
     }
 
@@ -147,6 +153,7 @@ impl PointerState {
             Self::Hit { .. } => "hit",
             Self::Hint { .. } => "hint",
             Self::Miss => "miss",
+            Self::OffFrame => "off-screen",
             Self::Corrected { .. } => "corrected",
         }
     }
@@ -326,7 +333,8 @@ impl ExportBuffer {
             }
             // Never downgrade a recorded outcome to a miss: a later local re-render
             // of the same step must not erase what the first locate established.
-            (existing, PointerState::Miss) if !matches!(existing, PointerState::Miss) => {}
+            (existing, PointerState::Miss | PointerState::OffFrame)
+                if !matches!(existing, PointerState::Miss | PointerState::OffFrame) => {}
             _ => step.pointer = pointer,
         }
         if decision.is_some() {
@@ -399,7 +407,7 @@ pub fn capture_frame(target_rect: Option<Rect>) -> Option<(Vec<u8>, Rect)> {
         Some(r) => monitor_containing(r).unwrap_or(r),
         None => crate::capture::enumerate_monitor_rects().into_iter().next()?,
     };
-    match crate::capture::capture_region_jpeg(region, FRAME_QUALITY, &[]) {
+    match crate::capture::capture_region_for_export(region) {
         Ok((bytes, rect)) => Some((bytes, rect)),
         Err(e) => {
             log::warn!("[export] frame capture failed: {e}");
@@ -699,15 +707,19 @@ impl ExportBuffer {
         let title = if opts.title.is_empty() { "Navisual session" } else { &opts.title };
         let mut out = String::new();
         out.push_str("---\n");
-        out.push_str(&format!("title: \"{}\"\n", title.replace('"', "'")));
+        out.push_str(&format!("title: \"{}\"
+", yaml_scalar(title)));
         if let Some(a) = &self.app_name {
-            out.push_str(&format!("app: \"{a}\"\n"));
+            out.push_str(&format!("app: \"{}\"
+", yaml_scalar(a)));
         }
         out.push_str(&format!("created: {}\n", chrono::Local::now().to_rfc3339()));
         out.push_str(&format!("steps: {}\n", self.step_count()));
         out.push_str(&format!("navisual: {}\n", env!("CARGO_PKG_VERSION")));
         out.push_str("---\n\n");
-        out.push_str(&format!("# {title}\n\n"));
+        out.push_str(&format!("# {}
+
+", yaml_scalar(title)));
 
         if let Some(first) = self.turns.iter().find(|t| t.user.kind == UserInputKind::Task) {
             if let Some(q) = &first.user.text {
@@ -757,6 +769,29 @@ impl ExportBuffer {
         }
         out
     }
+}
+
+/// Make a string safe inside a one-line, double-quoted YAML scalar.
+///
+/// Front matter is the first thing every downstream tool parses, so a stray
+/// newline there does not degrade gracefully — it breaks the whole document.
+/// This shipped: an app name carrying an embedded newline split `app:` across two
+/// lines and produced invalid front matter (live 2026-09-04). That particular
+/// string is fixed at its source too, but the writer should not depend on every
+/// caller being careful with what it hands over.
+fn yaml_scalar(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            // Any control character ends the scalar early or corrupts it; a space
+            // is always safe and preserves word boundaries.
+            '\n' | '\r' | '\t' => ' ',
+            // The value is emitted inside double quotes, so only those need to go.
+            '"' => '\'',
+            other => other,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Draw the pointer annotation: a bright ring plus a soft halo, sized to the
@@ -962,6 +997,36 @@ mod tests {
     }
 
     #[test]
+    fn an_off_frame_hit_is_not_recorded_as_a_miss() {
+        // Live 2026-09-04: a step logged `pointer: miss` next to `locator: HitA11y`
+        // because a dialog opened on the other monitor. The locator succeeded; the
+        // screenshot simply cannot show it, and the record has to say which.
+        let mut b = ExportBuffer::new();
+        let (u, a) = turn_with(UserInputKind::Task, 1);
+        b.push(u, a);
+        b.set_step_outcome(0, None, PointerState::OffFrame, Some("HitA11y".into()), None);
+        let step = &b.turns()[0].assistant.steps[0];
+        assert!(matches!(step.pointer, PointerState::OffFrame));
+        assert_eq!(step.pointer.label(), "off-screen");
+        assert!(step.pointer.draw_rect().is_none(), "nothing may be drawn either way");
+    }
+
+    #[test]
+    fn neither_miss_nor_off_frame_may_overwrite_a_recorded_hit() {
+        for later in [PointerState::Miss, PointerState::OffFrame] {
+            let mut b = ExportBuffer::new();
+            let (u, a) = turn_with(UserInputKind::Task, 1);
+            b.push(u, a);
+            b.set_step_outcome(0, None, PointerState::Hit { rect: [1, 2, 3, 4] }, None, None);
+            b.set_step_outcome(0, None, later.clone(), None, None);
+            assert!(
+                matches!(b.turns()[0].assistant.steps[0].pointer, PointerState::Hit { .. }),
+                "a re-render must not erase the outcome the first locate established"
+            );
+        }
+    }
+
+    #[test]
     fn a_recorded_hit_is_never_downgraded_to_a_miss() {
         let mut b = ExportBuffer::new();
         let (u, a) = turn_with(UserInputKind::Task, 1);
@@ -1163,6 +1228,34 @@ mod tests {
         let md = std::fs::read_to_string(out.join("session.md")).unwrap();
         assert!(md.contains("Click Copilot"), "the step itself remains");
         assert!(md.contains("screenshot removed"), "and says why the image is absent");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn front_matter_survives_a_value_containing_a_newline() {
+        // This shipped: an app name holding an embedded newline split `app:` over
+        // two lines, producing invalid YAML at the very top of the artifact.
+        let dir = temp_dir("yaml");
+        let mut b = buffer_with_one_framed_step(PointerState::Miss);
+        // Verbatim shape of the string that actually broke it in the field.
+        b.app_name = Some("Title: 'x - File Explorer'\nRect: [-1927, 0, -475, 1087]".into());
+        let out = b
+            .write_folder(
+                &dir,
+                &ExportOptions { title: "Line one\nline two".into(), ..Default::default() },
+            )
+            .unwrap();
+
+        let md = std::fs::read_to_string(out.join("session.md")).unwrap();
+        let fm: Vec<&str> = md.split("---").nth(1).unwrap().trim().lines().collect();
+        for line in &fm {
+            assert!(
+                line.contains(':'),
+                "every front-matter line must be a key: value pair, got {line:?}"
+            );
+        }
+        assert!(fm.iter().any(|l| l.starts_with("title:")));
+        assert!(fm.iter().any(|l| l.starts_with("app:")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

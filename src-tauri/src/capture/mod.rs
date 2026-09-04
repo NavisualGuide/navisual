@@ -181,6 +181,54 @@ pub fn capture_region_jpeg(rect: Rect, quality: u8, exclude: &[Rect]) -> Result<
     }
 }
 
+/// Ceiling for session-export frames. Deliberately NOT `MAX_CAP_W`/`MAX_CAP_H`.
+///
+/// Those exist to cap the image *tokens* an AI request pays for; an export pays no
+/// tokens. Worse, reusing them made export frames strictly softer than what the
+/// model itself saw: the AI's image is a cropped WINDOW squeezed into 1536×768,
+/// while an export frame is a whole MONITOR squeezed into the same box, so detail
+/// per on-screen element came out lower. Live 2026-09-04: a 1920×1080 monitor
+/// exported at 1365×768 — half the pixels — and the founder read the result as
+/// low-resolution, correctly.
+///
+/// 2560×1440 leaves 1080p and 1440p untouched and still halves a 4K frame, which
+/// keeps the worst-case ring buffer sane on a high-DPI machine.
+const EXPORT_MAX_W: u32 = 2560;
+const EXPORT_MAX_H: u32 = 1440;
+
+/// JPEG quality for export frames. Higher than the AI path's 75 for the same
+/// reason: these are read by people, at full width, and are click-to-enlarge
+/// targets on a published page.
+const EXPORT_QUALITY: u8 = 88;
+
+/// Capture a region for session export: native resolution up to a generous cap,
+/// and nothing blanked. The caller passes the monitor rect, so the Navisual panel
+/// stays in shot (`session-export-design.md` §0.4).
+pub fn capture_region_for_export(rect: Rect) -> Result<(Vec<u8>, Rect)> {
+    #[cfg(windows)]
+    {
+        let img = win::capture_desktop_region(&rect)?;
+        let (w, h) = (img.width(), img.height());
+        let img = if w <= EXPORT_MAX_W && h <= EXPORT_MAX_H {
+            img
+        } else {
+            let scale =
+                (EXPORT_MAX_W as f32 / w as f32).min(EXPORT_MAX_H as f32 / h as f32);
+            let nw = ((w as f32 * scale).round() as u32).max(1);
+            let nh = ((h as f32 * scale).round() as u32).max(1);
+            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3)
+        };
+        let buf = encode_jpeg(&img, EXPORT_QUALITY)?;
+        Ok((buf, rect))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = rect;
+        Err(anyhow!("export capture only implemented for Windows"))
+    }
+}
+
 /// Capture one explicit desktop region as a raw RGBA ImageBuffer (no JPEG, no downscale).
 /// The OCR-path counterpart of `capture_region_jpeg` — used so that in full-screen mode the
 /// locator's OCR sees the *same* region the AI did (the chosen monitor / whole desktop) at

@@ -1325,7 +1325,17 @@ fn push_export_turn(
     if buf.app_name.is_none() {
         let g = state.guidance.lock();
         if let Some(hwnd) = g.pinned_hwnd.or(g.target_hwnd) {
-            buf.app_name = Some(capture::get_window_info(hwnd));
+            // The friendly display name the target picker shows, NOT
+            // `get_window_info` — that is a debug dump, and using it put
+            // "Title: 'steps - File Explorer'\nRect: [-1927, 0, -475, 1087]" into
+            // an exported record's `app.name` field on 2026-09-04.
+            let listed = capture::list_target_windows()
+                .into_iter()
+                .find(|w| w.hwnd == hwnd);
+            buf.app_exe = listed.as_ref().map(|w| w.exe_stem.clone());
+            buf.app_name = listed
+                .map(|w| w.display_name)
+                .or_else(|| capture::get_window_title(hwnd).into());
             buf.window_title = Some(capture::get_window_title(hwnd));
         }
         buf.provider = Some(g.provider.clone());
@@ -1372,9 +1382,18 @@ fn record_export_step(
     // Frame-relative pixels, never virtual-desktop coordinates — §4.3's portability
     // rule. A rect that converts to None sat outside this frame (another monitor),
     // and drawing it clamped would put a confident marker on the wrong control.
-    let pointer = match drawn.and_then(|r| session_export::to_frame_coords(r, frame_rect, w, h)) {
-        Some(rect) if hint_shown => session_export::PointerState::Hint { rect },
-        Some(rect) => session_export::PointerState::Hit { rect },
+    //
+    // The None case splits in two, and conflating them corrupts the record: if
+    // there was no rect at all the locator genuinely missed, but if there WAS one
+    // and it simply fell outside this frame, the locator succeeded and the
+    // screenshot just cannot show it. Live 2026-09-04 produced exactly the second
+    // case — `pointer: miss` beside `locator: HitA11y`, a flat contradiction.
+    let pointer = match drawn {
+        Some(r) => match session_export::to_frame_coords(r, frame_rect, w, h) {
+            Some(rect) if hint_shown => session_export::PointerState::Hint { rect },
+            Some(rect) => session_export::PointerState::Hit { rect },
+            None => session_export::PointerState::OffFrame,
+        },
         None => session_export::PointerState::Miss,
     };
 
