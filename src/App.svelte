@@ -798,6 +798,82 @@ See the LICENSE file in the root of this repository for complete details.
     customOllama = !ollamaModels.includes(settingsForm.ollama_model);
   }
   let showQuickMenu = $state(false);
+
+  // ── Session export (session-export-design.md) ─────────────────────────────
+  // The backend keeps the last 30 steps of conversation in memory at all times.
+  // Nothing reaches disk until this dialog writes it, which is what makes the
+  // shipped promise — "nothing is written unless you choose to save it" — true
+  // rather than aspirational. So this dialog IS the consent step, and it shows
+  // what will be written before it writes anything.
+  type ExportStepInfo = {
+    index: number; turn: number; instruction: string;
+    has_frame: boolean; pointer: string; user_kind: string; user_typed: boolean;
+  };
+  type ExportStatus = {
+    turns: number; steps: number; frames: number; empty: boolean;
+    detail: ExportStepInfo[]; app: string | null;
+    suggested_title: string; suggested_slug: string;
+    thin_warning: string | null; destination: string;
+  };
+  let showExport = $state(false);
+  let exportStatus = $state<ExportStatus | null>(null);
+  let exportTitle = $state("");
+  let exportDest = $state("");
+  let exportCropToApp = $state(false);
+  let exportDrawPointer = $state(true);
+  let exportRedacted = $state<number[]>([]);
+  let exportBusy = $state(false);
+  let exportError = $state("");
+  let exportDone = $state("");
+
+  async function openExport() {
+    exportError = ""; exportDone = ""; exportRedacted = [];
+    try {
+      const s = await invoke<ExportStatus>("export_status");
+      exportStatus = s;
+      exportTitle = s.suggested_title;
+      exportDest = s.destination;
+      showExport = true;
+    } catch (e) {
+      exportError = String(e);
+      showExport = true;
+    }
+  }
+
+  function toggleRedact(i: number) {
+    exportRedacted = exportRedacted.includes(i)
+      ? exportRedacted.filter((x) => x !== i)
+      : [...exportRedacted, i];
+  }
+
+  async function chooseExportFolder() {
+    try {
+      const picked = await invoke<string | null>("pick_export_folder");
+      // null is a cancelled dialog, which is the normal path, not an error.
+      if (picked) exportDest = picked;
+    } catch (e) {
+      exportError = String(e);
+    }
+  }
+
+  async function runExport() {
+    exportBusy = true; exportError = ""; exportDone = "";
+    try {
+      const out = await invoke<string>("export_session", {
+        destination: exportDest || null,
+        title: exportTitle,
+        slug: null,
+        cropToApp: exportCropToApp,
+        drawPointer: exportDrawPointer,
+        redactedSteps: exportRedacted,
+      });
+      exportDone = out;
+    } catch (e) {
+      exportError = String(e);
+    } finally {
+      exportBusy = false;
+    }
+  }
   let isMuted = $state(false);
   let isOverlayCleared = $state(false);
   let isRecording = $state(false);
@@ -1723,7 +1799,7 @@ See the LICENSE file in the root of this repository for complete details.
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("send_correction", { note: note || null, avoidBboxes });
+      const res = await invoke<GuideResponse>("send_correction", { note: note || null, avoidBboxes, reason: category ?? null });
       stopTimer();
       if (token !== requestToken) return;
       if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64);
@@ -2856,6 +2932,10 @@ See the LICENSE file in the root of this repository for complete details.
         <button class="qm-btn" class:qm-active={settingsForm.subtitle_enabled} onclick={quickToggleSubtitle}>
           💬 {settingsForm.subtitle_enabled ? "Caption: on" : "Caption: off"}
         </button>
+        <button class="qm-btn" onclick={() => { showQuickMenu = false; openExport(); }}
+          title="Save this session — steps, screenshots and the conversation — to a folder">
+          💾 Save this session
+        </button>
       </div>
     {/if}
 
@@ -2977,6 +3057,92 @@ See the LICENSE file in the root of this repository for complete details.
   {/if}
 
   <!-- Screenshot lightbox — panel window is temporarily expanded to fit -->
+  <!-- Session export. This dialog is the consent step: the ring buffer is
+       memory-only until the button at the bottom is pressed. -->
+  {#if showExport}
+    <!-- Closing is driven from the backdrop by comparing target to currentTarget,
+         rather than a stopPropagation handler on the panel. That keeps the panel
+         free of a click handler it does not need, which is what the a11y rule is
+         actually pointing at. -->
+    <div class="modal-backdrop" role="presentation"
+      onclick={(e) => { if (e.target === e.currentTarget) showExport = false; }}>
+      <div class="export-panel" role="dialog" aria-modal="true" tabindex="-1"
+        aria-label="Save this session"
+        onkeydown={(e) => { if (e.key === "Escape") showExport = false; }}>
+        <div class="export-head">
+          <strong>Save this session</strong>
+          <button class="export-x" onclick={() => (showExport = false)} title="Close">✕</button>
+        </div>
+
+        {#if exportError}
+          <p class="export-err">{exportError}</p>
+        {/if}
+
+        {#if exportDone}
+          <p class="export-ok">
+            Saved to<br /><code>{exportDone}</code>
+          </p>
+          <p class="export-note">
+            The folder holds one image per step, a readable <code>session.md</code>, and the full
+            record in <code>session.json</code>. Look through it before sending it to anyone —
+            the screenshots are pictures of your screen.
+          </p>
+        {:else if exportStatus && exportStatus.empty}
+          <p class="export-note">Nothing recorded yet. Run a step or two first.</p>
+        {:else if exportStatus}
+          <p class="export-note">
+            {exportStatus.steps} step{exportStatus.steps === 1 ? "" : "s"} across
+            {exportStatus.turns} exchange{exportStatus.turns === 1 ? "" : "s"},
+            {exportStatus.frames} with a screenshot{exportStatus.app ? ` · ${exportStatus.app}` : ""}
+          </p>
+
+          {#if exportStatus.thin_warning}
+            <!-- Advisory only. A thin session still exports: it is a valid record
+                 even when it would make a poor article. -->
+            <p class="export-thin">{exportStatus.thin_warning}</p>
+          {/if}
+
+          <label class="export-field">
+            <span>Title</span>
+            <input type="text" bind:value={exportTitle} placeholder="What was this session about?" />
+          </label>
+
+          <label class="export-field">
+            <span>Folder</span>
+            <span class="export-dest">
+              <input type="text" bind:value={exportDest} spellcheck="false" />
+              <button onclick={chooseExportFolder} title="Choose a different folder">Browse…</button>
+            </span>
+          </label>
+
+          <div class="export-opts">
+            <label><input type="checkbox" bind:checked={exportDrawPointer} /> Draw the pointer on each screenshot</label>
+            <label><input type="checkbox" bind:checked={exportCropToApp} /> Crop to the app (hides the Navisual panel)</label>
+          </div>
+
+          <div class="export-list">
+            {#each exportStatus.detail as d (d.index)}
+              <div class="export-row" class:export-redacted={exportRedacted.includes(d.index)}>
+                <span class="export-n">{d.index + 1}</span>
+                <span class="export-instr" title={d.instruction}>{d.instruction}</span>
+                <span class="export-tag" class:export-miss={d.pointer === "miss"}>{d.pointer}</span>
+                {#if !d.user_typed}<span class="export-tag export-auto">{d.user_kind}</span>{/if}
+                <button class="export-drop" onclick={() => toggleRedact(d.index)}
+                  title={exportRedacted.includes(d.index) ? "Include this screenshot" : "Leave this screenshot out"}>
+                  {exportRedacted.includes(d.index) ? "restore" : "drop"}
+                </button>
+              </div>
+            {/each}
+          </div>
+
+          <button class="export-go" onclick={runExport} disabled={exportBusy}>
+            {exportBusy ? "Saving…" : "Save to folder"}
+          </button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   {#if lightboxOpen}
     <div class="lightbox-backdrop" role="presentation" onclick={closeLightbox}>
       {#if lightboxLoading}
@@ -4946,6 +5112,128 @@ See the LICENSE file in the root of this repository for complete details.
   .btn-new:hover { background: rgba(161, 161, 170, 0.2); color: var(--text-primary); }
 
   /* ── Quick-action menu ───────────────────────────── */
+
+  /* ── Session export dialog ─────────────────────────────────────────────── */
+  .export-panel {
+    width: min(560px, 94vw);
+    max-height: 86vh;
+    overflow-y: auto;
+    background: var(--surface, #1b1b1f);
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    border-radius: 10px;
+    padding: 16px 18px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .export-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 15px;
+  }
+  .export-x {
+    background: none;
+    border: 0;
+    color: var(--text-tertiary, #8a8a92);
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .export-note { font-size: 12.5px; color: var(--text-secondary, #a0a0a8); line-height: 1.5; margin: 0; }
+  .export-err { font-size: 12.5px; color: #ff6b6b; margin: 0; }
+  .export-ok { font-size: 12.5px; margin: 0; line-height: 1.6; }
+  .export-ok code { word-break: break-all; font-size: 11.5px; }
+  /* Advisory, not a blocker — deliberately not styled as an error. */
+  .export-thin {
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0;
+    padding: 8px 10px;
+    border-left: 3px solid #d19a34;
+    background: rgba(209, 154, 52, 0.08);
+    color: var(--text-secondary, #a0a0a8);
+  }
+  .export-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+  .export-field input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    font-size: 12.5px;
+    border-radius: 6px;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    background: rgba(0, 0, 0, 0.25);
+    color: inherit;
+  }
+  .export-dest { display: flex; gap: 6px; }
+  .export-dest button {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    background: rgba(255, 255, 255, 0.05);
+    color: inherit;
+    cursor: pointer;
+  }
+  .export-opts { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+  .export-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+    border-radius: 6px;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .export-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 8px;
+    font-size: 11.5px;
+    border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.05));
+  }
+  .export-row:last-child { border-bottom: none; }
+  .export-redacted { opacity: 0.4; text-decoration: line-through; }
+  .export-n { flex: 0 0 18px; color: var(--text-tertiary, #8a8a92); }
+  .export-instr {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .export-tag {
+    flex: 0 0 auto;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--text-tertiary, #8a8a92);
+  }
+  /* A miss is the row worth noticing: it is the one with no pointer on it. */
+  .export-miss { background: rgba(209, 154, 52, 0.18); color: #e0b25a; }
+  .export-auto { background: rgba(120, 160, 255, 0.15); color: #8fb0ff; }
+  .export-drop {
+    flex: 0 0 auto;
+    background: none;
+    border: 0;
+    color: var(--text-tertiary, #8a8a92);
+    cursor: pointer;
+    font-size: 11px;
+    text-decoration: underline;
+  }
+  .export-go {
+    margin-top: 2px;
+    padding: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 7px;
+    border: 0;
+    background: var(--accent, #ff6b35);
+    color: #fff;
+    cursor: pointer;
+  }
+  .export-go:disabled { opacity: 0.6; cursor: default; }
 
   .quick-menu {
     display: flex;

@@ -14,6 +14,7 @@ mod overlay;
 mod packs;
 mod prompt_log;
 mod server;
+mod session_export;
 mod track;
 mod tts;
 
@@ -754,6 +755,16 @@ struct AppState {
     /// Nav-Packs loaded at startup (bundled + user). Read-only after load; the active pack
     /// for the focused window injects app-specific guidance + shortcuts into the prompt.
     packs: packs::PackRegistry,
+    /// Session-export ring buffer (`session-export-design.md` §3.1) — the last 30
+    /// steps of conversation, held in memory and never written unless the user
+    /// exports. Always on, so "that one was worth keeping" stays a decision you can
+    /// make afterwards instead of one you have to predict.
+    export: parking_lot::Mutex<session_export::ExportBuffer>,
+    /// Where the last export was written. §9.0: start from a default, then remember
+    /// — deliberately internal state rather than a user-facing setting, because a
+    /// save dialog puts an explicit choice in front of the user every time
+    /// screenshots of their real screen go to disk.
+    export_dest: parking_lot::Mutex<Option<PathBuf>>,
 }
 
 /// Snapshot of the most recent non-clear overlay. Stored so `restore_overlay`
@@ -998,7 +1009,35 @@ fn execute_step(
     // Flow A: ranked candidate boxes to draw INSTEAD of the single pointer when 2+
     // (the primary must equal `located`'s bbox). Empty for every normal call.
     candidates_abs: &[capture::Rect],
+    // Session export (`session-export-design.md`): which step of the most recent
+    // turn this call is rendering, so the ring buffer can attach the frame and the
+    // pointer outcome to the right entry. `None` disables recording for this call —
+    // used by paths that re-render a step that is already recorded.
+    export_step_index: Option<usize>,
 ) -> Result<StepOutcome, String> {
+    // §0.4 — capture the export frame BEFORE anything is drawn.
+    //
+    // The pointer is composited at export time from a clean frame, never burned in
+    // here. A pointer drawn into the pixels cannot be moved or removed later, which
+    // would make the wrong-pointer step — the one that most needs rescuing — the
+    // only unfixable one.
+    //
+    // Clearing first matters on a local advance, where the PREVIOUS step's pointer
+    // is still on screen and would otherwise be captured as though it belonged to
+    // this step. On the AI paths the overlay is already clear, so this is a no-op.
+    let export_frame = export_step_index.and_then(|_| {
+        tracker.clear();
+        if let Ok(u) = overlay::make_update(overlay::OverlayKind::None, None, None) {
+            let _ = overlay::emit_update(app, u);
+        }
+        // Same settle the AI-capture path uses — one DWM composite, so the cleared
+        // overlay is actually gone from the framebuffer before the BitBlt.
+        std::thread::sleep(std::time::Duration::from_millis(33));
+        // capture_rect is the target app's own rect; capture_frame widens from it
+        // to the whole monitor so the Navisual panel is in shot. None falls back to
+        // the primary monitor.
+        session_export::capture_frame(capture_rect)
+    });
     let (located, trace) = match precomputed {
         Some(pre) => pre,
         None => locate_for_step(
@@ -1205,7 +1244,147 @@ fn execute_step(
         tracker.clear();
     }
 
+    // Session export: bank the clean frame and the pointer OUTCOME for this step.
+    // Everything needed is settled by here — which pass won, whether the hint ring
+    // stood in for a real hit, and the rect that was actually drawn.
+    if let (Some(idx), Some((jpeg, frame_rect))) = (export_step_index, export_frame) {
+        record_export_step(
+            app,
+            idx,
+            jpeg,
+            frame_rect,
+            capture_rect,
+            bbox,
+            hint_shown,
+            trace.as_ref(),
+        );
+    }
+
     Ok((located, trace, hint_shown, shown_candidates))
+}
+
+/// Classify what the user actually did, for the export conversation model (§0.7).
+///
+/// **The `[User completed:]` check is the whole point of this function.** That
+/// string is composed by the app for a → Next re-query, not typed by anyone. The
+/// session-memory work hit exactly this and mis-pinned 18 of 36 turns because it
+/// could not tell a machine continuation string from real input; an exporter making
+/// the same mistake would print the app's own words in an article as if the reader
+/// had said them.
+fn classify_user_input(
+    task: &str,
+    is_reply: bool,
+    is_next_requery: bool,
+) -> session_export::UserInput {
+    use session_export::{UserInput, UserInputKind};
+    if is_next_requery {
+        // Deliberately no text: the synthesized string is not something a person
+        // wrote, and storing it would invite exactly the confusion above.
+        return UserInput::new(UserInputKind::Next, None);
+    }
+    let text = (!task.trim().is_empty()).then(|| task.to_string());
+    if is_reply {
+        return UserInput::new(UserInputKind::Reply, text);
+    }
+    UserInput::new(UserInputKind::Task, text)
+}
+
+/// Push one completed exchange into the export ring buffer.
+///
+/// Called after the AI response is parsed and before the locate runs, so
+/// `execute_step` has a turn to attach its frame and pointer outcome to.
+fn push_export_turn(
+    state: &State<'_, AppState>,
+    user: session_export::UserInput,
+    steps: &[ai::types::GuidanceStep],
+    needs_input: bool,
+) {
+    let assistant = session_export::AssistantTurn {
+        instruction: steps.first().map(|s| s.instruction.clone()).unwrap_or_default(),
+        state_summary: state.guidance.lock().state_summary.clone(),
+        goal: session_goal(state),
+        plan_outline: session_plan_outline(state),
+        plan_completed_count: session_plan_completed_count(state),
+        needs_input,
+        steps: steps
+            .iter()
+            .map(|s| {
+                let mut es = session_export::ExportStep::new(s.instruction.clone());
+                es.target_text = s.target_text.clone();
+                es.target_role = s.target_role.as_ref().map(|r| format!("{r:?}"));
+                es.clipboard = s.clipboard.clone();
+                es.checkpoint = s.checkpoint;
+                es
+            })
+            .collect(),
+    };
+
+    let mut buf = state.export.lock();
+    // App identity is captured once, from the first turn that knows it — the target
+    // can change mid-session, and the first app is the one the session is about.
+    if buf.app_name.is_none() {
+        let g = state.guidance.lock();
+        if let Some(hwnd) = g.pinned_hwnd.or(g.target_hwnd) {
+            buf.app_name = Some(capture::get_window_info(hwnd));
+            buf.window_title = Some(capture::get_window_title(hwnd));
+        }
+        buf.provider = Some(g.provider.clone());
+    }
+    buf.push(user, assistant);
+}
+
+/// Attach one step's clean frame and pointer state to the export ring buffer.
+///
+/// Split out of `execute_step` because it is the only part that reaches for
+/// `AppState`, and it does so with `try_state`: this runs on paths that can be
+/// reached before `handle.manage()` has completed during a cold start, and an
+/// unwrap there is the shape that aborted the process in v0.7.6.
+#[allow(clippy::too_many_arguments)]
+fn record_export_step(
+    app: &AppHandle,
+    step_index: usize,
+    jpeg: Vec<u8>,
+    frame_rect: capture::Rect,
+    app_rect: Option<capture::Rect>,
+    drawn: Option<capture::Rect>,
+    hint_shown: bool,
+    trace: Option<&locator::trace::LocateTrace>,
+) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+
+    let (w, h) = match image::load_from_memory(&jpeg) {
+        Ok(img) => (img.width(), img.height()),
+        Err(e) => {
+            log::warn!("[export] could not read back frame dims: {e}");
+            return;
+        }
+    };
+
+    let frame = session_export::Frame {
+        jpeg,
+        width: w,
+        height: h,
+        // Lets the export preview crop the panel out of this one frame instead of
+        // needing a second, tighter capture (§0.4).
+        app_rect: app_rect.and_then(|r| session_export::to_frame_coords(r, frame_rect, w, h)),
+    };
+
+    // Frame-relative pixels, never virtual-desktop coordinates — §4.3's portability
+    // rule. A rect that converts to None sat outside this frame (another monitor),
+    // and drawing it clamped would put a confident marker on the wrong control.
+    let pointer = match drawn.and_then(|r| session_export::to_frame_coords(r, frame_rect, w, h)) {
+        Some(rect) if hint_shown => session_export::PointerState::Hint { rect },
+        Some(rect) => session_export::PointerState::Hit { rect },
+        None => session_export::PointerState::Miss,
+    };
+
+    let decision = trace.map(|t| format!("{:?}", t.final_decision));
+    let ms = trace.map(|t| t.elapsed_ms as u64);
+
+    state
+        .export
+        .lock()
+        .set_step_outcome(step_index, Some(frame), pointer, decision, ms);
 }
 
 // ---------- Autopilot screen-change polling + stale-response detection ----------
@@ -3618,6 +3797,19 @@ async fn guide(
         .flatten();
     emit_stale_if_drifted(&app, pre_hash, stale_hash);
 
+    // Session export (§0.7): record the exchange BEFORE the locate, so the frame
+    // and pointer outcome that `execute_step` banks have a turn to attach to.
+    //
+    // `task` here can be a synthesized `[User completed: ...]` continuation string
+    // rather than anything the user typed, which is exactly the distinction
+    // `classify_user_input` exists to preserve.
+    push_export_turn(
+        &state,
+        classify_user_input(&task, is_reply, is_next_requery),
+        &steps,
+        needs_input,
+    );
+
     let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
         &app,
         &steps[0],
@@ -3634,6 +3826,8 @@ async fn guide(
         context_elements,
         None,
         &[],
+        // guide(): this response's first step, recorded against the turn just pushed.
+        Some(0),
     )
     .unwrap_or((None, None, false, Vec::new()));
     // Flow B: a first-locate ambiguity set was drawn — arm the state readback.
@@ -3780,6 +3974,8 @@ async fn next_step(
         context_elements,
         None,
         &[],
+        // next_step(): a local advance through steps guide() already recorded.
+        Some(step_index),
     )
     .unwrap_or((None, None, false, Vec::new()));
     arm_candidates_if_shown(
@@ -3850,6 +4046,12 @@ async fn retry_locate(
     // entries recorded for THIS step's target below (scoped_avoid doc comment).
     avoid_bboxes: Vec<locator::candidates::AvoidEntry>,
 ) -> Result<GuideResponse, String> {
+    // Session export: the pointer currently recorded for this step is the one the
+    // user just rejected. Promote it to Corrected now, so the rejected rect is
+    // preserved when the replacement lands (§0.4) — a control the locator got wrong
+    // once is usually one that looks like something else on screen, which is
+    // exactly the ambiguity worth writing about.
+    state.export.lock().mark_rejected(step_index);
     // Flow A: a second "Wrong spot" while candidates are showing means the user did
     // NOT click any of them — resolve (likely unresolved, honest) before re-arming.
     resolve_pending_candidates(&app, &state, true).await;
@@ -3976,6 +4178,8 @@ async fn retry_locate(
         context_elements,
         Some((primary, primary_trace)),
         &candidate_boxes,
+        // next_step(): a local advance through steps already recorded by guide().
+        Some(step_index),
     )
     .unwrap_or((None, None, false, Vec::new()));
 
@@ -4039,6 +4243,12 @@ async fn send_correction(
     // step's own target_text — a rejection of "the heading" must not blanket-veto
     // a later 'Save' whose best answer sits inside that heading (live 2026-07-18).
     avoid_bboxes: Option<Vec<locator::candidates::AvoidEntry>>,
+    // Session export (§0.7): the ✗ Wrong reason chip, verbatim from the picker
+    // ("wrong_spot", "cant_find", …). It is passed explicitly rather than inferred
+    // from `note`, because the note carries a steering HINT for the model, not the
+    // category — guessing the category back out of prose would be a fabrication
+    // sitting in an exported record that reads as fact.
+    reason: Option<String>,
 ) -> Result<GuideResponse, String> {
     // Flow A: resolve any on-screen candidate boxes before the correction reshapes
     // the step (a "None of these" Wrong press lands here — resolves unresolved).
@@ -4559,6 +4769,16 @@ async fn send_correction(
         .flatten();
     emit_stale_if_drifted(&app, pre_hash, stale_hash);
 
+    // Session export (§0.7): a correction is the highest-value turn there is. It
+    // marks the place the obvious answer was wrong, which is the paragraph an
+    // article most needs and the one no session of pure → Next turns can supply.
+    push_export_turn(
+        &state,
+        session_export::UserInput::correction(note.clone(), reason.clone()),
+        &steps,
+        needs_input,
+    );
+
     // Scope the rejections to the NEW step's target — the AI may have re-targeted,
     // and only rejections recorded against this exact target still apply.
     let scoped = locator::candidates::scoped_avoid(
@@ -4581,6 +4801,8 @@ async fn send_correction(
         context_elements,
         None,
         &[],
+        // send_correction(): first step of the correction turn just pushed.
+        Some(0),
     )
     .unwrap_or((None, None, false, Vec::new()));
     arm_candidates_if_shown(
@@ -4795,6 +5017,10 @@ fn list_monitors() -> Vec<capture::MonitorInfo> {
 /// explicitly chose that window and it should survive a session reset.
 #[tauri::command]
 fn new_session(state: State<'_, AppState>) {
+    // §3.1: the ring buffer's lifetime is a stated rule, not an accident. A new
+    // task is a new subject, and the previous session's screenshots have no
+    // business outliving it in memory.
+    state.export.lock().clear();
     let mut g = state.guidance.lock();
     g.session_id = None;
     g.steps = vec![];
@@ -4803,6 +5029,162 @@ fn new_session(state: State<'_, AppState>) {
     // A click from the abandoned task is not "what the user just did" for the new one —
     // it would be reported as fresh context on the first turn and steer the opening answer.
     last_click::clear();
+}
+
+/// One row in the export preview.
+#[derive(serde::Serialize)]
+struct ExportStepInfo {
+    /// Flattened index across all turns — what `export_session` expects back in
+    /// `redacted_steps`, so the preview and the writer cannot disagree about
+    /// which step is which.
+    index: usize,
+    turn: usize,
+    instruction: String,
+    has_frame: bool,
+    /// `hit` / `hint` / `miss` / `corrected`. Surfaced because a `miss` is the row
+    /// the user may want to place a pointer on, and a `corrected` row carries a
+    /// rejected rect worth knowing about (§0.4).
+    pointer: String,
+    /// What kind of user input produced the turn this step belongs to, and whether
+    /// a person actually typed anything for it (§0.7).
+    user_kind: String,
+    user_typed: bool,
+}
+
+/// What the export UI needs to decide whether, and what, to export.
+#[derive(serde::Serialize)]
+struct ExportStatus {
+    turns: usize,
+    steps: usize,
+    /// Steps that actually hold a frame — the ones that can become figures.
+    frames: usize,
+    /// Empty when nothing has been recorded yet, which is the one state where the
+    /// export UI should offer nothing at all rather than an empty folder.
+    empty: bool,
+    detail: Vec<ExportStepInfo>,
+    app: Option<String>,
+    /// A derived title the user is expected to edit. Derived from the first real
+    /// task, because that is the question in the words someone actually used.
+    suggested_title: String,
+    suggested_slug: String,
+    /// §0.7's publishability signal. Present when the session ran straight through
+    /// with no corrections, questions or follow-ups. Advisory only — §10 settled
+    /// that a thin session still exports, because replay and personal records have
+    /// no publishing quality bar.
+    thin_warning: Option<String>,
+    /// Where an export would land by default (§9.0: default first, then remembered).
+    destination: String,
+}
+
+#[tauri::command]
+fn export_status(state: State<'_, AppState>) -> ExportStatus {
+    let buf = state.export.lock();
+    let title = buf
+        .turns()
+        .iter()
+        .find(|t| t.user.kind == session_export::UserInputKind::Task)
+        .and_then(|t| t.user.text.clone())
+        .or_else(|| buf.turns().front().map(|t| t.assistant.instruction.clone()))
+        .unwrap_or_default();
+    let dest = state
+        .export_dest
+        .lock()
+        .clone()
+        .unwrap_or_else(session_export::default_destination);
+    let mut detail = Vec::new();
+    let mut flat = 0usize;
+    for turn in buf.turns() {
+        for step in &turn.assistant.steps {
+            detail.push(ExportStepInfo {
+                index: flat,
+                turn: turn.n,
+                instruction: step.instruction.clone(),
+                has_frame: step.frame.is_some(),
+                pointer: step.pointer.label().to_string(),
+                user_kind: format!("{:?}", turn.user.kind).to_lowercase(),
+                user_typed: turn.user.typed,
+            });
+            flat += 1;
+        }
+    }
+
+    ExportStatus {
+        turns: buf.turn_count(),
+        steps: buf.step_count(),
+        frames: detail.iter().filter(|d| d.has_frame).count(),
+        empty: buf.is_empty(),
+        detail,
+        app: buf.app_name.clone(),
+        suggested_slug: session_export::slugify(&title),
+        suggested_title: title,
+        thin_warning: buf.thinness_warning(),
+        destination: dest.display().to_string(),
+    }
+}
+
+/// Open the native folder picker, starting where the last export went.
+/// Returns `None` when the user cancels, which is the normal path.
+#[tauri::command]
+async fn pick_export_folder(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let start = state
+        .export_dest
+        .lock()
+        .clone()
+        .or_else(|| Some(session_export::default_destination()));
+    let picked = session_export::pick_folder(start);
+    if let Some(p) = &picked {
+        *state.export_dest.lock() = Some(p.clone());
+    }
+    Ok(picked.map(|p| p.display().to_string()))
+}
+
+/// Write the export folder and return its path.
+///
+/// This is the ONLY function in the app that puts session screenshots on disk.
+/// Everything before it is memory-only, which is what makes the shipped privacy
+/// promise ("nothing is written unless you choose to save it") true rather than
+/// aspirational.
+#[tauri::command]
+fn export_session(
+    state: State<'_, AppState>,
+    destination: Option<String>,
+    title: String,
+    slug: Option<String>,
+    crop_to_app: bool,
+    draw_pointer: bool,
+    redacted_steps: Vec<usize>,
+) -> Result<String, String> {
+    let dest = destination
+        .map(std::path::PathBuf::from)
+        .or_else(|| state.export_dest.lock().clone())
+        .unwrap_or_else(session_export::default_destination);
+    std::fs::create_dir_all(&dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
+
+    let opts = session_export::ExportOptions {
+        crop_to_app,
+        crop_steps: Vec::new(),
+        draw_pointer,
+        title: title.clone(),
+        slug: slug.unwrap_or_default(),
+    };
+
+    let mut buf = state.export.lock();
+    // Redaction is applied to the buffer so the preview and the written folder
+    // cannot disagree about what was dropped (§4.4).
+    let mut flat = 0usize;
+    for turn in buf.turns_mut() {
+        for step in turn.assistant.steps.iter_mut() {
+            step.redacted = redacted_steps.contains(&flat);
+            flat += 1;
+        }
+    }
+    let out = buf.write_folder(&dest, &opts).map_err(|e| e.to_string())?;
+    drop(buf);
+
+    // Remember where it went — §9.0's "start from the default, then remember".
+    *state.export_dest.lock() = Some(dest);
+    log::info!("[export] wrote {}", out.display());
+    Ok(out.display().to_string())
 }
 
 /// Item 1 — clear the pinned window and return to auto-detection.
@@ -6144,6 +6526,8 @@ pub fn run() {
                 screen_sig: parking_lot::Mutex::new(None),
                 chat_full_jpeg: parking_lot::Mutex::new(None),
                 packs,
+                export: parking_lot::Mutex::new(session_export::ExportBuffer::new()),
+                export_dest: parking_lot::Mutex::new(None),
             });
 
             Ok(())
@@ -6212,6 +6596,9 @@ pub fn run() {
             pin_full_screen_target,
             unpin_target_window,
             new_session,
+            export_status,
+            pick_export_folder,
+            export_session,
             list_tts_voices,
             get_chat_full_screenshot,
         ])

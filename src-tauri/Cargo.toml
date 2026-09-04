@@ -92,6 +92,13 @@ windows = { version = "0.62", features = [
   # GetCurrentPackageFullName — "am I running under MSIX package identity?", which
   # gates the self-updater off for a Microsoft Store build (see running_packaged()).
   "Win32_Storage_Packaging_Appx",
+  # IFileOpenDialog with FOS_PICKFOLDERS — the native "where should this go?" picker
+  # for session export. A dialog rather than a settings value on purpose: an export
+  # is the one feature that deliberately writes screenshots of the user's real screen
+  # to disk, and a per-export choice is a stronger consent signal than a path
+  # configured once and forgotten (session-export-design.md §9.0).
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
 ] }
 uiautomation = { version = "0.24.4", features = ["process", "event", "pattern"] }
 
