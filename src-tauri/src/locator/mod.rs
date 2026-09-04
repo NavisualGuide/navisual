@@ -63,6 +63,13 @@ pub(crate) fn strip_trailing_ellipsis(target: &str) -> (String, bool) {
         .or_else(|| trimmed.strip_suffix("..."))
         .map(|c| c.trim_end());
     match core {
+        // Stripping must never consume the whole target. A label that IS the
+        // marker — File Explorer's overflow button is literally "..." — is a real
+        // control the user can be pointed at, not a truncated name. Emptying it
+        // produced an anchored pattern with nothing in the middle, which matched
+        // every unnamed element in the tree (live 2026-09-04, see
+        // `a11y::build_name_regex`).
+        Some(c) if c.trim().is_empty() => (target.trim_end().to_string(), false),
         Some(c) if c.chars().count() >= 5 => (c.to_string(), true),
         Some(c) => (c.to_string(), false),
         None => (target.to_string(), false),
