@@ -5243,6 +5243,18 @@ fn new_session(state: State<'_, AppState>) {
     // A click from the abandoned task is not "what the user just did" for the new one —
     // it would be reported as fresh context on the first turn and steer the opening answer.
     last_click::clear();
+    drop(g);
+
+    // Drop the abandoned session itself, not just the id. `session_goal` /
+    // `session_plan_outline` read straight off `current_session`, and every
+    // GuideResponse carries them — so until the new task's first answer replaces
+    // the session, any response built in between (a locate, a restore, a cheap
+    // local advance) would hand the frontend the FINISHED task's goal back and
+    // re-populate the card the frontend just cleared. `create_session` on the
+    // next `guide` repopulates this, and both readers already treat None as "".
+    if let Ok(mut router) = state.ai_router.try_lock() {
+        router.session_manager.current_session = None;
+    }
 }
 
 /// One row in the export preview.

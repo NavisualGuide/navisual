@@ -1675,6 +1675,11 @@ See the LICENSE file in the root of this repository for complete details.
   async function newSession() {
     isOverlayCleared = false;
     planExpanded = false;
+    // The goal card is gated on sessionGoal alone, so leaving it set kept the
+    // FINISHED task's "Working on …" pinned above a freshly-emptied session
+    // (live-reported) — the plan underneath it was already being cleared here,
+    // which just made the leftover card look emptied rather than stale.
+    sessionGoal = "";
     sessionPlanOutline = [];
     sessionPlanCompletedCount = 0;
     cancelRequest();
@@ -2963,11 +2968,20 @@ See the LICENSE file in the root of this repository for complete details.
       {#each history as entry (entry.id)}
         <div class="h-entry h-{entry.role}">
           <span class="h-label">
-            {entry.role === "user" ? "You"
-            : entry.role === "ai" ? "AI"
-            : entry.role === "correction" ? "Wrong"
-            : entry.role === "error" ? "Error"
-            : "·"}
+            {#if entry.role === "ai"}
+              <!-- The product's own mark rather than the word "AI": it is what the
+                   user is talking to, and at this size a repeated 8-letter word
+                   down the column would be both wide and noisy where every other
+                   label is one short word. <img>, never inline <svg> — see the
+                   header-actions note on this WebView2 build squashing inline SVG
+                   flex children to ~2px. -->
+              <img src="/goldfish.svg" class="h-label-fish" alt="Navisual" title="Navisual" draggable="false" />
+            {:else}
+              {entry.role === "user" ? "You"
+              : entry.role === "correction" ? "Wrong"
+              : entry.role === "error" ? "Error"
+              : "·"}
+            {/if}
           </span>
           <div class="h-body">
             <span class="h-text">{entry.text}</span>
@@ -5127,6 +5141,16 @@ See the LICENSE file in the root of this repository for complete details.
 
   .h-text { color: var(--text-secondary); word-break: break-word; }
   .h-meta { font-size: 11px; color: var(--text-tertiary); font-family: "JetBrains Mono", ui-monospace, monospace; }
+
+  /* Sized to sit on the same baseline as the text labels beside it, and pinned
+     to the right of the 34px column like they are. */
+  .h-label-fish {
+    width: 14px;
+    height: 14px;
+    display: inline-block;
+    vertical-align: -3px;
+    border-radius: 3px;
+  }
 
   .h-user .h-label { color: var(--accent-400); }
   .h-user .h-text  { color: var(--text-primary); }
