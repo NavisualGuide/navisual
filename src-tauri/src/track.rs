@@ -33,7 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, WindowFromPoint, CW_USEDEFAULT, EVENT_OBJECT_HIDE,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
     EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, MSG, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_DISPLAYCHANGE, WNDCLASSEXW,
+    SPI_SETWORKAREA, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_DISPLAYCHANGE, WM_SETTINGCHANGE,
+    WNDCLASSEXW,
 };
 
 struct TrackState {
@@ -497,6 +498,16 @@ unsafe fn create_display_watch_window() {
 /// one-shot reconfigure (`schedule_display_settle`) rather than acting immediately — see
 /// `DISPLAY_SETTLE_DELAY_MS`'s doc comment for why. Everything else passes straight to the
 /// default handler.
+///
+/// `WM_SETTINGCHANGE`/`SPI_SETWORKAREA` is handled for the same reason and by the same
+/// route. Hiding the taskbar changes the work area without changing monitor topology, so
+/// it broadcasts this instead of `WM_DISPLAYCHANGE` — and Windows takes the opportunity to
+/// refit the desktop-spanning overlay onto the primary monitor, permanently, squashing the
+/// pointer horizontally for the rest of the session (measured: `-1920,0 3840x1080` →
+/// `-8,-8 1936x1096`). `overlay::emit_update` already repairs that on the next drawn frame
+/// regardless of what caused it, which is the actual fix; this exists so the repair happens
+/// within milliseconds instead of waiting for a frame that may not come until the user's
+/// next step, leaving a live pointer visibly wrong in the meantime.
 #[cfg(windows)]
 unsafe extern "system" fn display_watch_wndproc(
     hwnd: HWND,
@@ -507,6 +518,12 @@ unsafe extern "system" fn display_watch_wndproc(
     if msg == WM_DISPLAYCHANGE {
         log::info!("display-watch: WM_DISPLAYCHANGE received, scheduling reconfigure");
         mark_display_change_for_logging();
+        schedule_display_settle();
+    } else if msg == WM_SETTINGCHANGE && wparam.0 as u32 == SPI_SETWORKAREA.0 {
+        // Not logged at info like WM_DISPLAYCHANGE: the work area changes for mundane
+        // reasons too (a docked app bar opening), and the settle is a no-op when the
+        // overlay didn't actually move.
+        log::debug!("display-watch: SPI_SETWORKAREA received, scheduling reconfigure");
         schedule_display_settle();
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)

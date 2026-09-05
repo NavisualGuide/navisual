@@ -258,11 +258,87 @@ pub fn reconfigure(app: &AppHandle) {
     }
 }
 
+/// Restore the single invariant the overlay's coordinate mapping depends on:
+/// **the overlay window's physical rect must equal the virtual desktop.**
+///
+/// The canvas backing store is sized in virtual-desktop pixels and everything is
+/// drawn in that space, while the canvas CSS box is 100 % of the overlay window —
+/// so the browser stretches one onto the other. Let the two diverge and every
+/// drawn coordinate is silently scaled by `window / vd` and offset by the
+/// difference of their origins. Nothing downstream can detect it: the pointer is
+/// simply in the wrong place, and the geometry all the way up the pipeline is
+/// still perfectly correct.
+///
+/// Windows refits a desktop-spanning top-level window on far more occasions than
+/// a trigger list has ever managed to enumerate. `WM_DISPLAYCHANGE` was wired up
+/// in v0.7.2 for monitor plug/unplug; **hiding the taskbar was not**, and measured
+/// live it moves the overlay from `-1920,0 3840x1080` to `-8,-8 1936x1096` —
+/// refitted onto the primary monitor — and never puts it back, so one toggle
+/// squashes the pointer horizontally (0.50x) for the rest of the session while
+/// leaving it vertically correct (1.01x). Rather than grow the list again (taskbar
+/// moved or resized, DPI change, a resolution change that doesn't alter topology,
+/// RDP reconnect, session unlock), this re-establishes the invariant itself, on
+/// the one path every drawn frame passes through.
+///
+/// Returns the virtual-desktop rect the window is now aligned to, so the caller
+/// can emit the frame in exactly that space.
+fn realign_to_virtual_desktop(window: &WebviewWindow) -> Option<Rect> {
+    // Detection deliberately reads the CACHED virtual-desktop rect: this runs on
+    // every emitted frame and must not re-enumerate monitors each time. That is
+    // sound because the drift being caught is the *window* being moved under us,
+    // not the desktop changing shape — a topology change arrives as
+    // WM_DISPLAYCHANGE, which invalidates the cache on its own. And a stale cache
+    // is self-correcting anyway: the repair below re-reads it fresh, so a false
+    // positive costs one extra enumeration and still lands on the right rect.
+    let vd = virtual_desktop_rect().ok()?;
+    let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        return Some(vd);
+    };
+    if pos.x == vd.x && pos.y == vd.y && size.width == vd.width && size.height == vd.height {
+        return Some(vd);
+    }
+
+    log::warn!(
+        "overlay geometry drifted: window {}x{} at {},{} vs virtual desktop {}x{} at {},{} \
+         (x scale {:.3}, y scale {:.3}) — realigning",
+        size.width,
+        size.height,
+        pos.x,
+        pos.y,
+        vd.width,
+        vd.height,
+        vd.x,
+        vd.y,
+        size.width as f64 / vd.width.max(1) as f64,
+        size.height as f64 / vd.height.max(1) as f64,
+    );
+
+    // Repair against freshly enumerated topology, never the cached copy that
+    // detected the drift — if the desktop itself is what changed, the cached rect
+    // is precisely the wrong thing to restore the window to.
+    invalidate_virtual_desktop_cache();
+    if let Err(e) = configure(window) {
+        log::warn!("overlay realign failed: {e}");
+    }
+    virtual_desktop_rect().ok().or(Some(vd))
+}
+
 /// Emit an `overlay:update` event to the overlay frontend.
-pub fn emit_update(app: &AppHandle, update: OverlayUpdate) -> Result<()> {
+///
+/// Every path that draws anything on screen funnels through here, which makes it
+/// the one place a geometry guard cannot be forgotten — see
+/// `realign_to_virtual_desktop`. The update's own `virtual_origin`/`virtual_size`
+/// are overwritten with whatever that settles on, so the frame is always emitted
+/// in the same space the window actually occupies rather than in whatever the
+/// caller measured a moment earlier.
+pub fn emit_update(app: &AppHandle, mut update: OverlayUpdate) -> Result<()> {
     let Some(window) = app.get_webview_window("overlay") else {
         return Err(anyhow!("overlay window not found"));
     };
+    if let Some(vd) = realign_to_virtual_desktop(&window) {
+        update.virtual_origin = (vd.x, vd.y);
+        update.virtual_size = (vd.width, vd.height);
+    }
     window
         .emit("overlay:update", &update)
         .map_err(|e| anyhow!("emit overlay:update: {e}"))?;
