@@ -1920,6 +1920,88 @@ mod drain_flag_live_tests {
 }
 
 #[cfg(test)]
+mod dock_tests {
+    use super::*;
+
+    const WORK: capture::Rect = capture::Rect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1032,
+    };
+
+    #[test]
+    fn right_dock_puts_the_panel_on_the_right_edge_flush_with_the_partner() {
+        let l = dock_split(WORK, "right", 480);
+        assert_eq!(l.partner.x, 0);
+        assert_eq!(l.partner.width, 1440);
+        // The whole point: no gap and no overlap at the shared edge.
+        assert_eq!(l.panel.x, l.partner.x + l.partner.width as i32);
+        assert_eq!(l.panel.width, 480);
+        // Full work-area height on both sides, never the monitor height.
+        assert_eq!(l.panel.height, WORK.height);
+        assert_eq!(l.partner.height, WORK.height);
+    }
+
+    #[test]
+    fn left_dock_mirrors_it() {
+        let l = dock_split(WORK, "left", 480);
+        assert_eq!(l.panel.x, 0);
+        assert_eq!(l.partner.x, 480);
+        assert_eq!(l.partner.width, 1440);
+    }
+
+    #[test]
+    fn the_split_covers_the_work_area_exactly() {
+        for w in [1, 300, 480, 960, 1900, 5000] {
+            let l = dock_split(WORK, "right", w);
+            assert_eq!(
+                l.panel.width + l.partner.width,
+                WORK.width,
+                "panel {} + partner {} should tile {} exactly",
+                l.panel.width,
+                l.partner.width,
+                WORK.width
+            );
+        }
+    }
+
+    #[test]
+    fn a_runaway_divider_drag_cannot_squeeze_the_partner_away() {
+        // Dragging the panel edge past the far side of the screen must still
+        // leave the app something to be seen in, not a zero-width window.
+        let l = dock_split(WORK, "right", 1919);
+        assert_eq!(l.partner.width, DOCK_MIN_PARTNER_W);
+        assert_eq!(l.panel.width, WORK.width - DOCK_MIN_PARTNER_W);
+        assert_eq!(l.panel.x, l.partner.x + l.partner.width as i32);
+    }
+
+    #[test]
+    fn the_dock_is_anchored_to_the_work_area_not_the_origin() {
+        // Second monitor at a negative x, with a taskbar-inset work area.
+        let work = capture::Rect {
+            x: -1920,
+            y: 24,
+            width: 1920,
+            height: 1000,
+        };
+        let l = dock_split(work, "right", 480);
+        assert_eq!(l.partner.x, -1920);
+        assert_eq!(l.panel.x, -480); // work.x + partner width = -1920 + 1440
+        assert_eq!(l.panel.y, 24);
+        assert_eq!(l.panel.height, 1000);
+    }
+
+    #[test]
+    fn the_default_fraction_is_a_quarter() {
+        let want = (WORK.width as f64 * DOCK_PANEL_FRACTION) as u32;
+        assert_eq!(want, 480);
+        let l = dock_split(WORK, "right", want);
+        assert_eq!(l.partner.width, 1440);
+    }
+}
+
+#[cfg(test)]
 mod autopilot_change_tests {
     use super::*;
 
@@ -5032,6 +5114,118 @@ fn list_monitors() -> Vec<capture::MonitorInfo> {
     }
 }
 
+// ─── Side-by-side docking ───────────────────────────────────────────────────
+
+/// Where the panel and its docked partner sit after a dock. Both rects are
+/// **visible frames** in virtual-desktop pixels, so the frontend can report the
+/// real split without re-measuring.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+struct DockLayout {
+    panel: capture::Rect,
+    partner: capture::Rect,
+}
+
+/// Fraction of the work area the panel takes when docking. A quarter is wide
+/// enough for the instruction panel at 100 % and leaves three quarters — the
+/// useful part — to the app being guided.
+const DOCK_PANEL_FRACTION: f64 = 0.25;
+/// Never leave the partner a sliver. Independent of the panel's own minimum,
+/// which the window manager enforces for us (see `dock_split` on why the
+/// panel's *actual* rect, not the requested one, drives the split).
+const DOCK_MIN_PARTNER_W: u32 = 320;
+
+/// Split `work` at the panel's inner edge: the panel keeps `panel_w` on `side`,
+/// the partner gets the remainder, both full work-area height.
+fn dock_split(work: capture::Rect, side: &str, panel_w: u32) -> DockLayout {
+    let panel_w = panel_w
+        .max(1)
+        .min(work.width.saturating_sub(DOCK_MIN_PARTNER_W).max(1));
+    let partner_w = work.width.saturating_sub(panel_w);
+    let dock_left = side.eq_ignore_ascii_case("left");
+    DockLayout {
+        panel: capture::Rect {
+            x: if dock_left {
+                work.x
+            } else {
+                work.x + partner_w as i32
+            },
+            y: work.y,
+            width: panel_w,
+            height: work.height,
+        },
+        partner: capture::Rect {
+            x: if dock_left {
+                work.x + panel_w as i32
+            } else {
+                work.x
+            },
+            y: work.y,
+            width: partner_w,
+            height: work.height,
+        },
+    }
+}
+
+/// The work area the panel currently lives on, plus the panel's live frame.
+fn dock_context() -> Option<(capture::Rect, capture::Rect, usize)> {
+    let panel_hwnd = capture::own_panel_hwnd()?;
+    let panel = capture::window_frame(panel_hwnd)?;
+    let work = capture::work_area_containing(
+        panel.x + panel.width as i32 / 2,
+        panel.y + panel.height as i32 / 2,
+    )?;
+    Some((work, panel, panel_hwnd))
+}
+
+/// Dock the panel to `side` ("left" / "right") — a quarter of the work area's
+/// width by default, full height — and report the space left over for a partner
+/// app. `width` (physical px) restores a split the user has since dragged to
+/// their own taste, so re-docking after a collapse or a restart doesn't snap
+/// back to the default quarter.
+///
+/// The returned `panel` rect is measured **after** the move, not predicted:
+/// `tauri.conf.json`'s `minWidth` is a *logical* size, so on a scaled display
+/// the window manager can hand back a window wider than a physical quarter.
+/// Deriving the partner's rect from the panel's real frame keeps the two edges
+/// flush at any DPI instead of silently overlapping.
+#[tauri::command]
+fn dock_panel(side: String, width: Option<u32>) -> Option<DockLayout> {
+    let (work, _panel, panel_hwnd) = dock_context()?;
+    let want_w = width
+        .filter(|w| *w > 0)
+        .unwrap_or((work.width as f64 * DOCK_PANEL_FRACTION) as u32);
+    let want = dock_split(work, &side, want_w);
+    capture::set_window_frame(panel_hwnd, want.panel);
+
+    let actual = capture::window_frame(panel_hwnd).unwrap_or(want.panel);
+    // A clamped panel would otherwise overlap the partner: re-split on the real width.
+    let settled = dock_split(work, &side, actual.width);
+    if settled.panel != actual {
+        capture::set_window_frame(panel_hwnd, settled.panel);
+    }
+    Some(settled)
+}
+
+/// Put `hwnd` in the space beside the docked panel.
+///
+/// This is both halves of the divider: the frontend calls it once when the user
+/// picks which app fills the rest, and again on every panel resize while docked,
+/// so dragging the panel's inner edge drags the shared border. Windows' own
+/// joint resize can't do this job — it only drives windows inside a snap group,
+/// which excludes always-on-top windows and, at a quarter width, isn't a layout
+/// Windows offers in the first place (see `capture::win::work_area_containing`).
+#[tauri::command]
+fn dock_fill(hwnd: usize, side: String) -> Option<capture::Rect> {
+    let (work, panel, _) = dock_context()?;
+    // Split at the panel's live inner edge, so a drag mid-flight is honoured.
+    let layout = dock_split(work, &side, panel.width);
+    if capture::set_window_frame(hwnd, layout.partner) {
+        Some(layout.partner)
+    } else {
+        None
+    }
+}
+
 /// Reset target_hwnd (and session state) when the user explicitly starts a new task.
 /// Called by the "＋ New task" button in the panel. Preserves pinned_hwnd — the user
 /// explicitly chose that window and it should survive a session reset.
@@ -6635,6 +6829,8 @@ pub fn run() {
             pin_target_window,
             pin_full_screen_target,
             unpin_target_window,
+            dock_panel,
+            dock_fill,
             new_session,
             export_status,
             pick_export_folder,

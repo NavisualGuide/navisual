@@ -554,3 +554,59 @@ pub fn to_base64(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
+
+// ─── Side-by-side docking ───────────────────────────────────────────────────
+//
+// See `win::work_area_containing` for why Navisual tiles the panel and its
+// docked partner itself instead of leaning on the OS snap-group divider.
+
+/// The work area (monitor minus taskbar) of the monitor containing `(x, y)`.
+pub fn work_area_containing(x: i32, y: i32) -> Option<Rect> {
+    #[cfg(windows)]
+    {
+        win::work_area_containing(x, y)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (x, y);
+        None
+    }
+}
+
+/// Raw handle of our own panel window (never the click-through overlay).
+pub fn own_panel_hwnd() -> Option<usize> {
+    #[cfg(windows)]
+    {
+        win::own_panel_hwnd()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// A window's visible frame (DWM extended bounds, not `GetWindowRect`).
+pub fn window_frame(hwnd_raw: usize) -> Option<Rect> {
+    #[cfg(windows)]
+    {
+        win::window_frame(hwnd_raw)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd_raw;
+        None
+    }
+}
+
+/// Move/resize a window so its visible frame lands exactly on `target`.
+pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
+    #[cfg(windows)]
+    {
+        win::set_window_frame(hwnd_raw, target)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd_raw, target);
+        false
+    }
+}

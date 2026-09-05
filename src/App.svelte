@@ -528,6 +528,9 @@ See the LICENSE file in the root of this repository for complete details.
   type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; };
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
+  // "target" = pick what Navisual assists with; "dock" = pick what fills the
+  // space beside a docked panel. Same list, different verb.
+  let targetPickerMode = $state<"target" | "dock">("target");
   let pinnedHwnd = $state<number | null>(null);
   // User chose a full-screen capture target in the picker (backend full_screen_mode).
   // Mutually exclusive with pinnedHwnd; the user-initiated replacement for the
@@ -589,7 +592,8 @@ See the LICENSE file in the root of this repository for complete details.
   type VoiceInfo = { id: string; name: string; };
   let availableVoices = $state<VoiceInfo[]>([]);
 
-  async function openTargetPicker() {
+  async function openTargetPicker(mode: "target" | "dock" = "target") {
+    targetPickerMode = mode;
     dismissTargetHint(); // they found the picker — the coach mark is no longer needed
     [targetWindows, monitors] = await Promise.all([
       invoke<TargetWindowInfo[]>("list_target_windows"),
@@ -638,6 +642,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function selectTarget(hwnd: number | null) {
     targetPickerOpen = false;
+    targetPickerMode = "target";
     fullScreenTarget = false;
     if (hwnd === null) {
       await invoke("unpin_target_window");
@@ -654,6 +659,7 @@ See the LICENSE file in the root of this repository for complete details.
   // Auto-detect again.
   async function selectDesktop(monitorIndex: number | null) {
     targetPickerOpen = false;
+    targetPickerMode = "target";
     await invoke("pin_full_screen_target", { monitorIndex });
     pinnedHwnd = null;
     fullScreenTarget = true;
@@ -907,6 +913,134 @@ See the LICENSE file in the root of this repository for complete details.
   const PANEL_SIZE_KEY = "navisual-panel-size-v1";
   let lastPanelSize = { width: PANEL_W, height: PANEL_H };
   let panelSizeSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // ─── Side-by-side dock ────────────────────────────────────────────────────
+  //
+  // Dock the panel to one quarter of the screen edge, full height, and give the
+  // rest to one chosen app. Windows 11 can resize two snapped windows together
+  // via their shared divider, but never for an always-on-top window (it is not
+  // put in a snap group), and a quarter-width full-height zone isn't a layout
+  // Windows offers anyway — so Navisual owns both edges here and mirrors its own
+  // resize onto the partner, which makes the shared edge a real divider at any
+  // ratio without giving up always-on-top.
+  //
+  // Only the *arrangement* is remembered across restarts, never the partner
+  // window: silently dragging someone's browser around at launch is the panel-
+  // nudging instinct this project already rejected once. The panel returns to
+  // its dock (which is what a floating panel could never do — its position was
+  // always reset to bottom-right); re-filling the space is one click.
+  const DOCK_KEY = "navisual-dock-v1";
+  type DockSide = "left" | "right";
+  let dockSide = $state<DockSide | null>(null);
+  let dockPartner = $state<number | null>(null);
+  // Physical px. The panel's width while docked — i.e. where the user last put
+  // the divider — kept apart from lastPanelSize so docking never overwrites the
+  // floating size we restore on undock.
+  let dockWidth: number | null = null;
+  let preDockSize: { width: number; height: number } | null = null;
+  let dockSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function saveDock() {
+    try {
+      if (dockSide) {
+        localStorage.setItem(DOCK_KEY, JSON.stringify({ side: dockSide, width: dockWidth, floating: preDockSize }));
+      } else {
+        localStorage.removeItem(DOCK_KEY);
+      }
+    } catch (_) {}
+  }
+  function saveDockSoon() {
+    if (dockSaveTimer) clearTimeout(dockSaveTimer);
+    dockSaveTimer = setTimeout(saveDock, 400);
+  }
+
+  // Move the panel to `side`. `width` (physical px) reuses a divider position
+  // the user already chose; omitted, the backend picks the default quarter.
+  //
+  // `dockSide` is claimed BEFORE the move, not after: the move fires an
+  // onResized event, and that handler branches on `dockSide` to decide whether
+  // it is looking at a divider drag or at the user resizing a floating panel.
+  // Setting it afterwards let the dock's own resize race in as a "floating"
+  // one, which overwrote the very size undock() exists to restore (seen live:
+  // undock came back at the docked width). Reverted if the dock fails.
+  async function applyDock(side: DockSide, width: number | null) {
+    const prev = dockSide;
+    dockSide = side;
+    try {
+      const layout = await invoke<{ panel: { width: number } } | null>("dock_panel", {
+        side,
+        width: width ?? null,
+      });
+      if (!layout) { dockSide = prev; return false; }
+      dockWidth = layout.panel.width;
+      return true;
+    } catch (e) {
+      dockSide = prev;
+      throw e;
+    }
+  }
+
+  async function dockPanel(side: DockSide) {
+    showQuickMenu = false;
+    if (iconMode) await expandToPanel();
+    // Remember what to come back to before the dock overwrites the live size.
+    if (!dockSide) preDockSize = { ...lastPanelSize };
+    if (!(await applyDock(side, dockWidth))) return;
+    saveDock();
+    // The other half of the arrangement: which app fills the rest.
+    openTargetPicker("dock");
+  }
+
+  async function undock() {
+    showQuickMenu = false;
+    const restore = preDockSize ?? lastPanelSize;
+    dockSide = null;
+    dockPartner = null;
+    dockWidth = null;
+    preDockSize = null;
+    saveDock();
+    try {
+      const sw = window.screen.availWidth;
+      const sh = window.screen.availHeight;
+      const margin = 24;
+      const w = Math.min(Math.max(360, restore.width), sw - margin * 2);
+      const h = Math.min(Math.max(380, restore.height), sh - margin * 2);
+      lastPanelSize = { width: w, height: h };
+      localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify(lastPanelSize));
+      await getCurrentWindow().setSize(new LogicalSize(w, h));
+      await getCurrentWindow().setPosition(new LogicalPosition(sw - w - margin, sh - h - margin));
+    } catch (e) { console.error("undock:", e); }
+  }
+
+  // Give the chosen app everything the panel isn't using, and make it the
+  // guidance target too — docking an app beside the panel is a plain statement
+  // of what the user is working in.
+  async function fillDockPartner(hwnd: number) {
+    targetPickerOpen = false;
+    targetPickerMode = "target";
+    if (!dockSide) return;
+    dockPartner = hwnd;
+    saveDock();
+    try { await invoke("dock_fill", { hwnd, side: dockSide }); }
+    catch (e) { console.error("dock_fill:", e); }
+    await selectTarget(hwnd);
+  }
+
+  // The divider. Every panel resize while docked pushes the partner's edge to
+  // match, so dragging the panel's inner border drags the shared border.
+  // Coalesced to one call per frame — a drag fires resize events far faster
+  // than SetWindowPos needs to run, and the partner only ever needs the latest.
+  let dockSyncQueued = false;
+  function scheduleDockSync() {
+    if (dockSyncQueued || !dockSide || dockPartner === null) return;
+    dockSyncQueued = true;
+    requestAnimationFrame(async () => {
+      dockSyncQueued = false;
+      if (!dockSide || dockPartner === null) return;
+      try { await invoke("dock_fill", { hwnd: dockPartner, side: dockSide }); }
+      catch (_) { /* window closed under us — the next pick re-establishes it */ }
+    });
+  }
 
   function startTimer() {
     elapsedStart = performance.now();
@@ -1259,7 +1393,12 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function expandToPanel() {
     iconMode = false;
-    try { await getCurrentWindow().setSize(new LogicalSize(lastPanelSize.width, lastPanelSize.height)); }
+    try {
+      // A docked panel expands back into its dock at the width the user left it,
+      // not into a floating window parked wherever the icon happened to be.
+      if (dockSide) { await applyDock(dockSide, dockWidth); scheduleDockSync(); return; }
+      await getCurrentWindow().setSize(new LogicalSize(lastPanelSize.width, lastPanelSize.height));
+    }
     catch (e) { console.error("expandToPanel:", e); }
   }
 
@@ -2149,11 +2288,29 @@ See the LICENSE file in the root of this repository for complete details.
       }
     } catch (_) {}
 
+    // A docked panel goes back to its dock instead. This is the one piece of
+    // panel geometry that used to be thrown away on every launch: the size was
+    // restored above, but the position was always re-derived as bottom-right,
+    // so a deliberately-placed panel drifted off its edge every restart.
+    // The partner app is deliberately NOT restored — see DOCK_KEY.
     try {
-      await getCurrentWindow().setSize(new LogicalSize(lastPanelSize.width, lastPanelSize.height));
-      await getCurrentWindow().setPosition(
-        new LogicalPosition(sw - lastPanelSize.width - margin, sh - lastPanelSize.height - margin)
-      );
+      const savedDock = localStorage.getItem(DOCK_KEY);
+      if (savedDock) {
+        const d = JSON.parse(savedDock);
+        if (d.side === "left" || d.side === "right") {
+          preDockSize = d.floating ?? null;
+          await applyDock(d.side, typeof d.width === "number" ? d.width : null);
+        }
+      }
+    } catch (_) {}
+
+    try {
+      if (!dockSide) {
+        await getCurrentWindow().setSize(new LogicalSize(lastPanelSize.width, lastPanelSize.height));
+        await getCurrentWindow().setPosition(
+          new LogicalPosition(sw - lastPanelSize.width - margin, sh - lastPanelSize.height - margin)
+        );
+      }
     } catch (_) {}
     try { await getCurrentWindow().show(); } catch (_) {}
 
@@ -2171,6 +2328,16 @@ See the LICENSE file in the root of this repository for complete details.
         const scale = await getCurrentWindow().scaleFactor();
         const logical = payload.toLogical(scale);
         if (logical.width < 100 || logical.height < 100) return; // ignore transient/minimize-adjacent events
+        if (dockSide) {
+          // Docked: this resize IS a divider drag. Record where the user put the
+          // border (physical px, the space the backend works in) and push the
+          // partner's edge to follow. Deliberately does NOT touch lastPanelSize
+          // — that's the floating size undock() restores.
+          dockWidth = Math.round(payload.width);
+          saveDockSoon();
+          scheduleDockSync();
+          return;
+        }
         lastPanelSize = { width: Math.round(logical.width), height: Math.round(logical.height) };
         if (panelSizeSaveTimer) clearTimeout(panelSizeSaveTimer);
         panelSizeSaveTimer = setTimeout(() => {
@@ -2383,7 +2550,7 @@ See the LICENSE file in the root of this repository for complete details.
         class:header-shared-pinned={pinnedHwnd !== null || fullScreenTarget}
         title={fullScreenTarget ? "Sharing your screen — click to switch target" : pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
         onmousedown={(e) => e.stopPropagation()}
-        onclick={openTargetPicker}
+        onclick={() => openTargetPicker()}
       >
         <span class="header-shared-dot"></span>
         {#if fullScreenTarget}
@@ -2929,6 +3096,25 @@ See the LICENSE file in the root of this repository for complete details.
         <button class="qm-btn" onclick={() => { showQuickMenu = false; openTargetPicker(); }} title="Choose which app Navisual assists with">
           🎯 Switch app
         </button>
+        {#if dockSide}
+          <button class="qm-btn" onclick={() => { showQuickMenu = false; openTargetPicker("dock"); }}
+            title="Give the rest of the screen to an app">
+            ⬒ Fill the rest with…
+          </button>
+          <button class="qm-btn qm-active" onclick={undock}
+            title="Float the panel again">
+            ⬜ Undock
+          </button>
+        {:else}
+          <button class="qm-btn" onclick={() => dockPanel("left")}
+            title="Put Navisual down the left quarter of the screen, full height, and give the rest to one app">
+            ◧ Dock left
+          </button>
+          <button class="qm-btn" onclick={() => dockPanel("right")}
+            title="Put Navisual down the right quarter of the screen, full height, and give the rest to one app">
+            ◨ Dock right
+          </button>
+        {/if}
         <button class="qm-btn" class:qm-active={isMuted} onclick={toggleMute}>
           {isMuted ? "🔇 Unmute" : "🔊 Mute"}
         </button>
@@ -3008,17 +3194,26 @@ See the LICENSE file in the root of this repository for complete details.
 
   <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden -->
   {#if targetPickerOpen}
-    <div class="target-picker-backdrop" role="presentation" onclick={() => (targetPickerOpen = false)}></div>
-    <div class="target-picker" role="listbox" aria-label="Choose target app">
-      <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null && !fullScreenTarget} onclick={() => selectTarget(null)}>
-        <span class="target-pick-check">{pinnedHwnd === null && !fullScreenTarget ? "✓" : ""}</span>
-        <span class="target-pick-name">Auto-detect</span>
-        <span class="target-pick-sub">follow the foreground window</span>
-      </button>
+    <div class="target-picker-backdrop" role="presentation" onclick={() => { targetPickerOpen = false; targetPickerMode = "target"; }}></div>
+    <div class="target-picker" role="listbox" aria-label={targetPickerMode === "dock" ? "Choose the app to fill the rest of the screen" : "Choose target app"}>
+      {#if targetPickerMode === "dock"}
+        <!-- Dock mode reuses the same window list with a different verb. No
+             Auto-detect and no whole-screen entries: neither names a window to
+             put in the space beside the panel. -->
+        <div class="target-pick-head">Which app should fill the rest?</div>
+      {:else}
+        <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null && !fullScreenTarget} onclick={() => selectTarget(null)}>
+          <span class="target-pick-check">{pinnedHwnd === null && !fullScreenTarget ? "✓" : ""}</span>
+          <span class="target-pick-name">Auto-detect</span>
+          <span class="target-pick-sub">follow the foreground window</span>
+        </button>
+      {/if}
       {#each targetWindows as w (w.hwnd)}
         {@const primary = w.title || w.display_name}
-        <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === w.hwnd} onclick={() => selectTarget(w.hwnd)}>
-          <span class="target-pick-check">{pinnedHwnd === w.hwnd ? "✓" : ""}</span>
+        {@const chosen = targetPickerMode === "dock" ? dockPartner === w.hwnd : pinnedHwnd === w.hwnd}
+        <button class="target-pick-item" class:target-pick-selected={chosen}
+          onclick={() => (targetPickerMode === "dock" ? fillDockPartner(w.hwnd) : selectTarget(w.hwnd))}>
+          <span class="target-pick-check">{chosen ? "✓" : ""}</span>
           <!-- Primary = the window title (what the user actually sees on screen);
                subtitle = the friendly app name for identity, when it adds info. -->
           <span class="target-pick-name">{primary.length > 46 ? primary.slice(0, 44) + "…" : primary}</span>
@@ -3027,7 +3222,9 @@ See the LICENSE file in the root of this repository for complete details.
           {/if}
         </button>
       {/each}
-      {#if monitors.length > 1}
+      {#if targetPickerMode === "dock"}
+        <!-- nothing further: a screen isn't a window to dock beside the panel -->
+      {:else if monitors.length > 1}
         {#each monitors as m (m.index)}
           <button class="target-pick-item" class:target-pick-selected={fullScreenTarget && fullScreenMonitorIndex === m.index} onclick={() => selectDesktop(m.index)}>
             <span class="target-pick-check">{fullScreenTarget && fullScreenMonitorIndex === m.index ? "✓" : ""}</span>
@@ -3048,7 +3245,7 @@ See the LICENSE file in the root of this repository for complete details.
   <!-- One-time coach mark pointing at the target-app chip; clicking it opens
        the picker it describes, and it fades on its own after a few seconds. -->
   {#if showTargetHint && sharedApp && !showPrivacyDisclosure && !targetPickerOpen}
-    <button class="target-hint" onclick={openTargetPicker}>
+    <button class="target-hint" onclick={() => openTargetPicker()}>
       <span class="target-hint-arrow"></span>
       Click here to select the app you want me to assist with.
     </button>
@@ -4275,6 +4472,16 @@ See the LICENSE file in the root of this repository for complete details.
     padding: 4px;
     z-index: 999;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  }
+  /* Dock mode has no "Auto-detect" row to lead with, so the list needs a line
+     saying what picking one of these will do. */
+  .target-pick-head {
+    padding: 6px 8px 7px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 3px;
   }
   .target-pick-item {
     display: grid;

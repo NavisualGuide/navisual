@@ -32,8 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
     GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE, WS_EX_TOOLWINDOW,
-    WS_EX_TRANSPARENT,
+    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -669,6 +669,165 @@ pub fn own_panel_rects() -> Vec<Rect> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
     state.rects
+}
+
+// ─── Side-by-side docking ───────────────────────────────────────────────────
+//
+// Windows 11 *does* resize two adjacent snapped windows together ("When I
+// resize a snapped window, simultaneously resize any adjacent snapped window",
+// on by default), but only for windows it tracks in a **snap group** — and it
+// never puts an always-on-top window in one, which is why the panel's edge has
+// always moved independently of the target app's. Giving up always-on-top would
+// not be enough either: a quarter-width full-height zone is not one of the
+// layouts Windows offers, so there would still be no group to join, and snap
+// membership is only ever established by real user input (a drag to an edge,
+// Win+Arrow, the Win+Z flyout) — not by any API an app can call on itself.
+//
+// So Navisual tiles the pair itself and mirrors its own resize onto the docked
+// app (`dock_sync` in lib.rs). The shared edge then behaves like a divider at
+// any ratio, with always-on-top kept.
+
+/// The **work area** — monitor rect minus the taskbar — of the monitor
+/// containing `(x, y)`, falling back to the nearest monitor. The sibling of
+/// `monitor_rect_containing`, which returns the *full* monitor: right for
+/// capture, wrong for docking (it would tile a window under the taskbar).
+pub fn work_area_containing(x: i32, y: i32) -> Option<Rect> {
+    unsafe {
+        let hmon: HMONITOR = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        if hmon.0.is_null() {
+            return None;
+        }
+        let mut mi = MONITORINFO {
+            cbSize: mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return None;
+        }
+        let r = mi.rcWork;
+        Some(Rect {
+            x: r.left,
+            y: r.top,
+            width: (r.right - r.left).max(0) as u32,
+            height: (r.bottom - r.top).max(0) as u32,
+        })
+    }
+}
+
+/// Our own panel window, as a raw handle. The panel is the only visible
+/// top-level window this process owns that is not the click-through overlay —
+/// the same `WS_EX_TRANSPARENT` identification `own_panel_rects` relies on, and
+/// for the same reason (a size-based guess silently failed on a 1920×1080
+/// single-monitor setup where the overlay is exactly the same size as a
+/// maximised panel would be).
+///
+/// Returns a raw `usize` rather than an `HWND` so callers in `lib.rs` can hold
+/// it in ordinary `Send` state, matching `pinned_hwnd` and friends.
+pub fn own_panel_hwnd() -> Option<usize> {
+    let our_pid = std::process::id();
+
+    struct State {
+        pid: u32,
+        found: Option<usize>,
+    }
+
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != state.pid || !IsWindowVisible(hwnd).as_bool() {
+            return TRUE;
+        }
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex_style & WS_EX_TRANSPARENT.0) != 0 {
+            return TRUE; // the overlay canvas
+        }
+        state.found = Some(hwnd.0 as usize);
+        FALSE // stop enumerating — z-order order means this is the frontmost one
+    }
+
+    let mut state = State {
+        pid: our_pid,
+        found: None,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+    state.found
+}
+
+/// The window's **visible** frame — what `own_panel_rects`/`frame_rect_of`
+/// return, i.e. DWM extended bounds rather than `GetWindowRect`.
+pub fn window_frame(hwnd_raw: usize) -> Option<Rect> {
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return None;
+        }
+    }
+    frame_rect_of(hwnd)
+}
+
+/// Move and resize a window so its **visible frame** lands exactly on `target`.
+///
+/// `SetWindowPos` works in `GetWindowRect` space, which on most modern windows
+/// is several pixels larger per side than what the user sees — Chrome and this
+/// app's own panel both carry ~7 px of invisible resize border. Positioning on
+/// the raw rect leaves a visible seam between two "adjacent" windows, so the
+/// difference between the two rects is measured per-window and added back.
+/// A minimised window is restored first, otherwise the call would only rewrite
+/// its restored bounds while it stayed in the taskbar.
+///
+/// The delta is re-measured and re-applied once, because it can be briefly
+/// *wrong* on a window that has only just been shown — measured live: the
+/// panel's border read 12 px during startup and 14 px a moment later, landing
+/// the first dock of a session 2 px narrow. Uncorrected that is not just a
+/// seam, it compounds: the docked width is persisted, so every restart would
+/// re-request the width the last one fell short by and fall short again.
+pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return false;
+        }
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+
+        let mut placed = false;
+        for _ in 0..2 {
+            let mut wr = RECT::default();
+            if GetWindowRect(hwnd, &mut wr).is_err() {
+                return placed;
+            }
+            let Some(fr) = frame_rect_of(hwnd) else {
+                return placed;
+            };
+            if fr == target {
+                return true;
+            }
+            let dx = wr.left - fr.x;
+            let dy = wr.top - fr.y;
+            let dw = (wr.right - wr.left) - fr.width as i32;
+            let dh = (wr.bottom - wr.top) - fr.height as i32;
+
+            if SetWindowPos(
+                hwnd,
+                None,
+                target.x + dx,
+                target.y + dy,
+                target.width as i32 + dw,
+                target.height as i32 + dh,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+            .is_err()
+            {
+                return placed;
+            }
+            placed = true;
+        }
+        placed
+    }
 }
 
 /// Re-assert the overlay window's TOPMOST z-order so the guidance pointer stays

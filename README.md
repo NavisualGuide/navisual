@@ -56,6 +56,7 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 - **Windows UI Automation** — primary element locator, < 5ms for browsers
 - **Windows built-in OCR** — zero model downloads, works offline
 - **Active-window crop** — only the relevant window is sent to the AI
+- **Side-by-side dock** — park the panel on a screen-edge quarter, give the rest to one app, and drag the shared edge to resize both at once
 - **Autopilot mode** — auto-advances when the screen changes, no hotkey needed
 - **Multi-step sequences** — groups related actions to reduce API calls
 - **Session persistence** — conversation and state survive app restarts
