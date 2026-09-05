@@ -179,6 +179,26 @@ pub fn configure(window: &WebviewWindow) -> Result<()> {
         .set_ignore_cursor_events(true)
         .map_err(|e| anyhow!("set_ignore_cursor_events: {e}"))?;
 
+    // Re-assert "keep this out of the taskbar" every time, not just at creation.
+    //
+    // On Windows `skipTaskbar` is a ONE-SHOT `ITaskbarList::DeleteTab`: it removes the
+    // button that exists at that moment and changes no window style. The overlay is in
+    // fact created WITH `WS_EX_APPWINDOW` (measured: EXSTYLE 0x000C0138), the explicit
+    // "force this window onto the taskbar" flag — so anything that makes the shell
+    // re-register the button brings it straight back, titled "Tauri App" before this
+    // window was given a title of its own. Reported live as a phantom second entry
+    // beside Navisual that vanished again on its own.
+    //
+    // Setting WS_EX_TOOLWINDOW directly was tried first and does NOT hold: tao keeps its
+    // own WindowFlags model and re-applies it, reverting the external style write within
+    // the same second (observed twice in one session). So this goes through the
+    // supported API instead. `configure` is the right home for it because it runs at
+    // startup AND on every realign — including the realign that follows the overlay
+    // restoring itself from a minimize, which is precisely when the button comes back.
+    if let Err(e) = window.set_skip_taskbar(true) {
+        log::warn!("overlay set_skip_taskbar failed: {e}");
+    }
+
     // Size to virtual desktop — best-effort; failure means overlay is
     // mispositioned but still click-through and safe to show.
     match virtual_desktop_rect() {
