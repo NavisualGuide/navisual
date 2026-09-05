@@ -43,8 +43,10 @@ struct TrackState {
     win_top: i32,
     win_width: i32,
     win_height: i32,
-    /// Element bbox relative to the window's top-left corner.
-    rel_bbox: Rect,
+    /// Element bbox relative to the window's top-left corner. `None` means this is a
+    /// **caption-only** session: the step produced instruction text but no pointer, so
+    /// there is nothing to move with the window — only something to hide with it.
+    rel_bbox: Option<Rect>,
     /// Flow A candidate boxes, window-relative like `rel_bbox` (empty for normal
     /// pointers). All candidates live in the same window, so one delta moves all.
     candidates_rel: Vec<Rect>,
@@ -244,6 +246,63 @@ impl WindowTracker {
         self.start_with_candidates(abs_bbox, kind, text, app, target_hwnd, initially_shown, &[]);
     }
 
+    /// Track a target window for **visibility only** — no pointer, just a caption.
+    ///
+    /// A step can produce instruction text with no located element: a completion or
+    /// summary answer ("You are now on the customization page!"), or a locate that
+    /// missed and fell back to "⊘ Pointer unavailable". The caption is still drawn,
+    /// because `Overlay.svelte` renders one whenever the update carries text — but
+    /// `execute_step` used to `clear()` the tracker in exactly that branch, and
+    /// `recompute` returns immediately when there is no tracking state. The caption was
+    /// therefore unmanaged: minimizing the target app never reached the hide path, and
+    /// the text sat on screen over an app that was no longer there (reported live,
+    /// intermittent precisely because it needs a pointerless step to happen on).
+    ///
+    /// This keeps the same lifecycle for text as for a pointer, minus the geometry.
+    pub fn start_caption_only(
+        &self,
+        text: Option<String>,
+        app: AppHandle,
+        target_hwnd: Option<usize>,
+        initially_shown: bool,
+    ) {
+        #[cfg(windows)]
+        {
+            // No located point to resolve a window from, so the target must be given.
+            // Without one there is nothing to track visibility against, and leaving the
+            // caption unmanaged is the old behaviour rather than a new failure.
+            let Some(target) = target_hwnd else {
+                self.clear();
+                return;
+            };
+            let hwnd = HWND(target as *mut std::ffi::c_void);
+            let mut wr = RECT::default();
+            let ok = unsafe { IsWindow(Some(hwnd)).as_bool() && GetWindowRect(hwnd, &mut wr).is_ok() };
+            if !ok {
+                self.clear();
+                return;
+            }
+            *self.state.lock().unwrap() = Some(TrackState {
+                hwnd: target as isize,
+                win_left: wr.left,
+                win_top: wr.top,
+                win_width: wr.right - wr.left,
+                win_height: wr.bottom - wr.top,
+                rel_bbox: None,
+                candidates_rel: Vec::new(),
+                kind: OverlayKind::None,
+                text,
+                app,
+                shown: initially_shown,
+            });
+            reset_logged_decision();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (text, app, target_hwnd, initially_shown);
+        }
+    }
+
     /// `start` plus Flow-A candidate boxes (absolute virtual-desktop coords; the
     /// primary candidate is `abs_bbox`). Stored window-relative so a window move
     /// shifts every box by the same delta.
@@ -336,7 +395,7 @@ impl WindowTracker {
                 win_top,
                 win_width,
                 win_height,
-                rel_bbox,
+                rel_bbox: Some(rel_bbox),
                 candidates_rel,
                 kind,
                 text,
@@ -764,24 +823,32 @@ unsafe fn recompute(force: bool) {
     s.win_width = new_w;
     s.win_height = new_h;
 
-    let abs_bbox = Rect {
-        x: wr.left + s.rel_bbox.x,
-        y: wr.top + s.rel_bbox.y,
-        width: s.rel_bbox.width,
-        height: s.rel_bbox.height,
-    };
+    let abs_bbox = s.rel_bbox.map(|r| Rect {
+        x: wr.left + r.x,
+        y: wr.top + r.y,
+        width: r.width,
+        height: r.height,
+    });
 
     // Visible only when the target window is neither minimized nor covered by another
     // app at the located spot. (s.hwnd is a window of the target app — anchored in
     // start() — so it's the right occlusion reference.)
+    //
+    // A caption-only session has no located spot, and the caption is drawn at the
+    // bottom of the screen rather than over the target — so occlusion is meaningless
+    // for it and only `iconic` decides. Running the occlusion test anyway would hide a
+    // perfectly readable caption the moment any window overlapped the target.
     let iconic = IsIconic(hwnd).as_bool();
-    let visible = crate::capture::target_visible_in_rect(
-        abs_bbox.x,
-        abs_bbox.y,
-        abs_bbox.width as i32,
-        abs_bbox.height as i32,
-        s.hwnd as usize,
-    );
+    let visible = match abs_bbox {
+        Some(b) => crate::capture::target_visible_in_rect(
+            b.x,
+            b.y,
+            b.width as i32,
+            b.height as i32,
+            s.hwnd as usize,
+        ),
+        None => true,
+    };
     let should_show = !iconic && visible;
 
     // The real gate: the 15s post-display-change window, OR this exact decision differs
@@ -791,9 +858,9 @@ unsafe fn recompute(force: bool) {
 
     if log_this {
         log::info!(
-            "recompute(force={force}): target_rect=({},{},{}x{}) abs_bbox=({},{},{}x{}) iconic={} visible={} should_show={} shown={} moved={} resized={}",
+            "recompute(force={force}): target_rect=({},{},{}x{}) abs_bbox={:?} iconic={} visible={} should_show={} shown={} moved={} resized={}",
             wr.left, wr.top, new_w, new_h,
-            abs_bbox.x, abs_bbox.y, abs_bbox.width, abs_bbox.height,
+            abs_bbox,
             iconic, visible, should_show, s.shown, moved, resized,
         );
     }
@@ -802,7 +869,10 @@ unsafe fn recompute(force: bool) {
         // Keep the overlay above any transient popup (ribbon dropdown, combo list,
         // tooltip) the user just opened, which Windows would otherwise stack on top.
         crate::capture::raise_overlay_topmost();
-        if !s.shown || moved || resized || force {
+        // A caption is screen-anchored, so a window move or resize changes nothing about
+        // it — only a visibility transition (or a forced recompute) is worth re-emitting.
+        let geometry_bound = abs_bbox.is_some();
+        if !s.shown || force || (geometry_bound && (moved || resized)) {
             // Flow A: candidate boxes shift with the window like the primary bbox.
             let candidates_abs: Vec<Rect> = s
                 .candidates_rel
@@ -816,7 +886,7 @@ unsafe fn recompute(force: bool) {
                 .collect();
             match overlay::make_update_full(
                 s.kind,
-                Some(abs_bbox),
+                abs_bbox,
                 s.text.clone(),
                 None,
                 candidates_abs,

@@ -1240,6 +1240,15 @@ fn execute_step(
             visible,
             if candidate_mode { &shown_candidates } else { &[] },
         );
+    } else if text_for_overlay.is_some() {
+        // No pointer, but there IS a caption — a completion or summary answer, or a
+        // locate that missed. The caption is drawn either way (Overlay.svelte renders
+        // one whenever the update carries text), so it needs the same lifecycle a
+        // pointer gets: `clear()` here left it unmanaged, and since `recompute` returns
+        // immediately with no tracking state, minimizing the target app never reached
+        // the hide path and the text stayed on screen over an app that was gone.
+        // Reported live, and intermittent exactly because it needs a pointerless step.
+        tracker.start_caption_only(text_for_overlay, app.clone(), target_hwnd, visible);
     } else {
         tracker.clear();
     }
