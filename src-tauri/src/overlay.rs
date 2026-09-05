@@ -282,6 +282,14 @@ pub fn reconfigure(app: &AppHandle) {
 ///
 /// Returns the virtual-desktop rect the window is now aligned to, so the caller
 /// can emit the frame in exactly that space.
+/// Shortest gap between two realign attempts. A genuine one-off drift still heals
+/// on the very next frame (the previous attempt is long past), but a repair that
+/// *cannot* take — for whatever reason a future Windows build invents — is bounded
+/// to two `SetWindowPos` calls and two log lines a second, rather than running
+/// once per emitted frame for the rest of the session.
+const REALIGN_MIN_INTERVAL: Duration = Duration::from_millis(500);
+static LAST_REALIGN: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
 fn realign_to_virtual_desktop(window: &WebviewWindow) -> Option<Rect> {
     // Detection deliberately reads the CACHED virtual-desktop rect: this runs on
     // every emitted frame and must not re-enumerate monitors each time. That is
@@ -291,11 +299,47 @@ fn realign_to_virtual_desktop(window: &WebviewWindow) -> Option<Rect> {
     // is self-correcting anyway: the repair below re-reads it fresh, so a false
     // positive costs one extra enumeration and still lands on the right rect.
     let vd = virtual_desktop_rect().ok()?;
+    // A minimized overlay is misaligned by definition, and rect comparison alone
+    // cannot lead anywhere useful here: Windows parks a minimized window at
+    // -32000,-32000 (measured: 160x28 there), so the check below does fire — but
+    // `configure`'s set_position/set_size only rewrite a minimized window's
+    // *restored* bounds, leaving it minimized and still reading -32000 on the next
+    // frame. Without unminimizing, the repair could never succeed and would re-fire
+    // on every emitted frame forever. This is the case v0.7.2 hit on a
+    // primary-monitor unplug, where Windows minimizes the desktop-spanning overlay
+    // of its own accord.
+    let minimized = window.is_minimized().unwrap_or(false);
     let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
         return Some(vd);
     };
-    if pos.x == vd.x && pos.y == vd.y && size.width == vd.width && size.height == vd.height {
+    if !minimized
+        && pos.x == vd.x
+        && pos.y == vd.y
+        && size.width == vd.width
+        && size.height == vd.height
+    {
         return Some(vd);
+    }
+
+    // Bound the damage if a repair cannot take. See REALIGN_MIN_INTERVAL.
+    {
+        let throttle = LAST_REALIGN.get_or_init(|| Mutex::new(None));
+        let mut last = throttle.lock().unwrap();
+        if last.is_some_and(|at| at.elapsed() < REALIGN_MIN_INTERVAL) {
+            return Some(vd);
+        }
+        *last = Some(Instant::now());
+    }
+
+    if minimized {
+        log::warn!(
+            "overlay geometry drifted: window is MINIMIZED (parked at {},{}) — restoring",
+            pos.x,
+            pos.y,
+        );
+        if let Err(e) = window.unminimize() {
+            log::warn!("overlay unminimize failed: {e}");
+        }
     }
 
     log::warn!(
