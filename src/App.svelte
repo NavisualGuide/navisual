@@ -2496,12 +2496,13 @@ See the LICENSE file in the root of this repository for complete details.
     });
 
     // The taskbar button's minimize is intercepted in Rust (see
-    // capture::intercept_panel_minimize) and arrives here instead, so there is one way
-    // out of the way however it's asked for: the header button, the Icon hotkey, or the
-    // taskbar. Already collapsed means the request is already satisfied — never
-    // minimize from here, since that is the state being avoided.
+    // capture::intercept_panel_minimize) and arrives here instead, making the taskbar
+    // button the same toggle the header button and the Icon hotkey already are:
+    // expanded → collapse, collapsed → restore. It never minimizes, which is the
+    // state being avoided; and it is never a dead click, which is what a plain
+    // "collapse or do nothing" would have made it once already collapsed.
     listen("panel:collapse_requested", () => {
-      if (!iconMode) collapseToIcon();
+      if (iconMode) expandToPanel(); else collapseToIcon();
     });
 
     listen("trial_exhausted", () => {

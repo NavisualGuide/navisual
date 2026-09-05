@@ -853,7 +853,7 @@ pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
 /// The overlay is the only own-process window with `WS_EX_TRANSPARENT`, so we
 /// identify it the same way `own_panel_rects` does. `SWP_NOACTIVATE` ensures we
 /// never steal focus from the app the user is working in.
-/// Turn a minimize request on the panel into a **collapse** instead.
+/// Turn a minimize request on the panel into a **collapse/restore toggle** instead.
 ///
 /// Navisual has no minimize button: collapsing to the floating goldfish is how the
 /// panel gets out of the way, and it is the better fit for what this app is — a
@@ -875,6 +875,10 @@ pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
 /// existing wndproc chain rather than replacing it, so everything Tauri does with
 /// this window keeps working (unlike the raw style write in `overlay::configure`'s
 /// history, which tao simply reverted).
+///
+/// The frontend decides which way to go, so the taskbar button behaves exactly like
+/// the header button and the Icon hotkey: expanded collapses, collapsed restores. A
+/// click that did nothing once already collapsed would be its own small papercut.
 ///
 /// Deliberately only `SC_MINIMIZE`: Show Desktop and Win+M minimize by a different
 /// path and are left alone, because "hide everything" should mean everything.
