@@ -108,13 +108,11 @@ See the LICENSE file in the root of this repository for complete details.
     hotkey_icon: string;
     hotkey_talk: string;
     debug_screenshot_enabled: boolean;
-    debug_show_response_info: boolean;
-    debug_locate_trace_enabled: boolean;
-    debug_locate_log_file_enabled: boolean;
-    debug_prompt_log_file_enabled: boolean;
+    debug_diagnostics_enabled: boolean;
+    debug_log_files_enabled: boolean;
     training_capture_enabled: boolean;
+    session_export_enabled: boolean;
     task_suggestions: boolean;
-    debug_show_ai_bbox: boolean;
     developer_mode: boolean;
   };
 
@@ -733,13 +731,11 @@ See the LICENSE file in the root of this repository for complete details.
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
     hotkey_pause: "", hotkey_icon: "", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
-    debug_show_response_info: false,
-    debug_locate_trace_enabled: false,
-    debug_locate_log_file_enabled: false,
-    debug_prompt_log_file_enabled: false,
+    debug_diagnostics_enabled: false,
+    debug_log_files_enabled: false,
     training_capture_enabled: false,
+    session_export_enabled: false,
     task_suggestions: true,
-    debug_show_ai_bbox: false,
     developer_mode: false,
   };
   let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
@@ -1192,7 +1188,7 @@ See the LICENSE file in the root of this repository for complete details.
       color: settingsForm.overlay_color,
       thickness: settingsForm.overlay_thickness,
       subtitle_enabled: settingsForm.subtitle_enabled,
-      show_ai_bbox: settingsForm.debug_show_ai_bbox,
+      show_ai_bbox: settingsForm.debug_diagnostics_enabled,
     });
     showQuickMenu = false;
   }
@@ -1210,7 +1206,7 @@ See the LICENSE file in the root of this repository for complete details.
       color: settingsForm.overlay_color,
       thickness: settingsForm.overlay_thickness,
       subtitle_enabled: settingsForm.subtitle_enabled,
-      show_ai_bbox: settingsForm.debug_show_ai_bbox,
+      show_ai_bbox: settingsForm.debug_diagnostics_enabled,
     });
     showQuickMenu = false;
   }
@@ -1433,7 +1429,7 @@ See the LICENSE file in the root of this repository for complete details.
       // changed it since the last disk save, and the button is the source of truth.
       settingsForm = { ...data, auto_advance: autoAdvanceEnabled };
       syncCustomModelFlags();
-      debugShowInfo = data.debug_show_response_info;
+      debugShowInfo = data.debug_diagnostics_enabled;
       if (data.api_provider === "ollama") refreshOllamaModels();
     } catch (e) {
       settingsError = String(e);
@@ -1507,12 +1503,12 @@ See the LICENSE file in the root of this repository for complete details.
       autopilotMinCells = settingsForm.autopilot_min_cells;
       if (autoAdvanceEnabled) startAutopilotPolling(); else stopAutopilotPolling();
       isMuted = !settingsForm.tts_enabled;
-      debugShowInfo = settingsForm.debug_show_response_info;
+      debugShowInfo = settingsForm.debug_diagnostics_enabled;
       await emitTo("overlay", "overlay:theme", {
         color: settingsForm.overlay_color,
         thickness: settingsForm.overlay_thickness,
         subtitle_enabled: settingsForm.subtitle_enabled,
-        show_ai_bbox: settingsForm.debug_show_ai_bbox,
+        show_ai_bbox: settingsForm.debug_diagnostics_enabled,
       });
       const hkErrors = await registerShortcuts(settingsForm);
       if (hkErrors.length) {
@@ -2128,7 +2124,7 @@ See the LICENSE file in the root of this repository for complete details.
       // history entry (their `meta` string was always computed correctly;
       // only the display gate was stuck at its false default). Reported live
       // 2026-07-11.
-      debugShowInfo = init.debug_show_response_info;
+      debugShowInfo = init.debug_diagnostics_enabled;
     } catch (_) {}
 
     const sw = window.screen.availWidth;
@@ -2190,7 +2186,7 @@ See the LICENSE file in the root of this repository for complete details.
       color: settingsForm.overlay_color,
       thickness: settingsForm.overlay_thickness,
       subtitle_enabled: settingsForm.subtitle_enabled,
-      show_ai_bbox: settingsForm.debug_show_ai_bbox,
+      show_ai_bbox: settingsForm.debug_diagnostics_enabled,
     }).catch(() => {});
 
     listen<{ delta: string; steps_seen: number }>("stream_chunk", (event) => {
@@ -2605,7 +2601,7 @@ See the LICENSE file in the root of this repository for complete details.
         {/if}
 
         <!-- Phase 0.1: locate-trace debug drawer -->
-        {#if settingsForm.debug_locate_trace_enabled && locateTrace}
+        {#if settingsForm.debug_diagnostics_enabled && locateTrace}
           <div class="debug-drawer">
             <button class="debug-toggle" onclick={() => (debugDrawerOpen = !debugDrawerOpen)}>
               {debugDrawerOpen ? "▾" : "▸"} Debug · {locateTrace.final_decision.kind} · {locateTrace.elapsed_ms} ms
@@ -2939,10 +2935,14 @@ See the LICENSE file in the root of this repository for complete details.
         <button class="qm-btn" class:qm-active={settingsForm.subtitle_enabled} onclick={quickToggleSubtitle}>
           💬 {settingsForm.subtitle_enabled ? "Caption: on" : "Caption: off"}
         </button>
-        <button class="qm-btn" onclick={() => { showQuickMenu = false; openExport(); }}
-          title="Save this session — steps, screenshots and the conversation — to a folder">
-          💾 Save this session
-        </button>
+        {#if settingsForm.session_export_enabled}
+          <!-- Developer-gated. The ring buffer behind it runs regardless, so the
+               menu item appearing mid-session reveals a session already recorded. -->
+          <button class="qm-btn" onclick={() => { showQuickMenu = false; openExport(); }}
+            title="Save this session — steps, screenshots and the conversation — to a folder">
+            💾 Save this session
+          </button>
+        {/if}
       </div>
     {/if}
 
@@ -3433,6 +3433,13 @@ See the LICENSE file in the root of this repository for complete details.
                   value={customGemini ? "__custom__" : settingsForm.gemini_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customGemini = false; settingsForm.gemini_model = v; } else { customGemini = true; settingsForm.gemini_model = ""; } }}>
                   <option value="gemini-3.7-flash">gemini-3.7-flash (recommended)</option>
+                  <!-- 3.8 is listed but NOT the default. It is newer and the family
+                       prior is strong, but 3.7 is the one with measured grounding
+                       here (100% bbox, 92% hit, median 1px — model-comparison.md),
+                       and 3.8's model card says thinking cannot be set below "low",
+                       which is the shape that broke forced tool calls on OpenAI's
+                       reasoning models. Promote it once it has its own numbers. -->
+                  <option value="gemini-3.8-flash">gemini-3.8-flash (newest — untested here)</option>
                   <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (fast)</option>
                   <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (best quality)</option>
                   <option value="gemini-2.5-flash">gemini-2.5-flash</option>
@@ -3705,61 +3712,56 @@ See the LICENSE file in the root of this repository for complete details.
             </div>
 
           {:else if settingsTab === "developer" && settingsForm.developer_mode}
-            <!-- Developer tab — gated by NAVISUAL_DEV=true -->
+            <!-- Developer tab — gated by NAVISUAL_DEV=true.
+                 Consolidated 2026-09-04 from seven switches to four. The seven were
+                 never seven decisions: nobody wants the locate drawer without the
+                 response info beside it, or one JSONL log and not the other. They
+                 are grouped by CONSEQUENCE — what turning each one on actually
+                 costs you — because that is what the reader is deciding about. -->
             <div class="setting-group">
-              <p class="setting-label">Debug captures</p>
+              <p class="setting-label">Diagnostics on screen</p>
               <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
-                <span>Save AI screenshots, OCR inputs, and the exact prompt text sent to the AI to the debug folder</span>
+                <input type="checkbox" bind:checked={settingsForm.debug_diagnostics_enabled} />
+                <span>Locate-trace drawer, per-response info line, and the AI's target_bbox on the overlay</span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Saved to %APPDATA%\com.navisual.app\debug\ — one prompt_&lt;timestamp&gt;.txt per request, alongside its screenshot. See "Prompt log" below for a single running history instead.</p>
+              <p class="stub-hint" style="margin-top:4px">Was three separate switches. Costs nothing and writes nothing — it only changes what is displayed.</p>
+            </div>
+
+            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
+              <p class="setting-label">Diagnostic logs</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.debug_log_files_enabled} />
+                <span>Append every locate and every prompt to <code>locate_log.jsonl</code> / <code>prompt_log.jsonl</code></span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px">Text only, in %LOCALAPPDATA%\com.navisual.app\. One switch for both: a locate trace without the prompt that caused it answers half a question, and the <code>toolsnalyze-*.ps1</code> scripts read both.</p>
+
+              <label class="toggle-row" style="margin-top:10px">
+                <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
+                <span>Also save screenshots, OCR inputs and per-request prompt text</span>
+              </label>
+              <p class="stub-hint" style="margin-top:4px"><strong>Kept separate on purpose.</strong> The logs above are text; this writes pictures of whatever is on your screen, a few hundred KB each. Merging them would mean switching on locate diagnostics quietly starts capturing your screen to disk.</p>
               <button class="btn-ghost" style="margin-top:8px;font-size:12px;padding:5px 10px"
                 onclick={() => invoke("open_debug_folder").catch(() => {})}>
                 📂 Open debug folder
               </button>
             </div>
-            <div class="setting-group">
-              <p class="setting-label">Response info</p>
-              <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.debug_show_response_info} />
-                <span>Show locate method, confidence, and element name after each AI response</span>
-              </label>
-            </div>
-            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
-              <p class="setting-label">Locate diagnostics</p>
-              <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.debug_locate_trace_enabled} />
-                <span>Show locate trace drawer in panel after each step</span>
-              </label>
-              <label class="toggle-row" style="margin-top:6px">
-                <input type="checkbox" bind:checked={settingsForm.debug_locate_log_file_enabled} />
-                <span>Append every locate to locate_log.jsonl</span>
-              </label>
-              <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\locate_log.jsonl</p>
-            </div>
-            <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
-              <p class="setting-label">Prompt log</p>
-              <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.debug_prompt_log_file_enabled} />
-                <span>Append every prompt sent to the AI to prompt_log.jsonl</span>
-              </label>
-              <p class="stub-hint" style="margin-top:4px">Log file: %APPDATA%\com.navisual.app\prompt_log.jsonl — a single running history covering every request (task, follow-up, re-query, and ✗ Wrong corrections). The system prompt is static (src-tauri/src/ai/prompts.rs) and never logged, only the per-request dynamic text.</p>
-            </div>
+
             <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
               <p class="setting-label">Training capture</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.training_capture_enabled} />
                 <span>Bank complete training triples (screenshot + prompt + response + outcome) locally</span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Saves the exact AI-sent screenshot per request to %APPDATA%\com.navisual.app\training\, records the AI response in prompt_log.jsonl, archives rotated logs instead of deleting them, and mirrors worked/wrong feedback locally — all joined by a per-request id. Local only, never uploaded; exempt from the 7-day debug cleanup. Disk ≈ 100–200 KB per request.</p>
+              <p class="stub-hint" style="margin-top:4px">Saves the exact AI-sent screenshot per request to %LOCALAPPDATA%\com.navisual.app	raining\, records the AI response in prompt_log.jsonl, archives rotated logs instead of deleting them, and mirrors worked/wrong feedback locally — all joined by a per-request id. Local only, never uploaded; exempt from the 7-day debug cleanup. Disk ≈ 100–200 KB per request.</p>
             </div>
+
             <div class="setting-group" style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:12px">
-              <p class="setting-label">AI bounding box</p>
+              <p class="setting-label">Session export</p>
               <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.debug_show_ai_bbox} />
-                <span>Draw the AI-returned target_bbox on the overlay (cyan dashed)</span>
+                <input type="checkbox" bind:checked={settingsForm.session_export_enabled} />
+                <span>Show 💾 Save this session in the ··· menu</span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Drawn alongside the production pointer for visual comparison. Coordinate-system per provider — Gemini normalized 0–1000, others absolute pixels.</p>
+              <p class="stub-hint" style="margin-top:4px">Writes the last 30 steps — screenshots, the conversation, and the locator outcome per step — to a folder you choose. The last 30 steps are <em>always</em> held in memory whether this is on or off, so switching it on mid-session finds the session already recorded rather than starting from empty. Nothing reaches disk until you press Save.</p>
             </div>
 
           {:else}

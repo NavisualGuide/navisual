@@ -100,20 +100,38 @@ pub struct Config {
     pub hotkey_icon: String,
     pub hotkey_talk: String,
 
-    // Developer / testing
+    // ── Developer / testing ──────────────────────────────────────────────────
+    //
+    // Consolidated 2026-09-04 from seven independent switches to four. The seven
+    // were not seven decisions: nobody wants the locate drawer without the
+    // response info, or one JSONL log without the other. They were one decision
+    // each time they were used, spread across seven checkboxes.
+    //
+    // The grouping is by CONSEQUENCE, not by subsystem — what turning it on costs
+    // you is what a reader of the Settings page is actually deciding about:
+    //   diagnostics  — changes what is on screen. Costs nothing, writes nothing.
+    //   log files    — appends text to disk. Small, and readable by the tools/.
+    //   screenshots  — writes PICTURES OF YOUR SCREEN to disk. Deliberately its
+    //                  own switch; see below.
+    //   training     — accumulates a joinable corpus, exempt from cleanup.
+    /// On-screen diagnostics: the locate-trace drawer, the per-response info line,
+    /// and the AI's `target_bbox` drawn on the overlay. Merged because all three
+    /// answer the same question — "what did the locator just do?" — and were
+    /// invariably turned on together.
+    pub debug_diagnostics_enabled: bool,
+    /// Append diagnostics to `locate_log.jsonl` and `prompt_log.jsonl`.
+    ///
+    /// One switch for both, because a locate trace without the prompt that caused
+    /// it answers half a question, and `tools/analyze-*.ps1` want both anyway.
+    pub debug_log_files_enabled: bool,
+    /// Save AI screenshots, OCR inputs, and per-request prompt text to `debug\`.
+    ///
+    /// **Deliberately NOT merged into `debug_log_files_enabled`.** The other logs
+    /// are text; this one writes pictures of whatever was on screen, at a few
+    /// hundred KB each. Coupling them would mean that turning on locate
+    /// diagnostics silently starts capturing the user's screen to disk, which is
+    /// exactly the kind of surprise a privacy-sensitive write must never be.
     pub debug_screenshot_enabled: bool,
-    pub debug_show_response_info: bool,
-    /// Render the locator-trace drawer in the panel (Phase 0.1).
-    pub debug_locate_trace_enabled: bool,
-    /// Append every locate trace to %LOCALAPPDATA%\com.navisual.app\locate_log.jsonl.
-    pub debug_locate_log_file_enabled: bool,
-    /// Append every prompt sent to the AI (guide/reply/requery/correction) to
-    /// %LOCALAPPDATA%\com.navisual.app\prompt_log.jsonl. Independent of
-    /// `debug_screenshot_enabled`'s per-call prompt_<ts>.txt dumps (which only cover
-    /// guide(), not send_correction()) — this is a single running history instead.
-    pub debug_prompt_log_file_enabled: bool,
-    /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
-    pub debug_show_ai_bbox: bool,
     /// Training-data banking (llm-finetuning-eval.md §5b) — one switch for the whole
     /// bundle a future fine-tune needs as COMPLETE, JOINABLE triples: the exact AI-sent
     /// JPEG saved per request (training/shot_<request_id>.jpg), prompt+response entries
@@ -123,6 +141,18 @@ pub struct Config {
     /// The training/ dir is exempt from the 7-day debug cleanup — it exists only when
     /// this is deliberately on, and its whole point is accumulation.
     pub training_capture_enabled: bool,
+    /// Session export — the ✗/💾 "Save this session" flow (`session_export.rs`).
+    ///
+    /// Developer-gated for now at the founder's request: they are the only user of
+    /// it, and it is the one feature that deliberately writes screenshots of a real
+    /// screen to disk. Keeping it behind the flag means the ring buffer is the only
+    /// part running for everyone else, and that is memory-only.
+    ///
+    /// **The buffer keeps filling regardless.** Gating the UI, not the capture, is
+    /// what preserves the whole point of §3.1 — that "this one was worth keeping"
+    /// stays a decision you make afterwards. Turning the toggle on mid-session must
+    /// find the session already recorded, not start from empty.
+    pub session_export_enabled: bool,
 
     /// Include the *text* of the paragraph the cursor is in, in the `[App State — Word]`
     /// block. Default on — it is what lets the AI say "you're in the Outlook heading"
@@ -188,16 +218,28 @@ impl Default for Config {
             hotkey_pause: String::new(),
             hotkey_icon:  String::new(),
             hotkey_talk:  "Ctrl+KeyD".to_string(),
+            debug_diagnostics_enabled: false,
+            debug_log_files_enabled: false,
             debug_screenshot_enabled: false,
-            debug_show_response_info: false,
-            debug_locate_trace_enabled: false,
-            debug_locate_log_file_enabled: false,
-            debug_prompt_log_file_enabled: false,
-            debug_show_ai_bbox: false,
             training_capture_enabled: false,
+            session_export_enabled: false,
             word_state_paragraph_text: true,
             gemini_thinking_budget: None,
         }
+    }
+}
+
+/// Resolve a developer switch that replaced several older ones (2026-09-04).
+///
+/// The new key wins whenever it is set. Only when it is absent do the retired
+/// keys fill it in, and then generously: any of them being on means the merged
+/// group was in use. Reading a retired key once beats silently resetting an
+/// existing developer setup to off, because that failure is invisible -- it looks
+/// like diagnostics simply stopped working, with nothing tying it to an upgrade.
+fn merged_switch(new_key: Option<bool>, legacy: &[Option<bool>]) -> bool {
+    match new_key {
+        Some(v) => v,
+        None => legacy.iter().any(|l| l.unwrap_or(false)),
     }
 }
 
@@ -406,24 +448,33 @@ impl Config {
         if let Ok(v) = env::var("HOTKEY_TALK") {
             config.hotkey_talk = v;
         }
+        let truthy = |v: &str| v == "true" || v == "1";
+
         if let Ok(v) = env::var("DEBUG_SCREENSHOT_ENABLED") {
-            config.debug_screenshot_enabled = v == "true" || v == "1";
+            config.debug_screenshot_enabled = truthy(&v);
         }
-        if let Ok(v) = env::var("DEBUG_SHOW_RESPONSE_INFO") {
-            config.debug_show_response_info = v == "true" || v == "1";
+        if let Ok(v) = env::var("SESSION_EXPORT_ENABLED") {
+            config.session_export_enabled = truthy(&v);
         }
-        if let Ok(v) = env::var("DEBUG_LOCATE_TRACE_ENABLED") {
-            config.debug_locate_trace_enabled = v == "true" || v == "1";
-        }
-        if let Ok(v) = env::var("DEBUG_LOCATE_LOG_FILE_ENABLED") {
-            config.debug_locate_log_file_enabled = v == "true" || v == "1";
-        }
-        if let Ok(v) = env::var("DEBUG_PROMPT_LOG_FILE_ENABLED") {
-            config.debug_prompt_log_file_enabled = v == "true" || v == "1";
-        }
-        if let Ok(v) = env::var("DEBUG_SHOW_AI_BBOX") {
-            config.debug_show_ai_bbox = v == "true" || v == "1";
-        }
+
+        // Merged-switch migration (see `merged_switch`).
+        let flag = |k: &str| env::var(k).ok().map(|v| truthy(&v));
+        config.debug_diagnostics_enabled = merged_switch(
+            flag("DEBUG_DIAGNOSTICS_ENABLED"),
+            &[
+                flag("DEBUG_SHOW_RESPONSE_INFO"),
+                flag("DEBUG_LOCATE_TRACE_ENABLED"),
+                flag("DEBUG_SHOW_AI_BBOX"),
+            ],
+        );
+        config.debug_log_files_enabled = merged_switch(
+            flag("DEBUG_LOG_FILES_ENABLED"),
+            &[
+                flag("DEBUG_LOCATE_LOG_FILE_ENABLED"),
+                flag("DEBUG_PROMPT_LOG_FILE_ENABLED"),
+            ],
+        );
+
         if let Ok(v) = env::var("TRAINING_CAPTURE_ENABLED") {
             config.training_capture_enabled = v == "true" || v == "1";
         }
@@ -488,6 +539,7 @@ fn load_env_file_simple(path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    use super::merged_switch;
     use std::env;
 
     /// Pins the platform assumption the hotkey-clear round-trip relies on (see the
@@ -496,6 +548,34 @@ mod tests {
     /// this ever fails (a platform where setting an empty value deletes the var),
     /// a cleared hotkey would silently resurrect its default on the next load, and
     /// the clear feature needs a sentinel value ("none") instead of "".
+    /// The 2026-09-04 seven-to-four merge. Tested through the pure helper rather
+    /// than by setting process env vars: the suite runs in parallel, so mutating
+    /// shared env is how a test becomes intermittently wrong for reasons that have
+    /// nothing to do with what it is checking.
+    #[test]
+    fn a_legacy_switch_carries_its_group_forward() {
+        // Any old key in the group being on means the group was in use.
+        assert!(merged_switch(None, &[Some(true), None, None]));
+        assert!(merged_switch(None, &[None, Some(true), Some(false)]));
+        assert!(merged_switch(None, &[None, None, Some(true)]));
+    }
+
+    #[test]
+    fn absent_everywhere_stays_off() {
+        assert!(!merged_switch(None, &[None, None, None]));
+        assert!(!merged_switch(None, &[Some(false), Some(false)]));
+        assert!(!merged_switch(None, &[]));
+    }
+
+    #[test]
+    fn an_explicit_new_key_beats_every_legacy_one() {
+        // Silently resetting a developer's setup would surface only as diagnostics
+        // quietly not appearing, so the legacy fill is generous -- but it must
+        // never override a decision the user actually made on the new key.
+        assert!(!merged_switch(Some(false), &[Some(true), Some(true)]));
+        assert!(merged_switch(Some(true), &[Some(false), None]));
+    }
+
     #[test]
     fn env_empty_value_roundtrip() {
         const KEY: &str = "NAVISUAL_TEST_EMPTY_ENV_VALUE";

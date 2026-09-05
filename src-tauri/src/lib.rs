@@ -2757,10 +2757,13 @@ struct SettingsPayload {
     hotkey_icon: String,
     hotkey_talk: String,
     debug_screenshot_enabled: bool,
-    debug_show_response_info: bool,
-    debug_locate_trace_enabled: bool,
-    debug_locate_log_file_enabled: bool,
-    debug_prompt_log_file_enabled: bool,
+    /// Consolidated developer switches (2026-09-04). `#[serde(default)]` on both so
+    /// a frontend that predates the merge still deserialises rather than failing
+    /// the whole save.
+    #[serde(default)]
+    debug_diagnostics_enabled: bool,
+    #[serde(default)]
+    debug_log_files_enabled: bool,
     /// Training-data banking (llm-finetuning-eval.md §5b) — see Config field docs.
     #[serde(default)]
     training_capture_enabled: bool,
@@ -2768,12 +2771,10 @@ struct SettingsPayload {
     /// suggested_tasks). Screen Guide toggle; default on (display-only, no risk).
     #[serde(default = "default_true_setting")]
     task_suggestions: bool,
-    /// Draw the AI-returned target_bbox on the overlay (developer / comparison).
-    /// Front-end only — backend always emits ai_bbox in OverlayUpdate; the
-    /// overlay renderer reads this flag (from `overlay:theme`) to decide
-    /// whether to draw the cyan dashed box.
+    /// Session export UI (`session_export.rs`). Developer-gated; the ring buffer
+    /// itself runs regardless, so enabling this mid-session finds it already full.
     #[serde(default)]
-    debug_show_ai_bbox: bool,
+    session_export_enabled: bool,
     /// Read-only — true when the process was launched with NAVISUAL_DEV=true.
     /// Frontend uses this to show/hide the Developer settings tab. Never
     /// written by save_settings (it's deserialized but ignored on the way in).
@@ -3555,7 +3556,7 @@ async fn guide(
     let resp_err_str = resp.as_ref().err().map(|e| e.to_string());
     maybe_log_prompt(
         &app,
-        router.config.debug_prompt_log_file_enabled,
+        router.config.debug_log_files_enabled,
         training_enabled,
         prompt_log::PromptLogFields {
             session_id: &session_id,
@@ -3789,7 +3790,7 @@ async fn guide(
         .lock()
         .await
         .config
-        .debug_locate_log_file_enabled;
+        .debug_log_files_enabled;
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path()
@@ -3956,7 +3957,7 @@ async fn next_step(
             .get_managed_routed_model()
             .unwrap_or_else(|| router.active_model());
         (
-            router.config.debug_locate_log_file_enabled,
+            router.config.debug_log_files_enabled,
             router.config.training_capture_enabled,
             router.config.debug_screenshot_enabled,
             ai::bbox::bbox_is_decisive(&used_model, &router.config.bbox_distrust_models),
@@ -4106,7 +4107,7 @@ async fn retry_locate(
             .get_managed_routed_model()
             .unwrap_or_else(|| router.active_model());
         (
-            router.config.debug_locate_log_file_enabled,
+            router.config.debug_log_files_enabled,
             router.config.training_capture_enabled,
             router.config.debug_screenshot_enabled,
             ai::bbox::bbox_is_decisive(&used_model, &router.config.bbox_distrust_models),
@@ -4602,7 +4603,7 @@ async fn send_correction(
     let resp_err_str = resp.as_ref().err().map(|e| e.to_string());
     maybe_log_prompt(
         &app,
-        router.config.debug_prompt_log_file_enabled,
+        router.config.debug_log_files_enabled,
         training_enabled,
         prompt_log::PromptLogFields {
             session_id: &session_id,
@@ -4763,7 +4764,7 @@ async fn send_correction(
     let (log_trace, debug_screenshot_enabled) = {
         let cfg = &state.ai_router.lock().await.config;
         (
-            cfg.debug_locate_log_file_enabled,
+            cfg.debug_log_files_enabled,
             cfg.debug_screenshot_enabled,
         )
     };
@@ -5143,8 +5144,27 @@ fn export_status(state: State<'_, AppState>) -> ExportStatus {
 
 /// Open the native folder picker, starting where the last export went.
 /// Returns `None` when the user cancels, which is the normal path.
+/// Whether the export UI is available. Developer-gated (`SESSION_EXPORT_ENABLED`).
+///
+/// The GATE IS ON THE UI, NOT THE RING BUFFER. The buffer keeps recording for
+/// everyone, because §3.1's whole premise is that "that one was worth keeping" is
+/// a decision made after the fact — a gate on capture would mean switching the
+/// toggle on gives you an empty session, which is the opposite of the point. The
+/// buffer is memory-only, so nothing reaches disk for a user who never enables
+/// this.
+fn export_enabled(state: &State<'_, AppState>) -> bool {
+    state
+        .ai_router
+        .try_lock()
+        .map(|r| r.config.session_export_enabled)
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 async fn pick_export_folder(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    if !export_enabled(&state) {
+        return Err("Session export is off. Turn it on in Settings → Developer.".into());
+    }
     let start = state
         .export_dest
         .lock()
@@ -5176,6 +5196,12 @@ fn export_session(
     draw_caption: bool,
     redacted_steps: Vec<usize>,
 ) -> Result<String, String> {
+    // Checked here too, not only in the UI: this is the one command in the app
+    // that writes screenshots of a real screen to disk, so the guard belongs
+    // beside the write rather than only in front of the button.
+    if !export_enabled(&state) {
+        return Err("Session export is off. Turn it on in Settings → Developer.".into());
+    }
     let dest = destination
         .map(std::path::PathBuf::from)
         .or_else(|| state.export_dest.lock().clone())
@@ -5570,13 +5596,11 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         hotkey_icon: c.hotkey_icon.clone(),
         hotkey_talk: c.hotkey_talk.clone(),
         debug_screenshot_enabled: c.debug_screenshot_enabled,
-        debug_show_response_info: c.debug_show_response_info,
-        debug_locate_trace_enabled: c.debug_locate_trace_enabled,
-        debug_locate_log_file_enabled: c.debug_locate_log_file_enabled,
-        debug_prompt_log_file_enabled: c.debug_prompt_log_file_enabled,
+        debug_diagnostics_enabled: c.debug_diagnostics_enabled,
+        debug_log_files_enabled: c.debug_log_files_enabled,
         training_capture_enabled: c.training_capture_enabled,
         task_suggestions: c.task_suggestions,
-        debug_show_ai_bbox: c.debug_show_ai_bbox,
+        session_export_enabled: c.session_export_enabled,
         developer_mode: developer_mode_enabled(),
     })
 }
@@ -5651,20 +5675,12 @@ async fn save_settings(
             payload.debug_screenshot_enabled.to_string(),
         ),
         (
-            "DEBUG_SHOW_RESPONSE_INFO".into(),
-            payload.debug_show_response_info.to_string(),
+            "DEBUG_DIAGNOSTICS_ENABLED".into(),
+            payload.debug_diagnostics_enabled.to_string(),
         ),
         (
-            "DEBUG_LOCATE_TRACE_ENABLED".into(),
-            payload.debug_locate_trace_enabled.to_string(),
-        ),
-        (
-            "DEBUG_LOCATE_LOG_FILE_ENABLED".into(),
-            payload.debug_locate_log_file_enabled.to_string(),
-        ),
-        (
-            "DEBUG_PROMPT_LOG_FILE_ENABLED".into(),
-            payload.debug_prompt_log_file_enabled.to_string(),
+            "DEBUG_LOG_FILES_ENABLED".into(),
+            payload.debug_log_files_enabled.to_string(),
         ),
         (
             "TRAINING_CAPTURE_ENABLED".into(),
@@ -5675,8 +5691,8 @@ async fn save_settings(
             payload.task_suggestions.to_string(),
         ),
         (
-            "DEBUG_SHOW_AI_BBOX".into(),
-            payload.debug_show_ai_bbox.to_string(),
+            "SESSION_EXPORT_ENABLED".into(),
+            payload.session_export_enabled.to_string(),
         ),
     ];
 
