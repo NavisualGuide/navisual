@@ -6769,6 +6769,13 @@ pub fn run() {
                 if let Some(win) = panel_handle.get_webview_window("panel") {
                     let _ = win.show();
                     log::info!("panel window shown from Rust setup");
+                    // After show(), because the hook finds the panel by enumerating
+                    // VISIBLE own-process windows — and on the main thread, because
+                    // SetWindowSubclass has to run on the thread that owns the window.
+                    #[cfg(windows)]
+                    let _ = panel_handle.run_on_main_thread(|| {
+                        capture::intercept_panel_minimize();
+                    });
                 }
             });
 

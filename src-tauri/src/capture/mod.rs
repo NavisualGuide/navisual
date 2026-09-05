@@ -610,3 +610,16 @@ pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
         false
     }
 }
+
+/// Make a minimize request on the panel collapse it to the floating icon instead.
+/// Must be called on the window's own (main) thread.
+pub fn intercept_panel_minimize() -> bool {
+    #[cfg(windows)]
+    {
+        win::intercept_panel_minimize()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}

@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use image::{ImageBuffer, Rgba};
 use std::mem;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, POINT, RECT, TRUE};
+use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, LRESULT, POINT, RECT, TRUE, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
@@ -26,6 +26,7 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
@@ -33,8 +34,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
     GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_RESTORE, WM_SYSCOMMAND, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -852,6 +853,67 @@ pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
 /// The overlay is the only own-process window with `WS_EX_TRANSPARENT`, so we
 /// identify it the same way `own_panel_rects` does. `SWP_NOACTIVATE` ensures we
 /// never steal focus from the app the user is working in.
+/// Turn a minimize request on the panel into a **collapse** instead.
+///
+/// Navisual has no minimize button: collapsing to the floating goldfish is how the
+/// panel gets out of the way, and it is the better fit for what this app is — a
+/// companion to whatever you are working in. A minimized panel goes to the taskbar,
+/// which means leaving the app you are being guided through to hunt for it; the
+/// collapsed icon stays on top, one click away, draggable anywhere. It is also the
+/// honest state for a screen-watching app: the goldfish IS the "Navisual is running"
+/// indicator, and a screen reader that can become completely invisible while still
+/// watching is not a posture this product should offer.
+///
+/// But the taskbar button never knew that. Clicking it while the panel was focused
+/// did the standard Windows thing and minimized — a second, worse "get out of the
+/// way" mechanism reachable by a path the UI itself never offers, leaving the panel
+/// in a state nothing in the app puts it in.
+///
+/// So the request is intercepted rather than the state repaired afterwards: catching
+/// `SC_MINIMIZE` means the window never minimizes at all, so there is no flash of a
+/// vanishing panel before it comes back as an icon. `SetWindowSubclass` adds to tao's
+/// existing wndproc chain rather than replacing it, so everything Tauri does with
+/// this window keeps working (unlike the raw style write in `overlay::configure`'s
+/// history, which tao simply reverted).
+///
+/// Deliberately only `SC_MINIMIZE`: Show Desktop and Win+M minimize by a different
+/// path and are left alone, because "hide everything" should mean everything.
+pub fn intercept_panel_minimize() -> bool {
+    unsafe extern "system" fn panel_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        // The low 4 bits of wParam are reserved by Windows for internal use, hence
+        // the 0xFFF0 mask that every SC_ comparison needs.
+        if msg == WM_SYSCOMMAND && (wparam.0 as u32) & 0xFFF0 == SC_MINIMIZE {
+            if let Some(app) = crate::APP_HANDLE.get() {
+                use tauri::Emitter;
+                let _ = app.emit("panel:collapse_requested", ());
+            }
+            return LRESULT(0); // swallow it — the panel must not actually minimize
+        }
+        unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+    }
+
+    let Some(raw) = own_panel_hwnd() else {
+        log::warn!("panel minimize hook: panel window not found");
+        return false;
+    };
+    let hwnd = HWND(raw as *mut std::ffi::c_void);
+    // Must run on the thread that owns the window, so callers hop to the main thread.
+    let ok = unsafe { SetWindowSubclass(hwnd, Some(panel_subclass_proc), 1, 0).as_bool() };
+    if ok {
+        log::info!("panel minimize hook installed — taskbar minimize now collapses");
+    } else {
+        log::warn!("panel minimize hook: SetWindowSubclass failed");
+    }
+    ok
+}
+
 pub fn raise_overlay_topmost() {
     let our_pid = std::process::id();
 

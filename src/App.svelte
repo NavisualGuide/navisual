@@ -2495,6 +2495,15 @@ See the LICENSE file in the root of this repository for complete details.
       if (focused && billing.checkoutPending) refreshBalance();
     });
 
+    // The taskbar button's minimize is intercepted in Rust (see
+    // capture::intercept_panel_minimize) and arrives here instead, so there is one way
+    // out of the way however it's asked for: the header button, the Icon hotkey, or the
+    // taskbar. Already collapsed means the request is already satisfied — never
+    // minimize from here, since that is the state being avoided.
+    listen("panel:collapse_requested", () => {
+      if (!iconMode) collapseToIcon();
+    });
+
     listen("trial_exhausted", () => {
       billing.markFreeExhausted();
       exhaustedReason = "free";
