@@ -62,8 +62,32 @@ param(
     [string]$Kind = "all"
 )
 
-if (-not (Test-Path $Path)) {
-    Write-Error "Log not found: $Path"
+# Resolve to a real filesystem path before any .NET call.
+#
+# `Test-Path` understands PowerShell's own path forms -- `~`, PSDrives, relative
+# paths -- but `[System.IO.File]` does not. A path that passes the check can then
+# fail inside .NET with a confusing message: `~\Documents\...` came back as
+# "Could not find a part of the path 'C:\Users\you\~\Documents\...'", with the
+# tilde taken literally.
+if (-not (Test-Path -LiteralPath $Path)) {
+    Write-Error "Not found: $Path"
+    exit 1
+}
+$Path = (Resolve-Path -LiteralPath $Path).ProviderPath
+
+# A directory reaching ReadAllLines throws "Access to the path is denied", which
+# reads like a permissions problem and is not one. The likeliest mistake is
+# pointing a log analyser at an exported session folder, so say that outright.
+if (Test-Path -LiteralPath $Path -PathType Container) {
+    Write-Error "$Path is a folder, and this script reads a locate-log .jsonl FILE."
+    if (Test-Path -LiteralPath (Join-Path $Path "session.json")) {
+        Write-Host ""
+        Write-Host "That looks like an exported session. You probably want:" -ForegroundColor Yellow
+        Write-Host "  .\tools\annotate-session.ps1 -Path `"$Path`"" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "For grounding accuracy, pass the log file itself:" -ForegroundColor Yellow
+        Write-Host "  -Path `"$env:LOCALAPPDATA\com.navisual.app\locate_log.jsonl`"" -ForegroundColor Yellow
+    }
     exit 1
 }
 
@@ -101,9 +125,15 @@ $groundTruthKinds = switch ($Kind) {
 }
 
 $candidates = @($entries | Where-Object {
-    $kind = $_.final_decision.kind
-    if ($groundTruthKinds -contains $kind) { return $true }
-    if ($IncludeOcr -and $Kind -eq "all" -and $kind -eq "hit_ocr") {
+    # NOT `$kind`. PowerShell variable names are case-insensitive, so `$kind`
+    # is the SAME variable as the `$Kind` parameter -- and that parameter carries
+    # a [ValidateSet("all","cells","ui")] attribute which stays attached to the
+    # name for the whole scope. Assigning a decision kind to it therefore threw
+    # "the value hit_a11y is not a valid value for the Kind variable" once per
+    # entry, and the script reported nothing usable.
+    $decision = $_.final_decision.kind
+    if ($groundTruthKinds -contains $decision) { return $true }
+    if ($IncludeOcr -and $Kind -eq "all" -and $decision -eq "hit_ocr") {
         $c = $_.ocr.corroboration
         return $c -and ($c.uia_interactive -or $c.isolation_ok -or $c.near_anchor)
     }

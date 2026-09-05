@@ -8,7 +8,7 @@
   modified, so this can be run as many times as you like with different choices.
 
   This exists because annotation is a decision you will want to change AFTER the
-  session is over — a figure that needs a caption in an article often needs none in
+  session is over -- a figure that needs a caption in an article often needs none in
   a bug report, and the pointer that helps on one step clutters another. The export
   keeps `steps/` pristine precisely so that decision stays open.
 
@@ -51,10 +51,18 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
+# Resolve before touching .NET: System.Drawing takes raw strings and does not
+# understand `~`, PSDrives or PowerShell-relative paths, so a path that passes
+# Test-Path can still fail inside the image loader with a misleading message.
+if (-not (Test-Path -LiteralPath $Path)) { throw "Not found: $Path" }
+$Path = (Resolve-Path -LiteralPath $Path).ProviderPath
+
 $json = Join-Path $Path "session.json"
 $clean = Join-Path $Path "steps"
-if (-not (Test-Path $json))  { throw "No session.json in $Path" }
-if (-not (Test-Path $clean)) {
+if (-not (Test-Path -LiteralPath $json)) {
+  throw "No session.json in $Path -- this takes an exported session FOLDER, not a file or a log."
+}
+if (-not (Test-Path -LiteralPath $clean)) {
   throw "No steps/ folder in $Path. It was exported without the plain screenshots, so there is nothing to re-annotate from."
 }
 
@@ -91,7 +99,7 @@ foreach ($turn in $session.turns) {
     if (-not $NoPointer -and $step.pointer.rect) {
       $r = $step.pointer.rect
       $pad = 6
-      # Three nested rings, faintest outermost — the same shape the app draws.
+      # Three nested rings, faintest outermost -- the same shape the app draws.
       foreach ($ring in 3, 2, 1) {
         $alpha = @{ 3 = 90; 2 = 170; 1 = 255 }[$ring]
         $pen = New-Object System.Drawing.Pen(
@@ -109,7 +117,7 @@ foreach ($turn in $session.turns) {
       # Someone comparing an exported figure with their own screen should see the
       # same thing.
       #
-      # Microsoft YaHei so Chinese instructions render — the app replies in the
+      # Microsoft YaHei so Chinese instructions render -- the app replies in the
       # user's language, so a Latin-only font would be useless to many of them.
       $size = [Math]::Max(14, [Math]::Min(40, [int]($bmp.Height * 0.022)))
       $font = New-Object System.Drawing.Font("Microsoft YaHei", $size, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
@@ -128,20 +136,24 @@ foreach ($turn in $session.turns) {
       $radius  = [int]($size * 0.55)
 
       # Rounded rect via a path, so the corners match the app's 10px radius look.
-      $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+      # NOT `$path` -- PowerShell variable names are case-insensitive, so that is
+      # the SAME variable as the `$Path` parameter. Assigning a GraphicsPath to it
+      # replaced the session folder with a graphics object, and the next call blew
+      # up with "[System.String] does not contain a method named 'AddArc'".
+      $gp = New-Object System.Drawing.Drawing2D.GraphicsPath
       $d = $radius * 2
-      $path.AddArc($stripX, $stripY, $d, $d, 180, 90)
-      $path.AddArc($stripX + $stripW - $d, $stripY, $d, $d, 270, 90)
-      $path.AddArc($stripX + $stripW - $d, $stripY + $stripH - $d, $d, $d, 0, 90)
-      $path.AddArc($stripX, $stripY + $stripH - $d, $d, $d, 90, 90)
-      $path.CloseFigure()
+      $gp.AddArc($stripX, $stripY, $d, $d, 180, 90)
+      $gp.AddArc($stripX + $stripW - $d, $stripY, $d, $d, 270, 90)
+      $gp.AddArc($stripX + $stripW - $d, $stripY + $stripH - $d, $d, $d, 0, 90)
+      $gp.AddArc($stripX, $stripY + $stripH - $d, $d, $d, 90, 90)
+      $gp.CloseFigure()
       # 0.52 alpha = 133/255, the overlay's own value.
       $band = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(133, 0, 0, 0))
-      $g.FillPath($band, $path)
+      $g.FillPath($band, $gp)
 
       $rect = New-Object System.Drawing.RectangleF($stripX, $stripY, $stripW, $stripH)
       $g.DrawString($step.instruction, $font, [System.Drawing.Brushes]::White, $rect, $fmt)
-      $band.Dispose(); $path.Dispose(); $font.Dispose(); $fmt.Dispose()
+      $band.Dispose(); $gp.Dispose(); $font.Dispose(); $fmt.Dispose()
     }
 
     $g.Dispose()
