@@ -650,6 +650,17 @@ See the LICENSE file in the root of this repository for complete details.
     } else {
       await invoke("pin_target_window", { hwnd });
       pinnedHwnd = hwnd;
+      // While docked, "the app I'm being guided through" and "the app filling the rest
+      // of the screen" are the same choice — so the always-visible header chip does
+      // both, rather than making the dock version live only in the ··· menu, which is
+      // exactly where this project keeps losing actions. (The explicit
+      // "Fill the rest with…" entry stays for anyone who looks there first.)
+      if (dockSide) {
+        dockPartner = hwnd;
+        saveDock();
+        try { await invoke("dock_fill", { hwnd, side: dockSide }); }
+        catch (e) { console.error("dock_fill:", e); }
+      }
     }
   }
 
@@ -991,7 +1002,11 @@ See the LICENSE file in the root of this repository for complete details.
     openTargetPicker("dock");
   }
 
-  async function undock() {
+  // `reposition: false` is the drag case — the user has just put the panel somewhere
+  // deliberately, so restoring it to the pre-dock size and parking it bottom-right
+  // would be yanking it straight back out of their hands. Only the menu's Undock,
+  // which the user asked for with no place of their own in mind, repositions.
+  async function undock(reposition = true) {
     showQuickMenu = false;
     const restore = preDockSize ?? lastPanelSize;
     dockSide = null;
@@ -999,6 +1014,7 @@ See the LICENSE file in the root of this repository for complete details.
     dockWidth = null;
     preDockSize = null;
     saveDock();
+    if (!reposition) return;
     try {
       const sw = window.screen.availWidth;
       const sh = window.screen.availHeight;
@@ -1030,6 +1046,25 @@ See the LICENSE file in the root of this repository for complete details.
   // match, so dragging the panel's inner border drags the shared border.
   // Coalesced to one call per frame — a drag fires resize events far faster
   // than SetWindowPos needs to run, and the partner only ever needs the latest.
+  // Moving the panel out of its dock, or resizing it from any edge that isn't the
+  // divider, means it is no longer docked — so stop claiming it is. Checked rather
+  // than assumed, because a divider drag IS a move and a resize: the backend compares
+  // the panel against the dock invariant (outer edge pinned, full work-area height),
+  // which a divider drag preserves and a titlebar drag does not. Debounced so a drag
+  // is judged once it settles, never mid-flight.
+  let dockVerifyTimer: ReturnType<typeof setTimeout> | null = null;
+  function verifyDockSoon() {
+    if (!dockSide) return;
+    if (dockVerifyTimer) clearTimeout(dockVerifyTimer);
+    dockVerifyTimer = setTimeout(async () => {
+      if (!dockSide) return;
+      try {
+        const intact = await invoke<boolean>("dock_is_intact", { side: dockSide });
+        if (!intact) await undock(false);
+      } catch (_) { /* couldn't measure — leave the dock alone rather than guess */ }
+    }, 350);
+  }
+
   let dockSyncQueued = false;
   function scheduleDockSync() {
     if (dockSyncQueued || !dockSide || dockPartner === null) return;
@@ -2327,6 +2362,11 @@ See the LICENSE file in the root of this repository for complete details.
     // overwrite the real panel size (iconMode flips to true/false
     // synchronously before those setSize() calls, so this always sees the
     // correct mode for the resize it's reacting to).
+    getCurrentWindow().onMoved(() => {
+      if (iconMode) return;
+      verifyDockSoon();
+    }).catch(() => {});
+
     getCurrentWindow().onResized(async ({ payload }) => {
       if (iconMode) return;
       try {
@@ -2341,6 +2381,7 @@ See the LICENSE file in the root of this repository for complete details.
           dockWidth = Math.round(payload.width);
           saveDockSoon();
           scheduleDockSync();
+          verifyDockSoon();
           return;
         }
         lastPanelSize = { width: Math.round(logical.width), height: Math.round(logical.height) };
@@ -3115,7 +3156,7 @@ See the LICENSE file in the root of this repository for complete details.
             title="Give the rest of the screen to an app">
             ⬒ Fill the rest with…
           </button>
-          <button class="qm-btn qm-active" onclick={undock}
+          <button class="qm-btn qm-active" onclick={() => undock()}
             title="Float the panel again">
             ⬜ Undock
           </button>
@@ -3216,6 +3257,9 @@ See the LICENSE file in the root of this repository for complete details.
              put in the space beside the panel. -->
         <div class="target-pick-head">Which app should fill the rest?</div>
       {:else}
+        {#if dockSide}
+          <div class="target-pick-head">Picking an app also fills the rest of the screen with it</div>
+        {/if}
         <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null && !fullScreenTarget} onclick={() => selectTarget(null)}>
           <span class="target-pick-check">{pinnedHwnd === null && !fullScreenTarget ? "✓" : ""}</span>
           <span class="target-pick-name">Auto-detect</span>

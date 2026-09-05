@@ -2001,6 +2001,53 @@ mod dock_tests {
         assert_eq!(l.panel.height, 1000);
     }
 
+    // The distinction the whole "moving the panel undocks it" rule turns on: a divider
+    // drag is ALSO a move and a resize, so it must survive, while every other drag must
+    // not. Getting this backwards either kills the divider or makes the dock unescapable.
+    #[test]
+    fn a_divider_drag_keeps_the_dock() {
+        // Right-docked, user drags the inner edge left: x and width both change, the
+        // outer edge and the height do not.
+        for w in [480, 600, 900, 380] {
+            let panel = capture::Rect { x: 1920 - w, y: 0, width: w as u32, height: 1032 };
+            assert!(
+                dock_invariant_holds(WORK, panel, "right"),
+                "width {w} is a divider position, not an undock"
+            );
+        }
+        for w in [480, 600, 900] {
+            let panel = capture::Rect { x: 0, y: 0, width: w as u32, height: 1032 };
+            assert!(dock_invariant_holds(WORK, panel, "left"));
+        }
+    }
+
+    #[test]
+    fn dragging_the_panel_off_its_edge_breaks_the_dock() {
+        // Titlebar drag: right size, wrong place.
+        let moved = capture::Rect { x: 300, y: 200, width: 500, height: 600 };
+        assert!(!dock_invariant_holds(WORK, moved, "right"));
+        assert!(!dock_invariant_holds(WORK, moved, "left"));
+
+        // Correct edge and width, but no longer full height (top edge dragged down).
+        let short = capture::Rect { x: 1440, y: 120, width: 480, height: 912 };
+        assert!(!dock_invariant_holds(WORK, short, "right"));
+
+        // Correct height, but pulled away from the edge (outer edge dragged inward).
+        let inset = capture::Rect { x: 1300, y: 0, width: 480, height: 1032 };
+        assert!(!dock_invariant_holds(WORK, inset, "right"));
+    }
+
+    #[test]
+    fn the_invariant_holds_on_a_negative_origin_monitor() {
+        let work = capture::Rect { x: -1920, y: 24, width: 1920, height: 1000 };
+        let docked = capture::Rect { x: -480, y: 24, width: 480, height: 1000 };
+        assert!(dock_invariant_holds(work, docked, "right"));
+        let docked_left = capture::Rect { x: -1920, y: 24, width: 480, height: 1000 };
+        assert!(dock_invariant_holds(work, docked_left, "left"));
+        // Same rect, wrong side.
+        assert!(!dock_invariant_holds(work, docked_left, "right"));
+    }
+
     #[test]
     fn the_default_fraction_is_a_quarter() {
         let want = (WORK.width as f64 * DOCK_PANEL_FRACTION) as u32;
@@ -5215,6 +5262,41 @@ fn dock_panel(side: String, width: Option<u32>) -> Option<DockLayout> {
     Some(settled)
 }
 
+/// Is the panel still actually sitting in its dock?
+///
+/// "Moving the panel should undock it" cannot be implemented as "any move undocks",
+/// because **the divider drag is itself a move**: pulling the inner edge of a
+/// right-docked panel changes both its x and its width. What separates the two is
+/// what stays put — a divider drag leaves the panel flush against its screen edge
+/// and spanning the full work-area height, while dragging it away by the titlebar,
+/// or resizing it from the top, bottom or outer edge, breaks exactly that.
+///
+/// So the invariant is the test: outer edge on the work area's edge, top and height
+/// spanning it. The tolerance absorbs DPI rounding, nothing more — it is far tighter
+/// than any deliberate drag.
+#[tauri::command]
+fn dock_is_intact(side: String) -> bool {
+    let Some((work, panel, _)) = dock_context() else {
+        return true; // can't tell — never undock on a failed measurement
+    };
+    dock_invariant_holds(work, panel, &side)
+}
+
+/// The invariant itself, split out from the measurement so it can be tested: is
+/// `panel` still occupying `side` of `work` as a dock, rather than merely sitting
+/// somewhere on screen? Tolerance absorbs DPI rounding and nothing more.
+fn dock_invariant_holds(work: capture::Rect, panel: capture::Rect, side: &str) -> bool {
+    const EDGE_TOLERANCE: i32 = 4;
+    let full_height = (panel.y - work.y).abs() <= EDGE_TOLERANCE
+        && (panel.height as i32 - work.height as i32).abs() <= EDGE_TOLERANCE;
+    let outer_edge_pinned = if side.eq_ignore_ascii_case("left") {
+        (panel.x - work.x).abs() <= EDGE_TOLERANCE
+    } else {
+        ((panel.x + panel.width as i32) - (work.x + work.width as i32)).abs() <= EDGE_TOLERANCE
+    };
+    full_height && outer_edge_pinned
+}
+
 /// Put `hwnd` in the space beside the docked panel.
 ///
 /// This is both halves of the divider: the frontend calls it once when the user
@@ -6852,6 +6934,7 @@ pub fn run() {
             unpin_target_window,
             dock_panel,
             dock_fill,
+            dock_is_intact,
             new_session,
             export_status,
             pick_export_folder,

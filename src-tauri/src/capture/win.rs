@@ -29,6 +29,7 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    IsZoomed,
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
     GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
@@ -790,7 +791,16 @@ pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
         if !IsWindow(Some(hwnd)).as_bool() {
             return false;
         }
-        if IsIconic(hwnd).as_bool() {
+        // Both a MINIMIZED and a MAXIMIZED window must be restored first, and for the
+        // same reason: SetWindowPos on either only rewrites its *restored* bounds, so
+        // the window itself does not move. Minimized was handled from the start;
+        // maximized was not, and it is the more common case by far — docking a
+        // maximized browser into the space beside the panel silently did nothing
+        // (reported live). SW_RESTORE also settles the GetWindowRect↔DWM delta into its
+        // restored-state value before the loop below measures it; a maximized window's
+        // delta is different (it carries the ~8px inset on every side), so measuring
+        // first and restoring after would compensate by the wrong amount.
+        if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
 
