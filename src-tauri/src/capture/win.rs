@@ -949,7 +949,33 @@ pub fn remove_panel_border(hwnd_raw: usize) {
             Err(e) => log::debug!("panel border suppression unavailable: {e}"),
         }
 
-        // NOT DONE HERE: DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED.
+        // THE 1PX TOP LINE IS UNRESOLVED. Measured, so the next attempt can start
+        // from evidence rather than repeat these:
+        //
+        // The window's row 0 is opaque RGB(32,32,32) while rows 1-2 show whatever is
+        // behind them (they changed from black to orange as the background did), so
+        // the client area genuinely begins at row 1 and that pixel is frame paint.
+        // Four levers were tried and measured against that same pixel:
+        //
+        //   DWMWA_BORDER_COLOR = COLOR_NONE   removes the accent border on the other
+        //                                     three sides; no effect on the top. KEPT
+        //                                     above -- it fixed a real complaint.
+        //   DWMWA_NCRENDERING_POLICY=DISABLED removes the line AND substitutes the
+        //                                     legacy GDI frame: a thick grey border
+        //                                     around the whole window, collapsed or
+        //                                     not. Strictly worse. Reverted.
+        //   DWMWA_WINDOW_CORNER_PREFERENCE
+        //                     = DONOTROUND    no effect on the line.
+        //   WM_NCCALCSIZE with rgrc[0].top-=1 no effect, conditionally or
+        //                                     unconditionally -- the pixel is not
+        //                                     taken by the message that reserves the
+        //                                     non-client area.
+        //
+        // What is left is style surgery (dropping WS_CAPTION / WS_BORDER), and that
+        // is not a pixel-sized risk: the panel keeps those styles deliberately -- they
+        // are why Win+Arrow snapping works on it, and the minimize interception below
+        // hangs off WS_SYSMENU's SC_MINIMIZE. Worth doing as its own change with its
+        // own testing, not as a drive-by.
         //
         // DWMWA_COLOR_NONE leaves a 1px line along the TOP edge, drawn by DWM's
         // non-client rendering rather than the border colour. Disabling that
