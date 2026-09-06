@@ -746,7 +746,7 @@ See the LICENSE file in the root of this repository for complete details.
     subtitle_enabled: true, auto_advance: false, autopilot_min_cells: 16,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
-    hotkey_pause: "", hotkey_icon: "", hotkey_talk: "Ctrl+KeyD",
+    hotkey_pause: "", hotkey_icon: "Ctrl+Shift+Backquote", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
     debug_diagnostics_enabled: false,
     debug_log_files_enabled: false,
@@ -1418,6 +1418,45 @@ See the LICENSE file in the root of this repository for complete details.
   function handleIconClick() {
     if (!_iconDragged) expandToPanel();
   }
+
+  // ── Collapsed-icon state ──────────────────────────────────────────────────
+  // Circumference of the r=25.5 ring, so the progress arc can be driven by
+  // stroke-dashoffset. 25.5 sits just outside the 48px fish inside a 56px window.
+  const ICON_RING_C = 2 * Math.PI * 25.5;
+
+  // How far through the work we are, 0..1, or null when there is nothing honest
+  // to show. The model's own route overview is preferred — it describes the task
+  // — but `plan_outline` is optional and often absent, so the local step counter
+  // is the fallback rather than the primary.
+  // Both sources need MORE THAN ONE unit before a ring means anything. A
+  // single-milestone plan sits at 0/1 for the whole task and then vanishes —
+  // measured live on a real session, where the panel read "1 of 1" while the ring
+  // drew nothing at all, which looks exactly like a broken feature. And the
+  // alternative reading, (completed + 1) / total, would show a FULL ring for a task
+  // that has not been started. Neither is worth drawing: with one unit there is no
+  // journey to show, so the icon stays clean and the tooltip still says where you
+  // are. Progress is completed/total, never position, so the ring only ever
+  // overstates when it is genuinely full.
+  let iconProgress = $derived.by(() => {
+    if (sessionPlanOutline.length > 1) {
+      return Math.min(sessionPlanCompletedCount / sessionPlanOutline.length, 1);
+    }
+    if (steps.length > 1) return Math.min(stepIndex / steps.length, 1);
+    return null;
+  });
+
+  // The collapsed icon has no room for a legend, so its tooltip carries what the
+  // status bar would have said — including the shortcut, which already works while
+  // collapsed and was simply never visible there.
+  let iconTitle = $derived(
+    phase === "thinking" ? "Navisual is thinking…"
+    : phase === "needs_input" ? "Navisual asked you something — click to expand"
+    : iconProgress !== null && settingsForm.hotkey_next
+      ? `Step ${stepIndex + 1} of ${steps.length} — ${prettyHotkey(settingsForm.hotkey_next)} for next · click to expand`
+    : iconProgress !== null
+      ? `Step ${stepIndex + 1} of ${steps.length} — click to expand`
+    : "Expand Navisual"
+  );
 
   async function collapseToIcon() {
     dismissCollapseHint(); // they found it — the coach mark is no longer needed
@@ -2611,14 +2650,36 @@ See the LICENSE file in the root of this repository for complete details.
 </script>
 
 {#if iconMode}
-  <!-- Icon mode: goldfish icon — mousedown starts drag; click expands -->
+  <!-- Icon mode: goldfish icon — mousedown starts drag; click expands.
+       The ring and the thinking state are here rather than in the panel because
+       collapsed is exactly when the panel can't tell you anything: pressing Ctrl+~
+       moved the pointer and changed the caption, but the fish itself sat inert,
+       which is what made the shortcut feel like it went nowhere. -->
   <button
     class="icon-btn"
+    class:icon-thinking={phase === "thinking"}
     onclick={handleIconClick}
     onpointerdown={handleIconPointerdown}
     onpointermove={handleIconPointermove}
-    title="Expand Navisual (Ctrl+Q)"
+    title={iconTitle}
   >
+    {#if phase === "thinking"}
+      <!-- A short arc chasing its own tail: the press is acknowledged immediately,
+           before the answer that will eventually move the ring. -->
+      <svg class="icon-ring icon-ring-spin" viewBox="0 0 56 56" aria-hidden="true">
+        <circle class="icon-ring-track" cx="28" cy="28" r="25.5" />
+        <circle class="icon-ring-arc" cx="28" cy="28" r="25.5" />
+      </svg>
+    {:else if iconProgress !== null}
+      <svg class="icon-ring" viewBox="0 0 56 56" aria-hidden="true">
+        <circle class="icon-ring-track" cx="28" cy="28" r="25.5" />
+        <circle
+          class="icon-ring-value"
+          cx="28" cy="28" r="25.5"
+          style="stroke-dasharray: {ICON_RING_C}; stroke-dashoffset: {ICON_RING_C * (1 - iconProgress)};"
+        />
+      </svg>
+    {/if}
     <img src="/goldfish.svg" class="icon-fish" alt="Navisual" draggable="false" />
   </button>
 {:else}
@@ -4334,13 +4395,69 @@ See the LICENSE file in the root of this repository for complete details.
   }
   /* Sized to leave a small margin inside the window so the rounded icon centres cleanly and
      the shadow has room. 48/56 ≈ the SVG's own corner ratio (rx 112/512) → radius ≈ 11px. */
+  /* 44, not 48: the ring orbits at r=25.5 inside a 56px window, so a 48px fish
+     leaves ~1.5px and the ring cut across its rounded corners (seen live). 44
+     gives the ring a clear 2px lane and is indistinguishable at a glance. */
   .icon-fish {
     display: block;
-    width: 48px;
-    height: 48px;
-    border-radius: 11px;
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
     pointer-events: none;
     user-select: none;
+  }
+
+  /* Ring sits in the 4px gap between the 48px fish and the 56px window, so it
+     never covers the artwork. Rotated so 0% starts at 12 o'clock. */
+  .icon-ring {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+    pointer-events: none;
+    overflow: visible;
+  }
+  .icon-ring circle {
+    fill: none;
+    stroke-width: 3;
+    stroke-linecap: round;
+  }
+  /* The track is load-bearing, not decoration. Progress is completed/total, so a
+     task on its first step is legitimately 0% — and a 0% value arc is
+     indistinguishable from no ring at all, at exactly the moment someone
+     collapses. The visible track is what says "there IS a ring, and you are at
+     the start of it" rather than "this feature is missing". */
+  .icon-ring-track { stroke: rgba(255, 255, 255, 0.26); }
+  .icon-ring-value {
+    stroke: var(--accent-400, #ff6b35);
+    /* The whole point of the ring: a keypress visibly moves it. Without the
+       transition the arc teleports and the press still reads as nothing. */
+    transition: stroke-dashoffset 320ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  /* A short arc chasing its tail while an AI call is in flight. */
+  .icon-ring-arc {
+    stroke: var(--accent-400, #ff6b35);
+    stroke-dasharray: 40 120;
+    transform-origin: 50% 50%;
+    animation: icon-ring-spin 900ms linear infinite;
+  }
+  @keyframes icon-ring-spin {
+    to { transform: rotate(360deg); }
+  }
+  /* A slow breath on the fish itself, so the thinking state reads even at a glance
+     from the far side of the screen where the 2.5px ring may not. */
+  .icon-btn.icon-thinking .icon-fish {
+    animation: icon-fish-breathe 1600ms ease-in-out infinite;
+  }
+  @keyframes icon-fish-breathe {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.72; transform: scale(0.94); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .icon-ring-arc { animation-duration: 2400ms; }
+    .icon-btn.icon-thinking .icon-fish { animation: none; opacity: 0.8; }
+    .icon-ring-value { transition: none; }
   }
 
   /* ── Panel ──────────────────────────────────────── */

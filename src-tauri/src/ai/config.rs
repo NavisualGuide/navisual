@@ -216,7 +216,15 @@ impl Default for Config {
             hotkey_next:  "Ctrl+Backquote".to_string(),
             hotkey_wrong: "Ctrl+KeyE".to_string(),
             hotkey_pause: String::new(),
-            hotkey_icon:  String::new(),
+            // Ctrl+~ advances a step; its Shift sibling collapses and restores the
+            // panel. Left unset since v0.5.17, which removed the Ctrl+Q / Ctrl+S
+            // defaults for colliding with Quit and Save — the empty value was the
+            // fallout of that, not the intent, and it left the collapse toggle
+            // mouse-only in an app whose collapsed mode is meant to be driven from
+            // the keyboard. NOTE: existing installs already have `HOTKEY_ICON=` in
+            // .env and a cleared hotkey deliberately does not resurrect its default
+            // (the v0.7.3 F4 fix), so this reaches fresh installs only.
+            hotkey_icon:  "Ctrl+Shift+Backquote".to_string(),
             hotkey_talk:  "Ctrl+KeyD".to_string(),
             debug_diagnostics_enabled: false,
             debug_log_files_enabled: false,
