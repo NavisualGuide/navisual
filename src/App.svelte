@@ -1771,36 +1771,55 @@ See the LICENSE file in the root of this repository for complete details.
   // users skip this entirely. Opens Stripe Checkout in the system browser.
   async function buyCoins(amountUsd = 20) {
     if (billing.oauthPending || billing.checkoutPending) return;
-    // The checkout page opens in the system browser. The panel is
-    // alwaysOnTop, so it would sit OVER the browser even when the browser has
-    // focus — and the open Settings modal covers the draggable titlebar. So
-    // close Settings and drop always-on-top here; refreshBalance() restores it
-    // when the user returns (auto via the focus listener, or the manual button).
-    showSettings = false;
-    await setPanelOnTop(false);
+    // Settings used to close HERE, before the call, which doubled as the
+    // double-submit guard. It now closes only once a browser is actually
+    // opening (below), so the guard has to be explicit.
+    billing.oauthPending = true;
     try {
       let url: string;
       try {
         url = await invoke<string>("create_checkout", { amountUsd });
       } catch (e) {
         if (String(e).includes("oauth_required")) {
-          // Not signed in yet — stay in-app (no browser was opened) and let
-          // the user pick a sign-in method on the Account tab, which already
-          // offers both Google and email. They click Buy Coins again once
-          // signed in; account linking preserves free requests and any coins.
+          // Not signed in yet, and NOTHING opened in the browser — the user
+          // picks a sign-in method here (Google or email), then presses Buy
+          // again; account linking preserves free requests and any coins.
+          //
+          // This used to slam Settings shut and reopen it on the Account tab,
+          // and that visible Billing→Account switch WAS the feedback. Once
+          // Billing merged into Account (2026-09-06) both assignments became
+          // no-ops and the close/reopen degraded into a flicker ending exactly
+          // where it started — reported live as "Buy coins button not working",
+          // because from the outside nothing happened. So: don't move them,
+          // tell them why, and put the cursor in the field they need. Settings
+          // is opened only if closed — the trial-exhausted modal arrives here
+          // with no Settings open and still needs it raised.
           await setPanelOnTop(true);
           settingsTab = "account";
           account.view = "signin";
           account.error = "";
           account.notice = "Sign in to buy coins — use Google below, or enter your email.";
           showSettings = true;
+          await tick();
+          document.getElementById("acct-email")?.focus();
           return;
         }
         throw e;
       }
+      // A browser is opening NOW, so get out of its way: the panel is
+      // alwaysOnTop and would sit over the checkout page even when that has
+      // focus, and the open Settings modal covers the draggable titlebar.
+      // refreshBalance() restores both when the user returns (auto via the
+      // focus listener, or the manual button).
+      showSettings = false;
+      await setPanelOnTop(false);
       billing.checkoutPending = true;
       openUrl(url);
     } catch (e) {
+      // Settings is still open on this path (it no longer closes up front), so
+      // the history line would land behind the modal. Put the reason in the
+      // panel as well, where the click happened.
+      account.error = "Checkout failed: " + String(e);
       addToHistory("system", "⚠️ Checkout failed: " + String(e));
       await setPanelOnTop(true); // nothing opened — restore always-on-top
     } finally {
