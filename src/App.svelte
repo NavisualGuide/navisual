@@ -1480,6 +1480,13 @@ See the LICENSE file in the root of this repository for complete details.
     expandToPanel();
   }
 
+  // Set when a request fails, so the COLLAPSED icon can say so. AI failures revert
+  // `phase` to what it was and write a warning line into the history -- exactly the
+  // wrong shape for a collapsed session, where the history is not on screen and the
+  // fish would otherwise sit looking idle after a Gemini API error (reported live).
+  // Cleared whenever a new attempt starts, so it always describes the LAST one.
+  let lastRequestFailed = $state(false);
+
   // ── Collapsed-icon surfaces (menu / chat) ─────────────────────────────────
   //
   // The collapsed window is ICON_SIZE square, and nothing can paint outside its
@@ -1649,7 +1656,8 @@ See the LICENSE file in the root of this repository for complete details.
   // status bar would have said — including the shortcut, which already works while
   // collapsed and was simply never visible there.
   let iconTitle = $derived(
-    phase === "thinking" ? "Navisual is thinking…"
+    lastRequestFailed ? "Last request failed — click to expand and see why"
+    : phase === "thinking" ? "Navisual is thinking…"
     : phase === "needs_input" ? "Navisual asked you something — click to expand"
     : iconProgress !== null && settingsForm.hotkey_next
       ? `Step ${stepIndex + 1} of ${steps.length} — ${prettyHotkey(settingsForm.hotkey_next)} for next · click to expand`
@@ -2101,7 +2109,8 @@ See the LICENSE file in the root of this repository for complete details.
       if (res.chat_thumb_b64) attachThumb(userEntryId, res.chat_thumb_b64);
       if (!res.ok) {
         phase = prevPhase;
-        addToHistory("system", "⚠️ " + (res.error ?? "guide failed"));
+        lastRequestFailed = true;
+          addToHistory("system", "⚠️ " + (res.error ?? "guide failed"));
         if (taskText !== "") task = taskText;
         return;
       }
@@ -2110,7 +2119,8 @@ See the LICENSE file in the root of this repository for complete details.
       stopTimer();
       if (token !== requestToken) return;
       phase = prevPhase;
-      addToHistory("system", "⚠️ " + String(e));
+      lastRequestFailed = true;
+        addToHistory("system", "⚠️ " + String(e));
       if (taskText !== "") task = taskText;
     }
   }
@@ -2119,6 +2129,7 @@ See the LICENSE file in the root of this repository for complete details.
     // Don't allow next while an AI call is in flight — the hotkey can fire
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
+    lastRequestFailed = false; // this attempt supersedes whatever the last one did
     // Any manual advance means the user is engaged — clear the autopilot runaway counter so
     // a genuine hands-on session can't accumulate stalls toward a spurious pause.
     if (!viaAutopilot) autopilotStalls = 0;
@@ -2201,6 +2212,7 @@ See the LICENSE file in the root of this repository for complete details.
         if (res.chat_thumb_b64) attachThumb(reQueryId, res.chat_thumb_b64);
         if (!res.ok) {
           phase = prevPhase;
+          lastRequestFailed = true;
           addToHistory("system", "⚠️ " + (res.error ?? "re-query failed"));
           return;
         }
@@ -2209,6 +2221,7 @@ See the LICENSE file in the root of this repository for complete details.
         stopTimer();
         if (token !== requestToken) return;
         phase = prevPhase;
+        lastRequestFailed = true;
         addToHistory("system", "⚠️ " + String(e));
       }
       return;
@@ -2227,7 +2240,8 @@ See the LICENSE file in the root of this repository for complete details.
       stopTimer();
       if (token !== requestToken) return;
       phase = prevPhase;
-      addToHistory("system", "⚠️ " + String(e));
+      lastRequestFailed = true;
+        addToHistory("system", "⚠️ " + String(e));
     }
   }
 
@@ -2273,7 +2287,8 @@ See the LICENSE file in the root of this repository for complete details.
       stopTimer();
       if (token !== requestToken) return;
       phase = prevPhase;
-      addToHistory("system", "⚠️ " + String(e));
+      lastRequestFailed = true;
+        addToHistory("system", "⚠️ " + String(e));
       if (rawNote !== "") task = rawNote;
     }
   }
@@ -2452,6 +2467,7 @@ See the LICENSE file in the root of this repository for complete details.
   // Textarea submit: while the Wrong picker is open, a typed message is itself a
   // "wrong" report (logged as wrong_other) rather than a normal follow-up.
   function submitTask() {
+    lastRequestFailed = false;
     if (wrongPickerOpen && task.trim()) submitWrong("wrong_other");
     else guide();
   }
@@ -2894,6 +2910,15 @@ See the LICENSE file in the root of this repository for complete details.
         <circle class="icon-ring-track" cx="28" cy="28" r="25.5" />
         <circle class="icon-ring-arc" cx="28" cy="28" r="25.5" />
       </svg>
+    {:else if lastRequestFailed}
+      <!-- A failed request reverts `phase` and writes a warning into the history,
+           which a collapsed user cannot see. Without this the fish just sits there
+           looking idle after e.g. a Gemini API error, and the session appears to
+           have quietly stopped. -->
+      <svg class="icon-ring" viewBox="0 0 56 56" aria-hidden="true">
+        <circle class="icon-ring-failed" cx="28" cy="28" r="25.5" />
+      </svg>
+      <span class="icon-ask icon-ask-failed">!</span>
     {:else if phase === "needs_input"}
       <!-- Rare — ~3% of first turns in real use once the grounding battery is
            excluded — so it earns no mechanism of its own and reuses the ring slot:
@@ -4731,6 +4756,12 @@ See the LICENSE file in the root of this repository for complete details.
     0%, 100% { opacity: 1; }
     50%      { opacity: 0.45; }
   }
+  .icon-ring-failed {
+    stroke: var(--danger, #ef4444);
+    animation: icon-ask-pulse 1800ms ease-in-out infinite;
+  }
+  .icon-ask-failed { background: var(--danger, #ef4444); color: #fff; }
+
   .icon-ask {
     position: absolute;
     right: 2px;

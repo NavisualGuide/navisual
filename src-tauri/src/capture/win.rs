@@ -32,11 +32,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     IsZoomed,
-    SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
-    GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT,
+    GA_ROOTOWNER, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
-    SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SW_RESTORE, WM_SYSCOMMAND, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_RESTORE, WM_SYSCOMMAND, WS_CAPTION, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -943,6 +943,35 @@ pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
     let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
     let colour = if enabled { DWMWA_COLOR_DEFAULT } else { DWMWA_COLOR_NONE };
     unsafe {
+        // DWMWA_COLOR_NONE leaves a 1px line along the TOP edge that no DWM attribute
+        // removes (four were measured — see this file's history). That line is drawn
+        // for WS_CAPTION, so while COLLAPSED the style goes too, and comes back on
+        // expand.
+        //
+        // Scoped to collapsed deliberately. WS_CAPTION is why Win+Arrow snapping
+        // works on the panel, and dropping it globally would cost that; but a 56px
+        // icon is never snapped, never user-resized (its surfaces resize themselves
+        // through SetWindowPos, which does not care), and WS_SYSMENU — which the
+        // SC_MINIMIZE interception hangs off — is left untouched either way.
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let wanted = if enabled {
+            style | WS_CAPTION.0
+        } else {
+            style & !WS_CAPTION.0
+        };
+        if wanted != style {
+            SetWindowLongW(hwnd, GWL_STYLE, wanted as i32);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+
         match DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR,
