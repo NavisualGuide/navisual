@@ -5293,6 +5293,21 @@ fn dock_panel(side: String, width: Option<u32>) -> Option<DockLayout> {
     Some(settled)
 }
 
+/// Show or hide Windows 11's accent border on the panel.
+///
+/// Called on collapse/expand rather than set once, because the right answer differs
+/// by state: the border is how a Windows window looks and belongs on the expanded
+/// panel, but around the 56px collapsed icon it draws a box about a floating fish.
+#[tauri::command]
+fn set_panel_border(enabled: bool) {
+    #[cfg(windows)]
+    if let Some(h) = capture::own_panel_hwnd() {
+        capture::set_panel_border(h, enabled);
+    }
+    #[cfg(not(windows))]
+    let _ = enabled;
+}
+
 /// Is the panel still actually sitting in its dock?
 ///
 /// "Moving the panel should undock it" cannot be implemented as "any move undocks",
@@ -6806,11 +6821,13 @@ pub fn run() {
                     #[cfg(windows)]
                     let _ = panel_handle.run_on_main_thread(|| {
                         capture::intercept_panel_minimize();
-                        // Same trip to the main thread: kill Windows 11's accent
-                        // border, which traces the whole window rect and makes the
-                        // collapsed icon look like it is sitting in a coloured box.
+                        // The panel opens EXPANDED and never passes through
+                        // expandToPanel() on the way, so the border has to be put
+                        // into its expanded state explicitly here or the first
+                        // collapse/expand cycle would be the only thing that ever
+                        // set it.
                         if let Some(h) = capture::own_panel_hwnd() {
-                            capture::remove_panel_border(h);
+                            capture::set_panel_border(h, true);
                         }
                     });
                 }
@@ -6976,6 +6993,7 @@ pub fn run() {
             pin_target_window,
             pin_full_screen_target,
             unpin_target_window,
+            set_panel_border,
             dock_panel,
             dock_fill,
             dock_is_intact,

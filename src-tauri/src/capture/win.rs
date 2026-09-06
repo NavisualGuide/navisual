@@ -919,76 +919,40 @@ pub fn intercept_panel_minimize() -> bool {
     ok
 }
 
-/// Stop Windows drawing its accent-coloured border around the panel window.
+/// Turn Windows 11's accent-coloured window border on or off for the panel.
 ///
-/// Windows 11 paints a 1px border in the user's accent colour on every top-level
-/// window. On the expanded panel that is invisible against its own chrome, but the
-/// COLLAPSED panel is a 56px transparent window containing a floating goldfish —
-/// and while a surface is open it is a larger transparent rectangle with a rounded
-/// menu inside it. The accent border traces that whole rectangle, so the icon reads
-/// as sitting inside a stray coloured box rather than floating (reported live, with
-/// a green accent).
+/// **State-dependent on purpose.** The border is simply how a Windows 11 window
+/// looks, and on the expanded panel it is right — v0.7.15 shipped with it on all
+/// four sides and nobody minded. What looks wrong is the border around the
+/// COLLAPSED icon: a 56px transparent window holding a floating goldfish, with a
+/// coloured box drawn around the whole rectangle (reported live).
 ///
-/// `DWMWA_BORDER_COLOR` (34) accepts the sentinel `DWMWA_COLOR_NONE` (0xFFFFFFFE)
-/// to suppress the border entirely. Windows 11 build 22000+; older builds return an
-/// error, which is fine — they do not draw this border in the first place.
-pub fn remove_panel_border(hwnd_raw: usize) {
+/// Suppressing it globally was tried first and is worse than either end state:
+/// `DWMWA_COLOR_NONE` removes the border on three sides but NOT the top, so the
+/// expanded panel lost its frame everywhere except a single line across the top —
+/// and that asymmetry reads as a defect in a way the full border never did
+/// ("the old ones have this border all around... it was fine. now it is only at
+/// top become weird"). The top pixel resists every attribute that removes the other
+/// three; see the note in `remove_panel_border`'s history if it comes up again.
+///
+/// So: border off while collapsed, border back on when expanded.
+pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
     const DWMWA_BORDER_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(34);
+    const DWMWA_COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
     let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    let colour = if enabled { DWMWA_COLOR_DEFAULT } else { DWMWA_COLOR_NONE };
     unsafe {
-        let colour = DWMWA_COLOR_NONE;
         match DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR,
             &colour as *const u32 as *const _,
             std::mem::size_of::<u32>() as u32,
         ) {
-            Ok(()) => log::info!("panel border suppressed (DWMWA_COLOR_NONE)"),
-            // Pre-22000 Windows has no such border to remove.
-            Err(e) => log::debug!("panel border suppression unavailable: {e}"),
+            Ok(()) => log::debug!("panel border enabled={enabled}"),
+            // Pre-22000 Windows draws no such border to begin with.
+            Err(e) => log::debug!("panel border attribute unavailable: {e}"),
         }
-
-        // THE 1PX TOP LINE IS UNRESOLVED. Measured, so the next attempt can start
-        // from evidence rather than repeat these:
-        //
-        // The window's row 0 is opaque RGB(32,32,32) while rows 1-2 show whatever is
-        // behind them (they changed from black to orange as the background did), so
-        // the client area genuinely begins at row 1 and that pixel is frame paint.
-        // Four levers were tried and measured against that same pixel:
-        //
-        //   DWMWA_BORDER_COLOR = COLOR_NONE   removes the accent border on the other
-        //                                     three sides; no effect on the top. KEPT
-        //                                     above -- it fixed a real complaint.
-        //   DWMWA_NCRENDERING_POLICY=DISABLED removes the line AND substitutes the
-        //                                     legacy GDI frame: a thick grey border
-        //                                     around the whole window, collapsed or
-        //                                     not. Strictly worse. Reverted.
-        //   DWMWA_WINDOW_CORNER_PREFERENCE
-        //                     = DONOTROUND    no effect on the line.
-        //   WM_NCCALCSIZE with rgrc[0].top-=1 no effect, conditionally or
-        //                                     unconditionally -- the pixel is not
-        //                                     taken by the message that reserves the
-        //                                     non-client area.
-        //
-        // What is left is style surgery (dropping WS_CAPTION / WS_BORDER), and that
-        // is not a pixel-sized risk: the panel keeps those styles deliberately -- they
-        // are why Win+Arrow snapping works on it, and the minimize interception below
-        // hangs off WS_SYSMENU's SC_MINIMIZE. Worth doing as its own change with its
-        // own testing, not as a drive-by.
-        //
-        // DWMWA_COLOR_NONE leaves a 1px line along the TOP edge, drawn by DWM's
-        // non-client rendering rather than the border colour. Disabling that
-        // rendering does remove the line -- and makes Windows fall back to the
-        // LEGACY GDI frame instead, which on a WS_THICKFRAME window is a thick grey
-        // border around the whole window, collapsed or not. Strictly worse, and
-        // tried live before being reverted.
-        //
-        // The 1px line is accepted for now. The real fix is WM_NCCALCSIZE returning
-        // a zero non-client area (what borderless-window libraries do), which the
-        // panel subclass in `intercept_panel_minimize` is already positioned to
-        // handle -- but that governs the resize borders and drag region too, so it
-        // is not worth risking for one pixel without a reason to touch it.
     }
 }
 

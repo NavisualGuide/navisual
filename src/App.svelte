@@ -1665,11 +1665,15 @@ See the LICENSE file in the root of this repository for complete details.
     iconFlipX = false;
     iconFlipY = false;
     iconMode = true;
+    // A Windows accent border round the expanded panel looks like a window. Round a
+    // 56px transparent square holding a goldfish it looks like a box someone drew.
+    invoke("set_panel_border", { enabled: false }).catch(() => {});
     try { await getCurrentWindow().setSize(new LogicalSize(ICON_SIZE, ICON_SIZE)); }
     catch (e) { console.error("collapseToIcon:", e); }
   }
 
   async function expandToPanel() {
+    invoke("set_panel_border", { enabled: true }).catch(() => {});
     iconSurface = null;
     iconRestorePos = null;
     iconFlipX = false;

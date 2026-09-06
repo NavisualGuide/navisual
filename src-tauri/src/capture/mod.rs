@@ -624,14 +624,14 @@ pub fn intercept_panel_minimize() -> bool {
     }
 }
 
-/// Suppress Windows 11's accent-coloured border on the panel window.
-pub fn remove_panel_border(hwnd_raw: usize) {
+/// Turn Windows 11's accent border on (expanded) or off (collapsed) for the panel.
+pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
     #[cfg(windows)]
     {
-        win::remove_panel_border(hwnd_raw)
+        win::set_panel_border(hwnd_raw, enabled)
     }
     #[cfg(not(windows))]
     {
-        let _ = hwnd_raw;
+        let _ = (hwnd_raw, enabled);
     }
 }
