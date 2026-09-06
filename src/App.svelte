@@ -1904,8 +1904,26 @@ See the LICENSE file in the root of this repository for complete details.
     const prevPhase = phase;
     if (nextIdx >= steps.length) {
       // Re-query AI — tell it what was just completed so it doesn't repeat.
-      const completed = currentInstruction || lastCompletedInstruction;
-      lastCompletedInstruction = completed;
+      //
+      // UNLESS the AI was asking a question. Then `currentInstruction` IS the
+      // question, and the old code reported it back as
+      // `[User completed: "Which cell are you looking for?"]` — telling the model
+      // the user had completed the model's own unanswered question. That is not
+      // merely noise: prompt Rule 17 instructs the model to TRUST a completion
+      // claim and advance without second-guessing it (many real actions leave no
+      // visible trace), so it is a false confirmation aimed squarely at the one
+      // rule built to be believed. Seen in the wild once, on a long Chinese
+      // question echoed back whole as a completed step.
+      //
+      // It also actively fights the screenshot, which is the honest signal here:
+      // the capture taken with this very click is current, and often already
+      // shows what the question was asking about. So say what actually happened
+      // and point the model at the picture rather than contradicting it.
+      const unanswered = prevPhase === "needs_input" ? currentInstruction : "";
+      const completed = unanswered ? "" : (currentInstruction || lastCompletedInstruction);
+      // Never bank a question as the last completed step — it would be re-sent as
+      // a completion on the following turn too.
+      if (!unanswered) lastCompletedInstruction = completed;
       currentInstruction = "";
       streamStepsSeen = 0;
       phase = "thinking";
@@ -1913,10 +1931,18 @@ See the LICENSE file in the root of this repository for complete details.
       const token = ++requestToken;
       // Create a history entry so the screenshot thumbnail has somewhere to live.
       const reQueryId = await addToHistory("system",
-        completed ? `✓ Completed — re-analysing…` : "Re-analysing…");
+        unanswered ? "↷ Skipped the question — re-analysing…"
+        : completed ? `✓ Completed — re-analysing…` : "Re-analysing…");
       try {
         const res = await invoke<GuideResponse>("guide", {
-          task: completed ? `[User completed: "${completed}"]` : "",
+          task: unanswered
+            ? `[The user did not answer your question: "${unanswered}" — they pressed Next to move on. `
+              + `The screenshot accompanying this message is CURRENT and is the reliable signal: read it, `
+              + `and if it already answers the question, act on that. Otherwise proceed with the most `
+              + `reasonable assumption and say which assumption you made. Do not treat the question as `
+              + `answered or as a completed step, and do not simply repeat it — if you truly cannot `
+              + `continue without an answer, ask again in a shorter, simpler form.]`
+            : completed ? `[User completed: "${completed}"]` : "",
           isReply: false,
         });
         stopTimer();
