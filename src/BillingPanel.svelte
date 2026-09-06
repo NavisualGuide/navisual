@@ -24,7 +24,10 @@
 </script>
 
 <div class="setting-group">
-  <span class="setting-label">Account</span>
+  <!-- "Plan", not "Account": this section now renders inside the Account tab, and
+       two nested headings both reading "Account" made the tier line look like the
+       identity block above it. -->
+  <span class="setting-label">Plan</span>
   <p class="setting-hint">{billing.tier === "paid" ? "Paid (coins)" : "Free trial"}</p>
 </div>
 {#if billing.coins !== null && billing.coins > 0}

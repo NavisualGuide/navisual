@@ -19,7 +19,6 @@ See the LICENSE file in the root of this repository for complete details.
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
   import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
-  import BillingPanel from "./BillingPanel.svelte";
   import AccountPanel from "./AccountPanel.svelte";
 
   type Rect = { x: number; y: number; width: number; height: number };
@@ -72,7 +71,7 @@ See the LICENSE file in the root of this repository for complete details.
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
-  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "billing" | "account";
+  type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
     api_provider: string;
     anthropic_api_key: string;
@@ -1847,10 +1846,12 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function openSettings(tab: SettingsTab = "provider") {
     settingsTab = tab;
-    // The Billing tab renders live balance state; the tab *button* refreshes it
-    // on click, but this deep-link path (header balance chips) used to skip the
-    // refresh and show stale numbers (audit F9).
-    if (tab === "billing") refreshBalance();
+    // The Account tab renders live balance + identity state; the tab *button*
+    // refreshes both on click, but this deep-link path (the header balance chips,
+    // which are the main route to buying coins) used to skip the refresh and show
+    // stale numbers (audit F9). Billing moved onto this tab on 2026-09-06, so the
+    // chips now land here and both loads have to run.
+    if (tab === "account") { refreshBalance(); account.load(); }
     settingsError = null;
     settingsSaved = false;
     showKeyAnthropic = false; showKeyGemini = false; showKeyOpenAI = false; showKeyDeepSeek = false; showKeyQwen = false; showKeyCustom = false;
@@ -3049,11 +3050,11 @@ See the LICENSE file in the root of this repository for complete details.
              bar reads as a countdown and makes the free experience itself feel
              metered (strategy §4.3); the number earns its place only when it's
              an actual, timely nudge. -->
-        <button class="header-balance" onclick={() => openSettings("billing")} title="View billing">🪙</button>
+        <button class="header-balance" onclick={() => openSettings("account")} title="View billing">🪙</button>
       {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null && billing.freeRemaining <= 5}
-        <button class="header-balance header-balance-low" onclick={() => openSettings("billing")} title="Get more requests">{billing.freeRemaining} left</button>
+        <button class="header-balance header-balance-low" onclick={() => openSettings("account")} title="Get more requests">{billing.freeRemaining} left</button>
       {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null}
-        <button class="header-balance header-balance-free" onclick={() => openSettings("billing")} title="You're on the free tier — click for billing">Free tier</button>
+        <button class="header-balance header-balance-free" onclick={() => openSettings("account")} title="You're on the free tier — click for billing">Free tier</button>
       {/if}
       {#if pendingUpdate}
         <button class="header-update" onclick={() => openAbout("about")} title="Update available">
@@ -3953,8 +3954,10 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
-          <button class="tab-btn {settingsTab === 'billing' ? 'tab-active' : ''}" onclick={() => { settingsTab = "billing"; refreshBalance(); }}>Billing</button>
-          <button class="tab-btn {settingsTab === 'account' ? 'tab-active' : ''}" onclick={() => { settingsTab = "account"; account.load(); }}>Account</button>
+          <!-- Billing merged into Account (2026-09-06). Coins belong to an account,
+               both were the only two live views outside the Apply/OK form, and buying
+               while signed out already switched from one tab to the other mid-click. -->
+          <button class="tab-btn {settingsTab === 'account' ? 'tab-active' : ''}" onclick={() => { settingsTab = "account"; account.load(); refreshBalance(); }}>Account</button>
           <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
           <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
           <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
@@ -3964,16 +3967,12 @@ See the LICENSE file in the root of this repository for complete details.
         </div>
 
         <div class="modal-body">
-          {#if settingsTab === "billing"}
-            <!-- Extracted to BillingPanel.svelte (componentization pass, 2026-07-13) -->
-            <BillingPanel
+          {#if settingsTab === "account"}
+            <!-- Extracted to AccountPanel.svelte + lib/account.svelte.ts (componentization pass,
+                 2026-07-13). It renders BillingPanel itself since the 2026-09-06 merge. -->
+            <AccountPanel
               provider={settingsForm.api_provider}
               onBuy={buyCoins}
-              onRefreshBalance={refreshBalance}
-            />
-          {:else if settingsTab === "account"}
-            <!-- Extracted to AccountPanel.svelte + lib/account.svelte.ts (componentization pass, 2026-07-13) -->
-            <AccountPanel
               onRefreshBalance={refreshBalance}
               onSignedOut={() => addToHistory("system", "Signed out — you're back on the free tier.")}
             />
@@ -6366,6 +6365,13 @@ See the LICENSE file in the root of this repository for complete details.
     border: none;
     border-top: 1px solid var(--border);
     margin: 14px 0;
+  }
+  /* Section heading for the Billing block merged into the Account tab. Keeps the
+     word "Billing" on screen even though it left the tab strip, so anyone
+     eye-scanning for it still finds it. */
+  :global(.acct-billing-heading) {
+    display: block;
+    margin: 0 0 10px;
   }
   :global(.acct-links) {
     display: flex;

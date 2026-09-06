@@ -8,15 +8,41 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { account } from "./lib/account.svelte";
   import { billing } from "./lib/billing.svelte";
+  import BillingPanel from "./BillingPanel.svelte";
 
   let {
+    provider,
+    onBuy,
     onRefreshBalance,
     onSignedOut,
   }: {
+    /** Active AI provider — billing only spends on `managed`, so the panel says so. */
+    provider: string;
+    onBuy: (amount: number) => Promise<void>;
     onRefreshBalance: () => Promise<void>;
     /** Lets App post the "Signed out — you're back on the free tier." history line. */
     onSignedOut: () => void;
   } = $props();
+
+  /**
+   * Billing lives on this tab (merged 2026-09-06 — coins belong to an account, and
+   * the two were already handing off to each other: buying while signed out used to
+   * switch tabs mid-click, set the sign-in view, and make you press Buy again).
+   *
+   * Shown on the two RESTING views only. `signin` counts: an anonymous user lands
+   * there, and they are exactly who the "N left" / "Free tier" header chips bring
+   * here — hiding their remaining-request count and the top-up entry behind a
+   * sign-in they have not done yet would be the regression this merge exists to
+   * avoid. On `signin` the form sits above billing, so the old bounce is now just
+   * scrolling up.
+   *
+   * Hidden mid-flow (signup / verify_signup / forgot / verify_reset): a checkout
+   * button under an OTP field is a trap, since checkout needs a signed-in account
+   * and would either fail or hijack the verification. Deliberately an INCLUSION
+   * list — a future view added here shows no billing until it is listed, which is
+   * the safe way to be wrong.
+   */
+  const showBilling = $derived(account.view === "account" || account.view === "signin");
 
   let acctEmail = $state("");
   let acctPassword = $state("");
@@ -249,46 +275,9 @@
     <p class="setting-hint"><strong>{account.info?.email}</strong></p>
   </div>
   {#if billing.coins !== null && billing.coins > 0}
-    <p class="setting-hint">{billing.coins} coins · your balance and purchases stay with this account.</p>
-  {/if}
-
-  {#if account.showChangePw}
-    {#if !showChangePw}
-      <div class="setting-group" style="margin-top: 12px;">
-        <button class="btn-ghost" onclick={() => { showChangePw = true; account.error = ""; account.notice = ""; }}>Change password</button>
-      </div>
-    {:else}
-      <div class="setting-group" style="margin-top: 12px;">
-        <label class="setting-label" for="acct-newpw">New password</label>
-        <input id="acct-newpw" class="setting-input" type="password" bind:value={acctNewPassword} placeholder="At least 6 characters" />
-        <div style="display:flex; gap:8px; margin-top:8px;">
-          <button class="btn-primary" onclick={acctChangePassword} disabled={acctBusy}>{acctBusy ? "Saving…" : "Save password"}</button>
-          <button class="btn-ghost" onclick={() => { showChangePw = false; acctNewPassword = ""; }}>Cancel</button>
-        </div>
-      </div>
-    {/if}
-  {:else if account.isGoogle}
-    <p class="setting-hint" style="margin-top: 12px;">
-      Signed in with Google — your password is managed by Google, not Navisual. Change it at
-      <button class="legal-link" onclick={() => openUrl("https://myaccount.google.com/security")}>myaccount.google.com</button>.
-    </p>
-  {/if}
-
-  <div class="setting-group" style="margin-top: 12px;">
-    <button class="btn-ghost" onclick={acctSignOut} disabled={acctBusy}>Sign out</button>
-  </div>
-
-  <hr class="acct-sep" />
-  {#if !showDeleteConfirm}
-    <button class="legal-link acct-danger" onclick={() => { showDeleteConfirm = true; account.error = ""; }}>Delete account</button>
-  {:else}
-    <div class="setting-group">
-      <p class="setting-hint acct-error">This permanently deletes your account. Coins are <strong>not</strong> refunded and cannot be recovered.</p>
-      <div style="display:flex; gap:8px; margin-top:8px;">
-        <button class="btn-danger" onclick={acctDeleteAccount} disabled={acctBusy}>{acctBusy ? "Deleting…" : "Delete permanently"}</button>
-        <button class="btn-ghost" onclick={() => (showDeleteConfirm = false)}>Cancel</button>
-      </div>
-    </div>
+    <!-- The number itself is in the Billing section below now; what belongs up
+         here beside the identity is which account owns it. -->
+    <p class="setting-hint">Your coins and purchases stay with this account.</p>
   {/if}
 
 {:else if account.view === "signin"}
@@ -375,4 +364,55 @@
   <div class="acct-links">
     <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>Cancel</button>
   </div>
+{/if}
+
+{#if showBilling}
+  <hr class="acct-sep" />
+  <p class="setting-label acct-billing-heading">Billing</p>
+  <BillingPanel {provider} {onBuy} {onRefreshBalance} />
+{/if}
+
+{#if account.view === "account"}
+  <!-- Account actions and the danger zone sit AFTER billing so the destructive
+       action stays the floor of the page. Before the 2026-09-06 merge these were
+       the end of the tab; appending billing under them buried "Delete account"
+       mid-page, directly above a Buy button. -->
+  {#if account.showChangePw}
+    {#if !showChangePw}
+      <div class="setting-group" style="margin-top: 12px;">
+        <button class="btn-ghost" onclick={() => { showChangePw = true; account.error = ""; account.notice = ""; }}>Change password</button>
+      </div>
+    {:else}
+      <div class="setting-group" style="margin-top: 12px;">
+        <label class="setting-label" for="acct-newpw">New password</label>
+        <input id="acct-newpw" class="setting-input" type="password" bind:value={acctNewPassword} placeholder="At least 6 characters" />
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn-primary" onclick={acctChangePassword} disabled={acctBusy}>{acctBusy ? "Saving…" : "Save password"}</button>
+          <button class="btn-ghost" onclick={() => { showChangePw = false; acctNewPassword = ""; }}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+  {:else if account.isGoogle}
+    <p class="setting-hint" style="margin-top: 12px;">
+      Signed in with Google — your password is managed by Google, not Navisual. Change it at
+      <button class="legal-link" onclick={() => openUrl("https://myaccount.google.com/security")}>myaccount.google.com</button>.
+    </p>
+  {/if}
+
+  <div class="setting-group" style="margin-top: 12px;">
+    <button class="btn-ghost" onclick={acctSignOut} disabled={acctBusy}>Sign out</button>
+  </div>
+
+  <hr class="acct-sep" />
+  {#if !showDeleteConfirm}
+    <button class="legal-link acct-danger" onclick={() => { showDeleteConfirm = true; account.error = ""; }}>Delete account</button>
+  {:else}
+    <div class="setting-group">
+      <p class="setting-hint acct-error">This permanently deletes your account. Coins are <strong>not</strong> refunded and cannot be recovered.</p>
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <button class="btn-danger" onclick={acctDeleteAccount} disabled={acctBusy}>{acctBusy ? "Deleting…" : "Delete permanently"}</button>
+        <button class="btn-ghost" onclick={() => (showDeleteConfirm = false)}>Cancel</button>
+      </div>
+    </div>
+  {/if}
 {/if}
