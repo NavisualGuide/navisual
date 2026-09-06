@@ -949,23 +949,20 @@ pub fn remove_panel_border(hwnd_raw: usize) {
             Err(e) => log::debug!("panel border suppression unavailable: {e}"),
         }
 
-        // DWMWA_COLOR_NONE kills the border on three sides but leaves a 1px line
-        // along the TOP: that edge is drawn by DWM's non-client rendering, which is
-        // separate from the border colour and survives `decorations: false` because
-        // the window still carries WS_CAPTION (measured: STYLE 0x14CF0000). Turning
-        // non-client rendering off removes it. Harmless on a window that draws no
-        // non-client area of its own.
-        const DWMWA_NCRENDERING_POLICY: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(2);
-        const DWMNCRP_DISABLED: u32 = 1;
-        let policy = DWMNCRP_DISABLED;
-        if let Err(e) = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_NCRENDERING_POLICY,
-            &policy as *const u32 as *const _,
-            std::mem::size_of::<u32>() as u32,
-        ) {
-            log::debug!("panel non-client rendering not disabled: {e}");
-        }
+        // NOT DONE HERE: DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED.
+        //
+        // DWMWA_COLOR_NONE leaves a 1px line along the TOP edge, drawn by DWM's
+        // non-client rendering rather than the border colour. Disabling that
+        // rendering does remove the line -- and makes Windows fall back to the
+        // LEGACY GDI frame instead, which on a WS_THICKFRAME window is a thick grey
+        // border around the whole window, collapsed or not. Strictly worse, and
+        // tried live before being reverted.
+        //
+        // The 1px line is accepted for now. The real fix is WM_NCCALCSIZE returning
+        // a zero non-client area (what borderless-window libraries do), which the
+        // panel subclass in `intercept_panel_minimize` is already positioned to
+        // handle -- but that governs the resize borders and drag region too, so it
+        // is not worth risking for one pixel without a reason to touch it.
     }
 }
 

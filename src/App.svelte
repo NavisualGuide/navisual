@@ -1434,7 +1434,9 @@ See the LICENSE file in the root of this repository for complete details.
     if (e.button !== 0) return;
     _iconStartX = e.screenX; _iconStartY = e.screenY; _iconDragged = false;
     _iconLongPressFired = false;
-    if (iconSurface) return; // a surface is already open; the click will dismiss it
+    // A surface is already open: no long-press timer (the click dismisses it), but the
+    // press is still tracked above so a DRAG from here still works -- see pointermove.
+    if (iconSurface) return;
     cancelIconLongPress();
     _iconLongPressTimer = setTimeout(() => {
       _iconLongPressTimer = null;
@@ -1448,18 +1450,21 @@ See the LICENSE file in the root of this repository for complete details.
     cancelIconLongPress();
   }
   async function handleIconPointermove(e: PointerEvent) {
-    // Never drag while a surface is open. `startDragging()` enters the OS modal move
-    // loop, which blurs the WebView -- so the blur handler nulls `iconSurface` and
-    // then tries to shrink the window, but those calls are swallowed inside the drag
-    // loop. The result was a menu-sized transparent window with no menu in it
-    // (reported live: "right click then drag keeps the expanded window with no
-    // menu"). Dragging the icon while its own menu is open is not a thing anyone
-    // means to do; click to dismiss first.
-    if (iconSurface) return;
     if (_iconDragged || e.buttons !== 1) return;
     if (Math.hypot(e.screenX - _iconStartX, e.screenY - _iconStartY) > 4) {
       _iconDragged = true;
       cancelIconLongPress(); // moving the icon is a drag, never a menu
+      // Dragging with a surface open has to CLOSE it first, and finish closing
+      // before the drag starts. `startDragging()` enters the OS modal move loop,
+      // which blurs the WebView -- so the blur handler's own close would run inside
+      // that loop, where the shrink and reposition are swallowed, leaving a
+      // menu-sized transparent window with no menu in it (reported live). Closing
+      // here, awaited, means the drag begins from a real icon-sized window.
+      //
+      // Refusing to drag at all was tried instead and was worse: dragging the icon
+      // is how it gets out of the way, and losing that because a menu happens to be
+      // open is a bigger loss than the ghost window ever was.
+      if (iconSurface) await closeIconSurface();
       try { await getCurrentWindow().startDragging(); } catch (_) {}
     }
   }
