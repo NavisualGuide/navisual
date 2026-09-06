@@ -1448,6 +1448,14 @@ See the LICENSE file in the root of this repository for complete details.
     cancelIconLongPress();
   }
   async function handleIconPointermove(e: PointerEvent) {
+    // Never drag while a surface is open. `startDragging()` enters the OS modal move
+    // loop, which blurs the WebView -- so the blur handler nulls `iconSurface` and
+    // then tries to shrink the window, but those calls are swallowed inside the drag
+    // loop. The result was a menu-sized transparent window with no menu in it
+    // (reported live: "right click then drag keeps the expanded window with no
+    // menu"). Dragging the icon while its own menu is open is not a thing anyone
+    // means to do; click to dismiss first.
+    if (iconSurface) return;
     if (_iconDragged || e.buttons !== 1) return;
     if (Math.hypot(e.screenX - _iconStartX, e.screenY - _iconStartY) > 4) {
       _iconDragged = true;

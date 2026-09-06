@@ -948,6 +948,24 @@ pub fn remove_panel_border(hwnd_raw: usize) {
             // Pre-22000 Windows has no such border to remove.
             Err(e) => log::debug!("panel border suppression unavailable: {e}"),
         }
+
+        // DWMWA_COLOR_NONE kills the border on three sides but leaves a 1px line
+        // along the TOP: that edge is drawn by DWM's non-client rendering, which is
+        // separate from the border colour and survives `decorations: false` because
+        // the window still carries WS_CAPTION (measured: STYLE 0x14CF0000). Turning
+        // non-client rendering off removes it. Harmless on a window that draws no
+        // non-client area of its own.
+        const DWMWA_NCRENDERING_POLICY: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(2);
+        const DWMNCRP_DISABLED: u32 = 1;
+        let policy = DWMNCRP_DISABLED;
+        if let Err(e) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u32,
+        ) {
+            log::debug!("panel non-client rendering not disabled: {e}");
+        }
     }
 }
 
