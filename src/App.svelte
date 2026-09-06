@@ -1921,12 +1921,17 @@ See the LICENSE file in the root of this repository for complete details.
   function resetSettings() {
     // Restore everything to defaults but preserve API keys so the user
     // doesn't lose credentials they've already entered.
+    // Every *_API_KEY the backend knows about — save_settings skips empty key
+    // fields, so a key omitted here is not lost, it just goes blank in the UI
+    // until Settings is reopened. That still reads as "my key was wiped", which
+    // is why the list must stay complete rather than nearly complete.
     const preserved = {
       anthropic_api_key: settingsForm.anthropic_api_key,
       gemini_api_key: settingsForm.gemini_api_key,
       openai_api_key: settingsForm.openai_api_key,
       deepseek_api_key: settingsForm.deepseek_api_key,
       qwen_api_key: settingsForm.qwen_api_key,
+      custom_api_key: settingsForm.custom_api_key,
     };
     settingsForm = { ...SETTINGS_DEFAULTS, ...preserved };
     syncCustomModelFlags();
@@ -4511,7 +4516,7 @@ See the LICENSE file in the root of this repository for complete details.
               class="btn-ghost btn-reset"
               class:btn-reset-armed={resetArmed}
               onclick={handleResetClick}
-              title="Restores EVERY setting on ALL tabs to its default — not just this tab. Your API keys are kept.">
+              title="Restores EVERY setting on ALL tabs to its default — not just this tab. Your API keys are kept, but server addresses and model choices are not: a custom or local provider will need its URL and model set again.">
               {resetArmed ? "Click again — resets ALL tabs" : "Reset all settings"}
             </button>
             <button class="btn-ghost" onclick={() => (showSettings = false)}>Cancel</button>
