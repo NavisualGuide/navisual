@@ -931,58 +931,76 @@ pub fn intercept_panel_minimize() -> bool {
 /// expanded panel lost its frame everywhere except a single line across the top —
 /// and that asymmetry reads as a defect in a way the full border never did
 /// ("the old ones have this border all around... it was fine. now it is only at
-/// top become weird"). The top pixel resists every attribute that removes the other
-/// three; see the note in `remove_panel_border`'s history if it comes up again.
+/// top become weird").
 ///
-/// So: border off while collapsed, border back on when expanded.
+/// That leftover top row is the CAPTION, not the border, which is why no amount of
+/// border work reached it. It gets its own colour here — see the measurements in the
+/// body. It cannot be made transparent, only dark enough to disappear.
+///
+/// So: border off and caption black while collapsed, both back to the system default
+/// when expanded.
 pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
     const DWMWA_BORDER_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(34);
+    const DWMWA_CAPTION_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(35);
     const DWMWA_COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
-    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
-    let colour = if enabled { DWMWA_COLOR_DEFAULT } else { DWMWA_COLOR_NONE };
-    unsafe {
-        // DWMWA_COLOR_NONE leaves a 1px line along the TOP edge that no DWM attribute
-        // removes (four were measured — see this file's history). That line is drawn
-        // for WS_CAPTION, so while COLLAPSED the style goes too, and comes back on
-        // expand.
-        //
-        // Scoped to collapsed deliberately. WS_CAPTION is why Win+Arrow snapping
-        // works on the panel, and dropping it globally would cost that; but a 56px
-        // icon is never snapped, never user-resized (its surfaces resize themselves
-        // through SetWindowPos, which does not care), and WS_SYSMENU — which the
-        // SC_MINIMIZE interception hangs off — is left untouched either way.
-        // NO STYLE STRIPPING HERE. Removing frame styles to chase the last 1px is a
-        // dead end, measured three ways:
-        //
-        //   drop WS_CAPTION            removes the top line, and leaves a window that
-        //                              is still a SIZING frame -- so Windows draws
-        //                              that frame the legacy way instead, a light
-        //                              rectangle round the icon.
-        //   drop WS_THICKFRAME too     no frame is drawn at all, but the window rect
-        //                              (72x65) then no longer matches the client
-        //                              (56x56) and DWM reports the whole 72x65 as
-        //                              visible -- so a 16x9 transparent strip of the
-        //                              window sits over the desktop and shows other
-        //                              windows through it. Reported as a stray close
-        //                              button appearing beside the fish.
-        //   DWMWA_NCRENDERING_POLICY   same shape as the first: the modern frame goes
-        //                              and the legacy one is drawn in its place.
-        //
-        // Each removed the line and added something worse. The 1px top line on the
-        // COLLAPSED icon stays until there is a way to make the client fill the whole
-        // window rect, which is WM_NCCALCSIZE territory and governs the resize border
-        // and drag region with it.
+    // COLORREF 0x00BBGGRR. The collapsed icon is a dark rounded square over a soft
+    // shadow, so black is the one value that reads as part of that shadow instead of
+    // as a frame.
+    const CAPTION_BLACK: u32 = 0x0000_0000;
 
-        match DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &colour as *const u32 as *const _,
-            std::mem::size_of::<u32>() as u32,
-        ) {
-            Ok(()) => log::debug!("panel border enabled={enabled}"),
-            // Pre-22000 Windows draws no such border to begin with.
-            Err(e) => log::debug!("panel border attribute unavailable: {e}"),
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+
+    // The window reserves a 1px ring between its DWM frame and its client on all four
+    // sides (measured on the live collapsed icon: frame 58x58 around a 56x56 client,
+    // client origin at frame+1,+1). DWMWA_BORDER_COLOR owns three of those sides; the
+    // TOP row belongs to the caption and goes on painting itself #202020 after the
+    // border is set to NONE. That asymmetry -- three sides gone, one left -- is what
+    // made the line look deliberate on the collapsed icon.
+    //
+    // DWMWA_CAPTION_COLOR owns that row, measured directly on the live window: white
+    // paints it #FFFFFF, black #000000, and COLOR_NONE is NOT transparent there (it
+    // paints #2B2B2B). So the row can be recoloured but never removed, and recolouring
+    // is the fix -- black merges it into the icon's own shadow.
+    //
+    // Removing frame styles to delete the row outright was measured three ways, and
+    // each traded the line for something worse:
+    //
+    //   drop WS_CAPTION            removes the row, and leaves a window that is still a
+    //                              SIZING frame -- so Windows draws that frame the
+    //                              legacy way instead, a light rectangle round the icon.
+    //   drop WS_THICKFRAME too     no frame is drawn at all, but the window rect (72x65)
+    //                              then no longer matches the client (56x56) and DWM
+    //                              reports the whole 72x65 as visible -- so a 16x9
+    //                              transparent strip sits over the desktop and shows
+    //                              other windows through it. Reported as a stray close
+    //                              button appearing beside the fish.
+    //   DWMWA_NCRENDERING_POLICY   same shape as the first: the modern frame goes and
+    //                              the legacy one is drawn in its place.
+    //
+    // Deleting the row needs the client to fill the whole window rect, which is
+    // WM_NCCALCSIZE territory and governs the resize border and drag region with it.
+    let (border, caption) = if enabled {
+        (DWMWA_COLOR_DEFAULT, DWMWA_COLOR_DEFAULT)
+    } else {
+        (DWMWA_COLOR_NONE, CAPTION_BLACK)
+    };
+
+    for (attr, value, what) in [
+        (DWMWA_BORDER_COLOR, border, "border"),
+        (DWMWA_CAPTION_COLOR, caption, "caption"),
+    ] {
+        unsafe {
+            match DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                &value as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            ) {
+                Ok(()) => log::debug!("panel {what} enabled={enabled}"),
+                // Pre-22000 Windows draws no such frame to begin with.
+                Err(e) => log::debug!("panel {what} attribute unavailable: {e}"),
+            }
         }
     }
 }
