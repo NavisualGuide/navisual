@@ -14,7 +14,8 @@ use std::mem;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, LRESULT, POINT, RECT, TRUE, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    DWMWINDOWATTRIBUTE,
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, DeleteDC, DeleteObject,
@@ -916,6 +917,38 @@ pub fn intercept_panel_minimize() -> bool {
         log::warn!("panel minimize hook: SetWindowSubclass failed");
     }
     ok
+}
+
+/// Stop Windows drawing its accent-coloured border around the panel window.
+///
+/// Windows 11 paints a 1px border in the user's accent colour on every top-level
+/// window. On the expanded panel that is invisible against its own chrome, but the
+/// COLLAPSED panel is a 56px transparent window containing a floating goldfish —
+/// and while a surface is open it is a larger transparent rectangle with a rounded
+/// menu inside it. The accent border traces that whole rectangle, so the icon reads
+/// as sitting inside a stray coloured box rather than floating (reported live, with
+/// a green accent).
+///
+/// `DWMWA_BORDER_COLOR` (34) accepts the sentinel `DWMWA_COLOR_NONE` (0xFFFFFFFE)
+/// to suppress the border entirely. Windows 11 build 22000+; older builds return an
+/// error, which is fine — they do not draw this border in the first place.
+pub fn remove_panel_border(hwnd_raw: usize) {
+    const DWMWA_BORDER_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(34);
+    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        let colour = DWMWA_COLOR_NONE;
+        match DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &colour as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u32,
+        ) {
+            Ok(()) => log::info!("panel border suppressed (DWMWA_COLOR_NONE)"),
+            // Pre-22000 Windows has no such border to remove.
+            Err(e) => log::debug!("panel border suppression unavailable: {e}"),
+        }
+    }
 }
 
 pub fn raise_overlay_topmost() {

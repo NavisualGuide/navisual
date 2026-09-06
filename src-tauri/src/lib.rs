@@ -6806,6 +6806,12 @@ pub fn run() {
                     #[cfg(windows)]
                     let _ = panel_handle.run_on_main_thread(|| {
                         capture::intercept_panel_minimize();
+                        // Same trip to the main thread: kill Windows 11's accent
+                        // border, which traces the whole window rect and makes the
+                        // collapsed icon look like it is sitting in a coloured box.
+                        if let Some(h) = capture::own_panel_hwnd() {
+                            capture::remove_panel_border(h);
+                        }
                     });
                 }
             });
