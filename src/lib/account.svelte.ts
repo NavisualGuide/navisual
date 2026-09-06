@@ -43,7 +43,19 @@ class Account {
     if (!force && (this.view === "verify_signup" || this.view === "verify_reset" || this.view === "forgot")) {
       return;
     }
-    this.view = this.signedIn ? "account" : "signin";
+    const next = this.signedIn ? "account" : "signin";
+    // A notice raised while signed OUT ("Sign in to buy coins — use Google below…")
+    // is stale the instant identity resolves to a real account, and it renders at
+    // the top of the panel — directly above "Signed in as", contradicting it.
+    // Reported live after a Google sign-in, whose only route back here is this
+    // `account_changed` → load() path (the email flows clear it themselves).
+    // Scoped to the TRANSITION so a success notice set while already on the
+    // account view (e.g. "Password updated") is never clobbered.
+    if (next === "account" && this.view !== "account") {
+      this.error = "";
+      this.notice = "";
+    }
+    this.view = next;
   }
 }
 

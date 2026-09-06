@@ -23,24 +23,37 @@
   let amountValid = $derived(effectiveAmount >= 5 && effectiveAmount <= 500);
 </script>
 
-<div class="setting-group">
-  <!-- "Plan", not "Account": this section now renders inside the Account tab, and
-       two nested headings both reading "Account" made the tier line look like the
-       identity block above it. -->
-  <span class="setting-label">Plan</span>
-  <p class="setting-hint">{billing.tier === "paid" ? "Paid (coins)" : "Free trial"}</p>
-</div>
-{#if billing.coins !== null && billing.coins > 0}
-  <div class="setting-group">
-    <span class="setting-label">Coin balance</span>
-    <p class="setting-hint">{billing.coins} coins</p>
-  </div>
+{#if provider !== "managed"}
+  <!-- Promoted from the last grey line on the page to the first thing in the
+       section. It is the only ACTIONABLE fact here — coins bought now cannot be
+       spent until the provider changes — and it was buried under three
+       paragraphs of explanatory prose. -->
+  <p class="bill-warn">
+    Coins are spent by the <strong>Managed</strong> provider, and you're on
+    <strong>{provider}</strong>. Switch on the <strong>Provider</strong> tab to use them.
+  </p>
 {/if}
-<div class="setting-group">
-  <span class="setting-label">Free requests</span>
-  <p class="setting-hint">{billing.freeRemaining ?? "—"} remaining of 30</p>
-</div>
-<p class="setting-hint">Change your <strong>quality tier</strong> (which model answers, and its coin cost) on the <strong>Provider</strong> tab.</p>
+
+<!-- Label/value pairs on one line each rather than stacked. The stacked form cost
+     two lines per fact and read as six unrelated headings; these are three facts
+     about one account and belong in one block that can be scanned down. -->
+<dl class="bill-facts">
+  <div>
+    <dt>Plan</dt>
+    <dd>{billing.tier === "paid" ? "Paid (coins)" : "Free trial"}</dd>
+  </div>
+  {#if billing.coins !== null && billing.coins > 0}
+    <div>
+      <dt>Coin balance</dt>
+      <dd class="bill-value">{billing.coins} coins</dd>
+    </div>
+  {/if}
+  <div>
+    <dt>Free requests</dt>
+    <dd>{billing.freeRemaining ?? "—"} of 30 left</dd>
+  </div>
+</dl>
+<p class="setting-hint">Quality tier — which model answers, and its coin cost — is on the <strong>Provider</strong> tab.</p>
 
 <!-- Amount picker -->
 <div class="setting-group" style="margin-top: 14px;">
@@ -81,12 +94,52 @@
   and
   <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy Policy</button>.
 </p>
+<!-- Was three sentences. "If you're not signed in yet, Google sign-in runs first"
+     described the pre-merge flow and is now wrong twice over: sign-in lives on this
+     same tab, and it is no longer Google-only. The wrong-provider note moved to the
+     callout at the top. What is left is the one thing a buyer cannot predict. -->
 <p class="setting-hint" style="margin-top: 8px;">
-  Coins power the Managed provider's paid tiers. Checkout opens in your default
-  browser; if you're not signed in yet, Google sign-in runs first. Your balance
-  updates automatically when you return.
-  {#if provider !== "managed"}
-    <br /><br />Note: you're currently on the <strong>{provider}</strong>
-    provider. Switch to <strong>Managed</strong> on the Provider tab to spend coins.
-  {/if}
+  Checkout opens in your browser; your balance updates when you return.
 </p>
+
+<style>
+  /* Billing-only, so scoped here rather than added to App's globals. */
+  .bill-facts {
+    margin: 0 0 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .bill-facts > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .bill-facts dt {
+    color: var(--text-tertiary);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .bill-facts dd {
+    margin: 0;
+    color: var(--text-secondary);
+    text-align: right;
+  }
+  /* The balance is the number people open this page to read. */
+  .bill-value {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .bill-warn {
+    margin: 0 0 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--warning);
+    border-left-width: 3px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    color: var(--text-secondary);
+    line-height: 1.45;
+  }
+</style>
