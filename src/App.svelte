@@ -15,6 +15,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
   import HotkeyInput from "./HotkeyInput.svelte";
   import { prettyHotkey } from "./lib/hotkey";
+  import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
   import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
@@ -4315,7 +4316,7 @@ See the LICENSE file in the root of this repository for complete details.
               </label>
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="overlay-color">Accent color</label>
+              <label class="setting-label" for="overlay-color">Pointer color</label>
               <div class="color-row">
                 <input id="overlay-color" class="color-picker" type="color" bind:value={settingsForm.overlay_color} />
                 <span class="color-hex">{settingsForm.overlay_color}</span>
@@ -4323,7 +4324,9 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="overlay-thickness">Border thickness — {settingsForm.overlay_thickness} px</label>
+              <label class="setting-label" for="overlay-thickness">
+                Pointer thickness — {strokeScale(settingsForm.overlay_thickness).toFixed(2)}×{settingsForm.overlay_thickness === DEFAULT_THICKNESS ? " (default)" : ""}
+              </label>
               <input id="overlay-thickness" class="setting-range" type="range" min="1" max="10"
                 bind:value={settingsForm.overlay_thickness} />
             </div>

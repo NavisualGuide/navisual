@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { DEFAULT_THICKNESS, strokeScale as weightOf } from "./lib/overlay-weight";
 
   type Rect = { x: number; y: number; width: number; height: number };
   type OverlayUpdate = {
@@ -45,6 +46,11 @@
     show_ai_bbox: false,
   };
 
+  // Pointer thickness: one weight multiplier applied to every stroke below. The widths
+  // here are hand-tuned ratios, not free numbers — see src/lib/overlay-weight.ts for why
+  // this scales rather than sets them, and why it is independent of display DPI.
+  const strokeScale = () => weightOf(theme.thickness);
+
   function hexToRgb(hex: string): [number, number, number] {
     const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
     return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 107, 53];
@@ -77,6 +83,7 @@
     ctx.scale(scale, scale);
     bx /= scale; by /= scale; bw /= scale; bh /= scale;
     const [r, g, b] = hexToRgb(theme.color);
+    const k = strokeScale();
     const pulse = (Math.sin(t / 700) + 1) / 2;
     const cx = bx + bw / 2;
     const cy = by + bh / 2;
@@ -103,7 +110,7 @@
       ctx.beginPath();
       ctx.ellipse(cx, cy, Math.max(rx, 0.1), Math.max(ry, 0.1), 0, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
-      ctx.lineWidth = 2.5 - phase * 1.8;
+      ctx.lineWidth = (2.5 - phase * 1.8) * k;
       ctx.shadowColor = theme.color;
       ctx.shadowBlur = 6;
       ctx.stroke();
@@ -118,22 +125,23 @@
     function bracket(ox: number, oy: number, dx: number, dy: number) {
       // Shadow layer
       ctx.strokeStyle = "rgba(0,0,0,0.75)";
-      ctx.lineWidth = 5.5;
+      ctx.lineWidth = 5.5 * k;
       ctx.beginPath();
       ctx.moveTo(ox + dx * arm, oy); ctx.lineTo(ox, oy); ctx.lineTo(ox, oy + dy * arm);
       ctx.stroke();
       // Accent layer
       ctx.strokeStyle = theme.color;
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 3 * k;
       ctx.shadowColor = theme.color;
       ctx.shadowBlur = 8 + pulse * 16;
       ctx.stroke();
       ctx.shadowBlur = 0;
-      // Corner dot
+      // Corner dot — a stroke-weight sibling of the bracket, not layout, so it scales
+      // with it; a fixed dot under a 2x bracket reads as a nick in the corner.
       ctx.fillStyle = theme.color;
       ctx.shadowColor = theme.color;
       ctx.shadowBlur = 10 + pulse * 8;
-      ctx.beginPath(); ctx.arc(ox, oy, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(ox, oy, 3.5 * k, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
     }
 
@@ -153,10 +161,10 @@
     grad.addColorStop(0.85, `rgba(${r},${g},${b},${scanAlpha})`);
     grad.addColorStop(1,    `rgba(${r},${g},${b},0)`);
     ctx.fillStyle = grad;
-    ctx.fillRect(bx, scanY - 1.5, bw, 3);
+    ctx.fillRect(bx, scanY - 1.5 * k, bw, 3 * k);
     // Bright core of the scan line
     ctx.strokeStyle = `rgba(255, 230, 170, ${scanAlpha * 0.9})`;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1 * k;
     ctx.shadowColor = "rgba(255, 180, 80, 0.9)";
     ctx.shadowBlur = 8;
     ctx.beginPath(); ctx.moveTo(bx, scanY); ctx.lineTo(bx + bw, scanY); ctx.stroke();
@@ -165,7 +173,7 @@
     // ── 4. CROSSHAIR dot at center (subtle) ──────────────────────────────
     const cr = 5;
     ctx.strokeStyle = `rgba(${r},${g},${b},${0.35 + pulse * 0.25})`;
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.5 * k;
     ctx.lineCap = "round";
     ctx.shadowColor = theme.color; ctx.shadowBlur = 5;
     ctx.beginPath(); ctx.moveTo(cx - cr, cy); ctx.lineTo(cx + cr, cy); ctx.stroke();
@@ -189,6 +197,7 @@
     ctx.scale(scale, scale);
     bx /= scale; by /= scale; bw /= scale; bh /= scale;
     const [r, g, b] = hexToRgb(theme.color);
+    const k = strokeScale();
     const pulse = (Math.sin(t / 600) + 1) / 2;
     const cx = bx + bw / 2;
     const beaconY = by - 44;
@@ -198,7 +207,7 @@
     lineGrd.addColorStop(0, `rgba(${r},${g},${b},${0.6 + pulse * 0.25})`);
     lineGrd.addColorStop(1, `rgba(${r},${g},${b},0.05)`);
     ctx.strokeStyle = lineGrd;
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.5 * k;
     ctx.setLineDash([5, 5]);
     ctx.lineCap = "round";
     ctx.beginPath(); ctx.moveTo(cx, beaconY + 14); ctx.lineTo(cx, by); ctx.stroke();
@@ -211,7 +220,7 @@
       const aa = (1 - phase) * 0.5;
       ctx.beginPath(); ctx.arc(cx, beaconY, rr, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(${r},${g},${b},${aa})`;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.5 * k;
       ctx.stroke();
     }
 
@@ -227,7 +236,7 @@
     // Tiny downward chevron below beacon
     const chevY = beaconY + 13;
     ctx.strokeStyle = `rgba(${r},${g},${b},${0.55 + pulse * 0.3})`;
-    ctx.lineWidth = 2; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.lineWidth = 2 * k; ctx.lineCap = "round"; ctx.lineJoin = "round";
     ctx.shadowColor = theme.color; ctx.shadowBlur = 6;
     ctx.beginPath();
     ctx.moveTo(cx - 5, chevY); ctx.lineTo(cx, chevY + 5); ctx.lineTo(cx + 5, chevY);
@@ -323,7 +332,7 @@
     if (age >= APP_BOUNDARY_DURATION_MS) return false;
 
     const flashEnd = 250;
-    const fadeStart = APP_BOUNDARY_DURATION_MS - 1_000; // 9000ms
+    const fadeStart = APP_BOUNDARY_DURATION_MS - 1_000; // 2000ms
     let opacity = 1.0;
     if (age > fadeStart) {
       const fadeProgress = (age - fadeStart) / 1_000;
@@ -333,7 +342,9 @@
     }
 
     const [r, g, b] = hexToRgb(theme.color);
-    const lw = Math.max(2, theme.thickness);
+    // Same weight model as the pointer so one setting means one thing everywhere;
+    // at the default thickness this is 4, exactly what it was before.
+    const lw = Math.max(2, DEFAULT_THICKNESS * strokeScale());
 
     // Inset the rect by half the widest stroke so the centered outline sits just
     // INSIDE the window edge instead of straddling it — on a fullscreen window the
@@ -393,6 +404,7 @@
   ) {
     const scale = dprOf(ctx);
     const [r, g, b] = hexToRgb(theme.color);
+    const k = strokeScale();
     const pulse = (Math.sin(t / 600) + 1) / 2;
     candidates.forEach((c, i) => {
       const pad = 8;
@@ -407,11 +419,11 @@
       ctx.setLineDash(i === 0 ? [] : [6, 5]);
       // Shadow pass for contrast on any background.
       ctx.strokeStyle = `rgba(0,0,0,${alpha * 0.6})`;
-      ctx.lineWidth = 4;
+      ctx.lineWidth = 4 * k;
       roundRectPath(ctx, bx, by, bw, bh, 6);
       ctx.stroke();
       ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
-      ctx.lineWidth = 2.2;
+      ctx.lineWidth = 2.2 * k;
       roundRectPath(ctx, bx, by, bw, bh, 6);
       ctx.stroke();
       ctx.setLineDash([]);
@@ -460,6 +472,7 @@
     ctx.scale(scale, scale);
     bx /= scale; by /= scale; bw /= scale; bh /= scale;
     const [r, g, b] = hexToRgb(theme.color);
+    const k = strokeScale();
     const pulse = (Math.sin(t / 700) + 1) / 2;
     const cx = bx + bw / 2;
     const cy = by + bh / 2;
@@ -482,7 +495,7 @@
       ctx.beginPath();
       ctx.ellipse(cx, cy, Math.max(rx, 0.1), Math.max(ry, 0.1), 0, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
-      ctx.lineWidth = 2 - phase * 1.4;
+      ctx.lineWidth = (2 - phase * 1.4) * k;
       ctx.shadowColor = theme.color;
       ctx.shadowBlur = 6;
       ctx.stroke();
@@ -499,13 +512,13 @@
     function bracket(ox: number, oy: number, dx: number, dy: number) {
       // Shadow layer for contrast on any background
       ctx.strokeStyle = "rgba(0,0,0,0.65)";
-      ctx.lineWidth = 4.5;
+      ctx.lineWidth = 4.5 * k;
       ctx.beginPath();
       ctx.moveTo(ox + dx * arm, oy); ctx.lineTo(ox, oy); ctx.lineTo(ox, oy + dy * arm);
       ctx.stroke();
       // Accent layer
       ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${0.72 + pulse * 0.15})`;
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = 2.5 * k;
       ctx.shadowColor = theme.color;
       ctx.shadowBlur = 6 + pulse * 8;
       ctx.stroke();
