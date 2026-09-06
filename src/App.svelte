@@ -1675,18 +1675,26 @@ See the LICENSE file in the root of this repository for complete details.
     iconMode = true;
     // A Windows accent border round the expanded panel looks like a window. Round a
     // 56px transparent square holding a goldfish it looks like a box someone drew.
-    invoke("set_panel_border", { enabled: false }).catch(() => {});
+    //
+    // AWAITED, and before the resize. Removing the frame styles changes how much of
+    // the window rect the client occupies, so a size applied first is computed
+    // against the old frame: the window stayed 72x65 around a 56x56 icon, and the
+    // leftover transparent L showed whatever was behind it -- reported as a stray
+    // close button appearing next to the fish.
+    try { await invoke("set_panel_border", { enabled: false }); } catch (_) {}
     try { await getCurrentWindow().setSize(new LogicalSize(ICON_SIZE, ICON_SIZE)); }
     catch (e) { console.error("collapseToIcon:", e); }
   }
 
   async function expandToPanel() {
-    invoke("set_panel_border", { enabled: true }).catch(() => {});
     iconSurface = null;
     iconRestorePos = null;
     iconFlipX = false;
     iconFlipY = false;
     iconMode = false;
+    // Restore the frame BEFORE sizing, for the same reason collapse suppresses it
+    // before sizing: the size is computed against whichever frame is in effect.
+    try { await invoke("set_panel_border", { enabled: true }); } catch (_) {}
     try {
       // A docked panel expands back into its dock at the width the user left it,
       // not into a floating window parked wherever the icon happened to be.

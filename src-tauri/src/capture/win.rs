@@ -32,12 +32,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     IsZoomed,
-    SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT,
-    GA_ROOTOWNER, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
+    GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
-    SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_RESTORE, WM_SYSCOMMAND, WS_CAPTION, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-    WS_THICKFRAME,
+    SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_SYSCOMMAND, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -954,33 +952,27 @@ pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
         // icon is never snapped, never user-resized (its surfaces resize themselves
         // through SetWindowPos, which does not care), and WS_SYSMENU — which the
         // SC_MINIMIZE interception hangs off — is left untouched either way.
-        // WS_THICKFRAME goes with it. Removing WS_CAPTION alone leaves a window that
-        // is still a SIZING frame, and Windows falls back to drawing that frame the
-        // legacy way -- a light rectangle around the icon, obvious on a dark
-        // background and nearly invisible on a light one (reported live with all
-        // three). Same failure shape as DWMWA_NCRENDERING_POLICY earlier: remove one
-        // piece of the modern frame and the old one is drawn instead. A collapsed
-        // icon has no user-resizable edge to give up, and SetWindowPos resizes it
-        // regardless of the style.
-        const COLLAPSED_STRIP: u32 = WS_CAPTION.0 | WS_THICKFRAME.0;
-        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-        let wanted = if enabled {
-            style | COLLAPSED_STRIP
-        } else {
-            style & !COLLAPSED_STRIP
-        };
-        if wanted != style {
-            SetWindowLongW(hwnd, GWL_STYLE, wanted as i32);
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
-        }
+        // NO STYLE STRIPPING HERE. Removing frame styles to chase the last 1px is a
+        // dead end, measured three ways:
+        //
+        //   drop WS_CAPTION            removes the top line, and leaves a window that
+        //                              is still a SIZING frame -- so Windows draws
+        //                              that frame the legacy way instead, a light
+        //                              rectangle round the icon.
+        //   drop WS_THICKFRAME too     no frame is drawn at all, but the window rect
+        //                              (72x65) then no longer matches the client
+        //                              (56x56) and DWM reports the whole 72x65 as
+        //                              visible -- so a 16x9 transparent strip of the
+        //                              window sits over the desktop and shows other
+        //                              windows through it. Reported as a stray close
+        //                              button appearing beside the fish.
+        //   DWMWA_NCRENDERING_POLICY   same shape as the first: the modern frame goes
+        //                              and the legacy one is drawn in its place.
+        //
+        // Each removed the line and added something worse. The 1px top line on the
+        // COLLAPSED icon stays until there is a way to make the client fill the whole
+        // window rect, which is WM_NCCALCSIZE territory and governs the resize border
+        // and drag region with it.
 
         match DwmSetWindowAttribute(
             hwnd,
