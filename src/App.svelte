@@ -1404,20 +1404,23 @@ See the LICENSE file in the root of this repository for complete details.
   // startDragging() is only called once the mouse moves > 4px — below that
   // threshold the OS drag never starts and the browser fires onclick normally.
   let _iconStartX = 0, _iconStartY = 0, _iconDragged = false;
-  // LONG-PRESS opens the menu, not right-click.
+  // Right-click OR long-press opens the menu.
   //
-  // Right-click was the intent, and it does not work here: this WebView2 build
-  // delivers no right-button events to the page at all. Verified live three ways —
-  // the `contextmenu` event never fires, a `pointerdown` with `button === 2` never
-  // fires, and a second right-click with the window already focused behaves the
-  // same, ruling out the activation-eating that v0.7.4 documented for left-clicks.
-  // The menu items never appeared in the accessibility tree either, so it was the
-  // event that was missing rather than the window that failed to grow.
+  // CORRECTION (2026-09-06): an earlier version of this comment claimed WebView2
+  // delivers no right-button events to the page. That was wrong, and wrong in an
+  // avoidable way — it generalised from SYNTHETIC `mouse_event` right-clicks that
+  // were not landing, and never tried a real one. A real right-click works, and
+  // opens this menu.
   //
-  // Long-press uses left-button pointerdown, which demonstrably works, and reads as
-  // a deliberate gesture on a 48px target where a stray click should only ever
-  // expand. The right-button branch is kept anyway: it costs nothing and starts
-  // working by itself if a future WebView2 delivers the event.
+  // What was actually missing is `oncontextmenu` + preventDefault: WebView2's own
+  // menu (Back / Refresh / Save as / Print / Inspect) otherwise opens ON TOP of
+  // ours. `preventDefault()` on pointerdown does NOT suppress it — only the
+  // `contextmenu` event does. Suppressed on the fish alone, deliberately: right
+  // click elsewhere in the panel keeps Inspect, which is worth having in a dev
+  // build.
+  //
+  // Long-press is kept alongside it — same action, and the gesture that works on a
+  // 48px target where a stray click should only ever expand.
   const ICON_LONG_PRESS_MS = 450;
   let _iconLongPressTimer: ReturnType<typeof setTimeout> | null = null;
   let _iconLongPressFired = false;
@@ -2828,6 +2831,7 @@ See the LICENSE file in the root of this repository for complete details.
     class="icon-btn"
     class:icon-thinking={phase === "thinking"}
     onclick={handleIconClick}
+    oncontextmenu={(e) => e.preventDefault()}
     onpointerdown={handleIconPointerdown}
     onpointerup={handleIconPointerup}
     onpointermove={handleIconPointermove}
