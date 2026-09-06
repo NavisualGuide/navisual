@@ -48,7 +48,17 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // Half 3.5-flash's input and ~42% of its output while it lasts. Cached input 0.075
         // (0.15 after), though our ~2,924-token prefix is under Gemini's 4,096 cache minimum
         // so no discount applies today. Revisit this row before January 2027.
-        "gemini-3.7-flash" => (0.75, 3.75),
+        // 3.8-flash is priced IDENTICALLY to 3.7 across every tier, same promo end date
+        // (ai.google.dev/gemini-api/docs/pricing, checked 2026-09-06) — so on rates alone
+        // there is no reason to prefer either. What differs is what they SPEND: 3.8 cannot
+        // disable thinking ("minimal is not supported and returns an error"), and output
+        // price includes thinking tokens, so its 3-4x larger completions are billed in
+        // full. Measured over 25 real locates, that is ~33% more per median request and
+        // ~51% more per mean request than 3.7 for the same work — a difference that lives
+        // entirely in token COUNT, which is exactly why it needs a row here to be visible
+        // at all. Without one this fell through to `None` and the Usage tab estimated
+        // nothing. See model-comparison.md.
+        "gemini-3.7-flash" | "gemini-3.8-flash" => (0.75, 3.75),
         m if m.starts_with("gemini-3.1-pro") || m.starts_with("gemini-3-pro") => (2.0, 12.0),
         // OpenAI — 5.6 family (2026-08-16 refresh) replaces 5.4/5.5, ~86% cheaper at the
         // fast tier (Luna vs old 5.4-mini's 0.75/4.50). Old rows kept for historical logs.
