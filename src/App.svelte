@@ -1404,19 +1404,170 @@ See the LICENSE file in the root of this repository for complete details.
   // startDragging() is only called once the mouse moves > 4px — below that
   // threshold the OS drag never starts and the browser fires onclick normally.
   let _iconStartX = 0, _iconStartY = 0, _iconDragged = false;
+  // LONG-PRESS opens the menu, not right-click.
+  //
+  // Right-click was the intent, and it does not work here: this WebView2 build
+  // delivers no right-button events to the page at all. Verified live three ways —
+  // the `contextmenu` event never fires, a `pointerdown` with `button === 2` never
+  // fires, and a second right-click with the window already focused behaves the
+  // same, ruling out the activation-eating that v0.7.4 documented for left-clicks.
+  // The menu items never appeared in the accessibility tree either, so it was the
+  // event that was missing rather than the window that failed to grow.
+  //
+  // Long-press uses left-button pointerdown, which demonstrably works, and reads as
+  // a deliberate gesture on a 48px target where a stray click should only ever
+  // expand. The right-button branch is kept anyway: it costs nothing and starts
+  // working by itself if a future WebView2 delivers the event.
+  const ICON_LONG_PRESS_MS = 450;
+  let _iconLongPressTimer: ReturnType<typeof setTimeout> | null = null;
+  let _iconLongPressFired = false;
+
+  function cancelIconLongPress() {
+    if (_iconLongPressTimer) { clearTimeout(_iconLongPressTimer); _iconLongPressTimer = null; }
+  }
+
   function handleIconPointerdown(e: PointerEvent) {
+    if (e.button === 2) { e.preventDefault(); openIconMenu(e); return; }
     if (e.button !== 0) return;
     _iconStartX = e.screenX; _iconStartY = e.screenY; _iconDragged = false;
+    _iconLongPressFired = false;
+    if (iconSurface) return; // a surface is already open; the click will dismiss it
+    cancelIconLongPress();
+    _iconLongPressTimer = setTimeout(() => {
+      _iconLongPressTimer = null;
+      if (_iconDragged) return;      // they were moving the icon, not holding it
+      _iconLongPressFired = true;    // so the click that follows doesn't also expand
+      openIconMenu();
+    }, ICON_LONG_PRESS_MS);
+  }
+
+  function handleIconPointerup() {
+    cancelIconLongPress();
   }
   async function handleIconPointermove(e: PointerEvent) {
     if (_iconDragged || e.buttons !== 1) return;
     if (Math.hypot(e.screenX - _iconStartX, e.screenY - _iconStartY) > 4) {
       _iconDragged = true;
+      cancelIconLongPress(); // moving the icon is a drag, never a menu
       try { await getCurrentWindow().startDragging(); } catch (_) {}
     }
   }
   function handleIconClick() {
-    if (!_iconDragged) expandToPanel();
+    cancelIconLongPress();
+    if (_iconDragged) return;
+    // The long press already opened the menu; the click that ends it must not then
+    // expand the panel out from under it.
+    if (_iconLongPressFired) { _iconLongPressFired = false; return; }
+    // With a surface open the window IS the surface, so there is no "outside" to
+    // click — the fish is the only place left to dismiss from.
+    if (iconSurface) { closeIconSurface(); return; }
+    expandToPanel();
+  }
+
+  // ── Collapsed-icon surfaces (menu / chat) ─────────────────────────────────
+  //
+  // The collapsed window is ICON_SIZE square, and nothing can paint outside its
+  // own window — so a context menu, a chat box, or any hint bubble richer than a
+  // native tooltip is simply not renderable at 56px. They all need the same thing:
+  // grow the window, then shrink it back.
+  //
+  // The fish must not move while that happens. It is what the user just clicked,
+  // and having it jump out from under the cursor to make room for its own menu
+  // would be the worst kind of surprise. So the window ORIGIN is adjusted by
+  // exactly the amount it grew, in whichever direction keeps the fish still —
+  // which also gives the edge flip any context menu needs, for free.
+  type IconSurface = null | "menu" | "chat";
+  let iconSurface = $state<IconSurface>(null);
+  let iconFlipX = $state(false);
+  let iconFlipY = $state(false);
+  let iconChatText = $state("");
+  // Where the icon sat before it grew, in logical px, so shrinking puts it back.
+  let iconRestorePos: { x: number; y: number } | null = null;
+
+  const ICON_MENU_W = 190;
+  // 56 for the fish plus four ~34px rows and the surface's own padding. Measured
+  // rather than guessed: at 172 the Quit row was cut in half.
+  const ICON_MENU_H = 212;
+  const ICON_CHAT_W = 340;
+  // 56 for the fish, then the input, the send row and the surface's padding. At
+  // 104 only 48px was left below the fish for all three.
+  const ICON_CHAT_H = 152;
+
+  async function growIconWindow(w: number, h: number) {
+    const win = getCurrentWindow();
+    try {
+      const scale = await win.scaleFactor();
+      const pos = await win.outerPosition();
+      const x = pos.x / scale;
+      const y = pos.y / scale;
+      // Flip against the monitor the icon is actually on, not the primary — the
+      // panel is frequently parked on a second screen.
+      const mon = await currentMonitor();
+      const mx = mon ? mon.position.x / scale : 0;
+      const my = mon ? mon.position.y / scale : 0;
+      const mw = mon ? mon.size.width / scale : window.screen.availWidth;
+      const mh = mon ? mon.size.height / scale : window.screen.availHeight;
+
+      iconFlipX = x + w > mx + mw;
+      iconFlipY = y + h > my + mh;
+      iconRestorePos = { x, y };
+
+      await win.setSize(new LogicalSize(w, h));
+      await win.setPosition(
+        new LogicalPosition(
+          iconFlipX ? x - (w - ICON_SIZE) : x,
+          iconFlipY ? y - (h - ICON_SIZE) : y,
+        ),
+      );
+    } catch (e) { console.error("growIconWindow:", e); }
+  }
+
+  async function closeIconSurface() {
+    if (!iconSurface) return;
+    iconSurface = null;
+    iconChatText = "";
+    const win = getCurrentWindow();
+    try {
+      await win.setSize(new LogicalSize(ICON_SIZE, ICON_SIZE));
+      if (iconRestorePos) {
+        await win.setPosition(new LogicalPosition(iconRestorePos.x, iconRestorePos.y));
+      }
+    } catch (e) { console.error("closeIconSurface:", e); }
+    iconRestorePos = null;
+    iconFlipX = false;
+    iconFlipY = false;
+  }
+
+  async function openIconMenu(e?: Event) {
+    e?.preventDefault();
+    if (iconSurface === "menu") { await closeIconSurface(); return; }
+    if (iconSurface) await closeIconSurface();
+    await growIconWindow(ICON_MENU_W, ICON_MENU_H);
+    iconSurface = "menu";
+  }
+
+  async function openIconChat() {
+    if (iconSurface) await closeIconSurface();
+    await growIconWindow(ICON_CHAT_W, ICON_CHAT_H);
+    iconSurface = "chat";
+    // The window has to exist at its new size before the input can take focus.
+    setTimeout(() => iconChatInput?.focus(), 60);
+  }
+  let iconChatInput = $state<HTMLInputElement | undefined>(undefined);
+
+  // Ask a follow-up without ever leaving collapsed mode — the point of the whole
+  // surface. Submitting shrinks straight back to the fish, whose ring and thinking
+  // arc then report what the answer is doing.
+  async function submitIconChat() {
+    const text = iconChatText.trim();
+    if (!text) return;
+    await closeIconSurface();
+    task = text;
+    await submitTask();
+  }
+
+  function iconMenuAction(fn: () => void) {
+    closeIconSurface().then(fn);
   }
 
   // ── Collapsed-icon state ──────────────────────────────────────────────────
@@ -1460,12 +1611,20 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function collapseToIcon() {
     dismissCollapseHint(); // they found it — the coach mark is no longer needed
+    iconSurface = null;    // never collapse into a stale menu/chat size
+    iconRestorePos = null;
+    iconFlipX = false;
+    iconFlipY = false;
     iconMode = true;
     try { await getCurrentWindow().setSize(new LogicalSize(ICON_SIZE, ICON_SIZE)); }
     catch (e) { console.error("collapseToIcon:", e); }
   }
 
   async function expandToPanel() {
+    iconSurface = null;
+    iconRestorePos = null;
+    iconFlipX = false;
+    iconFlipY = false;
     iconMode = false;
     try {
       // A docked panel expands back into its dock at the width the user left it,
@@ -2566,6 +2725,15 @@ See the LICENSE file in the root of this repository for complete details.
     // expanded → collapse, collapsed → restore. It never minimizes, which is the
     // state being avoided; and it is never a dead click, which is what a plain
     // "collapse or do nothing" would have made it once already collapsed.
+    // A menu that survives the window losing focus is a menu that gets left open
+    // behind whatever the user switched to — and while collapsed it would also be
+    // holding the window at menu size, so the fish would be the wrong shape when
+    // they came back.
+    window.addEventListener("blur", () => { if (iconSurface) closeIconSurface(); });
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && iconSurface) { e.preventDefault(); closeIconSurface(); }
+    });
+
     listen("panel:collapse_requested", () => {
       if (iconMode) expandToPanel(); else collapseToIcon();
     });
@@ -2655,11 +2823,13 @@ See the LICENSE file in the root of this repository for complete details.
        collapsed is exactly when the panel can't tell you anything: pressing Ctrl+~
        moved the pointer and changed the caption, but the fish itself sat inert,
        which is what made the shortcut feel like it went nowhere. -->
+  <div class="icon-shell" class:icon-flip-x={iconFlipX} class:icon-flip-y={iconFlipY}>
   <button
     class="icon-btn"
     class:icon-thinking={phase === "thinking"}
     onclick={handleIconClick}
     onpointerdown={handleIconPointerdown}
+    onpointerup={handleIconPointerup}
     onpointermove={handleIconPointermove}
     title={iconTitle}
   >
@@ -2682,6 +2852,53 @@ See the LICENSE file in the root of this repository for complete details.
     {/if}
     <img src="/goldfish.svg" class="icon-fish" alt="Navisual" draggable="false" />
   </button>
+  {#if iconSurface === "menu"}
+    <!-- Each item carries its shortcut, so the menu TEACHES the keyboard path
+         rather than competing with it - the whole reason the collapsed icon exists
+         is that Ctrl+~ already drives a session and was never visible here.
+         Wrong is deliberately absent: 2 corrections in 574 AI calls and 0 local
+         retries in 66 locate traces make it dead pixels. -->
+    <div class="icon-menu" role="menu">
+      <button class="icon-menu-item" role="menuitem"
+        disabled={actionDisabled}
+        onclick={() => iconMenuAction(() => nextStep())}>
+        <span>→ Next</span>
+        {#if settingsForm.hotkey_next}<kbd class="hk-key">{prettyHotkey(settingsForm.hotkey_next)}</kbd>{/if}
+      </button>
+      <button class="icon-menu-item" role="menuitem" onclick={openIconChat}>
+        <span>💬 Chat</span>
+      </button>
+      <button class="icon-menu-item" role="menuitem"
+        onclick={() => iconMenuAction(expandToPanel)}>
+        <span>↗ Expand</span>
+        {#if settingsForm.hotkey_icon}<kbd class="hk-key">{prettyHotkey(settingsForm.hotkey_icon)}</kbd>{/if}
+      </button>
+      <button class="icon-menu-item icon-menu-quit" role="menuitem"
+        onclick={() => iconMenuAction(closeWindow)}>
+        <span>✕ Quit</span>
+      </button>
+    </div>
+  {:else if iconSurface === "chat"}
+    <!-- Ask something without leaving collapsed mode. Submitting shrinks straight
+         back to the fish, whose thinking arc then reports what the answer is doing. -->
+    <div class="icon-chat">
+      <input
+        bind:this={iconChatInput}
+        bind:value={iconChatText}
+        class="icon-chat-input"
+        placeholder={phase === "needs_input" ? "Answer Navisual…" : "Ask a follow-up…"}
+        onkeydown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitIconChat(); }
+          else if (e.key === "Escape") { e.preventDefault(); closeIconSurface(); }
+        }}
+      />
+      <div class="icon-chat-row">
+        <button class="icon-chat-send" onclick={submitIconChat} disabled={!iconChatText.trim()}>↩ Send</button>
+        <button class="icon-chat-cancel" onclick={closeIconSurface}>Esc</button>
+      </div>
+    </div>
+  {/if}
+  </div>
 {:else}
   <main>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
@@ -4368,6 +4585,106 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   /* ── Icon mode ─────────────────────────────────── */
+
+  /* The shell fills whatever size the window currently is — ICON_SIZE square
+     normally, larger while a menu or chat surface is open. The fish is pinned to
+     the corner the window grew AWAY from, which is what keeps it physically still
+     on screen while the window changes size around it. */
+  .icon-shell {
+    position: fixed;
+    inset: 0;
+  }
+  .icon-shell .icon-btn {
+    position: absolute;
+    inset: auto auto auto 0;
+    top: 0;
+    width: 56px;
+    height: 56px;
+  }
+  .icon-shell.icon-flip-x .icon-btn { left: auto; right: 0; }
+  .icon-shell.icon-flip-y .icon-btn { top: auto; bottom: 0; }
+
+  .icon-menu,
+  .icon-chat {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 56px;
+    bottom: 0;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
+  }
+  /* Grown upward: the surface sits above the fish instead of below it. */
+  .icon-shell.icon-flip-y .icon-menu,
+  .icon-shell.icon-flip-y .icon-chat { top: 0; bottom: 56px; }
+
+  .icon-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 9px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .icon-menu-item:hover:not(:disabled) { background: var(--surface-3); }
+  .icon-menu-item:disabled { opacity: 0.4; cursor: default; }
+  .icon-menu-quit:hover { background: rgba(239, 68, 68, 0.18); color: var(--danger); }
+
+  .icon-chat-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+  }
+  .icon-chat-input:focus { border-color: var(--accent-400, #ff6b35); }
+  .icon-chat-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .icon-chat-send {
+    flex: 1;
+    padding: 6px 8px;
+    background: var(--accent-500, #ff6b35);
+    border: none;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .icon-chat-send:disabled { opacity: 0.45; cursor: default; }
+  .icon-chat-cancel {
+    padding: 6px 8px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    cursor: pointer;
+  }
 
   /* Fill the collapsed window (ICON_SIZE square, transparent) and CENTRE the icon inside it.
      The fixed 64px button in a 56px window couldn't centre — it jammed into the top-left and
