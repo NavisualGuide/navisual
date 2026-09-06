@@ -1548,12 +1548,39 @@ mod context_cache_tests {
     /// A real, live top-level window to key fixtures on — the cache refuses handles that are
     /// not windows (see `a_recycled_or_dead_hwnd_is_never_served`), so a made-up number cannot
     /// be used here. The desktop always exists.
+    ///
+    /// It is also **the same handle in every test**, which is what `SERIAL` below exists for.
     fn live_hwnd() -> usize {
         unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow().0 as usize }
     }
 
+    /// These tests must not run concurrently with each other.
+    ///
+    /// `context_cache` is one process-wide store, Rust runs a binary's tests in parallel,
+    /// and every fixture here keys on the SAME handle (`live_hwnd`) because the cache
+    /// rejects handles that are not real windows — so the a11y gate tests' trick of giving
+    /// each test its own `0xDEAD_000n` key is not available. On top of that,
+    /// `eviction_keeps_the_most_recent_windows` calls `invalidate_all()`, which wipes every
+    /// entry in the store, not just its own.
+    ///
+    /// Left unserialised this produced a genuinely rare flake — roughly 1 run in 50 — where
+    /// `stores_and_returns_within_ttl` panicked on `expect("just stored")` because another
+    /// test had invalidated the entry in the window between its `store` and its `peek`. It
+    /// survived 100 clean runs across idle, CPU load, 128 test threads and a live app before
+    /// being caught, so if it ever reappears, suspect a new test in this module that forgot
+    /// the guard rather than a real cache bug.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the module lock, ignoring poisoning: a panic in one test has already failed that
+    /// test, and there is no shared invariant left to protect — every test here starts by
+    /// invalidating what it is about to use.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn stores_and_returns_within_ttl() {
+        let _guard = serial();
         let hwnd = live_hwnd();
         context_cache::store(hwnd, vec![el(1, "Save")], Some(vec![0u8; SIG_LEN]), 900);
         let (els, sig, age, cost) = context_cache::peek(hwnd).expect("just stored");
@@ -1570,6 +1597,7 @@ mod context_cache_tests {
 
     #[test]
     fn a_starved_read_does_not_overwrite_a_rich_bank() {
+        let _guard = serial();
         // Live case: a 20-element failed read overwrote a fresh 107-element bank, so the only
         // cache hit of the session served the starved list. Less than half the banked size for
         // the same window identity = a failed read, kept out.
@@ -1596,6 +1624,7 @@ mod context_cache_tests {
 
     #[test]
     fn a_recycled_or_dead_hwnd_is_never_served() {
+        let _guard = serial();
         // An HWND is a reusable OS handle. Serving a dead or recycled one would hand the model
         // another application's element list, which corrupts the PROMPT and not just the
         // pointer — a worse failure than a miss. A value that was never a window stands in for
@@ -1614,6 +1643,7 @@ mod context_cache_tests {
 
     #[test]
     fn eviction_keeps_the_most_recent_windows() {
+        let _guard = serial();
         context_cache::invalidate_all();
         // One more than MAX_ENTRIES; the oldest must be the one that goes.
         // All five share one live handle's identity but distinct keys, so the eviction policy
@@ -1632,6 +1662,7 @@ mod context_cache_tests {
 
     #[test]
     fn signature_drift_is_measured_against_the_serve_threshold() {
+        let _guard = serial();
         // The content check is what makes a stale entry safe to hold: ~24% of consecutive
         // request pairs differ by more than half, so an unchanged screen must read as
         // unchanged and a moved one must read as moved.
