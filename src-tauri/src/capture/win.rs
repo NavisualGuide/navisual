@@ -37,6 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_XVIRTUALSCREEN,
     SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SW_RESTORE, WM_SYSCOMMAND, WS_CAPTION, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    WS_THICKFRAME,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -953,11 +954,20 @@ pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
         // icon is never snapped, never user-resized (its surfaces resize themselves
         // through SetWindowPos, which does not care), and WS_SYSMENU — which the
         // SC_MINIMIZE interception hangs off — is left untouched either way.
+        // WS_THICKFRAME goes with it. Removing WS_CAPTION alone leaves a window that
+        // is still a SIZING frame, and Windows falls back to drawing that frame the
+        // legacy way -- a light rectangle around the icon, obvious on a dark
+        // background and nearly invisible on a light one (reported live with all
+        // three). Same failure shape as DWMWA_NCRENDERING_POLICY earlier: remove one
+        // piece of the modern frame and the old one is drawn instead. A collapsed
+        // icon has no user-resizable edge to give up, and SetWindowPos resizes it
+        // regardless of the style.
+        const COLLAPSED_STRIP: u32 = WS_CAPTION.0 | WS_THICKFRAME.0;
         let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
         let wanted = if enabled {
-            style | WS_CAPTION.0
+            style | COLLAPSED_STRIP
         } else {
-            style & !WS_CAPTION.0
+            style & !COLLAPSED_STRIP
         };
         if wanted != style {
             SetWindowLongW(hwnd, GWL_STYLE, wanted as i32);
