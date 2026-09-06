@@ -1479,7 +1479,7 @@ See the LICENSE file in the root of this repository for complete details.
   // would be the worst kind of surprise. So the window ORIGIN is adjusted by
   // exactly the amount it grew, in whichever direction keeps the fish still —
   // which also gives the edge flip any context menu needs, for free.
-  type IconSurface = null | "menu" | "chat";
+  type IconSurface = null | "menu" | "chat" | "hint";
   let iconSurface = $state<IconSurface>(null);
   let iconFlipX = $state(false);
   let iconFlipY = $state(false);
@@ -1491,6 +1491,11 @@ See the LICENSE file in the root of this repository for complete details.
   // 56 for the fish plus four ~34px rows and the surface's own padding. Measured
   // rather than guessed: at 172 the Quit row was cut in half.
   const ICON_MENU_H = 212;
+  const ICON_HINT_W = 268;
+  // 56 for the fish, then the title, two lines of body and the Got-it button.
+  // Third surface in a row whose first guess was too short — a fixed-size window
+  // gives CSS nowhere to overflow to, so these are measured on screen, not reasoned.
+  const ICON_HINT_H = 168;
   const ICON_CHAT_W = 340;
   // 56 for the fish, then the input, the send row and the surface's padding. At
   // 104 only 48px was left below the fish for all three.
@@ -1568,6 +1573,34 @@ See the LICENSE file in the root of this repository for complete details.
     task = text;
     await submitTask();
   }
+
+  // The collapsed icon has no room for the status bar's shortcut legend, which is
+  // the whole reason Ctrl+~ was invisible here despite always having worked. Hover
+  // carries it permanently (see `iconTitle`), but hovering is something you have to
+  // think to do — so the key is also shown ONCE, unprompted, the first time a step
+  // lands while collapsed. Same mechanism as the target-chip and collapse hints:
+  // localStorage-gated, shown once ever, and it takes itself away.
+  const ICON_HOTKEY_HINT_KEY = "navisual-icon-hotkey-hint-v3";
+  let iconHintTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function showIconHotkeyHint() {
+    if (iconSurface) return;                       // never interrupt a menu or a chat
+    await growIconWindow(ICON_HINT_W, ICON_HINT_H);
+    iconSurface = "hint";
+    if (iconHintTimer) clearTimeout(iconHintTimer);
+    iconHintTimer = setTimeout(() => { if (iconSurface === "hint") closeIconSurface(); }, 7000);
+  }
+
+  $effect(() => {
+    // Deliberately reads phase/iconMode so it re-evaluates as they change; the
+    // localStorage write makes it fire once ever regardless of how often that is.
+    if (!iconMode || phase !== "guiding" || !settingsForm.hotkey_next) return;
+    try {
+      if (localStorage.getItem(ICON_HOTKEY_HINT_KEY)) return;
+      localStorage.setItem(ICON_HOTKEY_HINT_KEY, "1");
+    } catch (_) { return; }
+    showIconHotkeyHint();
+  });
 
   function iconMenuAction(fn: () => void) {
     closeIconSurface().then(fn);
@@ -2844,6 +2877,16 @@ See the LICENSE file in the root of this repository for complete details.
         <circle class="icon-ring-track" cx="28" cy="28" r="25.5" />
         <circle class="icon-ring-arc" cx="28" cy="28" r="25.5" />
       </svg>
+    {:else if phase === "needs_input"}
+      <!-- Rare — ~3% of first turns in real use once the grounding battery is
+           excluded — so it earns no mechanism of its own and reuses the ring slot:
+           a full amber ring and a "?" over the fish. Without it a collapsed user is
+           simply never told a question is waiting, which is the one state where the
+           panel has something to say and no way to say it. -->
+      <svg class="icon-ring" viewBox="0 0 56 56" aria-hidden="true">
+        <circle class="icon-ring-asking" cx="28" cy="28" r="25.5" />
+      </svg>
+      <span class="icon-ask">?</span>
     {:else if iconProgress !== null}
       <svg class="icon-ring" viewBox="0 0 56 56" aria-hidden="true">
         <circle class="icon-ring-track" cx="28" cy="28" r="25.5" />
@@ -2881,6 +2924,16 @@ See the LICENSE file in the root of this repository for complete details.
         onclick={() => iconMenuAction(closeWindow)}>
         <span>✕ Quit</span>
       </button>
+    </div>
+  {:else if iconSurface === "hint"}
+    <!-- Shown once, unprompted, the first time a step arrives while collapsed. -->
+    <div class="icon-hint">
+      <div class="icon-hint-title">Navisual is still driving</div>
+      <div class="icon-hint-body">
+        Press <kbd class="hk-key">{prettyHotkey(settingsForm.hotkey_next)}</kbd> for the next step —
+        no need to open the panel.
+      </div>
+      <button class="icon-hint-got-it" onclick={closeIconSurface}>Got it</button>
     </div>
   {:else if iconSurface === "chat"}
     <!-- Ask something without leaving collapsed mode. Submitting shrinks straight
@@ -4609,7 +4662,8 @@ See the LICENSE file in the root of this repository for complete details.
   .icon-shell.icon-flip-y .icon-btn { top: auto; bottom: 0; }
 
   .icon-menu,
-  .icon-chat {
+  .icon-chat,
+  .icon-hint {
     position: absolute;
     left: 0;
     right: 0;
@@ -4627,7 +4681,8 @@ See the LICENSE file in the root of this repository for complete details.
   }
   /* Grown upward: the surface sits above the fish instead of below it. */
   .icon-shell.icon-flip-y .icon-menu,
-  .icon-shell.icon-flip-y .icon-chat { top: 0; bottom: 56px; }
+  .icon-shell.icon-flip-y .icon-chat,
+  .icon-shell.icon-flip-y .icon-hint { top: 0; bottom: 56px; }
 
   .icon-menu-item {
     display: flex;
@@ -4649,6 +4704,64 @@ See the LICENSE file in the root of this repository for complete details.
   .icon-menu-item:hover:not(:disabled) { background: var(--surface-3); }
   .icon-menu-item:disabled { opacity: 0.4; cursor: default; }
   .icon-menu-quit:hover { background: rgba(239, 68, 68, 0.18); color: var(--danger); }
+
+  /* needs_input: a full amber ring plus a "?" badge, reusing the ring slot. */
+  .icon-ring-asking {
+    stroke: var(--warning, #f59e0b);
+    animation: icon-ask-pulse 1800ms ease-in-out infinite;
+  }
+  @keyframes icon-ask-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+  }
+  .icon-ask {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 3px;
+    box-sizing: border-box;
+    border-radius: 8px;
+    background: var(--warning, #f59e0b);
+    color: #1a1205;
+    font-size: 11px;
+    font-weight: 800;
+    line-height: 15px;
+    text-align: center;
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .icon-ring-asking { animation: none; }
+  }
+
+  .icon-hint { padding: 9px 10px; gap: 0; }
+  .icon-hint-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent-400, #ff6b35);
+    margin-bottom: 5px;
+  }
+  .icon-hint-body {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+  }
+  .icon-hint-got-it {
+    align-self: flex-end;
+    margin-top: auto;
+    padding: 4px 10px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .icon-hint-got-it:hover { background: var(--surface-3); }
 
   .icon-chat-input {
     width: 100%;
