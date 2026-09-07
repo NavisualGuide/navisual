@@ -482,6 +482,27 @@ pub fn emit_update(app: &AppHandle, mut update: OverlayUpdate) -> Result<()> {
                 sig.2
             );
             *last = Some(sig);
+
+            // Claim the top of the topmost band the moment something becomes visible.
+            //
+            // The panel is alwaysOnTop too, so typing a task leaves it ABOVE the overlay
+            // inside that band, and the streamed caption then draws behind it (live
+            // 2026-09-07). Until now the only thing that re-asserted z-order was the
+            // window TRACKER, which does not exist yet while the answer is streaming —
+            // it starts in execute_step, after the caption. Which is exactly why
+            // clicking the panel or the target app "fixed" it: that fires a foreground
+            // event, the tracker recomputes, and the raise finally happens.
+            //
+            // Deliberately on the EDGE, not on every emit: streaming calls this once per
+            // chunk, and a sustained re-insert loop above the taskbar is what revealed an
+            // auto-hide taskbar for a whole session in v0.7.7. One toggle per shape
+            // change is the "one occasional toggle" that fix settled on. Clearing
+            // (kind=None with nothing to draw) never raises — there is nothing to keep
+            // above anything.
+            let visible = !matches!(update.kind, OverlayKind::None) && (sig.1 || sig.2);
+            if visible {
+                crate::capture::raise_overlay_topmost();
+            }
         }
     }
     window
