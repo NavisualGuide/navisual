@@ -526,6 +526,18 @@ pub fn make_update_full(
     let work_area = active_screen.and_then(|m| {
         crate::capture::work_area_containing(m.x + m.width as i32 / 2, m.y + m.height as i32 / 2)
     });
+    // Logged once per session: the caption's bottom anchor is the one number that
+    // decides whether it clears the taskbar, and it is otherwise invisible from
+    // outside the webview. `reserved` is the taskbar inset actually being avoided.
+    static LOGGED_WORK_AREA: std::sync::Once = std::sync::Once::new();
+    LOGGED_WORK_AREA.call_once(|| match (active_screen, work_area) {
+        (Some(m), Some(w)) => log::info!(
+            "[overlay] caption anchor: monitor {}x{} at {},{} -> work area {}x{} at {},{} (taskbar reserves {}px at bottom)",
+            m.width, m.height, m.x, m.y, w.width, w.height, w.x, w.y,
+            (m.y + m.height as i32) - (w.y + w.height as i32)
+        ),
+        _ => log::warn!("[overlay] caption anchor: no work area resolved — falling back to the monitor's bottom edge, which sits under the taskbar"),
+    });
     Ok(OverlayUpdate {
         kind,
         bbox,

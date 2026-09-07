@@ -656,7 +656,15 @@ See the LICENSE file in the root of this repository for complete details.
   let availableVoices = $state<VoiceInfo[]>([]);
 
   function handlePanelContextMenu(e: MouseEvent) {
-    if (settingsForm.developer_mode) return;
+    // Escape hatches, in order of how often they matter:
+    //  - text fields: cut/copy/paste is expected there;
+    //  - Shift held: the browser convention for "give me the native menu
+    //    anyway", so Inspect stays one gesture away.
+    // NOT gated on developer_mode any more. It was, and that was the bug: this
+    // machine runs NAVISUAL_DEV=true permanently, so the suppression never
+    // applied for the only person who would ever notice it (live report
+    // 2026-09-07, browser menu still opening over the panel).
+    if (e.shiftKey) return;
     const t = e.target as HTMLElement | null;
     if (t && t.closest("textarea, input, [contenteditable]")) return;
     e.preventDefault();
@@ -1527,8 +1535,7 @@ See the LICENSE file in the root of this repository for complete details.
   // menu (Back / Refresh / Save as / Print / Inspect) otherwise opens ON TOP of
   // ours. `preventDefault()` on pointerdown does NOT suppress it — only the
   // `contextmenu` event does. The expanded panel suppresses it too now (see
-  // handlePanelContextMenu) — except in text fields and in developer mode, where
-  // Inspect is worth having.
+  // handlePanelContextMenu) — except in text fields, and on Shift+right-click.
   //
   // Long-press is kept alongside it — same action, and the gesture that works on a
   // 48px target where a stray click should only ever expand.
@@ -3180,9 +3187,10 @@ See the LICENSE file in the root of this repository for complete details.
 {:else}
   <!-- Right-click: WebView2's built-in browser menu (Back / Reload / Inspect…)
        breaks the native-app feel and offers nothing a user of this panel wants,
-       so it is suppressed — EXCEPT inside text fields, where cut/copy/paste is
-       expected, and in developer mode, where Inspect is the point. The fish has
-       its own handler for the collapsed menu; this is the expanded panel. -->
+       so it is suppressed — except inside text fields, and on Shift+right-click,
+       which is the browser convention for asking for the native menu anyway.
+       The fish has its own handler for the collapsed menu; this is the expanded
+       panel. -->
   <main oncontextmenu={handlePanelContextMenu}>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
     <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
