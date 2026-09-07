@@ -296,6 +296,16 @@ fn sanitize_instruction_text(text: &str) -> (String, Vec<u32>) {
     let emphasis = EMPHASIS
         .get_or_init(|| regex::Regex::new(r"\*\*([^*\n]+)\*\*|__([^_\n]+)__").unwrap());
     let cleaned = emphasis.replace_all(&cleaned, "$1$2");
+    // Inline code ticks. Emphasis was already stripped here; backticks were not, so
+    // `Item` and `Tab` reached BOTH the panel (seen live 2026-09-07 on a OneNote step)
+    // and the synthesizer. Instruction text is read aloud -- Rule 14's whole premise --
+    // and a tick is either a stumble in the prosody or, on some voices, spoken aloud.
+    // The words are what matter; the markup never was. Single ticks only: a run must
+    // stay on one line and be non-empty, so a ``` fence (already handled by
+    // recover_fenced_json_instruction) cannot match.
+    static CODE_TICK: OnceLock<regex::Regex> = OnceLock::new();
+    let code_tick = CODE_TICK.get_or_init(|| regex::Regex::new(r"`([^`\n]+)`").unwrap());
+    let cleaned = code_tick.replace_all(&cleaned, "$1");
     let spaces = SPACES.get_or_init(|| regex::Regex::new(r"[ \t]{2,}").unwrap());
     let cleaned = spaces.replace_all(&cleaned, " ");
     let space_punct = SPACE_PUNCT.get_or_init(|| regex::Regex::new(r" +([.,;:!?])").unwrap());
@@ -435,6 +445,26 @@ pub struct Message {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inline_code_ticks_are_stripped_for_speech() {
+        // Live text from a OneNote step: the ticks reached the panel and the voice.
+        let (out, _) = sanitize_instruction_text("Type `Item` and press the `Tab` key.");
+        assert_eq!(out, "Type Item and press the Tab key.");
+    }
+
+    #[test]
+    fn a_lone_tick_is_left_alone() {
+        // Nothing to unwrap -- do not eat a stray character out of the sentence.
+        let (out, _) = sanitize_instruction_text("Press the ` key");
+        assert_eq!(out, "Press the ` key");
+    }
+
+    #[test]
+    fn ticks_do_not_span_lines() {
+        let (out, _) = sanitize_instruction_text("first `a\nb` second");
+        assert!(out.contains('`'), "a multi-line span must not be treated as inline code");
+    }
+
     use super::*;
 
     fn step(json: &str) -> GuidanceStep {
