@@ -6859,6 +6859,17 @@ fn report_boot_timing(
     );
 }
 
+/// Called by the overlay's own script once it mounts. This is the second of the
+/// two keys that let the overlay window become visible at all — see
+/// `overlay::mark_configured` for why an unverified overlay is dangerous.
+#[tauri::command]
+fn overlay_script_alive(app: tauri::AppHandle) {
+    match app.get_webview_window("overlay") {
+        Some(win) => overlay::mark_script_alive(&win),
+        None => log::error!("overlay_script_alive: no overlay window"),
+    }
+}
+
 /// Readiness probe for the frontend's cold-start gate.
 ///
 /// `handle.manage(AppState)` is the LAST thing `setup()` does, and `setup()` can
@@ -7032,10 +7043,22 @@ pub fn run() {
                 if let Some(win) = overlay_handle.get_webview_window("overlay") {
                     match overlay::configure(&win) {
                         Ok(()) => {
-                            let _ = win.show();
-                            log::info!("overlay window configured and shown");
+                            log::info!("overlay window configured");
+                            // Shows only if the overlay's script has already
+                            // checked in; otherwise `overlay_script_alive` does.
+                            overlay::mark_configured(&win);
                         }
                         Err(e) => log::error!("overlay configure failed — NOT showing: {e}"),
+                    }
+                    // Watchdog: a page that never loads now leaves the overlay hidden,
+                    // which is the right outcome but a silent one. The bound has to clear
+                    // a real dev cold start -- measured 18s from configure to the script
+                    // checking in, on a launch that was working perfectly -- or this fires
+                    // on every dev run and stops meaning anything. Release checks in in
+                    // about a second, so 45s accuses nobody who is merely slow.
+                    tokio::time::sleep(Duration::from_secs(45)).await;
+                    if !overlay::is_shown() {
+                        log::error!("overlay still hidden 45s after configure — its page did not load, so screen guidance will not draw this session (the window is deliberately NOT shown: an unloaded overlay is a full-screen always-on-top error page)");
                     }
                 } else {
                     log::error!("overlay window not found from tauri.conf.json!");
@@ -7185,6 +7208,7 @@ pub fn run() {
             is_packaged,
             backend_ready,
             report_boot_timing,
+            overlay_script_alive,
             list_target_windows,
             list_monitors,
             pin_target_window,

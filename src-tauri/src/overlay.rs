@@ -12,6 +12,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
@@ -173,6 +174,57 @@ pub fn virtual_desktop_rect() -> Result<Rect> {
 ///
 /// CRITICAL: click-through must succeed before show(). A fullscreen
 /// transparent window that still captures input freezes the desktop.
+/// Two-key gate on ever making the overlay window visible.
+///
+/// The overlay is transparent, always-on-top and sized to the whole virtual
+/// desktop, and `raise_overlay_topmost` re-asserts `HWND_TOPMOST` on a timer --
+/// so it outranks even Task Manager. If its webview fails to load, that
+/// invisible canvas becomes an OPAQUE browser error page covering every monitor
+/// with no way out. Reported live 2026-09-07 after a dev server died under a
+/// running app: escaping it needed Win+Tab, because Task Manager itself came up
+/// underneath the overlay.
+///
+/// It used to be shown unconditionally 2s into `setup()`, which assumed the page
+/// behind it had loaded. Now both halves must be known good -- geometry applied
+/// on this side, and the overlay's own script alive on the other -- and whichever
+/// lands last does the showing.
+///
+/// There is deliberately NO timeout fallback. "Show it anyway" is exactly the
+/// behaviour that cost a user both screens. A page that never loads leaves the
+/// overlay hidden and says so loudly in the log: that costs the guidance visuals
+/// for the session, which is strictly less than costing the desktop.
+static OVERLAY_CONFIGURED: AtomicBool = AtomicBool::new(false);
+static OVERLAY_SCRIPT_ALIVE: AtomicBool = AtomicBool::new(false);
+
+/// Geometry and window styles have been applied.
+pub fn mark_configured(window: &WebviewWindow) {
+    OVERLAY_CONFIGURED.store(true, Ordering::SeqCst);
+    show_if_safe(window);
+}
+
+/// The overlay's own script reached `onMount`, so the page really loaded.
+/// Idempotent: a dev-server reload calls this again and `show()` is a no-op.
+pub fn mark_script_alive(window: &WebviewWindow) {
+    OVERLAY_SCRIPT_ALIVE.store(true, Ordering::SeqCst);
+    show_if_safe(window);
+}
+
+/// True once the overlay has actually been shown -- used by the startup watchdog
+/// so a page that never loads is a log line rather than silence.
+pub fn is_shown() -> bool {
+    OVERLAY_CONFIGURED.load(Ordering::SeqCst) && OVERLAY_SCRIPT_ALIVE.load(Ordering::SeqCst)
+}
+
+fn show_if_safe(window: &WebviewWindow) {
+    if !is_shown() {
+        return;
+    }
+    match window.show() {
+        Ok(()) => log::info!("overlay shown (configured + script alive)"),
+        Err(e) => log::error!("overlay show failed: {e}"),
+    }
+}
+
 pub fn configure(window: &WebviewWindow) -> Result<()> {
     // Use Tauri's API — it handles WebView2's child HWND correctly.
     window

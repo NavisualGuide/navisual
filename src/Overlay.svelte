@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { invoke } from "@tauri-apps/api/core";
   import { DEFAULT_THICKNESS, strokeScale as weightOf } from "./lib/overlay-weight";
 
   type Rect = { x: number; y: number; width: number; height: number };
@@ -758,6 +759,13 @@
   }
 
   onMount(async () => {
+    // Tell Rust this page really loaded. The overlay window is created hidden and
+    // is shown ONLY once this lands (and geometry is applied) — because an
+    // overlay whose page failed to load is not a transparent canvas, it is an
+    // opaque browser error page covering every monitor, always on top, over even
+    // Task Manager. Reported live 2026-09-07; escaping it needed Win+Tab.
+    invoke("overlay_script_alive").catch(() => {});
+
     await listen<OverlayUpdate>("overlay:update", (event) => {
       // Phase 0.2: AppBoundary is a transient flash, not a replacement for
       // the locator overlay. Run it on its own animation track.
