@@ -3932,7 +3932,10 @@ See the LICENSE file in the root of this repository for complete details.
           <p style="margin: 0 0 10px 0;">
             Navisual captures your active window and sends it to the AI provider you've selected.
           </p>
-          <!-- SINGLE SOURCE OF TRUTH: navisualguide.com/privacy.html.
+          <!-- SINGLE SOURCE OF TRUTH: navisualguide.com/privacy.html
+               (repo NavisualGuide.github.io, file privacy.html — its §1 carries a
+               matching comment listing these same five facts, so the pointer works
+               from either end).
                This list used to restate the policy in full and drifted from it — the
                2026-09-06 audit found it still promising "full-screen needs your
                permission each time" (that consent loop was removed in v0.5.23) and
