@@ -656,7 +656,8 @@ See the LICENSE file in the root of this repository for complete details.
   let availableVoices = $state<VoiceInfo[]>([]);
 
   function handlePanelContextMenu(e: MouseEvent) {
-    // Escape hatches, in order of how often they matter:
+    // App-wide (see the <svelte:window> binding). Escape hatches, in order of
+    // how often they matter:
     //  - text fields: cut/copy/paste is expected there;
     //  - Shift held: the browser convention for "give me the native menu
     //    anyway", so Inspect stays one gesture away.
@@ -3072,6 +3073,15 @@ See the LICENSE file in the root of this repository for complete details.
   });
 </script>
 
+<!-- Right-click: WebView2's built-in browser menu (Back / Reload / Inspect…)
+     breaks the native-app feel and offers nothing a user of this app wants, so it
+     is suppressed app-wide — except inside text fields, and on Shift+right-click.
+     On the WINDOW, not on <main>: Settings, About, the target picker and the
+     lightbox all render OUTSIDE <main> (it has overflow:hidden), so a handler
+     there caught the panel body and missed every dialog. Covers icon mode too;
+     the fish's own handler still runs and still opens its menu. -->
+<svelte:window oncontextmenu={handlePanelContextMenu} />
+
 {#if iconMode}
   <!-- Icon mode: goldfish icon — mousedown starts drag; click expands.
        The ring and the thinking state are here rather than in the panel because
@@ -3185,13 +3195,7 @@ See the LICENSE file in the root of this repository for complete details.
   {/if}
   </div>
 {:else}
-  <!-- Right-click: WebView2's built-in browser menu (Back / Reload / Inspect…)
-       breaks the native-app feel and offers nothing a user of this panel wants,
-       so it is suppressed — except inside text fields, and on Shift+right-click,
-       which is the browser convention for asking for the native menu anyway.
-       The fish has its own handler for the collapsed menu; this is the expanded
-       panel. -->
-  <main oncontextmenu={handlePanelContextMenu}>
+  <main>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
     <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
