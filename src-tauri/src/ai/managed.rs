@@ -244,7 +244,30 @@ impl ManagedClient {
 
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            bail!("relay error ({}): {}", status, text);
+            // Always logged: a relay failure otherwise left NO trace on disk at all —
+            // it went straight to the conversation and nowhere else, so a report of one
+            // could not be checked against anything afterwards.
+            log::warn!(
+                "[managed] relay {status} — body: {}",
+                text.chars().take(500).collect::<String>()
+            );
+            if status.is_server_error() {
+                // A gateway error is upstream and transient, and its body is an HTML
+                // error PAGE. Dumping that page into the conversation (live 2026-09-07:
+                // a full 502 document, tags and all) tells the user nothing they can act
+                // on and buries the one useful fact, which is "try again".
+                bail!(
+                    "The Navisual relay is temporarily unavailable ({}). This is on our side and usually clears in a moment — please try again.",
+                    status.as_u16()
+                );
+            }
+            // 4xx bodies are our own JSON and carry something actionable, so they are
+            // kept — bounded, since an unbounded body is what made 5xx unreadable.
+            bail!(
+                "relay error ({}): {}",
+                status,
+                text.chars().take(300).collect::<String>()
+            );
         }
 
         // Capture balance headers before consuming the response body.

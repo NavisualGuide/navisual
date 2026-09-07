@@ -631,7 +631,8 @@ pub fn get_virtual_desktop_rect() -> Rect {
 /// The previous size-based filter (`< 2000 px`) silently failed on Windows 10
 /// single-monitor setups where the overlay is exactly 1920×1080 — small enough
 /// to slip through, large enough to cover the entire capture in light grey.
-/// `WS_EX_TRANSPARENT` is the precise way to identify our overlay regardless
+/// `WS_EX_TRANSPARENT` identifies our overlay (and tao's tiny event-target helper,
+/// which is harmless to skip here too) regardless
 /// of monitor configuration.
 pub fn own_panel_rects() -> Vec<Rect> {
     let our_pid = std::process::id();
@@ -850,9 +851,9 @@ pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
 /// menu the user just opened can cover the pointer. Calling this on the tracker's
 /// 200 ms tick (only while a pointer is active) keeps the overlay on top.
 ///
-/// The overlay is the only own-process window with `WS_EX_TRANSPARENT`, so we
-/// identify it the same way `own_panel_rects` does. `SWP_NOACTIVATE` ensures we
-/// never steal focus from the app the user is working in.
+/// Identified by `WS_EX_TRANSPARENT` like `own_panel_rects`, MINUS tao's own
+/// "Tao Thread Event Target" helper, which carries the same style — see the body.
+/// `SWP_NOACTIVATE` ensures we never steal focus from the app the user is working in.
 /// Turn a minimize request on the panel into a **collapse/restore toggle** instead.
 ///
 /// Navisual has no minimize button: collapsing to the floating goldfish is how the
@@ -1021,6 +1022,36 @@ pub fn raise_overlay_topmost() {
         }
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         if (ex_style & WS_EX_TRANSPARENT.0) != 0 && IsWindowVisible(hwnd).as_bool() {
+            // "The overlay is the only own-process window with WS_EX_TRANSPARENT" was
+            // the premise here, and it is FALSE: tao creates its own top-level helper,
+            // class "Tao Thread Event Target", 16x16 at (0,0), visible, topmost and
+            // WS_EX_TRANSPARENT. Measured live 2026-09-07 with all three own windows
+            // enumerated front-to-back.
+            //
+            // EnumWindows walks front-to-back and this callback STOPS at its first
+            // match, so the moment that helper sat above the overlay it was the window
+            // that got raised — and being re-inserted at the top of the topmost band is
+            // self-perpetuating, so every later call found it first too. The real canvas
+            // was never touched: the caption stayed behind the panel, and clicking the
+            // panel stopped rescuing it, because the tracker's raise had the same
+            // problem. Silent because raising a 16x16 click-through window looks like
+            // nothing happening.
+            //
+            // Excluded by class rather than by size: a MINIMIZED overlay is parked at
+            // -32000,-32000 at 160x28 and must still be found here so the IsIconic
+            // branch below can restore it, which a size floor would have broken.
+            let mut buf = [0u16; 128];
+            let n = GetClassNameW(hwnd, &mut buf);
+            let class = String::from_utf16_lossy(&buf[..n as usize]);
+            if class == "Tao Thread Event Target" {
+                return TRUE; // keep looking — this is not our canvas
+            }
+            // Logged once so a future mis-pick is visible from a shipped log instead of
+            // presenting as "the pointer is behind things again".
+            static LOGGED_OVERLAY: std::sync::Once = std::sync::Once::new();
+            LOGGED_OVERLAY.call_once(|| {
+                log::info!("[overlay] z-order target: hwnd {:?} class '{class}'", hwnd.0);
+            });
             // A window keeps WS_VISIBLE while minimized — IsWindowVisible alone can't
             // tell iconic apart from actually on-screen. Windows can minimize the
             // overlay itself when it's anchored to a monitor that just disconnected
