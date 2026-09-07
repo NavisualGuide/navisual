@@ -34,6 +34,27 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+    // 4. Transform the app's own modules at server start instead of on the
+    // webview's first request. `tauri dev` boots a FRESH Vite every run, so the
+    // first page load has always paid the whole cold transform, and it is the
+    // dominant cost of starting dev: measured on a real launch (2026-09-07),
+    // navigationStart at process+1181ms, then ttfb 4067ms, domInteractive
+    // 4385ms and DOMContentLoaded 20242ms -- i.e. ~16s spent fetching and
+    // transforming the module graph after the HTML was parsed. Release never
+    // pays it (bundled assets, custom protocol), which is the whole gap between
+    // an instant .exe and a 10-30s dev start.
+    //
+    // Measured A/B, two cold `tauri dev` launches each, process start to the
+    // frontend's first invoke: OFF 21.5s / 25.9s, ON 16.8s / 16.0s. Warmup also
+    // removes the variance, which is the tell that the cold transform had been
+    // racing the page load. It costs ~0.6-1.1s of extra TTFB on index.html
+    // (warmup competes with the first request) and pays back 4-10s at DCL.
+    // It does NOT fix the remaining ~10s between domInteractive and DCL, which
+    // is the webview fetching and executing 43 dev modules -- Chrome does the
+    // same graph warm in ~0.9s, so that residual is still unexplained.
+    warmup: {
+      clientFiles: ["./src/main.ts", "./src/overlay.ts", "./src/*.svelte", "./src/lib/*.ts"],
+    },
   },
   // Pre-bundle Tauri runtime imports so each page transform doesn't trigger
   // a fresh module-graph walk through node_modules.
