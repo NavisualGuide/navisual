@@ -6812,6 +6812,53 @@ fn is_packaged() -> bool {
     packaged
 }
 
+/// Epoch-millis stamp taken as the first statement of `run()`, so a webview
+/// timestamp can be expressed as an offset from process start.
+static PROCESS_START_MS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+
+fn process_start_ms() -> u128 {
+    *PROCESS_START_MS.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    })
+}
+
+/// Boot-timing report from the webview, for one open question: a dev build takes
+/// ~24 s from process start to its first invoke while release takes ~1 s, and
+/// measurement has ruled out every workload explanation -- Chrome loads the
+/// identical dev page in 1.36 s, the warm module graph serves in 151 ms, the
+/// whole Svelte compile is 918 ms -- as well as a stale WebView2 lock, the
+/// localhost/::1 resolution order, and proxy auto-detection. The distribution is
+/// bimodal with nothing at all between 5 s and 10 s, which is the shape of a
+/// wait rather than of work.
+///
+/// `process->navigationStart` is the number that splits the remaining space: if
+/// it carries the delay, the time went on window/WebView2 creation before the
+/// page began loading; if it is small and the later marks are large, the load
+/// itself is slow inside WebView2 in a way it is not in Chrome.
+///
+/// Takes no `State` on purpose -- it has to answer during the very startup race
+/// it is measuring, before `manage()` has run.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn report_boot_timing(
+    phase: String,
+    time_origin_ms: f64,
+    connect_ms: f64,
+    ttfb_ms: f64,
+    dom_interactive_ms: f64,
+    dom_content_loaded_ms: f64,
+    load_event_end_ms: f64,
+    now_ms: f64,
+) {
+    let nav_start = time_origin_ms - process_start_ms() as f64;
+    log::info!(
+        "[boot:{phase}] process->navigationStart {nav_start:.0} ms | then, ms after navigationStart: connect {connect_ms:.0} ttfb {ttfb_ms:.0} domInteractive {dom_interactive_ms:.0} DCL {dom_content_loaded_ms:.0} loadEnd {load_event_end_ms:.0} report {now_ms:.0}"
+    );
+}
+
 /// Readiness probe for the frontend's cold-start gate.
 ///
 /// `handle.manage(AppState)` is the LAST thing `setup()` does, and `setup()` can
@@ -6927,6 +6974,8 @@ async fn submit_feedback(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First statement, so every later webview timestamp has a process-relative origin.
+    let _ = process_start_ms();
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -7135,6 +7184,7 @@ pub fn run() {
             exit_for_update,
             is_packaged,
             backend_ready,
+            report_boot_timing,
             list_target_windows,
             list_monitors,
             pin_target_window,

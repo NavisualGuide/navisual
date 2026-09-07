@@ -618,6 +618,34 @@ See the LICENSE file in the root of this repository for complete details.
     return backendReadyGate;
   }
 
+  // Boot timing, for one open question (2026-09-07): a dev build takes ~24s from
+  // process start to its first invoke while release takes ~1s. Measurement has
+  // ruled out every workload explanation -- Chrome loads this identical dev page
+  // in 1.36s, the warm module graph serves in 151ms, the whole Svelte compile is
+  // 918ms -- plus a stale WebView2 lock, the localhost/::1 resolution order and
+  // proxy auto-detection. The launch distribution is bimodal with nothing between
+  // 5s and 10s, which is the shape of a wait, not of work.
+  //
+  // Reported at two moments because they bracket the load: "mount" fires from
+  // onMount (module scripts are deferred, so DCL/load may still read 0 there),
+  // "load" after the window load event, when every mark is final. Plain invoke,
+  // never invokeReady -- this has to answer during the race it measures.
+  function reportBootTiming(phase: string) {
+    try {
+      const n = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+      invoke("report_boot_timing", {
+        phase,
+        timeOriginMs: performance.timeOrigin,
+        connectMs: n ? n.connectEnd - n.connectStart : -1,
+        ttfbMs: n ? n.responseStart - n.requestStart : -1,
+        domInteractiveMs: n ? n.domInteractive : -1,
+        domContentLoadedMs: n ? n.domContentLoadedEventEnd : -1,
+        loadEventEndMs: n ? n.loadEventEnd : -1,
+        nowMs: performance.now(),
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
   /** invoke(), held until Rust has managed AppState. Startup paths only. */
   async function invokeReady<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     await waitForBackend();
@@ -2679,6 +2707,11 @@ See the LICENSE file in the root of this repository for complete details.
   let isByok = $derived(!["managed", "ollama"].includes(settingsForm.api_provider));
 
   onMount(async () => {
+    // Before anything else, so "report" is the earliest the frontend could speak.
+    reportBootTiming("mount");
+    if (document.readyState === "complete") reportBootTiming("load");
+    else window.addEventListener("load", () => reportBootTiming("load"), { once: true });
+
     getVersion().then(v => { appVersion = v; }).catch(() => {});
     // Resolve packaging BEFORE arming the update check — awaited, not fire-and-forget,
     // so a Store build can't race the 5s timer and phone home once on launch.
