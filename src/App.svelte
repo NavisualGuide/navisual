@@ -658,6 +658,11 @@ See the LICENSE file in the root of this repository for complete details.
   function handlePanelContextMenu(e: MouseEvent) {
     // App-wide (see the <svelte:window> binding). Escape hatches, in order of
     // how often they matter:
+    //  - a live text selection: right-click is how people reach Copy, and the
+    //    conversation is selectable on purpose. WebView2's own menu is contextual
+    //    on a selection (Copy / Search / Print / Inspect), so it earns its place
+    //    there — which is why this beats building a custom menu for one item.
+    //    Ctrl+C already worked and still does; this is about discoverability.
     //  - text fields: cut/copy/paste is expected there;
     //  - Shift held: the browser convention for "give me the native menu
     //    anyway", so Inspect stays one gesture away.
@@ -666,6 +671,8 @@ See the LICENSE file in the root of this repository for complete details.
     // applied for the only person who would ever notice it (live report
     // 2026-09-07, browser menu still opening over the panel).
     if (e.shiftKey) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().trim()) return;
     const t = e.target as HTMLElement | null;
     if (t && t.closest("textarea, input, [contenteditable]")) return;
     e.preventDefault();
