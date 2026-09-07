@@ -97,17 +97,72 @@ foreach ($turn in $session.turns) {
     $g.TextRenderingHint = 'ClearTypeGridFit'
 
     if (-not $NoPointer -and $step.pointer.rect) {
-      $r = $step.pointer.rect
-      $pad = 6
-      # Three nested rings, faintest outermost -- the same shape the app draws.
-      foreach ($ring in 3, 2, 1) {
-        $alpha = @{ 3 = 90; 2 = 170; 1 = 255 }[$ring]
+      # Same pointer the app draws (Overlay.svelte drawBox) and the same one the Rust
+      # exporter burns in: ripple rings, corner brackets, centre crosshair. This used
+      # to be three nested rectangles under a comment claiming it was "the same shape
+      # the app draws" -- it never was. Keep this in step with draw_pointer() in
+      # src-tauri/src/session_export.rs; they must produce the same picture, because
+      # this script exists to redo exactly what the export already did.
+      #
+      # Two deliberate departures from the live overlay, because a still cannot show
+      # motion: the ripples are frozen at the three phases they hold at t=0, and the
+      # sweeping scan line is dropped (frozen it is just a bar across the element).
+      $r  = $step.pointer.rect
+      $bx = [double]$r[0]; $by = [double]$r[1]
+      $bw = [double]$r[2]; $bh = [double]$r[3]
+      $cx = $bx + $bw / 2.0
+      $cy = $by + $bh / 2.0
+
+      # Ripple rings. Ellipse, not circle: a circle sized by the long axis balloons
+      # past a thin element's short axis. Growth is capped on the short axis of a
+      # wide row for the same reason.
+      $growth   = [Math]::Min($bw, $bh) * 0.7
+      $ryGrowth = if ($bw -gt $bh * 2.0) { [Math]::Min($growth, $bh * 0.4) } else { $growth }
+      foreach ($i in 0, 1, 2) {
+        $phase = $i / 3.0
+        $rx = $bw / 2.0 + 8.0 + $phase * $growth
+        $ry = $bh / 2.0 + 8.0 + $phase * $ryGrowth
+        $a  = [int]((1.0 - $phase) * 0.55 * 255)
+        $wd = [Math]::Max(1.0, 2.5 - $phase * 1.8)
         $pen = New-Object System.Drawing.Pen(
-          [System.Drawing.Color]::FromArgb($alpha, $accent.R, $accent.G, $accent.B), 2)
-        $o = $pad + $ring * 2
-        $g.DrawRectangle($pen, $r[0] - $o, $r[1] - $o, $r[2] + $o * 2, $r[3] + $o * 2)
+          [System.Drawing.Color]::FromArgb($a, $accent.R, $accent.G, $accent.B), $wd)
+        $g.DrawEllipse($pen, $cx - $rx, $cy - $ry, $rx * 2.0, $ry * 2.0)
         $pen.Dispose()
       }
+
+      # Corner brackets: a dark stroke under the accent one, so the mark survives on
+      # any background.
+      $arm = [Math]::Min(26.0, [Math]::Max(14.0, [Math]::Min($bw * 0.38, $bh * 0.5)))
+      $shadow = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(191, 0, 0, 0), 5.5)
+      $bright = New-Object System.Drawing.Pen(
+        [System.Drawing.Color]::FromArgb(255, $accent.R, $accent.G, $accent.B), 3.0)
+      $dot = New-Object System.Drawing.SolidBrush(
+        [System.Drawing.Color]::FromArgb(255, $accent.R, $accent.G, $accent.B))
+      # Indices, not an array of arrays: PowerShell flattens nested arrays built with
+      # @(), so $corner[0] came back as an array and the arithmetic below failed with
+      # "does not contain a method named 'op_Addition'".
+      foreach ($corner in 0, 1, 2, 3) {
+        $left = ($corner -eq 0 -or $corner -eq 2)
+        $top  = ($corner -lt 2)
+        $ox = if ($left) { $bx } else { $bx + $bw }
+        $oy = if ($top)  { $by } else { $by + $bh }
+        $dx = if ($left) { 1.0 } else { -1.0 }
+        $dy = if ($top)  { 1.0 } else { -1.0 }
+        foreach ($pen in $shadow, $bright) {
+          $g.DrawLine($pen, $ox + $dx * $arm, $oy, $ox, $oy)
+          $g.DrawLine($pen, $ox, $oy, $ox, $oy + $dy * $arm)
+        }
+        $g.FillEllipse($dot, $ox - 3.5, $oy - 3.5, 7.0, 7.0)
+      }
+      $shadow.Dispose(); $bright.Dispose(); $dot.Dispose()
+
+      # Centre crosshair. The app pulses this between 0.35 and 0.60 alpha; a still
+      # takes the midpoint.
+      $cross = New-Object System.Drawing.Pen(
+        [System.Drawing.Color]::FromArgb([int](0.475 * 255), $accent.R, $accent.G, $accent.B), 1.5)
+      $g.DrawLine($cross, $cx - 5.0, $cy, $cx + 5.0, $cy)
+      $g.DrawLine($cross, $cx, $cy - 5.0, $cx, $cy + 5.0)
+      $cross.Dispose()
     }
 
     if (-not $NoCaption -and $step.instruction) {

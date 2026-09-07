@@ -411,6 +411,27 @@ impl ExportBuffer {
 ///
 /// The caller is responsible for the overlay being clear — see the call site in
 /// `execute_step`, which captures before drawing.
+/// Read the export frame's pixels, nothing more. Must be called at the clean
+/// moment (overlay down, no streamed caption); the encode that follows must not.
+pub fn capture_frame_raw(target_rect: Option<Rect>) -> Option<crate::capture::RawExportFrame> {
+    let region = match target_rect {
+        Some(r) => monitor_containing(r).unwrap_or(r),
+        None => crate::capture::enumerate_monitor_rects().into_iter().next()?,
+    };
+    crate::capture::capture_region_for_export_raw(region).ok()
+}
+
+/// Finish a frame started by `capture_frame_raw`. Deliberately called while the AI
+/// request is already in flight, where ~364 ms of JPEG encoding costs nothing.
+pub fn encode_frame(
+    img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>>,
+    rect: Rect,
+) -> Option<(Vec<u8>, Rect)> {
+    crate::capture::encode_export_frame(img)
+        .ok()
+        .map(|bytes| (bytes, rect))
+}
+
 pub fn capture_frame(target_rect: Option<Rect>) -> Option<(Vec<u8>, Rect)> {
     let region = match target_rect {
         Some(r) => monitor_containing(r).unwrap_or(r),
@@ -1030,16 +1051,143 @@ fn draw_caption(img: &mut image::RgbaImage, text: &str) {
     }
 }
 
-/// Draw the pointer annotation: a bright ring plus a soft halo, sized to the
-/// element. Kept simple on purpose — this is a still image, not the live overlay,
-/// and it has to read at both full width and click-to-enlarge (§0.4).
+/// Draw the pointer annotation, matching what the app actually puts on screen:
+/// ripple rings, corner brackets, centre crosshair.
+///
+/// It used to be three nested rectangles, "kept simple on purpose" — and a comment
+/// in `tools/annotate-session.ps1` claimed that was "the same shape the app draws",
+/// which it never was. The exporter's own rule, stated beside the caption code, is
+/// that someone comparing an exported figure with their own screen should see the
+/// same thing; the caption honoured it and the pointer did not.
+///
+/// The geometry below is `Overlay.svelte`'s `drawBox`, frozen. Two deliberate
+/// departures, because a still cannot lie about motion:
+///   - the ripples are drawn at the three phases they occupy at t=0 (0, 1/3, 2/3),
+///     which is one real frame of the animation rather than an invented one;
+///   - the sweeping scan line is omitted entirely. It reads as a highlight only
+///     because it moves; frozen it is just a bar across the element.
 fn draw_pointer(img: &mut image::RgbaImage, x: i32, y: i32, w: i32, h: i32) {
-    const ACCENT: [u8; 4] = [255, 107, 53, 255]; // --accent, matching the site
-    let pad = 6;
-    for (i, ring) in [3i32, 2, 1].into_iter().enumerate() {
-        let alpha = [90u8, 170, 255][i];
-        let r = [x - pad - ring * 2, y - pad - ring * 2, w + (pad + ring * 2) * 2, h + (pad + ring * 2) * 2];
-        stroke_rect(img, r[0], r[1], r[2], r[3], [ACCENT[0], ACCENT[1], ACCENT[2], alpha], 2);
+    const ACCENT: [u8; 3] = [255, 107, 53];
+    let (cx, cy) = (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
+    let (bw, bh) = (w as f32, h as f32);
+
+    // ── Ripple rings ────────────────────────────────────────────────────────
+    // Ellipse, not circle: a circle sized by max(bw,bh) balloons past a long thin
+    // element's short axis. Growth is capped on the short axis of a wide row for
+    // the same reason (drawBox carries the same two fixes).
+    let base_rx = bw / 2.0 + 8.0;
+    let base_ry = bh / 2.0 + 8.0;
+    let growth = bw.min(bh) * 0.7;
+    let ry_growth = if bw > bh * 2.0 { growth.min(bh * 0.4) } else { growth };
+    for i in 0..3 {
+        let phase = i as f32 / 3.0;
+        let rx = base_rx + phase * growth;
+        let ry = base_ry + phase * ry_growth;
+        let alpha = ((1.0 - phase) * 0.55 * 255.0) as u8;
+        let thickness = (2.5 - phase * 1.8).max(1.0);
+        stroke_ellipse(img, cx, cy, rx, ry, [ACCENT[0], ACCENT[1], ACCENT[2], alpha], thickness);
+    }
+
+    // ── Corner brackets ─────────────────────────────────────────────────────
+    // A dark stroke under the accent one, so the mark survives on any background.
+    let arm = 26.0_f32.min(14.0_f32.max((bw * 0.38).min(bh * 0.5)));
+    for &(ox, oy, dx, dy) in &[
+        (x as f32, y as f32, 1.0, 1.0),
+        (x as f32 + bw, y as f32, -1.0, 1.0),
+        (x as f32, y as f32 + bh, 1.0, -1.0),
+        (x as f32 + bw, y as f32 + bh, -1.0, -1.0),
+    ] {
+        for (colour, t) in [([0u8, 0, 0, 191], 5.5_f32), ([ACCENT[0], ACCENT[1], ACCENT[2], 255], 3.0)] {
+            stroke_line(img, ox + dx * arm, oy, ox, oy, colour, t);
+            stroke_line(img, ox, oy, ox, oy + dy * arm, colour, t);
+        }
+        fill_disc(img, ox, oy, 3.5, [ACCENT[0], ACCENT[1], ACCENT[2], 255]);
+    }
+
+    // ── Centre crosshair ────────────────────────────────────────────────────
+    // The app pulses this between 0.35 and 0.60 alpha; a still takes the midpoint.
+    let cr = 5.0;
+    let cross = [ACCENT[0], ACCENT[1], ACCENT[2], (0.475 * 255.0) as u8];
+    stroke_line(img, cx - cr, cy, cx + cr, cy, cross, 1.5);
+    stroke_line(img, cx, cy - cr, cx, cy + cr, cross, 1.5);
+}
+
+/// Alpha-blend one pixel, clipped to the image.
+fn blend_px(img: &mut image::RgbaImage, x: i32, y: i32, c: [u8; 4], coverage: f32) {
+    if coverage <= 0.0 || x < 0 || y < 0 || x >= img.width() as i32 || y >= img.height() as i32 {
+        return;
+    }
+    let a = (c[3] as f32 / 255.0) * coverage.min(1.0);
+    let dst = img.get_pixel_mut(x as u32, y as u32);
+    for (d, src) in dst.0.iter_mut().zip(c.iter()).take(3) {
+        *d = (*d as f32 * (1.0 - a) + *src as f32 * a).round() as u8;
+    }
+}
+
+/// Stroke an axis-aligned ellipse of the given thickness, anti-aliased by distance
+/// to the ideal curve. Scanning the bounding box keeps it simple and the boxes here
+/// are small; the normalised-radius trick avoids a per-pixel ellipse solve.
+fn stroke_ellipse(
+    img: &mut image::RgbaImage,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    c: [u8; 4],
+    thickness: f32,
+) {
+    if rx <= 0.5 || ry <= 0.5 {
+        return;
+    }
+    let half = thickness / 2.0;
+    let (x0, x1) = ((cx - rx - half - 1.0) as i32, (cx + rx + half + 1.0) as i32);
+    let (y0, y1) = ((cy - ry - half - 1.0) as i32, (cy + ry + half + 1.0) as i32);
+    for py in y0..=y1 {
+        for px in x0..=x1 {
+            let dx = (px as f32 + 0.5 - cx) / rx;
+            let dy = (py as f32 + 0.5 - cy) / ry;
+            let norm = (dx * dx + dy * dy).sqrt();
+            // Convert the normalised distance back into approximate pixels so the
+            // stroke has even width on both axes.
+            let scale = rx.min(ry);
+            let dist = ((norm - 1.0) * scale).abs();
+            let coverage = (half + 0.5 - dist).clamp(0.0, 1.0);
+            blend_px(img, px, py, c, coverage);
+        }
+    }
+}
+
+/// Stroke a straight segment with square caps, anti-aliased across its width.
+fn stroke_line(img: &mut image::RgbaImage, x0: f32, y0: f32, x1: f32, y1: f32, c: [u8; 4], t: f32) {
+    let half = t / 2.0;
+    let (minx, maxx) = (x0.min(x1) - half - 1.0, x0.max(x1) + half + 1.0);
+    let (miny, maxy) = (y0.min(y1) - half - 1.0, y0.max(y1) + half + 1.0);
+    let (vx, vy) = (x1 - x0, y1 - y0);
+    let len2 = vx * vx + vy * vy;
+    for py in miny as i32..=maxy as i32 {
+        for px in minx as i32..=maxx as i32 {
+            let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+            // Distance to the segment, clamped to its ends.
+            let tpar = if len2 > 0.0 {
+                (((fx - x0) * vx + (fy - y0) * vy) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let (nx, ny) = (x0 + tpar * vx, y0 + tpar * vy);
+            let dist = ((fx - nx).powi(2) + (fy - ny).powi(2)).sqrt();
+            let coverage = (half + 0.5 - dist).clamp(0.0, 1.0);
+            blend_px(img, px, py, c, coverage);
+        }
+    }
+}
+
+/// Filled anti-aliased disc — the bracket's corner dot.
+fn fill_disc(img: &mut image::RgbaImage, cx: f32, cy: f32, r: f32, c: [u8; 4]) {
+    for py in (cy - r - 1.0) as i32..=(cy + r + 1.0) as i32 {
+        for px in (cx - r - 1.0) as i32..=(cx + r + 1.0) as i32 {
+            let d = ((px as f32 + 0.5 - cx).powi(2) + (py as f32 + 0.5 - cy).powi(2)).sqrt();
+            blend_px(img, px, py, c, (r + 0.5 - d).clamp(0.0, 1.0));
+        }
     }
 }
 
@@ -1094,27 +1242,6 @@ fn fill_round_rect(
     }
 }
 
-fn stroke_rect(img: &mut image::RgbaImage, x: i32, y: i32, w: i32, h: i32, c: [u8; 4], t: i32) {
-    let (iw, ih) = (img.width() as i32, img.height() as i32);
-    let blend = |dst: &mut image::Rgba<u8>, c: [u8; 4]| {
-        let a = c[3] as f32 / 255.0;
-        for (d, src) in dst.0.iter_mut().zip(c.iter()).take(3) {
-            *d = (*d as f32 * (1.0 - a) + *src as f32 * a).round() as u8;
-        }
-    };
-    for dy in 0..h {
-        for dx in 0..w {
-            let on_edge = dx < t || dy < t || dx >= w - t || dy >= h - t;
-            if !on_edge {
-                continue;
-            }
-            let (px, py) = (x + dx, y + dy);
-            if px >= 0 && py >= 0 && px < iw && py < ih {
-                blend(img.get_pixel_mut(px as u32, py as u32), c);
-            }
-        }
-    }
-}
 
 /// The first-run default: `%USERPROFILE%\Documents\Navisual\exports`.
 ///
@@ -1603,7 +1730,6 @@ mod tests {
              the slider, select an accent color under 颜色, or switch your background theme.",
         );
         img.save(&out).unwrap();
-        println!("wrote {}", out.display());
     }
 
     #[test]
@@ -1710,5 +1836,34 @@ mod tests {
         assert!(b.is_empty());
         assert_eq!(b.step_count(), 0);
         assert!(b.app_name.is_none());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod pointer_parity {
+    /// Renders `draw_pointer` onto a real exported frame so it can be compared, by
+    /// eye, against what `tools/annotate-session.ps1` produces for the same rect.
+    /// The two implementations must draw the same picture — the script exists to redo
+    /// what the export already did — and nothing else checks that they agree.
+    ///
+    ///   cargo test --lib pointer_parity -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn render_sample() {
+        let src = std::env::var("NAVISUAL_FRAME").unwrap_or_default();
+        let rect: Vec<i32> = std::env::var("NAVISUAL_RECT")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        if src.is_empty() || rect.len() != 4 {
+            println!("set NAVISUAL_FRAME=<png> and NAVISUAL_RECT=x,y,w,h");
+            return;
+        }
+        let mut img = image::open(&src).expect("open frame").to_rgba8();
+        super::draw_pointer(&mut img, rect[0], rect[1], rect[2], rect[3]);
+        let out = std::env::temp_dir().join("rust-pointer.png");
+        img.save(&out).expect("save");
+        println!("wrote {}", out.to_string_lossy());
     }
 }

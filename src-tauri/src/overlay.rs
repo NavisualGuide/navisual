@@ -403,6 +403,30 @@ pub fn emit_update(app: &AppHandle, mut update: OverlayUpdate) -> Result<()> {
         update.virtual_origin = (vd.x, vd.y);
         update.virtual_size = (vd.width, vd.height);
     }
+    // EDGE-TRIGGERED so streaming (one emit per chunk) cannot flood the log: report
+    // only when what is on screen actually changes shape. Every draw path funnels
+    // through here, so this is the whole picture of what the overlay was told to
+    // show and in what order — which is exactly what a "the caption blinks out
+    // between the answer and the pointer" report needs and nothing else records.
+    {
+        use std::sync::Mutex;
+        static LAST: Mutex<Option<(u8, bool, bool)>> = Mutex::new(None);
+        let sig = (
+            update.kind as u8,
+            update.bbox.is_some(),
+            update.text.as_deref().is_some_and(|t| !t.is_empty()),
+        );
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.as_ref() != Some(&sig) {
+            log::info!(
+                "[overlay] emit kind={:?} bbox={} text={}",
+                update.kind,
+                sig.1,
+                sig.2
+            );
+            *last = Some(sig);
+        }
+    }
     window
         .emit("overlay:update", &update)
         .map_err(|e| anyhow!("emit overlay:update: {e}"))?;

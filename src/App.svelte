@@ -11,7 +11,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
   import { LogicalSize, LogicalPosition, PhysicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
   import { listen, emitTo } from "@tauri-apps/api/event";
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
   import HotkeyInput from "./HotkeyInput.svelte";
   import { prettyHotkey } from "./lib/hotkey";
@@ -843,6 +843,47 @@ See the LICENSE file in the root of this repository for complete details.
   let exportBusy = $state(false);
   let exportError = $state("");
   let exportDone = $state("");
+  // Brief "✓ Copied" confirmation on the export path's copy button.
+  let exportPathCopied = $state(false);
+  let exportCopyTimer: ReturnType<typeof setTimeout> | null = null;
+  // Two dead ends before this one, both worth recording.
+  //
+  // `openUrl` is for URLs — the opener plugin's default permission covers mailto/tel/
+  // http(s) only, so a Windows path was rejected as both wrong-scheme and not-a-URL.
+  // `openPath` is the filesystem entry point, but it enforces a path SCOPE, and no
+  // useful scope exists here: the export folder is whatever the user picked in a
+  // native dialog, so anything broad enough to always work is `**`.
+  //
+  // `revealItemInDir` takes no scope and is already granted by `opener:default`. It
+  // opens the CONTAINING folder with the item selected — so revealing a file inside
+  // the export folder opens the export folder itself, which is what "Open folder"
+  // should do. Revealing the folder would show its parent instead. Falls back to that
+  // if the file is missing.
+  async function openExportFolder() {
+    if (!exportDone) return;
+    const sep = exportDone.includes("\\") ? "\\" : "/";
+    try {
+      await revealItemInDir(`${exportDone}${sep}session.md`);
+    } catch {
+      try {
+        await revealItemInDir(exportDone);
+      } catch (e) {
+        exportError = `Couldn't open the folder: ${e}`;
+      }
+    }
+  }
+
+  async function copyExportPath() {
+    if (!exportDone) return;
+    try {
+      await invoke("copy_text", { text: exportDone });
+      exportPathCopied = true;
+      if (exportCopyTimer) clearTimeout(exportCopyTimer);
+      exportCopyTimer = setTimeout(() => (exportPathCopied = false), 1800);
+    } catch (e) {
+      exportError = `Couldn't copy the path: ${e}`;
+    }
+  }
 
   async function openExport() {
     exportError = ""; exportDone = ""; exportRedacted = [];
@@ -3807,8 +3848,21 @@ See the LICENSE file in the root of this repository for complete details.
 
         {#if exportDone}
           <p class="export-ok">
-            Saved to<br /><code>{exportDone}</code>
+            Saved to<br />
+            <!-- The path is the whole point of this screen, and it was previously a
+                 dead <code> block you had to retype or hand-select. Now: click to open
+                 the folder, or copy it for a terminal. -->
+            <button
+              class="export-path"
+              title="Open this folder"
+              onclick={openExportFolder}>{exportDone}</button>
           </p>
+          <div class="export-path-actions">
+            <button class="btn-ghost" onclick={openExportFolder}>📂 Open folder</button>
+            <button class="btn-ghost" onclick={copyExportPath}>
+              {exportPathCopied ? "✓ Copied" : "⧉ Copy path"}
+            </button>
+          </div>
           <p class="export-note">
             <code>steps/</code> holds the untouched screenshots and
             <code>steps-annotated/</code> the marked-up ones, alongside a readable
@@ -6167,7 +6221,33 @@ See the LICENSE file in the root of this repository for complete details.
   .export-note { font-size: 12.5px; color: var(--text-secondary, #a0a0a8); line-height: 1.5; margin: 0; }
   .export-err { font-size: 12.5px; color: #ff6b6b; margin: 0; }
   .export-ok { font-size: 12.5px; margin: 0; line-height: 1.6; }
-  .export-ok code { word-break: break-all; font-size: 11.5px; }
+  /* The path reads as the monospace block it always was, but is now a control:
+     click to open the folder. Kept full-width and wrapping — truncating the one
+     string the screen exists to give you would be a strange saving. */
+  .export-path {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 2px 0;
+    margin: 0;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 1.45;
+    word-break: break-all;
+    color: var(--accent-400, #ff8555);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .export-path:hover { color: var(--accent-500, #ff6b35); }
+  .export-path-actions {
+    display: flex;
+    gap: 8px;
+    margin: 8px 0 4px;
+  }
+  .export-path-actions .btn-ghost { flex: 1; padding: 6px 8px; font-size: 12px; }
   /* Advisory, not a blocker — deliberately not styled as an error. */
   .export-thin {
     font-size: 12px;
@@ -6266,6 +6346,14 @@ See the LICENSE file in the root of this repository for complete details.
 
   .quick-menu {
     display: flex;
+    /* WRAP, or the last items are silently clipped. A flex item will not shrink
+       below its label's intrinsic width, so this row overflows the panel once it
+       holds enough entries — and a docked panel is only a quarter of the screen.
+       Live report: with the panel docked and session export on, the menu held six
+       items and "Save this session" sat off the right edge, present in the DOM and
+       unreachable. Losing actions in this menu is a recurring fault here (it is why
+       Clear and Wrong were promoted out of it), so the row grows downward instead. */
+    flex-wrap: wrap;
     gap: 5px;
     padding: 6px 12px;
     border-top: 1px solid var(--border);

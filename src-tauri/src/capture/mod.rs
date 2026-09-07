@@ -205,21 +205,25 @@ const EXPORT_QUALITY: u8 = 88;
 /// and nothing blanked. The caller passes the monitor rect, so the Navisual panel
 /// stays in shot (`session-export-design.md` §0.4).
 pub fn capture_region_for_export(rect: Rect) -> Result<(Vec<u8>, Rect)> {
+    let (img, rect) = capture_region_for_export_raw(rect)?;
+    Ok((encode_export_frame(img)?, rect))
+}
+
+/// Screen pixels plus the region they came from, before any encoding.
+pub type RawExportFrame = (ImageBuffer<Rgba<u8>, Vec<u8>>, Rect);
+
+/// The half of the export frame that MUST happen at the clean moment: read the
+/// pixels while the overlay is down and the streamed caption does not exist yet.
+///
+/// Split out from the encode because the two have opposite constraints. Measured on
+/// a 1920x1080 primary monitor: BitBlt ~138 ms, JPEG encode ~364 ms. Only the first
+/// is time-critical, so the second is done while the AI request is already in flight
+/// (see guide()) instead of making every request wait for both.
+pub fn capture_region_for_export_raw(rect: Rect) -> Result<RawExportFrame> {
     #[cfg(windows)]
     {
         let img = win::capture_desktop_region(&rect)?;
-        let (w, h) = (img.width(), img.height());
-        let img = if w <= EXPORT_MAX_W && h <= EXPORT_MAX_H {
-            img
-        } else {
-            let scale =
-                (EXPORT_MAX_W as f32 / w as f32).min(EXPORT_MAX_H as f32 / h as f32);
-            let nw = ((w as f32 * scale).round() as u32).max(1);
-            let nh = ((h as f32 * scale).round() as u32).max(1);
-            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3)
-        };
-        let buf = encode_jpeg(&img, EXPORT_QUALITY)?;
-        Ok((buf, rect))
+        Ok((img, rect))
     }
 
     #[cfg(not(windows))]
@@ -227,6 +231,22 @@ pub fn capture_region_for_export(rect: Rect) -> Result<(Vec<u8>, Rect)> {
         let _ = rect;
         Err(anyhow!("export capture only implemented for Windows"))
     }
+}
+
+/// The half that can wait: downscale-if-needed and JPEG-encode. Safe to run long
+/// after the pixels were read, and deliberately does so.
+pub fn encode_export_frame(img: ImageBuffer<Rgba<u8>, Vec<u8>>) -> Result<Vec<u8>> {
+    let (w, h) = (img.width(), img.height());
+    // A cap, not a resize: 1080p and 1440p are untouched, 4K is halved.
+    let img = if w <= EXPORT_MAX_W && h <= EXPORT_MAX_H {
+        img
+    } else {
+        let scale = (EXPORT_MAX_W as f32 / w as f32).min(EXPORT_MAX_H as f32 / h as f32);
+        let nw = ((w as f32 * scale).round() as u32).max(1);
+        let nh = ((h as f32 * scale).round() as u32).max(1);
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3)
+    };
+    encode_jpeg(&img, EXPORT_QUALITY)
 }
 
 /// Capture one explicit desktop region as a raw RGBA ImageBuffer (no JPEG, no downscale).
@@ -279,6 +299,26 @@ pub fn capture_active_window_raw(
 /// RGB channels are preserved exactly; alpha is dropped (OCR doesn't need it).
 /// Uses default PNG compression (level 6) — correct and reasonably fast for
 /// the sizes we handle (typically ≤ 1920×1080 before any upscale).
+/// The virtual-desktop rect (all monitors' union), for callers that need the region
+/// before deciding how to capture it.
+pub fn virtual_desktop_rect() -> Rect {
+    #[cfg(windows)]
+    {
+        win::get_virtual_desktop_rect()
+    }
+    #[cfg(not(windows))]
+    {
+        Rect { x: 0, y: 0, width: 0, height: 0 }
+    }
+}
+
+/// Encode an already-captured frame as the AI-bound JPEG: token-cap downscale, then
+/// encode. Split out so one raw capture can serve both the AI image and the OCR PNG
+/// instead of the screen being read twice.
+pub fn encode_capture_jpeg(img: ImageBuffer<Rgba<u8>, Vec<u8>>, quality: u8) -> Result<Vec<u8>> {
+    encode_jpeg(&cap_size(img), quality)
+}
+
 pub fn encode_png_for_ocr(img: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> Result<Vec<u8>> {
     use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
     let (w, h) = (img.width(), img.height());
@@ -633,5 +673,90 @@ pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
     #[cfg(not(windows))]
     {
         let _ = (hwnd_raw, enabled);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod export_cost_tests {
+    /// Measures what the session-export frame actually costs on THIS machine's
+    /// primary monitor, since it now runs on every request at AI-capture time.
+    /// Ignored: it reads the live screen, so it is a measurement harness rather
+    /// than an assertion.
+    ///
+    /// RUN IT IN RELEASE, ALWAYS:
+    ///   cargo test --release --lib export_frame_cost -- --ignored --nocapture
+    ///
+    /// `image`'s resize and encode paths are 3-15x slower unoptimised, so a debug
+    /// run reports numbers that are real for `tauri dev` but wildly wrong for what
+    /// ships. Measured both ways on one 1920x1080 monitor: export frame 602 ms debug
+    /// vs 124 ms release, AI JPEG 2140 ms vs 142 ms. A debug figure was quoted as a
+    /// per-request user cost once already; don't repeat it.
+    #[test]
+    #[ignore]
+    fn export_frame_cost() {
+        let Some(mon) = super::enumerate_monitor_rects().into_iter().next() else {
+            println!("no monitors");
+            return;
+        };
+        println!("monitor {}x{}", mon.width, mon.height);
+        // One warm-up: the first BitBlt pays for DC setup that later ones do not.
+        let _ = super::capture_region_for_export(mon);
+        let mut total = 0u128;
+        let runs = 5;
+        let mut bytes = 0usize;
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            match super::capture_region_for_export(mon) {
+                Ok((buf, _)) => {
+                    total += t.elapsed().as_micros();
+                    bytes = buf.len();
+                }
+                Err(e) => {
+                    println!("capture failed: {e}");
+                    return;
+                }
+            }
+        }
+        println!(
+            "export frame: {:.1} ms avg over {runs} runs, {} KB per frame",
+            (total as f64 / runs as f64) / 1000.0,
+            bytes / 1024
+        );
+        // Split it: if the JPEG encode dominates, the pixels can be grabbed at the
+        // clean moment (which is what correctness needs) and encoded off the
+        // critical path, instead of making every request wait for both.
+        let mut blit = 0u128;
+        let mut enc = 0u128;
+        for _ in 0..runs {
+            let t = std::time::Instant::now();
+            let img = super::win::capture_desktop_region(&mon).expect("blit");
+            blit += t.elapsed().as_micros();
+            let t2 = std::time::Instant::now();
+            let _ = super::encode_jpeg(&img, super::EXPORT_QUALITY).expect("encode");
+            enc += t2.elapsed().as_micros();
+        }
+        // What the AI-capture closure pays synchronously, per request: one BitBlt plus
+        // BOTH encodings. Only the export frame's encode is deferred today.
+        let mut png = 0u128;
+        let mut jpg = 0u128;
+        for _ in 0..runs {
+            let img = super::win::capture_desktop_region(&mon).expect("blit");
+            let t = std::time::Instant::now();
+            let _ = super::encode_png_for_ocr(&img).expect("png");
+            png += t.elapsed().as_micros();
+            let t2 = std::time::Instant::now();
+            let _ = super::encode_capture_jpeg(img, 75).expect("jpeg");
+            jpg += t2.elapsed().as_micros();
+        }
+        println!(
+            "  critical path per request: OCR PNG {:.1} ms | AI JPEG {:.1} ms",
+            (png as f64 / runs as f64) / 1000.0,
+            (jpg as f64 / runs as f64) / 1000.0
+        );
+        println!(
+            "  split: BitBlt {:.1} ms | JPEG encode {:.1} ms",
+            (blit as f64 / runs as f64) / 1000.0,
+            (enc as f64 / runs as f64) / 1000.0
+        );
     }
 }

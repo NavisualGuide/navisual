@@ -1014,6 +1014,11 @@ fn execute_step(
     // pointer outcome to the right entry. `None` disables recording for this call —
     // used by paths that re-render a step that is already recorded.
     export_step_index: Option<usize>,
+    // Export frame already captured at AI-capture time, where the overlay is clear and
+    // the streamed caption does not yet exist. Some(..) means do NOT clear and capture
+    // here. None is the local-advance path, which has no AI capture to piggyback on and
+    // where the PREVIOUS step's pointer really is still on screen.
+    pre_export: Option<(Vec<u8>, capture::Rect)>,
 ) -> Result<StepOutcome, String> {
     // §0.4 — capture the export frame BEFORE anything is drawn.
     //
@@ -1026,6 +1031,19 @@ fn execute_step(
     // is still on screen and would otherwise be captured as though it belonged to
     // this step. On the AI paths the overlay is already clear, so this is a no-op.
     let export_frame = export_step_index.and_then(|_| {
+        // Prefer the frame taken at AI-capture time. Capturing here instead meant a
+        // SECOND overlay clear, and by this point the streamed caption is on screen and
+        // being read — so it blanked, stayed blank for a whole-monitor capture, and came
+        // back with the pointer. Reported live; the trace showed emit(Subtitle) →
+        // emit(None) → emit(Box). Note this block runs for EVERY user: the ring buffer is
+        // deliberately always-on and only the export UI is gated, so the flicker was not
+        // limited to people who had turned session export on.
+        if let Some(frame) = pre_export.clone() {
+            return Some(frame);
+        }
+        // Local advance: no AI capture happened, so there is nothing to piggyback on and
+        // the previous step's pointer IS still on screen — it would otherwise be captured
+        // as though it belonged to this step. No streamed caption exists on this path.
         tracker.clear();
         if let Ok(u) = overlay::make_update(overlay::OverlayKind::None, None, None) {
             let _ = overlay::emit_update(app, u);
@@ -3297,6 +3315,11 @@ async fn guide(
     // Debug folder is a sub-directory of the app data dir.
     let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
 
+    // Session export is developer-gated (user's call, 2026-09-07, reversing the
+    // original "the ring buffer runs for everyone"): the only user of the feature
+    // would rather redo a session than have every request pay ~480 ms for one.
+    let export_on = export_enabled(&state);
+
     // Clear the previous step's pointer before capture — prevents it from
     // appearing in the AI's screenshot. Stop the tracker first so it can't
     // re-emit the old overlay during the 33 ms DWM composite wait.
@@ -3304,40 +3327,72 @@ async fn guide(
     if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
         let _ = overlay::emit_update(&app, update);
     }
+    // The app-boundary flash runs on its OWN animation track in Overlay.svelte, so the
+    // clear above does not touch it: it keeps animating for its full 3 s. Submit a task
+    // within 3 s of switching apps and that outline is still on screen when the export
+    // frame is read -- which is exactly how an orange rectangle tracing the window ended
+    // up baked into a live export. An AppBoundary update with no bbox cancels it (the
+    // same signal `watch_boundary` uses when the window disappears mid-flash).
+    //
+    // Only when an export frame is actually going to be taken: truncating the flash is a
+    // real, if small, visual cost, and no one else should pay it.
+    if export_on {
+        if let Ok(update) = overlay::make_update(overlay::OverlayKind::AppBoundary, None, None) {
+            let _ = overlay::emit_update(&app, update);
+        }
+    }
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
     #[allow(clippy::type_complexity)]
-    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>, Option<u64>, Option<Vec<u8>>, Option<capture::Rect>), ()> {
-        let (bytes, rect_opt, hwnd_opt) = if is_fs {
+    let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>, Option<u64>, Option<Vec<u8>>, Option<capture::Rect>, Option<capture::RawExportFrame>), ()> {
+        // ONE capture, two encodings.
+        //
+        // The AI image and the OCR image are the same pixels: `recapture_window_jpeg`
+        // was `recapture_window_raw` plus `cap_size` + `encode_jpeg`, and nothing else.
+        // Taking them separately meant doing the entire capture twice per request — two
+        // BitBlts, two `pid_visible_keep_rects_raw` z-order walks, and two blanking
+        // passes — to produce a downscaled JPEG and a native-res PNG of one screen.
+        //
+        // Capturing raw once and encoding twice also removes a correctness hazard nobody
+        // had hit yet: the two reads were milliseconds apart, so a screen that changed in
+        // between gave the locator an image the model never saw.
+        let (raw_img, rect_opt, hwnd_opt) = if is_fs {
             // A chosen single monitor, else (single-monitor systems) the whole desktop.
-            let cap = match fs_monitor {
-                Some(r) => capture::capture_region_jpeg(r, 75, &exclude),
-                None => capture::capture_virtual_desktop_jpeg(75, &exclude),
+            let region = match fs_monitor {
+                Some(r) => r,
+                None => capture::virtual_desktop_rect(),
             };
-            match cap {
-                Ok((bytes, rect)) => (bytes, Some(rect), None),
+            match capture::capture_region_raw(region, &exclude) {
+                Ok(img) => (img, Some(region), None),
                 Err(_) => return Err(()),
             }
         } else if let Some(hwnd_raw) = stored_hwnd {
             // Reuse the HWND we already discovered — skip z-order walk entirely.
-            match capture::recapture_window_jpeg(hwnd_raw, 75, &exclude) {
-                Ok((bytes, rect)) => (bytes, Some(rect), Some(hwnd_raw)),
+            match capture::recapture_window_raw(hwnd_raw, &exclude) {
+                Ok((img, rect)) => (img, Some(rect), Some(hwnd_raw)),
                 Err(_) => {
                     // Window was closed/minimised — rediscover.
-                    match capture::capture_active_window_jpeg(75, &exclude) {
-                        Ok((bytes, rect, hwnd)) => (bytes, Some(rect), Some(hwnd)),
+                    match capture::capture_active_window_raw(&exclude) {
+                        Ok((img, rect, hwnd)) => (img, Some(rect), Some(hwnd)),
                         Err(_) => return Err(()),
                     }
                 }
             }
         } else {
             // First call for this task — discover the target window.
-            match capture::capture_active_window_jpeg(75, &exclude) {
-                Ok((bytes, rect, hwnd)) => (bytes, Some(rect), Some(hwnd)),
+            match capture::capture_active_window_raw(&exclude) {
+                Ok((img, rect, hwnd)) => (img, Some(rect), Some(hwnd)),
                 Err(_) => return Err(()),
             }
         };
-        let final_bytes = bytes;
+        // Native-res, lossless, for the locator's OCR — encoded from the same buffer,
+        // before the AI copy consumes it by downscaling.
+        let ocr_png = capture::encode_png_for_ocr(&raw_img).ok();
+        let ocr_rect = rect_opt;
+        let final_bytes = match capture::encode_capture_jpeg(raw_img, 75) {
+            Ok(b) => b,
+            Err(_) => return Err(()),
+        };
 
         let debug_path = if debug_screenshot_enabled {
             if let Some(ref dir) = debug_dir {
@@ -3366,30 +3421,6 @@ async fn guide(
             None
         };
 
-        // Native-res OCR image, captured NOW — the overlay is cleared and the streamed subtitle
-        // hasn't been shown yet, so the locator's OCR never reads our own caption and we avoid the
-        // clear/redraw flicker of capturing it at locate time.
-        let (ocr_png, ocr_rect) = if !is_fs {
-            match hwnd_opt {
-                Some(h) => match capture::recapture_window_raw(h, &exclude) {
-                    Ok((raw, rect)) => (capture::encode_png_for_ocr(&raw).ok(), Some(rect)),
-                    Err(_) => (None, None),
-                },
-                None => (None, None),
-            }
-        } else {
-            // Full-screen: OCR must see the SAME region the AI saw (chosen monitor or
-            // whole desktop), at native resolution — not the foreground window — so the
-            // OCR coordinate space matches the AI image. rect_opt is that capture rect.
-            match rect_opt {
-                Some(r) => match capture::capture_region_raw(r, &exclude) {
-                    Ok(raw) => (capture::encode_png_for_ocr(&raw).ok(), Some(r)),
-                    Err(_) => (None, None),
-                },
-                None => (None, None),
-            }
-        };
-
         let thumb_b64 = make_chat_thumbnail(&final_bytes);
         // Stale baseline: hash a RAW recapture of the same window (identical pipeline to the
         // post-response `ahash_of_screen`), NOT the downscaled+JPEG AI image. Comparing a
@@ -3398,8 +3429,25 @@ async fn guide(
         // false-fired the "guidance may be out of date" banner on unchanged screens (live
         // 2026-07-24, 3/3 FE locates). Same pipeline both sides ⇒ only *real* change registers.
         let pre_hash = ahash_of_screen(hwnd_opt);
+        // Session-export frame: PIXELS ONLY, taken here and nowhere else.
+        //
+        // This is the one instant the screen is provably ours to read — the overlay was
+        // cleared just above and one DWM composite has passed, the streamed caption does
+        // not exist yet, and the app-boundary flash has not been emitted yet either.
+        // Capturing it asynchronously after this closure looked free and was not: the
+        // flash fires ~immediately afterwards and landed IN the frame (visible live as an
+        // orange rectangle tracing the window in an exported screenshot). The clean-frame
+        // guarantee is the whole premise of the export, so the ~125 ms is paid here, and
+        // only by someone who turned the feature on.
+        //
+        // The ~355 ms JPEG encode has no such constraint and is done off this path.
+        let pre_export = if export_on {
+            session_export::capture_frame_raw(rect_opt)
+        } else {
+            None
+        };
         let b64 = capture::to_base64(&final_bytes);
-        Ok((b64, rect_opt, hwnd_opt, debug_path, thumb_b64, final_bytes, pre_hash, ocr_png, ocr_rect))
+        Ok((b64, rect_opt, hwnd_opt, debug_path, thumb_b64, final_bytes, pre_hash, ocr_png, ocr_rect, pre_export))
     })
     .await
     .map_err(|e| format!("capture task join: {e}"))?;
@@ -3415,8 +3463,9 @@ async fn guide(
         chat_thumb_b64,
         pre_hash,
         pre_ocr,
+        pre_export,
     ) = match capture_result {
-        Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes, pre_hash, ocr_png, ocr_rect)) => {
+        Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes, pre_hash, ocr_png, ocr_rect, pre_export)) => {
             if training_enabled {
                 let base = app.path().app_local_data_dir().ok();
                 training_shot_file = save_training_shot(base.as_deref(), &request_id, &full_bytes);
@@ -3430,6 +3479,7 @@ async fn guide(
                 thumb,
                 pre_hash,
                 ocr_png.zip(ocr_rect),
+                pre_export,
             )
         }
         Err(()) => {
@@ -3464,6 +3514,13 @@ async fn guide(
             });
         }
     };
+
+    // Finish the frame captured above WHILE THE AI IS THINKING. Only the encode is
+    // left here (~355 ms); the pixels are already read, so nothing downstream — the
+    // boundary flash below, the streamed caption — can contaminate it.
+    let export_task = pre_export.map(|(img, rect)| {
+        tokio::task::spawn_blocking(move || session_export::encode_frame(img, rect))
+    });
 
     // Phase 0.2 — flash the shared-app boundary so the user can see what
     // we're capturing. Emits the `app_changed` event for the header chip too.
@@ -3686,7 +3743,7 @@ async fn guide(
         .lock()
         .map(|t| t.saturating_duration_since(ai_started).as_millis());
     log::info!(
-        "[latency] ttft={} ms  full={ai_elapsed_ms} ms  (caption appears at ttft; pointer at full)",
+        "[latency] ttft={} ms  full={ai_elapsed_ms} ms  (caption at ttft; pointer only AFTER the locate that follows, which is not in either number)",
         ai_ttft_ms
             .map(|v| v.to_string())
             .unwrap_or_else(|| "n/a".into())
@@ -3992,12 +4049,14 @@ async fn guide(
     // `task` here can be a synthesized `[User completed: ...]` continuation string
     // rather than anything the user typed, which is exactly the distinction
     // `classify_user_input` exists to preserve.
-    push_export_turn(
-        &state,
-        classify_user_input(&task, is_reply, is_next_requery),
-        &steps,
-        needs_input,
-    );
+    if export_on {
+        push_export_turn(
+            &state,
+            classify_user_input(&task, is_reply, is_next_requery),
+            &steps,
+            needs_input,
+        );
+    }
 
     let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
         &app,
@@ -4016,7 +4075,15 @@ async fn guide(
         None,
         &[],
         // guide(): this response's first step, recorded against the turn just pushed.
-        Some(0),
+        // None when the toggle is off, which switches the whole export path off.
+        if export_on { Some(0) } else { None },
+        // The AI round-trip has already covered blit+encode; this is a join, not a
+        // wait. None (disabled, or a failed capture) simply means no frame for this
+        // step, which the ring buffer already tolerates.
+        match export_task {
+            Some(h) => h.await.ok().flatten(),
+            None => None,
+        },
     )
     .unwrap_or((None, None, false, Vec::new()));
     // Flow B: a first-locate ambiguity set was drawn — arm the state readback.
@@ -4165,6 +4232,7 @@ async fn next_step(
         &[],
         // next_step(): a local advance through steps guide() already recorded.
         Some(step_index),
+        None, // no AI capture on this path — see execute_step's pre_export
     )
     .unwrap_or((None, None, false, Vec::new()));
     arm_candidates_if_shown(
@@ -4369,6 +4437,7 @@ async fn retry_locate(
         &candidate_boxes,
         // next_step(): a local advance through steps already recorded by guide().
         Some(step_index),
+        None, // no AI capture on this path — see execute_step's pre_export
     )
     .unwrap_or((None, None, false, Vec::new()));
 
@@ -4504,6 +4573,10 @@ async fn send_correction(
     }
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
+    // Developer-gated, same as guide().
+    let export_on = export_enabled(&state);
+    let export_on_inner = export_on;
+
     // Fresh capture — no stored HWND, always walks z-order to the focused window.
     #[allow(clippy::type_complexity)]
     let (
@@ -4515,6 +4588,7 @@ async fn send_correction(
         full_jpeg_opt,
         pre_hash,
         pre_ocr,
+        pre_export,
     ): (
         String,
         Option<capture::Rect>,
@@ -4524,6 +4598,7 @@ async fn send_correction(
         Option<Vec<u8>>,
         Option<u64>,
         Option<(Vec<u8>, capture::Rect)>,
+        Option<capture::RawExportFrame>,
     ) = tokio::task::spawn_blocking(move || {
         // Full desktop (sticky "Entire desktop" user choice), the pinned app
         // (explicit 📌 scope — honored here exactly like guide() does), or the
@@ -4606,9 +4681,15 @@ async fn send_correction(
                 Some(final_bytes),
                 pre_hash,
                 pre_ocr,
+                // Clean instant: overlay down, no caption, no boundary flash yet.
+                if export_on_inner {
+                    session_export::capture_frame_raw(Some(rect))
+                } else {
+                    None
+                },
             )
         } else {
-            (String::new(), None, None, None, None, None, None, None)
+            (String::new(), None, None, None, None, None, None, None, None)
         }
     })
     .await
@@ -4628,6 +4709,13 @@ async fn send_correction(
         state.guidance.lock().last_announced_hwnd = Some(hwnd_raw);
         announce_shared_app(&app, Some(hwnd_raw), true);
     }
+
+    // Finish the frame captured in the closure above, while the AI is thinking.
+    // Same reasoning as guide(): the pixels must be read at the clean instant, the
+    // encode must not be on the critical path.
+    let export_task = pre_export.map(|(img, rect)| {
+        tokio::task::spawn_blocking(move || session_export::encode_frame(img, rect))
+    });
 
     // S.1 — fresh Structured-Context snapshot for the correction capture (the retry
     // may be looking at a different window/state than the original guide()). Skipped for
@@ -4755,7 +4843,7 @@ async fn send_correction(
         .lock()
         .map(|t| t.saturating_duration_since(ai_started).as_millis());
     log::info!(
-        "[latency] ttft={} ms  full={ai_elapsed_ms} ms  (caption appears at ttft; pointer at full)",
+        "[latency] ttft={} ms  full={ai_elapsed_ms} ms  (caption at ttft; pointer only AFTER the locate that follows, which is not in either number)",
         ai_ttft_ms
             .map(|v| v.to_string())
             .unwrap_or_else(|| "n/a".into())
@@ -4961,12 +5049,14 @@ async fn send_correction(
     // Session export (§0.7): a correction is the highest-value turn there is. It
     // marks the place the obvious answer was wrong, which is the paragraph an
     // article most needs and the one no session of pure → Next turns can supply.
-    push_export_turn(
-        &state,
-        session_export::UserInput::correction(note.clone(), reason.clone()),
-        &steps,
-        needs_input,
-    );
+    if export_on {
+        push_export_turn(
+            &state,
+            session_export::UserInput::correction(note.clone(), reason.clone()),
+            &steps,
+            needs_input,
+        );
+    }
 
     // Scope the rejections to the NEW step's target — the AI may have re-targeted,
     // and only rejections recorded against this exact target still apply.
@@ -4991,7 +5081,11 @@ async fn send_correction(
         None,
         &[],
         // send_correction(): first step of the correction turn just pushed.
-        Some(0),
+        if export_on { Some(0) } else { None },
+        match export_task {
+            Some(h) => h.await.ok().flatten(),
+            None => None,
+        },
     )
     .unwrap_or((None, None, false, Vec::new()));
     arm_candidates_if_shown(
@@ -5954,6 +6048,16 @@ fn payload_from_config(c: &Config) -> SettingsPayload {
 }
 
 /// The settings the app ships with, for Reset all settings.
+/// Put text on the clipboard. Uses the same `arboard` path `execute_step` already
+/// uses for a step's clipboard payload, rather than `navigator.clipboard`, which
+/// depends on the WebView's secure-context and permission state.
+#[tauri::command]
+async fn copy_text(text: String) -> Result<(), String> {
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn get_default_settings() -> Result<SettingsPayload, String> {
     Ok(payload_from_config(&Config::default()))
@@ -6984,6 +7088,7 @@ pub fn run() {
             get_settings,
             save_settings,
             get_default_settings,
+            copy_text,
             list_ollama_models,
             get_usage,
             reset_usage,
