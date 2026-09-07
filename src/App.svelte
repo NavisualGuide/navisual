@@ -1770,11 +1770,12 @@ See the LICENSE file in the root of this repository for complete details.
   // to auto-trigger Google OAuth with no alternative offered). Signed-in
   // users skip this entirely. Opens Stripe Checkout in the system browser.
   async function buyCoins(amountUsd = 20) {
-    if (billing.oauthPending || billing.checkoutPending) return;
+    if (billing.oauthPending || billing.buyPending || billing.checkoutPending) return;
     // Settings used to close HERE, before the call, which doubled as the
     // double-submit guard. It now closes only once a browser is actually
-    // opening (below), so the guard has to be explicit.
-    billing.oauthPending = true;
+    // opening (below), so the guard has to be explicit -- and on its OWN flag,
+    // since oauthPending still means "Google sign-in" to the Account panel.
+    billing.buyPending = true;
     try {
       let url: string;
       try {
@@ -1823,7 +1824,7 @@ See the LICENSE file in the root of this repository for complete details.
       addToHistory("system", "⚠️ Checkout failed: " + String(e));
       await setPanelOnTop(true); // nothing opened — restore always-on-top
     } finally {
-      billing.oauthPending = false;
+      billing.buyPending = false;
     }
   }
 
@@ -1835,6 +1836,10 @@ See the LICENSE file in the root of this repository for complete details.
     if (await billing.refresh()) {
       if (billing.tier === "paid") showTrialExhausted = false;
     }
+    // These two are cleared by things arriving from OUTSIDE (an oauth_complete
+    // event, a return from the browser), so they need this defensive reset.
+    // buyPending deliberately is not: it is owned by buyCoins' try/finally and
+    // clearing it here could only re-open the double-submit it exists to prevent.
     billing.oauthPending = false;
     billing.checkoutPending = false;
     await setPanelOnTop(true); // back from the browser — restore always-on-top
@@ -1938,7 +1943,8 @@ See the LICENSE file in the root of this repository for complete details.
     resetSettings();
   }
 
-  function resetSettings() {
+  async function resetSettings() {
+    settingsError = null;
     // Restore everything to defaults but preserve API keys so the user
     // doesn't lose credentials they've already entered.
     // Every *_API_KEY the backend knows about — save_settings skips empty key
@@ -1953,9 +1959,21 @@ See the LICENSE file in the root of this repository for complete details.
       qwen_api_key: settingsForm.qwen_api_key,
       custom_api_key: settingsForm.custom_api_key,
     };
-    settingsForm = { ...SETTINGS_DEFAULTS, ...preserved };
+    // Ask the BACKEND what the defaults are rather than trusting this file's
+    // SETTINGS_DEFAULTS copy of them. That copy had silently drifted from
+    // config.rs, so Reset was installing claude-sonnet-4-6, gemini-2.5-flash,
+    // gpt-5.5 and qwen3.6-plus over the current defaults — and gemini-2.5-flash
+    // is no longer even an option in its own dropdown. SETTINGS_DEFAULTS stays as
+    // the pre-load placeholder (and the fallback if this call fails), but it is no
+    // longer what a reset writes, so the drift cannot come back.
+    let defaults = SETTINGS_DEFAULTS;
+    try {
+      defaults = await invoke<SettingsPayload>("get_default_settings");
+    } catch (e) {
+      settingsError = `Couldn't read the shipped defaults (${e}); reset used this build's built-in copy.`;
+    }
+    settingsForm = { ...defaults, ...preserved };
     syncCustomModelFlags();
-    settingsError = null;
     settingsSaved = false;
   }
 
@@ -3916,7 +3934,12 @@ See the LICENSE file in the root of this repository for complete details.
           </p>
           <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
             <li>Screenshots are held in memory — nothing is saved to your disk unless you choose to save it.</li>
-            <li>Only the active window is captured by default; full-screen needs your permission each time.</li>
+            <!-- "full-screen needs your permission each time" described the consent
+                 loop REMOVED in v0.5.23 (the AI's request_full_screen field and the
+                 Allow Once dialog are both gone). Full-desktop capture is now a sticky
+                 choice the user makes in the app picker, so the old wording overstated
+                 the protection on the one screen where that must not happen. -->
+            <li>Only the active window is captured by default. The whole screen is captured only if <em>you</em> pick “🖥️ Entire desktop” in the app picker — and it stays that way until you pick something else.</li>
             <li>While guiding, Navisual notes <strong>which control you click</strong> inside the app you're being guided in — its name and type, like <em>Button "Save"</em> — so the AI knows what you just did. Clicks in any other window are discarded and never recorded. Navisual does not monitor your keyboard at all, and never reads the contents of a password box.</li>
             <li>In Word, it also reads where your cursor is (page, section, line) and the style of the paragraph you're in — a screenshot can't show a text cursor.</li>
             <li><strong>The default free tier uses free AI models that may keep your requests — including the screenshot — to train their models.</strong> Paid tiers, per their providers' current policies, don't; Ollama keeps everything on your machine. (<button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>details</button>)</li>
@@ -3925,7 +3948,12 @@ See the LICENSE file in the root of this repository for complete details.
             <li>For zero data sharing, use the Ollama provider — it runs locally.</li>
           </ul>
           <p style="margin: 0 0 14px 0; font-size: 0.85em; color: var(--text-tertiary);">
-            Use the Pause hotkey (configurable in Settings → Hotkeys) to stop all capture instantly.
+            <!-- Pause ships UNSET (config.rs: hotkey_pause = String::new(), since
+                 v0.5.17 dropped the Ctrl+S default for colliding with Save). Telling a
+                 first-run user to "use the Pause hotkey" pointed them at a key that
+                 does not exist yet — on the panel whose whole job is telling them how
+                 to stop capture. -->
+            To stop all capture instantly, assign a <strong>Pause</strong> hotkey in Settings → Hotkeys. It ships unset so it can't collide with a shortcut you already use.
           </p>
           <button
             class="btn-primary btn-full"
@@ -4064,12 +4092,17 @@ See the LICENSE file in the root of this repository for complete details.
                 <p class="setting-hint">
                   {#if settingsForm.managed_tier === "free"}
                     Free requests are used automatically until they run out, no matter which tier is selected here — this only decides what happens afterward, or once you buy coins.
+                  <!-- Model names must match the relay's TIER_ROUTES (relay/index.ts).
+                       All six were stale: the v0.7.12 roster change (2026-08-19) moved
+                       every tier onto the GPT-5.6 / Gemini 3.7 generation and this text
+                       was never updated, so a paying customer read superseded names for
+                       three weeks while deciding what their coins buy. -->
                   {:else if settingsForm.managed_tier === "speed"}
-                    GPT-5.4-mini, falls back to Gemini 3 Flash. Cheapest; good for simple, text-heavy UIs. Coins are bought on the Billing tab.
+                    GPT-5.6 Luna, falls back to Gemini 3.5 Flash-Lite. Cheapest; good for simple, text-heavy UIs. Coins are bought on the Account tab.
                   {:else if settingsForm.managed_tier === "smart"}
-                    Gemini 3 Pro, falls back to GPT-5.4. Best at pointing precisely on dense/visual UIs. Coins are bought on the Billing tab.
+                    GPT-5.6 Terra, falls back to Gemini 3.7 Flash. Reasoning-enabled; the strongest on ambiguous or visually dense screens. Coins are bought on the Account tab.
                   {:else}
-                    Gemini 3.5 Flash, falls back to GPT-5.4-mini. The best all-round default. Coins are bought on the Billing tab.
+                    Gemini 3.7 Flash, falls back to GPT-5.6 Terra. The best all-round default — measured on real sessions at 92% on-target pointing. Coins are bought on the Account tab.
                   {/if}
                 </p>
               </div>

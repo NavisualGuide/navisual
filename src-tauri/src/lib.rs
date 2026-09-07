@@ -5899,11 +5899,16 @@ async fn reset_usage(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, String> {
-    let router = state.ai_router.lock().await;
-    let c = &router.config;
-    Ok(SettingsPayload {
+/// Build the settings payload the UI edits from a Config.
+///
+/// Shared by `get_settings` (the live config) and `get_default_settings`
+/// (`Config::default()`), so the values Reset writes cannot drift from the
+/// values the app ships with. They HAD drifted: the frontend kept its own
+/// hand-copied SETTINGS_DEFAULTS, and Reset was quietly installing
+/// claude-sonnet-4-6, gemini-2.5-flash, gpt-5.5 and qwen3.6-plus over the
+/// current defaults -- gemini-2.5-flash is not even in its own dropdown.
+fn payload_from_config(c: &Config) -> SettingsPayload {
+    SettingsPayload {
         api_provider: c.api_provider.clone(),
         anthropic_api_key: c.anthropic_api_key.clone().unwrap_or_default(),
         anthropic_model: c.anthropic_model.clone(),
@@ -5945,7 +5950,19 @@ async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, Str
         task_suggestions: c.task_suggestions,
         session_export_enabled: c.session_export_enabled,
         developer_mode: developer_mode_enabled(),
-    })
+    }
+}
+
+/// The settings the app ships with, for Reset all settings.
+#[tauri::command]
+async fn get_default_settings() -> Result<SettingsPayload, String> {
+    Ok(payload_from_config(&Config::default()))
+}
+
+#[tauri::command]
+async fn get_settings(state: State<'_, AppState>) -> Result<SettingsPayload, String> {
+    let router = state.ai_router.lock().await;
+    Ok(payload_from_config(&router.config))
 }
 
 /// Returns true when the process was launched with NAVISUAL_DEV=true or =1.
@@ -6966,6 +6983,7 @@ pub fn run() {
             speak,
             get_settings,
             save_settings,
+            get_default_settings,
             list_ollama_models,
             get_usage,
             reset_usage,

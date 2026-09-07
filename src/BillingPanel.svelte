@@ -78,11 +78,8 @@
 </div>
 
 <div class="setting-group" style="margin-top: 12px;">
-  <button class="btn-primary" onclick={() => onBuy(effectiveAmount)} disabled={billing.oauthPending || billing.checkoutPending || !amountValid}>
-    <!-- "Opening checkout…" covers both readings: oauthPending now means "a buy is
-         in flight" (it guards double-submit while create_checkout runs), which for
-         a signed-in user is not signing in at all. -->
-    {billing.oauthPending ? "Opening checkout…" : billing.checkoutPending ? "Checkout open in browser…" : `Buy coins ($${effectiveAmount})`}
+  <button class="btn-primary" onclick={() => onBuy(effectiveAmount)} disabled={billing.buyPending || billing.oauthPending || billing.checkoutPending || !amountValid}>
+    {billing.buyPending ? "Opening checkout…" : billing.checkoutPending ? "Checkout open in browser…" : `Buy coins ($${effectiveAmount})`}
   </button>
   {#if billing.checkoutPending}
     <button class="btn-ghost" style="margin-top: 8px;" onclick={onRefreshBalance}>Refresh balance</button>

@@ -58,6 +58,12 @@
           <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
             Signing in with Google in your browser…
           </p>
+        {:else if billing.buyPending}
+          <!-- Distinct from oauthPending again: a signed-in user topping up was
+               being told they were signing in with Google. -->
+          <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
+            Opening checkout…
+          </p>
         {:else if billing.checkoutPending}
           <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
             Checkout opened in your browser. Come back once you've paid — your balance will update automatically.

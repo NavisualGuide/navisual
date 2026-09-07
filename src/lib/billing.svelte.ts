@@ -47,7 +47,18 @@ class Billing {
   // modal, and the Account panel's Google button, which is why they live here
   // and not in any one component. True while the respective browser round-trip
   // is in flight; refreshBalance() (App) clears both when the user returns.
+  /** Google OAuth round-trip (AccountPanel's "Continue with Google"). */
   oauthPending = $state(false);
+  /**
+   * A purchase is in flight: create_checkout has been called and we do not yet
+   * know whether it yields a URL or an oauth_required bounce.
+   *
+   * Separate from `oauthPending` on purpose. buyCoins briefly borrowed that flag
+   * (it needed a double-submit guard once Settings stopped closing up front), which
+   * made one flag mean two things — the exhausted modal then announced "Signing in
+   * with Google in your browser…" for a signed-in user's plain top-up.
+   */
+  buyPending = $state(false);
   checkoutPending = $state(false);
 
   /** THE one place a get_balance response becomes state. */
