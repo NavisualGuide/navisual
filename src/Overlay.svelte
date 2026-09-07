@@ -12,6 +12,7 @@
     virtual_origin: [number, number];
     virtual_size: [number, number];
     active_screen: Rect | null;
+    work_area: Rect | null;
     ai_bbox: Rect | null;
     // Flow A: ranked candidate boxes (strongest first) for kind === "candidates".
     candidates: Rect[];
@@ -248,17 +249,44 @@
 
   // Draw subtitle strip confined to a single screen.
   // Strip width fits the text content rather than spanning the full screen.
+  /** Lines the caption may grow to before it is cut with an ellipsis. The full
+   *  instruction is always in the panel; the caption is a glance, not a document.
+   *  Measured on 655 real instructions: median 85 chars, p95 348, max 1,119 (a
+   *  Markdown pros-and-cons answer). At 18px over 78% of a 1080p screen a line
+   *  holds ~110 chars, so three lines show everything up to ~p90 and stop a long
+   *  answer from climbing a quarter of the way up the screen. */
+  const CAPTION_MAX_LINES = 3;
+
+  /** Instruction text is read aloud and drawn as a caption, so Markdown that a
+   *  model slips in (**bold**, ### headings, * bullets, `code`) is only noise
+   *  there. Strip the markers; keep the words. */
+  function plainCaption(text: string): string {
+    return text
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/\*\*(.+?)\*\*/g, "$1")
+      .replace(/__(.+?)__/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/^\s*[*\-•]\s+/gm, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   function drawSubtitle(
     ctx: CanvasRenderingContext2D,
     canvasW: number, canvasH: number,
     ox: number, oy: number,
     activeScreen: Rect | null,
-    text: string,
+    workArea: Rect | null,
+    rawText: string,
   ) {
+    const text = plainCaption(rawText);
     const sx = activeScreen ? (activeScreen.x - ox) : 0;
     const sy = activeScreen ? (activeScreen.y - oy) : 0;
     const sw = activeScreen ? activeScreen.width  : canvasW;
     const sh = activeScreen ? activeScreen.height : canvasH;
+    // Bottom edge the strip must stay above: the work area's, so the taskbar
+    // stays visible and clickable. Falls back to the monitor's own bottom.
+    const bottom = workArea ? (workArea.y - oy) + workArea.height : sy + sh;
 
     // Scale every caption metric by the DPR so the strip is a constant *logical*
     // size on any display (a fixed-px font would be half-size at 200%). See dprOf.
@@ -285,13 +313,22 @@
     }
     if (line) lines.push(line);
 
+    // Clamp: keep the first CAPTION_MAX_LINES lines and ellipsize the last one so
+    // it still fits its width. The panel carries the full text.
+    if (lines.length > CAPTION_MAX_LINES) {
+      lines.length = CAPTION_MAX_LINES;
+      let last = lines[CAPTION_MAX_LINES - 1];
+      while (last.length > 1 && ctx.measureText(last + "…").width > maxTextW) last = last.slice(0, -1).trimEnd();
+      lines[CAPTION_MAX_LINES - 1] = last + "…";
+    }
+
     const lineH = 22 * scale;
     const maxLineW = Math.max(...lines.map(l => ctx.measureText(l).width));
     const stripW = Math.min(maxLineW + hPad * 2, maxTextW + hPad * 2);
     const stripH = lines.length * lineH + vPad * 2;
     const left   = cx - stripW / 2;
     const right  = cx + stripW / 2;
-    const stripY = sy + sh - stripH - 10;
+    const stripY = bottom - stripH - 12 * scale;
 
     ctx.fillStyle = "rgba(0,0,0,0.52)";
     ctx.beginPath();
@@ -667,7 +704,7 @@
         // No locator overlay — but still draw the subtitle caption if present
         // so the instruction text is always visible on screen.
         if (theme.subtitle_enabled && u.text) {
-          drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.text);
+          drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.work_area, u.text);
         }
         // Developer: still draw the AI-bbox even when the locator failed —
         // this is the case where the comparison is most useful.
@@ -685,7 +722,7 @@
       // Subtitle is drawn alongside every overlay type (arrow, box, hint, subtitle).
       // Rust always passes step.instruction as u.text.
       if (theme.subtitle_enabled && u.text) {
-        drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.text);
+        drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.work_area, u.text);
       }
 
       // Subtitle-only step — no bbox to locate, but AI bbox dev toggle may still apply.

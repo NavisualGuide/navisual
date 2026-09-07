@@ -655,6 +655,13 @@ See the LICENSE file in the root of this repository for complete details.
   type VoiceInfo = { id: string; name: string; };
   let availableVoices = $state<VoiceInfo[]>([]);
 
+  function handlePanelContextMenu(e: MouseEvent) {
+    if (settingsForm.developer_mode) return;
+    const t = e.target as HTMLElement | null;
+    if (t && t.closest("textarea, input, [contenteditable]")) return;
+    e.preventDefault();
+  }
+
   async function openTargetPicker(mode: "target" | "dock" = "target") {
     targetPickerMode = mode;
     dismissTargetHint(); // they found the picker — the coach mark is no longer needed
@@ -3171,7 +3178,12 @@ See the LICENSE file in the root of this repository for complete details.
   {/if}
   </div>
 {:else}
-  <main>
+  <!-- Right-click: WebView2's built-in browser menu (Back / Reload / Inspect…)
+       breaks the native-app feel and offers nothing a user of this panel wants,
+       so it is suppressed — EXCEPT inside text fields, where cut/copy/paste is
+       expected, and in developer mode, where Inspect is the point. The fish has
+       its own handler for the collapsed menu; this is the expanded panel. -->
+  <main oncontextmenu={handlePanelContextMenu}>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
     <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
       <span class="header-dot"></span>
@@ -5739,6 +5751,10 @@ See the LICENSE file in the root of this repository for complete details.
     letter-spacing: -0.005em;
     color: var(--text-primary);
     margin: 0;
+    /* A very long answer (max seen: 1,119 chars) scrolls inside the card rather
+       than pushing the conversation and the input off the bottom of the panel. */
+    max-height: 38vh;
+    overflow-y: auto;
   }
 
   .miss-note {

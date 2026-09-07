@@ -61,6 +61,11 @@ pub struct OverlayUpdate {
     /// The monitor the target element lives on (virtual-desktop physical pixels).
     /// Used to confine the subtitle strip to a single screen.
     pub active_screen: Option<Rect>,
+    /// That monitor's WORK AREA — the monitor minus the taskbar. The caption is
+    /// anchored to the bottom of this, not of `active_screen`, so it sits above
+    /// the taskbar instead of across its icons (live report 2026-09-07). With an
+    /// auto-hide taskbar the two rects coincide, so nothing is lost there.
+    pub work_area: Option<Rect>,
     /// AI-returned bounding box in virtual-desktop physical pixels.
     /// Drawn as a distinct cyan-dashed box alongside the production pointer
     /// when the developer "Show AI bbox" toggle is enabled.
@@ -516,6 +521,11 @@ pub fn make_update_full(
 ) -> Result<OverlayUpdate> {
     let vd = virtual_desktop_rect()?;
     let active_screen = active_screen_for_bbox(bbox.as_ref().or(ai_bbox.as_ref()));
+    // Work area of the same monitor, looked up by its centre so a monitor at a
+    // negative virtual-desktop origin resolves like any other.
+    let work_area = active_screen.and_then(|m| {
+        crate::capture::work_area_containing(m.x + m.width as i32 / 2, m.y + m.height as i32 / 2)
+    });
     Ok(OverlayUpdate {
         kind,
         bbox,
@@ -523,6 +533,7 @@ pub fn make_update_full(
         virtual_origin: (vd.x, vd.y),
         virtual_size: (vd.width, vd.height),
         active_screen,
+        work_area,
         ai_bbox,
         candidates,
     })
