@@ -1461,6 +1461,13 @@ const AUTOPILOT_MIN_CELLS: u32 = 16;
 /// the interruptive banner only appears on clearly substantial drift.
 const STALE_RESPONSE_THRESHOLD: u32 = 13;
 
+/// Below this round-trip, the stale check is skipped outright: the screenshot the
+/// AI answered from is still fresh, and the user has had no real chance to move on.
+/// A banner in that window is noise however the drift is measured — the user's call
+/// after the 2026-09-07 false positives ("if the AI comes back quick, there's no
+/// need to re-check").
+const STALE_MIN_THINK_MS: u128 = 8_000;
+
 fn ahash_from_luma8(luma: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>) -> u64 {
     let thumb = image::imageops::resize(luma, 8, 8, image::imageops::FilterType::Triangle);
     let pixels: Vec<u8> = thumb.pixels().map(|p| p.0[0]).collect();
@@ -2183,14 +2190,29 @@ fn hamming64(a: u64, b: u64) -> u32 {
 /// shows every time" report is diagnosable from the log — the 2026-07-17
 /// PowerPoint session needed offline image forensics because nothing recorded
 /// the measured drift.
-fn emit_stale_if_drifted(app: &tauri::AppHandle, pre_hash: Option<u64>, post_hash: Option<u64>) {
-    if let (Some(p), Some(q)) = (pre_hash, post_hash) {
-        let drift = hamming64(p, q);
-        let stale = drift >= STALE_RESPONSE_THRESHOLD;
-        log::info!("[stale] drift={drift}/64 threshold={STALE_RESPONSE_THRESHOLD} emitting={stale}");
-        if stale {
-            let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
+fn emit_stale_if_drifted(
+    app: &tauri::AppHandle,
+    pre_hash: Option<u64>,
+    post_hash: Option<u64>,
+    think_ms: u128,
+) {
+    if think_ms < STALE_MIN_THINK_MS {
+        log::info!("[stale] skipped — AI answered in {think_ms} ms (< {STALE_MIN_THINK_MS} ms), so the screenshot is still fresh");
+        return;
+    }
+    match (pre_hash, post_hash) {
+        (Some(p), Some(q)) => {
+            let drift = hamming64(p, q);
+            let stale = drift >= STALE_RESPONSE_THRESHOLD;
+            log::info!("[stale] drift={drift}/64 threshold={STALE_RESPONSE_THRESHOLD} think={think_ms} ms emitting={stale}");
+            if stale {
+                let _ = app.emit("ai_response_stale", serde_json::json!({ "drift": drift }));
+            }
         }
+        // The post sample is taken on a thread at first token; a response that
+        // completes almost immediately after ttft can outrun it. No sample means
+        // no check — a missed warning beats a false one.
+        _ => log::info!("[stale] no comparison (pre={} post={})", pre_hash.is_some(), post_hash.is_some()),
     }
 }
 
@@ -3605,10 +3627,42 @@ async fn guide(
     let ttft_at: std::sync::Arc<parking_lot::Mutex<Option<std::time::Instant>>> =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
     let ttft_setter = ttft_at.clone();
+    // Post side of the stale comparison, sampled at FIRST TOKEN — see the spawn below.
+    let stale_hwnd = if is_fs { None } else { new_hwnd_opt };
+    let stale_post: std::sync::Arc<parking_lot::Mutex<Option<u64>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let stale_post_setter = stale_post.clone();
     let on_chunk = move |chunk: &str, steps_seen: usize| {
         if !primed {
             primed = true;
             *ttft_setter.lock() = Some(std::time::Instant::now());
+            // Stale, post side. Taken HERE and nowhere else, for two reasons.
+            //
+            // (1) This is the end of the thinking window. The model has committed to
+            //     its answer by first token; everything after is transport.
+            // (2) It is the last instant this turn before WE draw. The overlay is
+            //     deliberately exempt from panel blanking (`own_panel_rects`: blanking
+            //     a canvas that spans the virtual desktop would wipe the whole image),
+            //     so anything it paints lands in the hash. Sampling after the caption
+            //     was measuring our own strip: the pre sample comes from a cleared
+            //     overlay + one DWM composite, the post sample did not, and on a
+            //     bottom-anchored caption that is 14–18 of 64 aHash bits (live
+            //     2026-09-07, the only two firings in 42 checks, both false).
+            //
+            // The 2026-05-20 fix moved this before `execute_step` and called the
+            // result "pointer-free" — true, and narrower than it read: the streamed
+            // caption is emitted from this very closure, long before execute_step.
+            // Hence "before we draw anything", not "before the pointer".
+            //
+            // Spawned, not awaited, so it cannot delay first paint: the BitBlt starts
+            // immediately while the caption still needs an IPC hop, a canvas draw and
+            // a composite (≥1 frame) to appear.
+            {
+                let setter = stale_post_setter.clone();
+                std::thread::spawn(move || {
+                    *setter.lock() = ahash_of_screen(stale_hwnd);
+                });
+            }
             #[cfg(windows)]
             if let Some(h) = prime_hwnd {
                 std::thread::spawn(move || crate::locator::a11y::prime(h));
@@ -3972,17 +4026,11 @@ async fn guide(
     }
 
     if steps.is_empty() {
-        // Still anchor the autopilot baseline + run stale detection so the needs_input branch
-        // behaves like a normal response. This branch draws no pointer, so the screen is
-        // pointer-free like pre_hash — stale uses its own aHash capture (decoupled from the
-        // block-sig baseline, which no longer returns a value).
+        // Still anchor the autopilot baseline + run stale detection so the needs_input
+        // branch behaves like a normal response. The post sample was taken at first
+        // token (see on_chunk) — before any caption, so it is overlay-clean like pre_hash.
         anchor_autopilot_baseline(&state).await;
-        let stale_target = guidance_target_hwnd(&state);
-        let stale_hash = tokio::task::spawn_blocking(move || ahash_of_screen(stale_target))
-            .await
-            .ok()
-            .flatten();
-        emit_stale_if_drifted(&app, pre_hash, stale_hash);
+        emit_stale_if_drifted(&app, pre_hash, *stale_post.lock(), ai_elapsed_ms);
         return Ok(GuideResponse {
             goal: session_goal(&state),
             plan_outline: session_plan_outline(&state),
@@ -4036,12 +4084,8 @@ async fn guide(
     // too; any drift now reflects a real user change while the AI was thinking.
     // Hash the SAME window the AI capture used (new_hwnd_opt) so pre/post compare
     // like-for-like (C5) — pre_hash came from that window, not the foreground.
-    let stale_target = if is_fs { None } else { new_hwnd_opt };
-    let stale_hash = tokio::task::spawn_blocking(move || ahash_of_screen(stale_target))
-        .await
-        .ok()
-        .flatten();
-    emit_stale_if_drifted(&app, pre_hash, stale_hash);
+    // The post sample itself was taken at first token, before this turn drew anything.
+    emit_stale_if_drifted(&app, pre_hash, *stale_post.lock(), ai_elapsed_ms);
 
     // Session export (§0.7): record the exchange BEFORE the locate, so the frame
     // and pointer outcome that `execute_step` banks have a turn to attach to.
@@ -4801,10 +4845,22 @@ async fn send_correction(
     let ttft_at: std::sync::Arc<parking_lot::Mutex<Option<std::time::Instant>>> =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
     let ttft_setter = ttft_at.clone();
+    // Post side of the stale comparison, sampled at first token — see guide().
+    let stale_hwnd = if is_fs { None } else { new_hwnd };
+    let stale_post: std::sync::Arc<parking_lot::Mutex<Option<u64>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let stale_post_setter = stale_post.clone();
     let on_chunk = move |chunk: &str, steps_seen: usize| {
         if !primed {
             primed = true;
             *ttft_setter.lock() = Some(std::time::Instant::now());
+            // Stale, post side — before the caption this closure emits. See guide().
+            {
+                let setter = stale_post_setter.clone();
+                std::thread::spawn(move || {
+                    *setter.lock() = ahash_of_screen(stale_hwnd);
+                });
+            }
             #[cfg(windows)]
             if let Some(h) = prime_hwnd {
                 std::thread::spawn(move || crate::locator::a11y::prime(h));
@@ -4982,15 +5038,10 @@ async fn send_correction(
     }
 
     if steps.is_empty() {
-        // Decoupled like guide()'s empty-steps branch: block-sig baseline + a separate aHash for
-        // stale (no pointer drawn here, so the screen is pointer-free like pre_hash).
+        // Decoupled like guide()'s empty-steps branch: block-sig baseline, and a stale
+        // sample taken at first token (see on_chunk) — overlay-clean like pre_hash.
         anchor_autopilot_baseline(&state).await;
-        let stale_target = guidance_target_hwnd(&state);
-        let stale_hash = tokio::task::spawn_blocking(move || ahash_of_screen(stale_target))
-            .await
-            .ok()
-            .flatten();
-        emit_stale_if_drifted(&app, pre_hash, stale_hash);
+        emit_stale_if_drifted(&app, pre_hash, *stale_post.lock(), ai_elapsed_ms);
         return Ok(GuideResponse {
             goal: session_goal(&state),
             plan_outline: session_plan_outline(&state),
@@ -5037,14 +5088,9 @@ async fn send_correction(
     let ai_bbox = compute_ai_bbox_for_step(&steps[0], new_capture_rect, &provider);
     let bbox_decisive = ai::bbox::bbox_is_decisive(&used_model, &bbox_distrust);
 
-    // Stale detection before the pointer is drawn — see guide() for rationale.
-    // Hash the same window the correction capture used (C5).
-    let stale_target = if is_fs { None } else { new_hwnd };
-    let stale_hash = tokio::task::spawn_blocking(move || ahash_of_screen(stale_target))
-        .await
-        .ok()
-        .flatten();
-    emit_stale_if_drifted(&app, pre_hash, stale_hash);
+    // Stale detection — see guide(). The post sample was taken at first token, before
+    // this turn drew anything; the window matches the one the correction captured (C5).
+    emit_stale_if_drifted(&app, pre_hash, *stale_post.lock(), ai_elapsed_ms);
 
     // Session export (§0.7): a correction is the highest-value turn there is. It
     // marks the place the obvious answer was wrong, which is the paragraph an
