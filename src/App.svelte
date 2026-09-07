@@ -3932,28 +3932,30 @@ See the LICENSE file in the root of this repository for complete details.
           <p style="margin: 0 0 10px 0;">
             Navisual captures your active window and sends it to the AI provider you've selected.
           </p>
+          <!-- SINGLE SOURCE OF TRUTH: navisualguide.com/privacy.html.
+               This list used to restate the policy in full and drifted from it — the
+               2026-09-06 audit found it still promising "full-screen needs your
+               permission each time" (that consent loop was removed in v0.5.23) and
+               pointing at a Pause hotkey that ships unset. Every one of those was a
+               volatile SPECIFIC: a count, a key name, a mechanism.
+
+               So this now carries only facts that describe what Navisual IS, which
+               change when the product changes rather than when an implementation
+               detail does. Numbers, key names and per-feature mechanics live on the
+               policy page and nowhere else. It still has to stand alone offline —
+               this is a consent gate shown before the first capture, so it cannot be
+               a bare link. -->
           <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
-            <li>Screenshots are held in memory — nothing is saved to your disk unless you choose to save it.</li>
-            <!-- "full-screen needs your permission each time" described the consent
-                 loop REMOVED in v0.5.23 (the AI's request_full_screen field and the
-                 Allow Once dialog are both gone). Full-desktop capture is now a sticky
-                 choice the user makes in the app picker, so the old wording overstated
-                 the protection on the one screen where that must not happen. -->
-            <li>Only the active window is captured by default. The whole screen is captured only if <em>you</em> pick “🖥️ Entire desktop” in the app picker — and it stays that way until you pick something else.</li>
-            <li>While guiding, Navisual notes <strong>which control you click</strong> inside the app you're being guided in — its name and type, like <em>Button "Save"</em> — so the AI knows what you just did. Clicks in any other window are discarded and never recorded. Navisual does not monitor your keyboard at all, and never reads the contents of a password box.</li>
-            <li>In Word, it also reads where your cursor is (page, section, line) and the style of the paragraph you're in — a screenshot can't show a text cursor.</li>
-            <li><strong>The default free tier uses free AI models that may keep your requests — including the screenshot — to train their models.</strong> Paid tiers, per their providers' current policies, don't; Ollama keeps everything on your machine. (<button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>details</button>)</li>
-            <li>On the free tier, a one-way hash of a device identifier counts your 30 free requests per machine — it can't identify you and isn't used on paid or your-own-key providers.</li>
-            <li>Voice input (optional) sends audio to Microsoft's online speech service via the WebView2 Web Speech API.</li>
-            <li>For zero data sharing, use the Ollama provider — it runs locally.</li>
+            <li>It captures the window you point it at — or your whole screen, if you pick that — and sends the picture to the AI provider you choose.</li>
+            <li>Screenshots are held in memory. Nothing is written to your disk unless you save it yourself.</li>
+            <li><strong>The default free tier uses AI models that may keep your requests — including the screenshot — to train on.</strong> Paid tiers and your own API key don't; Ollama never leaves your machine.</li>
+            <li>While guiding, it notes which control you click in that app — the control's name, never its contents. It does not monitor your keyboard.</li>
+            <li>Voice input, if you turn it on, sends your audio to Microsoft's speech service.</li>
           </ul>
           <p style="margin: 0 0 14px 0; font-size: 0.85em; color: var(--text-tertiary);">
-            <!-- Pause ships UNSET (config.rs: hotkey_pause = String::new(), since
-                 v0.5.17 dropped the Ctrl+S default for colliding with Save). Telling a
-                 first-run user to "use the Pause hotkey" pointed them at a key that
-                 does not exist yet — on the panel whose whole job is telling them how
-                 to stop capture. -->
-            To stop all capture instantly, assign a <strong>Pause</strong> hotkey in Settings → Hotkeys. It ships unset so it can't collide with a shortcut you already use.
+            The <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>full privacy policy</button>
+            is the complete and authoritative version — what is captured, where it goes, what is
+            stored, and how to stop it. You can reopen it any time from About.
           </p>
           <button
             class="btn-primary btn-full"
@@ -4617,6 +4619,11 @@ See the LICENSE file in the root of this repository for complete details.
           <p class="about-disclaimer">Navisual uses AI, which can make mistakes. Always verify each suggested action before performing it.</p>
           <div class="about-links">
             <button class="about-link" onclick={() => openUrl("https://navisualguide.com/docs.html")}>User guide</button>
+            <!-- The first-run notice is shown once per install and has no reopen path,
+                 so without this the policy was unreachable from inside a screen-reading
+                 app. It is also what makes the notice's "reopen it any time from About"
+                 true. -->
+            <button class="about-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy</button>
             <button class="about-link" onclick={() => openUrl("https://navisualguide.com")}>navisualguide.com</button>
             <button class="about-link" onclick={() => openUrl("https://github.com/NavisualGuide/navisual")}>GitHub</button>
             <button class="about-link" onclick={openFeedbackEmail}>Send feedback</button>
