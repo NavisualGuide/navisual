@@ -6812,6 +6812,29 @@ fn is_packaged() -> bool {
     packaged
 }
 
+/// Readiness probe for the frontend's cold-start gate.
+///
+/// `handle.manage(AppState)` is the LAST thing `setup()` does, and `setup()` can
+/// start long after the webview is already invoking commands — the panel's
+/// WebView2 boots and runs `onMount` while the main thread is still creating the
+/// overlay window. Measured on a real launch (2026-09-07): the first frontend
+/// invoke logged at 08:11:34, `manage()` at 08:11:52. Every state-touching call
+/// in between fails with "state not managed for field `state`".
+///
+/// This command takes `State` and does nothing else, so it answers exactly one
+/// question — has `manage()` run? — with no locks to contend for and no side
+/// effects. Any other state-taking command would answer it too, but would also
+/// be free to grow a job later that makes it a bad probe.
+#[tauri::command]
+fn backend_ready(_state: State<'_, AppState>) -> bool {
+    // Runs exactly once per session: Tauri rejects the call before it reaches this
+    // body while state is unmanaged, and the frontend memoises the gate once it
+    // succeeds. Its timestamp against "AiRouter ready" is what tells us, from a
+    // shipped log alone, whether a launch lost the race and how long the gate held.
+    log::info!("[startup] backend_ready probe answered — AppState is managed");
+    true
+}
+
 /// Return whether the app currently has a Supabase session.
 #[tauri::command]
 async fn get_session_status(state: State<'_, AppState>) -> Result<SessionStatus, String> {
@@ -7111,6 +7134,7 @@ pub fn run() {
             submit_feedback,
             exit_for_update,
             is_packaged,
+            backend_ready,
             list_target_windows,
             list_monitors,
             pin_target_window,

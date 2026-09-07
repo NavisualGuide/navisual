@@ -569,24 +569,59 @@ See the LICENSE file in the root of this repository for complete details.
     return EXE_DISPLAY[stem] ?? exeStem(exeName);
   }
 
-  // On a cold start (fresh Windows 10 install with no warm caches), WebView2
-  // can finish loading App.svelte and reach onMount invocations before Rust
-  // setup() finishes its cold-start I/O and calls handle.manage(AppState).
-  // Tauri then rejects state-touching commands with "state not managed".
-  // 8 × 150ms = 1.2s, comfortably longer than any observed cold start.
-  async function invokeReady<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-    for (let i = 0; i < 8; i++) {
-      try {
-        return await invoke<T>(cmd, args);
-      } catch (e) {
-        if (String(e).includes("state not managed") && i < 7) {
-          await new Promise((r) => setTimeout(r, 150));
-          continue;
+  // WebView2 can finish loading App.svelte and reach onMount invocations before
+  // Rust setup() calls handle.manage(AppState) — its very last statement. Until
+  // then Tauri rejects every state-touching command with "state not managed",
+  // so all of onMount's backend reads have to wait for that moment.
+  //
+  // This used to be a per-call retry budget: "8 × 150ms = 1.2s, comfortably
+  // longer than any observed cold start". It was not. Measured over 121 launches
+  // in the shipped logs, the race is BIMODAL: setup wins 110 of them, and in the
+  // other 11 the frontend wins by a median of 18s (max 30s) — only one was under
+  // 1.2s. So the old budget did not shave a rare tail, it missed almost the whole
+  // failure mode, and a merely larger constant would miss it too.
+  //
+  // What that cost, on the launch that prompted this (2026-09-07, first invoke
+  // 08:11:34, manage() 08:11:52): get_settings, the dock restore, the app chip,
+  // sign-in and the balance fetch ALL failed and fell back to defaults for the
+  // whole session. Every one of them was swallowed by a `catch (_) {}` except
+  // sign_in_anon, whose warning in the conversation was the only visible trace.
+  //
+  // The wait is now a condition rather than an attempt count: one shared gate
+  // that polls until state is managed. Waiting is safe because manage() is
+  // unconditional and one-way — the only run where it never happens is one where
+  // setup() panicked, and the ceiling exists purely so that build reports a real
+  // error instead of hanging forever.
+  const BACKEND_READY_CEILING_MS = 120_000;
+  let backendReadyGate: Promise<void> | null = null;
+  function waitForBackend(): Promise<void> {
+    backendReadyGate ??= (async () => {
+      const t0 = Date.now();
+      for (;;) {
+        try {
+          await invoke("backend_ready");
+          const waited = Date.now() - t0;
+          if (waited > 500) console.info(`[startup] backend state ready after ${waited}ms`);
+          return;
+        } catch (e) {
+          // Anything that is not the startup race is a real failure. Stop waiting
+          // and let the caller's own error handling see it on the next invoke.
+          if (!String(e).includes("state not managed")) return;
+          if (Date.now() - t0 > BACKEND_READY_CEILING_MS) {
+            console.error("[startup] backend state never became ready — giving up");
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 100));
         }
-        throw e;
       }
-    }
-    throw new Error("unreachable");
+    })();
+    return backendReadyGate;
+  }
+
+  /** invoke(), held until Rust has managed AppState. Startup paths only. */
+  async function invokeReady<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    await waitForBackend();
+    return invoke<T>(cmd, args);
   }
 
   type VoiceInfo = { id: string; name: string; };
@@ -2647,7 +2682,9 @@ See the LICENSE file in the root of this repository for complete details.
     getVersion().then(v => { appVersion = v; }).catch(() => {});
     // Resolve packaging BEFORE arming the update check — awaited, not fire-and-forget,
     // so a Store build can't race the 5s timer and phone home once on launch.
-    try { isPackaged = await invokeReady<boolean>("is_packaged"); } catch (_) {}
+    // Plain invoke, not invokeReady: is_packaged takes no State, so it answers
+    // during the startup race and must not queue behind the readiness gate.
+    try { isPackaged = await invoke<boolean>("is_packaged"); } catch (_) {}
     if (!isPackaged) setTimeout(() => checkForUpdates(), 5000);
 
     // S5 — first-run privacy disclosure. Shown once per install; the user's
@@ -2690,7 +2727,16 @@ See the LICENSE file in the root of this repository for complete details.
       // only the display gate was stuck at its false default). Reported live
       // 2026-07-11.
       debugShowInfo = init.debug_diagnostics_enabled;
-    } catch (_) {}
+    } catch (e) {
+      // Everything below runs on SETTINGS_DEFAULTS from here — wrong provider in
+      // the header, default hotkeys registered, the user's autopilot sensitivity
+      // and TTS choice ignored. That was silent until 2026-09-07, when a launch
+      // lost the manage() race and the only visible symptom was an unrelated-
+      // looking sign-in warning. Opening Settings re-reads from disk and repairs
+      // the form, so this degrades rather than destroys — but the user has to be
+      // told which state they are in.
+      addToHistory("system", "⚠️ Couldn't load your settings — running on defaults for now. Open Settings to reload them. (" + String(e) + ")");
+    }
 
     const sw = window.screen.availWidth;
     const sh = window.screen.availHeight;
