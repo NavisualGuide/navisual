@@ -81,14 +81,16 @@
 </div>
 
 <style>
+  /* Tokens from App.svelte's :root — this used to hard-code #FF6B35 and generic
+     monospace, so it drifted from the panel whenever the palette moved. */
   .hotkey-input {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
-    border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.15);
-    background: rgba(255,255,255,0.04);
+    padding: 6px 12px;
+    border-radius: var(--r-md, 12px);
+    border: 1px solid var(--border, rgba(255,255,255,0.08));
+    background: var(--surface-2, #1c1c20);
     cursor: pointer;
     outline: none;
     min-width: 160px;
@@ -97,12 +99,12 @@
     user-select: none;
   }
   .hotkey-input:hover {
-    border-color: rgba(255,255,255,0.3);
-    background: rgba(255,255,255,0.07);
+    border-color: var(--border-strong, rgba(255,255,255,0.14));
+    background: var(--surface-3, #26262b);
   }
   .hotkey-input.recording {
-    border-color: #FF6B35;
-    background: rgba(255,107,53,0.12);
+    border-color: var(--accent-500, #ff6b35);
+    background: var(--accent-soft, rgba(255,107,53,0.14));
     animation: pulse 1s ease-in-out infinite;
   }
   @keyframes pulse {
@@ -110,42 +112,41 @@
     50%       { box-shadow: 0 0 0 4px rgba(255,107,53,0); }
   }
   .hotkey-badge {
-    font-family: monospace;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
     font-size: 11px;
-    background: rgba(255,255,255,0.1);
-    border-radius: 4px;
-    padding: 2px 6px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 6px;
+    padding: 2px 7px;
     letter-spacing: 0.02em;
   }
   .click-hint {
-    color: rgba(255,255,255,0.35);
+    color: var(--text-tertiary, #6b6b73);
     font-size: 10px;
   }
   .recording-hint {
-    color: #FF6B35;
+    color: var(--accent-500, #ff6b35);
     font-size: 11px;
-    font-style: italic;
   }
   .clear-btn {
     margin-left: auto;
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
     flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0;
     border: none;
-    border-radius: 4px;
+    border-radius: 999px;
     background: rgba(255,255,255,0.06);
-    color: rgba(255,255,255,0.45);
+    color: var(--text-tertiary, #6b6b73);
     font-size: 14px;
     line-height: 1;
     cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
   .clear-btn:hover {
-    background: rgba(255,107,53,0.18);
-    color: #FF6B35;
+    background: var(--accent-soft, rgba(255,107,53,0.14));
+    color: var(--accent-500, #ff6b35);
   }
 </style>

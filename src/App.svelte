@@ -4869,18 +4869,39 @@ See the LICENSE file in the root of this repository for complete details.
     --surface-1: #141416;
     --surface-2: #1c1c20;
     --surface-3: #26262b;
+    --surface-4: #2f2f35;
     --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.14);
     --text-primary: #f5f5f7;
     --text-secondary: #a1a1aa;
     --text-tertiary: #6b6b73;
+    /* Aliases for names that were already in use below but never defined — a
+       `var(--accent)` with no fallback resolves to NOTHING, so the balance chip
+       was silently inheriting its text colour. */
+    --text-muted: #6b6b73;
+    --bg-secondary: #1c1c20;
+    --accent: #ff6b35;
     --accent-500: #ff6b35;
     --accent-400: #ff8555;
     --accent-600: #e55520;
+    --accent-soft: rgba(255, 107, 53, 0.14);
+    --accent-soft-strong: rgba(255, 107, 53, 0.24);
     --success: #22c55e;
     --danger: #ef4444;
     --warning: #f59e0b;
     --info: #0ea5e9;
-    font-family: Inter, -apple-system, "Segoe UI", Roboto, sans-serif;
+    /* Radius scale. Cards use --r-md, the shell and modals --r-lg, every
+       standalone control is a pill. */
+    --r-sm: 8px;
+    --r-md: 12px;
+    --r-lg: 16px;
+    --r-pill: 999px;
+    /* Inter is now actually shipped (main.ts imports @fontsource-variable/inter).
+       Before, this stack fell through -apple-system (Mac-only) to Segoe UI on
+       every Windows machine — which is most of why the panel read as a
+       Microsoft app. cv11 = single-storey a. */
+    font-family: "Inter Variable", Inter, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-feature-settings: "cv11";
     color-scheme: dark;
     font-size: 13px;
   }
@@ -4923,7 +4944,7 @@ See the LICENSE file in the root of this repository for complete details.
     bottom: 0;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--r-md);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
     padding: 4px;
     display: flex;
@@ -4945,7 +4966,7 @@ See the LICENSE file in the root of this repository for complete details.
     padding: 7px 9px;
     background: none;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     color: var(--text-primary);
     font-size: 12px;
     font-weight: 500;
@@ -5157,7 +5178,7 @@ See the LICENSE file in the root of this repository for complete details.
   main {
     background: var(--surface-1);
     border: 1px solid var(--border);
-    border-radius: 14px;
+    border-radius: var(--r-lg);
     height: calc(100vh - 6px);
     margin: 2px 4px 4px 4px;
     min-width: 352px;
@@ -5174,8 +5195,7 @@ See the LICENSE file in the root of this repository for complete details.
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
+    padding: 12px 14px 8px;
     flex-shrink: 0;
     cursor: default;
     user-select: none;
@@ -5198,23 +5218,24 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   .header-title {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
-    letter-spacing: 0.01em;
+    letter-spacing: -0.01em;
     flex-shrink: 0;
   }
 
   .header-balance {
     font-size: 11px;
-    color: var(--accent);
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    background: rgba(255, 107, 53, 0.12);
+    font-weight: 500;
+    color: var(--accent-400);
+    font-family: inherit;
+    background: var(--accent-soft);
     border: none;
-    border-radius: 4px;
-    padding: 1px 5px;
+    border-radius: var(--r-pill);
+    padding: 3px 9px;
   }
   .header-balance:hover {
-    background: rgba(255, 107, 53, 0.22);
+    background: var(--accent-soft-strong);
   }
   .header-balance-low {
     color: #ff4040;
@@ -5244,21 +5265,22 @@ See the LICENSE file in the root of this repository for complete details.
     text-overflow: ellipsis;
     white-space: nowrap;
     background: var(--surface-3);
-    padding: 1px 6px;
-    border-radius: 4px;
+    padding: 2px 8px;
+    border-radius: var(--r-pill);
   }
 
   /* Phase 0.2: "Shared: <App>" indicator chip. */
   .header-shared {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: var(--accent, #ff6b35);
-    background: rgba(255, 107, 53, 0.10);
-    border: 1px solid rgba(255, 107, 53, 0.35);
-    padding: 1px 6px;
-    border-radius: 4px;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: var(--surface-3);
+    border: 1px solid transparent;
+    padding: 3px 9px 3px 8px;
+    border-radius: var(--r-pill);
     flex-shrink: 1;
     min-width: 0;
     max-width: 160px;
@@ -5267,9 +5289,10 @@ See the LICENSE file in the root of this repository for complete details.
     white-space: nowrap;
     cursor: pointer;
     font-family: inherit;
+    transition: background 120ms ease-out, color 120ms ease-out;
   }
-  .header-shared:hover { background: rgba(255, 107, 53, 0.18); }
-  .header-shared-pinned { border-style: solid; border-width: 1.5px; }
+  .header-shared:hover { background: var(--surface-4); color: var(--text-primary); }
+  .header-shared-pinned { background: var(--accent-soft); color: var(--accent-400); }
   .header-shared-pin { font-size: 9px; opacity: 0.8; }
   .header-shared-caret { font-size: 11px; opacity: 0.9; flex-shrink: 0; }
   .header-shared-dot {
@@ -5300,9 +5323,9 @@ See the LICENSE file in the root of this repository for complete details.
     max-width: 250px;
     text-align: left;
     background: var(--surface-2);
-    border: 1px solid rgba(255, 107, 53, 0.45);
-    border-radius: 8px;
-    padding: 9px 11px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    padding: 10px 12px;
     font-size: 11.5px;
     font-weight: 400;
     line-height: 1.45;
@@ -5313,7 +5336,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .target-hint:hover {
     color: var(--text-primary);
-    border-color: rgba(255, 107, 53, 0.7);
+    border-color: var(--accent-500);
   }
   .target-hint-arrow {
     position: absolute;
@@ -5323,8 +5346,8 @@ See the LICENSE file in the root of this repository for complete details.
     height: 8px;
     transform: rotate(45deg);
     background: var(--surface-2);
-    border-left: 1px solid rgba(255, 107, 53, 0.45);
-    border-top: 1px solid rgba(255, 107, 53, 0.45);
+    border-left: 1px solid var(--border-strong);
+    border-top: 1px solid var(--border-strong);
   }
   /* One-time coach mark anchored under the header's collapse button (2nd
      icon from the right, before Close). Same treatment as .target-hint. */
@@ -5335,9 +5358,9 @@ See the LICENSE file in the root of this repository for complete details.
     max-width: 220px;
     text-align: left;
     background: var(--surface-2);
-    border: 1px solid rgba(255, 107, 53, 0.45);
-    border-radius: 8px;
-    padding: 9px 11px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    padding: 10px 12px;
     font-size: 11.5px;
     font-weight: 400;
     line-height: 1.45;
@@ -5348,7 +5371,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .collapse-hint:hover {
     color: var(--text-primary);
-    border-color: rgba(255, 107, 53, 0.7);
+    border-color: var(--accent-500);
   }
   .collapse-hint-arrow {
     position: absolute;
@@ -5358,8 +5381,8 @@ See the LICENSE file in the root of this repository for complete details.
     height: 8px;
     transform: rotate(45deg);
     background: var(--surface-2);
-    border-left: 1px solid rgba(255, 107, 53, 0.45);
-    border-top: 1px solid rgba(255, 107, 53, 0.45);
+    border-left: 1px solid var(--border-strong);
+    border-top: 1px solid var(--border-strong);
   }
   .target-picker {
     position: fixed;
@@ -5371,8 +5394,8 @@ See the LICENSE file in the root of this repository for complete details.
     overflow-y: auto;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 4px;
+    border-radius: var(--r-md);
+    padding: 6px;
     z-index: 999;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   }
@@ -5393,8 +5416,8 @@ See the LICENSE file in the root of this repository for complete details.
     align-items: center;
     column-gap: 6px;
     width: 100%;
-    padding: 5px 8px;
-    border-radius: 5px;
+    padding: 6px 8px;
+    border-radius: var(--r-sm);
     border: none;
     background: transparent;
     color: var(--text-primary);
@@ -5424,10 +5447,10 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   :global(.hdr-btn) {
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     padding: 0;
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     font-size: 13px;
     background: transparent;
     /* text-primary, not text-secondary: reported live as "nearly invisible" —
@@ -5505,18 +5528,18 @@ See the LICENSE file in the root of this repository for complete details.
   /* ── Latest instruction box ─────────────────────── */
 
   .latest-box {
-    background: rgba(255, 107, 53, 0.06);
-    border-bottom: 1px solid rgba(255, 107, 53, 0.15);
-    border-left: 3px solid var(--accent-500);
-    padding: 10px 12px 10px 10px;
+    margin: 6px 12px 0;
+    padding: 12px 14px 12px;
+    background: var(--surface-2);
+    border-radius: var(--r-md);
     flex-shrink: 0;
   }
 
   .latest-header {
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin-bottom: 5px;
+    gap: 8px;
+    margin-bottom: 6px;
   }
 
   /* The goal card — deliberately more significant than a status line (was
@@ -5525,21 +5548,22 @@ See the LICENSE file in the root of this repository for complete details.
   .goal-card {
     display: flex;
     align-items: center;
-    gap: 8px;
-    width: 100%;
-    margin: 2px 0 10px 0;
-    padding: 8px 10px;
-    background: rgba(255, 107, 53, 0.08);
-    border: 1px solid rgba(255, 107, 53, 0.25);
-    border-radius: 8px;
+    gap: 10px;
+    width: auto;
+    align-self: stretch;
+    margin: 6px 12px 0;
+    padding: 10px 12px;
+    background: var(--surface-2);
+    border: none;
+    border-radius: var(--r-md);
+    color: inherit;
     font-family: inherit;
     text-align: left;
     cursor: pointer;
-    transition: background 0.12s, border-color 0.12s;
+    transition: background 0.12s;
   }
   .goal-card:hover {
-    background: rgba(255, 107, 53, 0.14);
-    border-color: rgba(255, 107, 53, 0.4);
+    background: var(--surface-3);
   }
   .goal-card-icon {
     flex-shrink: 0;
@@ -5564,17 +5588,16 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .goal-label {
     flex: 0 0 auto;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-size: 0.72em;
-    opacity: 0.75;
+    font-size: 11px;
+    font-weight: 500;
     color: var(--text-tertiary);
   }
   .goal-text {
     color: var(--text-primary);
-    font-size: 0.92em;
+    font-size: 13.5px;
     font-weight: 600;
     line-height: 1.35;
+    letter-spacing: -0.005em;
     /* Long goals wrap rather than truncate — a clipped goal is exactly as unverifiable
        as no goal, which would defeat showing it. */
     overflow-wrap: anywhere;
@@ -5589,9 +5612,9 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .goal-card-progress-track {
     flex: 1;
-    height: 4px;
+    height: 3px;
     border-radius: 2px;
-    background: rgba(255, 107, 53, 0.18);
+    background: rgba(255, 255, 255, 0.08);
     overflow: hidden;
   }
   .goal-card-progress-fill {
@@ -5656,11 +5679,11 @@ See the LICENSE file in the root of this repository for complete details.
   /* Route overview, expanded in place — normal document flow, right under the
      goal card, instead of a floating modal. */
   .plan-inline {
-    margin: 0 0 10px 0;
-    padding: 10px 12px;
-    background: rgba(255, 107, 53, 0.05);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    margin: 6px 12px 0;
+    padding: 12px 14px;
+    background: var(--surface-2);
+    border: none;
+    border-radius: var(--r-md);
   }
   .plan-inline-header {
     display: flex;
@@ -5683,11 +5706,9 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .plan-inline-close:hover { color: var(--text-primary); }
   .step-counter {
-    font-size: 10px;
-    font-weight: 600;
+    font-size: 11px;
+    font-weight: 500;
     color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
     flex-shrink: 0;
   }
 
@@ -5696,25 +5717,26 @@ See the LICENSE file in the root of this repository for complete details.
   .clear-toggle-btn {
     margin-left: auto;
     flex-shrink: 0;
-    background: var(--surface-3);
+    background: transparent;
     color: var(--text-secondary);
-    border: 1px solid var(--border);
-    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-pill);
     font-size: 11px;
     font-weight: 500;
-    padding: 3px 8px;
+    padding: 3px 10px;
     cursor: pointer;
     transition: background 0.12s, color 0.12s;
   }
   .clear-toggle-btn:hover {
-    background: var(--surface-2, #2d2d33);
+    background: var(--surface-3);
     color: var(--text-primary);
   }
 
   .latest-text {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 500;
-    line-height: 1.5;
+    line-height: 1.45;
+    letter-spacing: -0.005em;
     color: var(--text-primary);
     margin: 0;
   }
@@ -5729,21 +5751,19 @@ See the LICENSE file in the root of this repository for complete details.
 
   .wrong-footer {
     margin-top: 10px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
   }
   .wrong-btn {
-    background: rgba(239, 68, 68, 0.1);
-    color: var(--danger);
-    border: 1px solid rgba(239, 68, 68, 0.22);
-    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-pill);
     font-size: 12px;
     font-weight: 500;
-    padding: 4px 10px;
+    padding: 5px 12px;
     cursor: pointer;
-    transition: background 0.12s;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
   }
-  .wrong-btn:hover { background: rgba(239, 68, 68, 0.22); }
+  .wrong-btn:hover { background: rgba(239, 68, 68, 0.12); color: var(--danger); border-color: rgba(239, 68, 68, 0.35); }
 
   .reason-row {
     display: flex;
@@ -5773,10 +5793,10 @@ See the LICENSE file in the root of this repository for complete details.
     gap: 6px;
   }
   .reason-chip {
-    background: var(--surface-3, #2d2d33);
+    background: var(--surface-3);
     color: var(--text-secondary);
-    border: 1px solid var(--border);
-    border-radius: 100px;
+    border: 1px solid transparent;
+    border-radius: var(--r-pill);
     font-size: 12px;
     font-weight: 500;
     padding: 5px 12px;
@@ -5808,7 +5828,7 @@ See the LICENSE file in the root of this repository for complete details.
     padding: 6px 8px;
     background: rgba(255, 184, 0, 0.10);
     border: 1px solid rgba(255, 184, 0, 0.32);
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     font-size: 11px;
     color: var(--text-secondary, #c8c8c8);
     line-height: 1.35;
@@ -5940,10 +5960,10 @@ See the LICENSE file in the root of this repository for complete details.
   .history {
     flex: 1;
     overflow-y: auto;
-    padding: 8px 12px;
+    padding: 10px 12px 8px;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 8px;
     min-height: 0;
   }
 
@@ -5952,8 +5972,9 @@ See the LICENSE file in the root of this repository for complete details.
   .history::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 2px; }
 
   .h-entry {
+    position: relative;
     display: flex;
-    gap: 7px;
+    gap: 8px;
     align-items: flex-start;
     font-size: 13px;
     line-height: 1.5;
@@ -5975,7 +5996,7 @@ See the LICENSE file in the root of this repository for complete details.
     width: 80px;
     height: 45px;
     object-fit: cover;
-    border-radius: 4px;
+    border-radius: var(--r-sm);
     border: 1px solid var(--border);
     opacity: 0.7;
     transition: opacity 0.2s;
@@ -6011,14 +6032,10 @@ See the LICENSE file in the root of this repository for complete details.
     pointer-events: none;
   }
   .h-label {
-    font-weight: 700;
+    font-weight: 600;
     font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
     flex-shrink: 0;
-    padding-top: 1px;
-    min-width: 34px;
-    text-align: right;
+    color: var(--text-tertiary);
   }
 
   .h-body {
@@ -6026,6 +6043,7 @@ See the LICENSE file in the root of this repository for complete details.
     flex-direction: column;
     gap: 2px;
     min-width: 0;
+    max-width: 86%;
   }
 
   .h-text { color: var(--text-secondary); word-break: break-word; }
@@ -6034,29 +6052,53 @@ See the LICENSE file in the root of this repository for complete details.
   /* Sized to sit on the same baseline as the text labels beside it, and pinned
      to the right of the 34px column like they are. */
   .h-label-fish {
-    width: 14px;
-    height: 14px;
-    display: inline-block;
-    vertical-align: -3px;
-    border-radius: 3px;
+    width: 20px;
+    height: 20px;
+    display: block;
+    border-radius: 6px;
+    /* Sit on the first line of the message, not at the bottom of a paragraph. */
+    margin-top: 0;
   }
 
-  .h-user .h-label { color: var(--accent-400); }
-  .h-user .h-text  { color: var(--text-primary); }
+  /* Who said what, shown the way every messaging app the user already knows
+     shows it: YOU are a filled bubble on the right, NAVISUAL is plain text on
+     the left beside its mark, and system notes sit centred and quiet between.
+     Position and fill are the marker, so the text label becomes screen-reader
+     only rather than a caps tag in a gutter. (Redesign 2026-09-07.) */
+  .h-user { flex-direction: row-reverse; }
+  .h-user .h-label,
+  .h-correction .h-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .h-user .h-body {
+    background: var(--accent-500);
+    padding: 8px 12px;
+    border-radius: 16px 16px 4px 16px;
+  }
+  .h-user .h-text { color: #fff; }
+  .h-user .h-meta { color: rgba(255, 255, 255, 0.72); }
 
-  .h-ai .h-label   { color: var(--info); }
-  .h-ai .h-text    { color: var(--text-secondary); }
+  .h-ai .h-text  { color: var(--text-primary); }
 
-  .h-correction .h-label { color: var(--warning); }
-  .h-correction .h-text  { color: var(--warning); font-style: italic; }
+  .h-correction { flex-direction: row-reverse; }
+  .h-correction .h-body {
+    background: rgba(245, 158, 11, 0.16);
+    padding: 8px 12px;
+    border-radius: 16px 16px 4px 16px;
+  }
+  .h-correction .h-text { color: var(--warning); }
 
-  .h-system .h-label { color: var(--text-tertiary); }
-  .h-system .h-text  { color: var(--text-tertiary); font-style: italic; }
-
-  .h-error .h-label { color: var(--danger); }
-  .h-error .h-text  { color: var(--danger); }
-
-  .h-thinking .h-text { color: var(--text-tertiary); }
+  .h-system, .h-error, .h-thinking { justify-content: center; }
+  .h-system .h-label, .h-error .h-label, .h-thinking .h-label { display: none; }
+  .h-system .h-body, .h-error .h-body { max-width: 100%; align-items: center; }
+  .h-system .h-text { color: var(--text-tertiary); font-size: 12px; text-align: center; }
+  .h-error .h-text  { color: var(--danger); font-size: 12px; text-align: center; }
+  .h-thinking .h-text { color: var(--text-tertiary); font-size: 12px; }
 
   @keyframes thinking-fade {
     0%, 100% { opacity: 1; }
@@ -6068,30 +6110,28 @@ See the LICENSE file in the root of this repository for complete details.
 
   /* ── Badge variants ──────────────────────────────── */
   .badge-clip {
-    background: rgba(14, 165, 233, 0.15);
+    background: rgba(14, 165, 233, 0.14);
     color: var(--info);
-    border: 1px solid rgba(14, 165, 233, 0.25);
-    font-size: 10px;
-    padding: 1px 5px;
-    border-radius: 4px;
-    font-weight: 600;
+    border: none;
+    font-size: 10.5px;
+    padding: 2px 8px;
+    border-radius: var(--r-pill);
+    font-weight: 500;
     flex-shrink: 0;
   }
 
   .task-section {
-    padding: 8px 12px;
+    padding: 8px 12px 6px;
     display: flex;
     flex-direction: column;
     gap: 6px;
-    border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
 
   .input-hint {
     font-size: 11px;
     color: var(--text-tertiary);
-    padding: 2px 0;
-    font-style: italic;
+    padding: 0 2px;
   }
 
   /* Workstream P — the task box holds exactly one prefill; a small ▾ toggle
@@ -6138,7 +6178,7 @@ See the LICENSE file in the root of this repository for complete details.
     flex-direction: column;
     gap: 2px;
     padding: 4px;
-    border-radius: 8px;
+    border-radius: var(--r-md);
     border: 1px solid var(--border);
     background: var(--surface-2);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
@@ -6148,7 +6188,7 @@ See the LICENSE file in the root of this repository for complete details.
     font-family: inherit;
     font-size: 12px;
     padding: 6px 8px;
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     border: 1px solid transparent;
     background: transparent;
     color: var(--text-secondary);
@@ -6167,12 +6207,12 @@ See the LICENSE file in the root of this repository for complete details.
     width: 100%;
     box-sizing: border-box;
     font-family: inherit;
-    font-size: 13px;
-    padding: 8px 10px;
-    border-radius: 7px;
+    font-size: 13.5px;
+    padding: 10px 12px;
+    border-radius: var(--r-md);
     background: var(--surface-2);
     color: var(--text-primary);
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     outline: none;
     resize: none;
     line-height: 1.5;
@@ -6184,7 +6224,7 @@ See the LICENSE file in the root of this repository for complete details.
     overflow-y: auto;
     transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
   }
-  textarea:focus { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255, 107, 53, 0.15); }
+  textarea:focus { border-color: var(--accent-500); box-shadow: 0 0 0 3px var(--accent-soft); }
   textarea:disabled { opacity: 0.45; }
 
   /* ── Action row ──────────────────────────────────── */
@@ -6192,82 +6232,75 @@ See the LICENSE file in the root of this repository for complete details.
   .action-row {
     display: flex;
     gap: 6px;
-    padding: 0 12px 8px;
+    padding: 0 12px 10px;
     flex-shrink: 0;
   }
 
   .btn-action {
     flex: 1;
-    padding: 7px 4px;
-    border-radius: 7px;
-    font-size: 12px;
+    padding: 8px 6px;
+    border-radius: var(--r-pill);
+    font-size: 12.5px;
     font-weight: 600;
     cursor: pointer;
     border: 1px solid transparent;
+    background: var(--surface-3);
+    color: var(--text-secondary);
     font-family: inherit;
-    transition: background 120ms ease-out, opacity 120ms ease-out;
+    transition: background 120ms ease-out, color 120ms ease-out, opacity 120ms ease-out;
   }
   .btn-action:disabled { opacity: 0.35; cursor: not-allowed; }
 
   .btn-next {
-    background: rgba(34, 197, 94, 0.15);
-    color: var(--success);
-    border-color: rgba(34, 197, 94, 0.25);
+    background: var(--accent-soft);
+    color: var(--accent-400);
   }
-  .btn-next:not(:disabled):hover { background: rgba(34, 197, 94, 0.25); }
+  .btn-next:not(:disabled):hover { background: var(--accent-soft-strong); }
 
   .btn-more {
-    flex: 0 0 32px;
-    padding: 7px 0;
-    background: rgba(161, 161, 170, 0.08);
-    color: var(--text-secondary);
-    border-color: rgba(161, 161, 170, 0.18);
+    flex: 0 0 34px;
+    padding: 8px 0;
     letter-spacing: 0.12em;
     font-size: 11px;
   }
-  .btn-more:hover { background: rgba(161, 161, 170, 0.18); color: var(--text-primary); }
+  .btn-more:hover { background: var(--surface-4); color: var(--text-primary); }
 
   .btn-more-open {
-    background: rgba(161, 161, 170, 0.22) !important;
+    background: var(--surface-4) !important;
     color: var(--text-primary) !important;
-    border-color: rgba(161, 161, 170, 0.35) !important;
   }
 
   .btn-mic {
-    flex: 0 0 32px;
-    padding: 7px 0;
-    background: rgba(161, 161, 170, 0.08);
-    color: var(--text-secondary);
-    border-color: rgba(161, 161, 170, 0.18);
+    flex: 0 0 34px;
+    padding: 8px 0;
     font-size: 13px;
   }
-  .btn-mic:hover:not(:disabled) { background: rgba(161, 161, 170, 0.18); color: var(--text-primary); }
+  .btn-mic:hover:not(:disabled) { background: var(--surface-4); color: var(--text-primary); }
   .btn-mic-active {
     background: rgba(239, 68, 68, 0.18) !important;
     border-color: rgba(239, 68, 68, 0.35) !important;
     animation: pulse 0.9s ease-in-out infinite;
   }
 
+  /* Autopilot ON lights up in the accent; OFF is the same quiet pill as its
+     neighbours. One accent doing one job, instead of green-vs-amber. */
   .btn-pause {
-    background: rgba(245, 158, 11, 0.12);
-    color: var(--warning);
-    border-color: rgba(245, 158, 11, 0.22);
+    background: var(--accent-soft);
+    color: var(--accent-400);
   }
-  .btn-pause:not(:disabled):hover { background: rgba(245, 158, 11, 0.22); }
+  .btn-pause:not(:disabled):hover { background: var(--accent-soft-strong); }
 
   .btn-resume {
-    background: rgba(34, 197, 94, 0.15);
-    color: var(--success);
-    border-color: rgba(34, 197, 94, 0.25);
+    background: var(--surface-3);
+    color: var(--text-secondary);
   }
-  .btn-resume:hover { background: rgba(34, 197, 94, 0.25); }
+  .btn-resume:hover { background: var(--surface-4); color: var(--text-primary); }
 
   .btn-new {
-    background: rgba(161, 161, 170, 0.1);
+    background: var(--surface-3);
     color: var(--text-secondary);
-    border-color: rgba(161, 161, 170, 0.2);
   }
-  .btn-new:hover { background: rgba(161, 161, 170, 0.2); color: var(--text-primary); }
+  .btn-new:hover { background: var(--surface-4); color: var(--text-primary); }
 
   /* ── Quick-action menu ───────────────────────────── */
 
@@ -6433,41 +6466,37 @@ See the LICENSE file in the root of this repository for complete details.
        unreachable. Losing actions in this menu is a recurring fault here (it is why
        Clear and Wrong were promoted out of it), so the row grows downward instead. */
     flex-wrap: wrap;
-    gap: 5px;
-    padding: 6px 12px;
-    border-top: 1px solid var(--border);
-    background: var(--surface-2);
+    gap: 6px;
+    padding: 0 12px 8px;
     flex-shrink: 0;
   }
 
   .qm-btn {
     flex: 1;
-    padding: 6px 4px;
-    border-radius: 6px;
+    padding: 7px 10px;
+    border-radius: var(--r-pill);
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     background: var(--surface-3);
     color: var(--text-secondary);
     font-family: inherit;
-    transition: background 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out;
+    transition: background 120ms ease-out, color 120ms ease-out;
     white-space: nowrap;
   }
-  .qm-btn:hover:not(:disabled) { background: #2d2d33; color: var(--text-primary); }
+  .qm-btn:hover:not(:disabled) { background: var(--surface-4); color: var(--text-primary); }
   .qm-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
   .qm-active {
-    background: rgba(255, 107, 53, 0.15) !important;
-    border-color: rgba(255, 107, 53, 0.35) !important;
+    background: var(--accent-soft) !important;
     color: var(--accent-400) !important;
   }
 
   /* ── Footer ──────────────────────────────────────── */
 
   footer {
-    padding: 6px 12px 10px;
-    border-top: 1px solid var(--border);
+    padding: 4px 14px 10px;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
@@ -6501,7 +6530,6 @@ See the LICENSE file in the root of this repository for complete details.
   .status-label {
     font-size: 11px;
     color: var(--text-tertiary);
-    font-family: "JetBrains Mono", ui-monospace, monospace;
   }
 
   .session-id {
@@ -6529,11 +6557,10 @@ See the LICENSE file in the root of this repository for complete details.
     font-size: 10px;
     line-height: 1;
     color: var(--text-secondary);
-    background: rgba(255, 255, 255, 0.07);
-    border: 1px solid rgba(255, 255, 255, 0.16);
-    border-bottom-width: 2px;
-    border-radius: 4px;
-    padding: 2px 5px;
+    background: rgba(255, 255, 255, 0.08);
+    border: none;
+    border-radius: 5px;
+    padding: 3px 6px;
   }
   .hk-none {
     font-size: 10px;
@@ -6542,7 +6569,7 @@ See the LICENSE file in the root of this repository for complete details.
     opacity: 0.7;
   }
   .hk-label {
-    font-size: 10px;
+    font-size: 10.5px;
     color: var(--text-secondary);
     font-weight: 500;
   }
@@ -6556,16 +6583,17 @@ See the LICENSE file in the root of this repository for complete details.
     font-family: inherit;
     font-size: 13px;
     font-weight: 500;
-    padding: 7px 12px;
-    border-radius: 7px;
+    padding: 8px 14px;
+    border-radius: var(--r-pill);
     cursor: pointer;
     border: 1px solid transparent;
-    transition: background 120ms ease-out, border-color 120ms ease-out;
+    transition: background 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
   }
 
   :global(.btn-primary) {
     background: var(--accent-500);
     color: #fff;
+    font-weight: 600;
     border-color: transparent;
   }
   :global(.btn-primary:hover:not(:disabled)) { background: var(--accent-400); }
@@ -6575,9 +6603,9 @@ See the LICENSE file in the root of this repository for complete details.
   :global(.btn-ghost) {
     background: var(--surface-3);
     color: var(--text-primary);
-    border-color: var(--border);
+    border-color: transparent;
   }
-  :global(.btn-ghost:hover) { background: #2d2d33; }
+  :global(.btn-ghost:hover) { background: var(--surface-4); }
 
   :global(.btn-danger) {
     background: #b91c1c;
@@ -6638,18 +6666,20 @@ See the LICENSE file in the root of this repository for complete details.
        titlebar controls stay clickable while a modal is open. */
     padding-top: 44px;
     box-sizing: border-box;
-    background: rgba(0, 0, 0, 0.6);
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 100;
-    border-radius: 14px;
+    border-radius: var(--r-lg);
   }
 
   :global(.modal) {
     background: var(--surface-1);
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: var(--r-lg);
     width: calc(100% - 32px);
     max-width: 400px;
     max-height: 92vh;
@@ -6661,25 +6691,27 @@ See the LICENSE file in the root of this repository for complete details.
   :global(.modal-header) {
     display: flex;
     align-items: center;
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--border);
+    padding: 14px 16px 6px;
     flex-shrink: 0;
   }
   :global(.modal-title) {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
+    letter-spacing: -0.01em;
     flex: 1;
   }
 
   .modal-tabs {
     display: flex;
+    gap: 2px;
+    padding: 0 10px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
   .tab-btn {
     flex: 1;
-    padding: 8px 4px;
-    font-size: 12px;
+    padding: 8px 6px 9px;
+    font-size: 12.5px;
     font-weight: 500;
     background: transparent;
     color: var(--text-tertiary);
@@ -6693,7 +6725,7 @@ See the LICENSE file in the root of this repository for complete details.
   .tab-active { color: var(--accent-500) !important; border-bottom-color: var(--accent-500) !important; }
 
   :global(.modal-body) {
-    padding: 12px 14px;
+    padding: 14px 16px;
     flex: 1;
     overflow-y: auto;
   }
@@ -6750,11 +6782,9 @@ See the LICENSE file in the root of this repository for complete details.
   :global(.setting-group:last-child) { margin-bottom: 0; }
 
   :global(.setting-label) {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     margin: 0;
   }
 
@@ -6762,8 +6792,8 @@ See the LICENSE file in the root of this repository for complete details.
     width: 100%;
     font-family: inherit;
     font-size: 13px;
-    padding: 7px 10px;
-    border-radius: 7px;
+    padding: 8px 12px;
+    border-radius: 10px;
     background: var(--surface-2);
     color: var(--text-primary);
     border: 1px solid var(--border);
@@ -6773,8 +6803,8 @@ See the LICENSE file in the root of this repository for complete details.
   }
   :global(.setting-input:focus) { border-color: var(--accent-500); box-shadow: 0 0 0 2px rgba(255, 107, 53, 0.15); }
   :global(.setting-select) {
-    width: 100%; font-family: inherit; font-size: 13px; padding: 7px 10px;
-    border-radius: 7px; background: var(--surface-2); color: var(--text-primary);
+    width: 100%; font-family: inherit; font-size: 13px; padding: 8px 12px;
+    border-radius: 10px; background: var(--surface-2); color: var(--text-primary);
     border: 1px solid var(--border); outline: none; box-sizing: border-box; cursor: pointer;
     transition: border-color 120ms ease-out;
     appearance: auto;
@@ -6790,20 +6820,20 @@ See the LICENSE file in the root of this repository for complete details.
   .key-row .setting-input { flex: 1; width: auto; }
 
   .key-toggle {
-    padding: 6px 10px;
+    padding: 7px 12px;
     font-size: 11px;
     font-weight: 600;
-    border-radius: 6px;
+    border-radius: var(--r-pill);
     background: var(--surface-3);
     color: var(--text-secondary);
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     cursor: pointer;
     flex-shrink: 0;
     font-family: inherit;
     white-space: nowrap;
     transition: background 120ms ease-out;
   }
-  .key-toggle:hover { background: #2d2d33; color: var(--text-primary); }
+  .key-toggle:hover { background: var(--surface-4); color: var(--text-primary); }
 
   .color-row {
     display: flex;
@@ -6934,8 +6964,8 @@ See the LICENSE file in the root of this repository for complete details.
     font-size: 11px;
     color: var(--text-tertiary);
     background: var(--surface-3);
-    padding: 2px 6px;
-    border-radius: 4px;
+    padding: 2px 8px;
+    border-radius: var(--r-pill);
   }
 
   .about-tagline {
@@ -6959,18 +6989,17 @@ See the LICENSE file in the root of this repository for complete details.
 
   .about-link {
     background: var(--surface-3);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--accent-400);
+    border: 1px solid transparent;
+    border-radius: var(--r-pill);
+    color: var(--text-primary);
     font-size: 12px;
-    padding: 4px 10px;
+    padding: 6px 12px;
     cursor: pointer;
     transition: background 0.15s;
   }
 
   .about-link:hover {
-    background: var(--surface-2);
-    color: var(--accent-500);
+    background: var(--surface-4);
   }
 
   .about-license {
@@ -6986,8 +7015,8 @@ See the LICENSE file in the root of this repository for complete details.
     gap: 6px;
     padding: 10px 12px;
     background: var(--surface-2);
-    border-radius: 8px;
-    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    border: none;
   }
 
   .update-status {
@@ -7023,9 +7052,9 @@ See the LICENSE file in the root of this repository for complete details.
     font-weight: 600;
     color: var(--warning);
     background: rgba(245, 158, 11, 0.12);
-    border: 1px solid rgba(245, 158, 11, 0.3);
-    border-radius: 4px;
-    padding: 2px 6px;
+    border: none;
+    border-radius: var(--r-pill);
+    padding: 3px 9px;
     cursor: pointer;
     margin-right: 4px;
     flex-shrink: 0;

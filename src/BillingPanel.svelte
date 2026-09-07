@@ -134,7 +134,7 @@
     padding: 8px 10px;
     border: 1px solid var(--warning);
     border-left-width: 3px;
-    border-radius: 6px;
+    border-radius: 10px;
     background: color-mix(in srgb, var(--warning) 12%, transparent);
     color: var(--text-secondary);
     line-height: 1.45;

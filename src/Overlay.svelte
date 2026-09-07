@@ -271,7 +271,7 @@
     const cx = sx + sw / 2;
 
     // Measure text first so strip width can fit the content
-    ctx.font = `bold ${Math.round(18 * scale)}px Inter, -apple-system, 'Segoe UI', sans-serif`;
+    ctx.font = `600 ${Math.round(18 * scale)}px 'Inter Variable', Inter, -apple-system, 'Segoe UI', sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
@@ -440,7 +440,7 @@
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.fillStyle = "#fff";
-      ctx.font = `bold ${chipR + 2}px 'Segoe UI', sans-serif`;
+      ctx.font = `700 ${chipR + 2}px 'Inter Variable', Inter, 'Segoe UI', sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(String(i + 1), chipX, chipY + 0.5);
