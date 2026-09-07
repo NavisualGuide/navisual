@@ -1526,9 +1526,9 @@ See the LICENSE file in the root of this repository for complete details.
   // What was actually missing is `oncontextmenu` + preventDefault: WebView2's own
   // menu (Back / Refresh / Save as / Print / Inspect) otherwise opens ON TOP of
   // ours. `preventDefault()` on pointerdown does NOT suppress it — only the
-  // `contextmenu` event does. Suppressed on the fish alone, deliberately: right
-  // click elsewhere in the panel keeps Inspect, which is worth having in a dev
-  // build.
+  // `contextmenu` event does. The expanded panel suppresses it too now (see
+  // handlePanelContextMenu) — except in text fields and in developer mode, where
+  // Inspect is worth having.
   //
   // Long-press is kept alongside it — same action, and the gesture that works on a
   // 48px target where a stray click should only ever expand.
