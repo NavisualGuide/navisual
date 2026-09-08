@@ -4916,6 +4916,15 @@ See the LICENSE file in the root of this repository for complete details.
     --accent-400: #ff8555;
     --accent-600: #e55520;
     --accent-soft: rgba(255, 107, 53, 0.14);
+    /* Disabled fills. Dimming a COLOURED button with opacity blends its own fill
+       into the surface behind it: --accent-500 at 0.4 over --surface-1 lands on
+       rgb(114,55,34), a muddy brown that reads as a dirty version of the enabled
+       colour rather than as "unavailable" -- and the white label dims with it,
+       so the one part still worth reading is the part that fades. A disabled
+       control gets an explicit desaturated pill instead. Grey buttons and
+       inputs keep plain opacity; they have no colour to muddy. */
+    --disabled-fill: #2b2b31;
+    --disabled-text: #7a7a83;
     --accent-soft-strong: rgba(255, 107, 53, 0.24);
     --success: #22c55e;
     --danger: #ef4444;
@@ -5102,7 +5111,11 @@ See the LICENSE file in the root of this repository for complete details.
     font-weight: 600;
     cursor: pointer;
   }
-  .icon-chat-send:disabled { opacity: 0.45; cursor: default; }
+  .icon-chat-send:disabled {
+    background: var(--disabled-fill);
+    color: var(--disabled-text);
+    cursor: default;
+  }
   .icon-chat-cancel {
     padding: 6px 8px;
     background: none;
@@ -6489,7 +6502,11 @@ See the LICENSE file in the root of this repository for complete details.
     color: #fff;
     cursor: pointer;
   }
-  .export-go:disabled { opacity: 0.6; cursor: default; }
+  .export-go:disabled {
+    background: var(--disabled-fill);
+    color: var(--disabled-text);
+    cursor: default;
+  }
 
   .quick-menu {
     display: flex;
@@ -6632,8 +6649,12 @@ See the LICENSE file in the root of this repository for complete details.
     border-color: transparent;
   }
   :global(.btn-primary:hover:not(:disabled)) { background: var(--accent-400); }
-  :global(.btn-primary:active) { background: var(--accent-600); }
-  :global(.btn-primary:disabled) { opacity: 0.4; cursor: not-allowed; }
+  :global(.btn-primary:active:not(:disabled)) { background: var(--accent-600); }
+  :global(.btn-primary:disabled) {
+    background: var(--disabled-fill);
+    color: var(--disabled-text);
+    cursor: not-allowed;
+  }
 
   :global(.btn-ghost) {
     background: var(--surface-3);
@@ -6648,7 +6669,11 @@ See the LICENSE file in the root of this repository for complete details.
     border-color: transparent;
   }
   :global(.btn-danger:hover:not(:disabled)) { background: #dc2626; }
-  :global(.btn-danger:disabled) { opacity: 0.4; cursor: not-allowed; }
+  :global(.btn-danger:disabled) {
+    background: var(--disabled-fill);
+    color: var(--disabled-text);
+    cursor: not-allowed;
+  }
 
   /* ── Account tab ─────────────────────────────────── */
   :global(.acct-error) { color: #f87171; }
@@ -6738,14 +6763,25 @@ See the LICENSE file in the root of this repository for complete details.
 
   .modal-tabs {
     display: flex;
+    /* Whole tabs wrap to a second row; a LABEL never does. See .tab-btn. */
+    flex-wrap: wrap;
     gap: 2px;
     padding: 0 10px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
   .tab-btn {
-    flex: 1;
-    padding: 8px 6px 9px;
+    /* `flex: 1` is flex-basis 0 -- it divides the row into six equal columns and
+       ignores what is written on them, so "Screen Guide" (the longest label, and
+       the only two-word one) was handed ~61px of a 400px modal and broke across
+       two lines the moment the Developer tab appeared. `auto` sizes each tab to
+       its own label first and only then shares out the slack, and `nowrap` makes
+       that label the item's min-content width, so a row that genuinely cannot
+       fit them all wraps whole tabs instead of splitting one. Five tabs -- what
+       a non-developer sees -- fit on one row with room to spare either way. */
+    flex: 1 1 auto;
+    white-space: nowrap;
+    padding: 8px 4px 9px;
     font-size: 12.5px;
     font-weight: 500;
     background: transparent;
