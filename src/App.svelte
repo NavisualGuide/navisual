@@ -4923,6 +4923,18 @@ See the LICENSE file in the root of this repository for complete details.
        so the one part still worth reading is the part that fades. A disabled
        control gets an explicit desaturated pill instead. Grey buttons and
        inputs keep plain opacity; they have no colour to muddy. */
+    /* Text ON an accent fill. #ff6b35 is a LIGHT colour -- relative luminance
+       0.32 -- so white on it is only **2.8:1**, under every WCAG bar including
+       the 3:1 floor for large text, and reported directly by a colour-weak user
+       as needing more contrast. Near-black on the same fill is 6.6:1 and leaves
+       the brand orange exactly as it is. Darkening the accent until white works
+       would need roughly #b8410f, which is a different colour, not a shade --
+       so the "on" colour moves instead, which is what every design system that
+       ships a warm accent does. Warm-tinted rather than pure black so it reads
+       as part of the fill. Do NOT use these on --danger (#ef4444 / #b91c1c):
+       those are dark enough that white is already the right pairing. */
+    --on-accent: #18110d;
+    --on-accent-dim: rgba(24, 17, 13, 0.72);
     --disabled-fill: #2b2b31;
     --disabled-text: #7a7a83;
     --accent-soft-strong: rgba(255, 107, 53, 0.24);
@@ -5106,7 +5118,7 @@ See the LICENSE file in the root of this repository for complete details.
     background: var(--accent-500, #ff6b35);
     border: none;
     border-radius: 6px;
-    color: #fff;
+    color: var(--on-accent);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -6128,8 +6140,8 @@ See the LICENSE file in the root of this repository for complete details.
     padding: 8px 12px;
     border-radius: 16px 16px 4px 16px;
   }
-  .h-user .h-text { color: #fff; }
-  .h-user .h-meta { color: rgba(255, 255, 255, 0.72); }
+  .h-user .h-text { color: var(--on-accent); }
+  .h-user .h-meta { color: var(--on-accent-dim); }
 
   .h-ai .h-text  { color: var(--text-primary); }
 
@@ -6499,7 +6511,7 @@ See the LICENSE file in the root of this repository for complete details.
     border-radius: 7px;
     border: 0;
     background: var(--accent, #ff6b35);
-    color: #fff;
+    color: var(--on-accent);
     cursor: pointer;
   }
   .export-go:disabled {
@@ -6644,7 +6656,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   :global(.btn-primary) {
     background: var(--accent-500);
-    color: #fff;
+    color: var(--on-accent);
     font-weight: 600;
     border-color: transparent;
   }
@@ -6761,39 +6773,66 @@ See the LICENSE file in the root of this repository for complete details.
     flex: 1;
   }
 
+  /* Segmented control, not underlined tabs. The underline marked which tab was
+     ACTIVE but nothing marked the row as a set of choices -- reported as "it is
+     not obvious to me if they are tabs" -- because an underline is one 2px line
+     under one word, and every unselected tab was bare text on the modal's own
+     background. A tray with a filled selection reads as a control at a glance,
+     and it is also what makes the second row legible: six tabs cannot fit 400px
+     at any sane font size, and wrapped chips inside a tray look deliberate where
+     wrapped underlines looked broken. --accent-soft is already this app's
+     "selected" fill (the pinned target chip, Next, Pause). */
   .modal-tabs {
     display: flex;
-    /* Whole tabs wrap to a second row; a LABEL never does. See .tab-btn. */
     flex-wrap: wrap;
-    gap: 2px;
-    padding: 0 10px;
-    border-bottom: 1px solid var(--border);
+    gap: 3px;
+    /* Settings' body adds 14px of its own and About's adds 24px, so the tray
+       keeps its own gap small. */
+    margin: 2px 16px 6px;
+    padding: 3px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
     flex-shrink: 0;
   }
   .tab-btn {
-    /* `flex: 1` is flex-basis 0 -- it divides the row into six equal columns and
+    /* `flex: 1` is flex-basis 0 -- it divides the row into equal columns and
        ignores what is written on them, so "Screen Guide" (the longest label, and
-       the only two-word one) was handed ~61px of a 400px modal and broke across
-       two lines the moment the Developer tab appeared. `auto` sizes each tab to
-       its own label first and only then shares out the slack, and `nowrap` makes
-       that label the item's min-content width, so a row that genuinely cannot
-       fit them all wraps whole tabs instead of splitting one. Five tabs -- what
-       a non-developer sees -- fit on one row with room to spare either way. */
+       the only two-word one) was handed ~61px and broke across two lines the
+       moment the Developer tab made it six. `auto` sizes each tab to its own
+       label before sharing out the slack, and `nowrap` makes that label the
+       item's min-content width, so a row that cannot fit them all wraps WHOLE
+       TABS rather than splitting one. Five tabs -- what a non-developer sees --
+       fit on one row. */
     flex: 1 1 auto;
     white-space: nowrap;
-    padding: 8px 4px 9px;
+    padding: 6px 8px;
     font-size: 12.5px;
     font-weight: 500;
     background: transparent;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     border: none;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
+    border-radius: 7px;
     cursor: pointer;
-    transition: color 120ms ease-out, border-color 120ms ease-out;
+    transition: background 120ms ease-out, color 120ms ease-out;
   }
-  .tab-btn:hover { color: var(--text-primary); }
-  .tab-active { color: var(--accent-500) !important; border-bottom-color: var(--accent-500) !important; }
+  .tab-btn:hover:not(.tab-active) {
+    background: var(--surface-3);
+    color: var(--text-primary);
+  }
+  .tab-active {
+    /* Four cues, and only one of them is colour: a fill, a hairline, brighter
+       text and a heavier weight. --accent-400 and --text-secondary sit at almost
+       the same relative luminance (0.387 vs 0.360), so marking the selected tab
+       by TEXT COLOUR alone is very nearly a pure hue change -- which is close to
+       invisible to the colour-weak reader who reported this row as not looking
+       like tabs in the first place. The fill keeps the accent association; the
+       legibility does not depend on seeing it. */
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+    color: var(--text-primary);
+    font-weight: 600;
+  }
 
   :global(.modal-body) {
     padding: 14px 16px;
