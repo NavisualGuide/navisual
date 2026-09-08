@@ -6773,63 +6773,73 @@ See the LICENSE file in the root of this repository for complete details.
     flex: 1;
   }
 
-  /* Segmented control, not underlined tabs. The underline marked which tab was
-     ACTIVE but nothing marked the row as a set of choices -- reported as "it is
-     not obvious to me if they are tabs" -- because an underline is one 2px line
-     under one word, and every unselected tab was bare text on the modal's own
-     background. A tray with a filled selection reads as a control at a glance,
-     and it is also what makes the second row legible: six tabs cannot fit 400px
-     at any sane font size, and wrapped chips inside a tray look deliberate where
-     wrapped underlines looked broken. --accent-soft is already this app's
-     "selected" fill (the pinned target chip, Next, Pause). */
+  /* A row of pills, every one of them visible.
+     Underlined tabs marked which one was ACTIVE but nothing marked the row as a
+     set of choices, so it did not read as tabs. A tray with only the selected
+     item filled fixed half of that and left the other half: the four unselected
+     entries were still bare text on a background, which is the part that was
+     reported second. Every tab is a pill now -- filled, hairlined, and shaped
+     like the app's other standalone controls (the redesign's own rule: every
+     standalone control is a pill) -- so the row is legible as a control before
+     you know which one is on. The tray went with it; it was grouping items that
+     now group themselves, and a container around containers is one layer too
+     many. Content-sized and centred rather than stretched, because six tabs
+     cannot fit a 400px modal at any sane size and a lone full-width "Developer"
+     bar on the second row is a worse answer than a centred chip. */
   .modal-tabs {
     display: flex;
     flex-wrap: wrap;
-    gap: 3px;
-    /* Settings' body adds 14px of its own and About's adds 24px, so the tray
-       keeps its own gap small. */
-    margin: 2px 16px 6px;
-    padding: 3px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    justify-content: center;
+    gap: 4px;
+    /* Settings' body adds 14px of its own and About's adds 24px. 12px at the
+       sides rather than the body's 16px: see the budget on .tab-btn's padding. */
+    margin: 2px 12px 8px;
     flex-shrink: 0;
   }
   .tab-btn {
-    /* `flex: 1` is flex-basis 0 -- it divides the row into equal columns and
-       ignores what is written on them, so "Screen Guide" (the longest label, and
-       the only two-word one) was handed ~61px and broke across two lines the
-       moment the Developer tab made it six. `auto` sizes each tab to its own
-       label before sharing out the slack, and `nowrap` makes that label the
-       item's min-content width, so a row that cannot fit them all wraps WHOLE
-       TABS rather than splitting one. Five tabs -- what a non-developer sees --
-       fit on one row. */
-    flex: 1 1 auto;
+    /* Sized to its own label, never stretched and never squeezed: `flex: 1` is
+       flex-basis 0, which divides the row into equal columns and ignores what is
+       written on them -- that is what broke "Screen Guide" across two lines once
+       the Developer tab made it six. With `nowrap` the label is the item's
+       min-content width, so a row that cannot hold them all wraps WHOLE TABS. */
+    flex: 0 0 auto;
     white-space: nowrap;
+    /* 8px, and the row is a hair's breadth from wrapping -- so this is measured,
+       not chosen. Bundled Inter at 500/12.5px (canvas measureText, 2026-09-07):
+       Provider 50.2, Account 50.0, Screen Guide 80.5, Hotkeys 48.9, Audio 34.8,
+       Developer 61.0. Five tabs = 265 + 5x16 padding + 4x4 gaps = 361px into the
+       366px a 400px modal leaves at 12px side margins. 12px padding reads better
+       as a pill and comes to 401px -- it would have wrapped the row for every
+       NON-developer, which is the whole population this fits for. Six tabs are
+       442px and wrap whatever we do; that is the second row, and it is the price
+       of a tab named "Screen Guide" rather than a reason to rename it.
+       Anything that lengthens a label or adds a tab needs re-measuring. */
     padding: 6px 8px;
     font-size: 12.5px;
     font-weight: 500;
-    background: transparent;
+    background: var(--surface-3);
     color: var(--text-secondary);
     border: none;
-    border-radius: 7px;
+    box-shadow: inset 0 0 0 1px var(--border);
+    border-radius: var(--r-pill);
     cursor: pointer;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background 120ms ease-out, color 120ms ease-out, box-shadow 120ms ease-out;
   }
   .tab-btn:hover:not(.tab-active) {
-    background: var(--surface-3);
+    background: var(--surface-4);
     color: var(--text-primary);
   }
   .tab-active {
-    /* Four cues, and only one of them is colour: a fill, a hairline, brighter
-       text and a heavier weight. --accent-400 and --text-secondary sit at almost
-       the same relative luminance (0.387 vs 0.360), so marking the selected tab
-       by TEXT COLOUR alone is very nearly a pure hue change -- which is close to
-       invisible to the colour-weak reader who reported this row as not looking
-       like tabs in the first place. The fill keeps the accent association; the
-       legibility does not depend on seeing it. */
-    background: var(--accent-soft);
-    box-shadow: inset 0 0 0 1px var(--border-strong);
+    /* Four cues and only one is colour: a warmer fill, a BRIGHT ring (the accent
+       reads 4.2:1 against the resting hairline on luminance alone), brighter
+       text (0.898 vs 0.360) and a heavier weight. Marking selection by accent
+       TEXT was the first draft and was wrong for it -- --accent-400 and
+       --text-secondary sit at nearly the same relative luminance, so that is
+       very nearly a pure hue change, and the person who reported this row is
+       colour weak. Stronger fill and ring than before, since the resting pills
+       are no longer bare and the selected one has to stay clearly ahead. */
+    background: var(--accent-soft-strong);
+    box-shadow: inset 0 0 0 1px var(--accent-500);
     color: var(--text-primary);
     font-weight: 600;
   }
