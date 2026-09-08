@@ -252,9 +252,11 @@
   /** Lines the caption may grow to before it is cut with an ellipsis. The full
    *  instruction is always in the panel; the caption is a glance, not a document.
    *  Measured on 655 real instructions: median 85 chars, p95 348, max 1,119 (a
-   *  Markdown pros-and-cons answer). At 18px over 78% of a 1080p screen a line
-   *  holds ~110 chars, so three lines show everything up to ~p90 and stop a long
-   *  answer from climbing a quarter of the way up the screen. */
+   *  Markdown pros-and-cons answer). Three lines of the measure set below hold
+   *  ~220 Latin / ~165 CJK characters -- past p90 -- and stop a long answer from
+   *  climbing a quarter of the way up the screen. (This paragraph used to quote
+   *  110 chars a line off the old full-width measure; narrowing the strip is why
+   *  it no longer does. A number in a comment ages with the code around it.) */
   const CAPTION_MAX_LINES = 3;
 
   /** Instruction text is read aloud and drawn as a caption, so Markdown that a
@@ -270,6 +272,42 @@
       .replace(/\s+/g, " ")
       .trim();
   }
+
+  /** Line-break opportunities.
+   *
+   *  `text.split(" ")` was the entire wrapper, and it is a Latin assumption:
+   *  Chinese, Japanese and Thai put no spaces between words, so a CJK caption
+   *  arrived as ONE token, became ONE line, and `fillText`'s maxWidth argument
+   *  then CONDENSED the glyphs to make it fit -- the squashed full-width strip
+   *  reported 2026-09-07. The three-line clamp never fired either: one token is
+   *  one line, so there was nothing to clamp. Same text, same length, in English
+   *  wrapped and read fine, which is why this survived every earlier look.
+   *
+   *  `Intl.Segmenter` gives real word boundaries in every script (WebView2 here
+   *  is Chromium 152). Spaces come back as their own segments, so the caller
+   *  CONCATENATES and can never insert a space that was not in the text -- which
+   *  is the whole point, since joining CJK segments with " " would be wrong.
+   *  The fallback only has to be reasonable, not correct. */
+  const SEGMENTER = (() => {
+    try { return new Intl.Segmenter(undefined, { granularity: "word" }); }
+    catch { return null; }
+  })();
+  const HAS_CJK = /[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/;
+  function breakTokens(text: string): string[] {
+    if (SEGMENTER) return Array.from(SEGMENTER.segment(text), (seg) => seg.segment);
+    const out: string[] = [];
+    for (const chunk of text.split(/(\s+)/)) {
+      if (!chunk) continue;
+      if (HAS_CJK.test(chunk)) out.push(...Array.from(chunk));
+      else out.push(chunk);
+    }
+    return out;
+  }
+
+  /** CJK typography: a line never OPENS with closing punctuation. The segmenter
+   *  hands these back as their own segments, so without this a break lands
+   *  before a comma and the next line starts with it. */
+  const NO_LINE_START = /^[、。，．！？：；」』）】〉》”’.,!?:;)\]}…]/;
 
   function drawSubtitle(
     ctx: CanvasRenderingContext2D,
@@ -295,7 +333,13 @@
     const hPad = 22 * scale;
     const vPad = 12 * scale;
     const r = 10 * scale;
-    const maxTextW = sw * 0.78;
+    // A caption is read at a glance, so line LENGTH matters more than fitting it
+    // all on one line: 78% of a 1080p screen is ~110 characters, roughly twice a
+    // comfortable measure and the reason a long answer looked like a wall. Capped
+    // to a LOGICAL width so a line holds the same number of characters at 100% and
+    // 200% (the font is 18 logical px too); the proportional bound still governs a
+    // narrow screen. ~74 Latin / ~55 CJK characters a line, ~3x that over the clamp.
+    const maxTextW = Math.min(sw * 0.78, 1000 * scale);
     const cx = sx + sw / 2;
 
     // Measure text first so strip width can fit the content
@@ -303,15 +347,40 @@
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
-    const words = text.split(" ");
+    // Pre-split any single token that is itself wider than the strip -- a long
+    // URL, or a script the fallback could not break -- so it wraps by character
+    // instead of being condensed by fillText's maxWidth.
+    const tokens: string[] = [];
+    for (const tok of breakTokens(text)) {
+      if (ctx.measureText(tok).width <= maxTextW) tokens.push(tok);
+      else for (const ch of tok) tokens.push(ch);
+    }
+
     const lines: string[] = [];
     let line = "";
-    for (const word of words) {
-      const test = line ? `${line} ${word}` : word;
-      if (ctx.measureText(test).width > maxTextW && line) { lines.push(line); line = word; }
-      else { line = test; }
+    for (const tok of tokens) {
+      const test = line + tok;
+      if (line && ctx.measureText(test).width > maxTextW) {
+        lines.push(line.trimEnd());
+        // Never open the next line with the space we happened to break at.
+        line = tok.trim() ? tok : "";
+      } else {
+        line = test;
+      }
     }
-    if (line) lines.push(line);
+    if (line.trim()) lines.push(line.trim());
+
+    // Pull orphaned closing punctuation back onto the line before it. One glyph
+    // of overhang is what hanging punctuation is; the strip cap absorbs it.
+    for (let i = 1; i < lines.length; i++) {
+      while (NO_LINE_START.test(lines[i])) {
+        lines[i - 1] += lines[i][0];
+        lines[i] = lines[i].slice(1);
+      }
+    }
+    // A line that was nothing but punctuation is now empty; do not draw a blank
+    // row and do not let it spend one of the three.
+    for (let i = lines.length - 1; i > 0; i--) if (!lines[i]) lines.splice(i, 1);
 
     // Clamp: keep the first CAPTION_MAX_LINES lines and ellipsize the last one so
     // it still fits its width. The panel carries the full text.
