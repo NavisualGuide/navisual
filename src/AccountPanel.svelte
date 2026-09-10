@@ -254,6 +254,8 @@
     if (billing.oauthPending) return;
     billing.oauthPending = true;
     account.error = "";
+    // Any second-window notice belongs to the PREVIOUS attempt.
+    account.notice = "";
     try {
       await invoke("start_google_oauth");
       await account.load();
@@ -301,9 +303,16 @@
     Signed up but never verified?
     <button class="legal-link" onclick={acctResend} disabled={acctBusy}>Resend verification code</button>
   </p>
-  <hr class="acct-sep" />
+  <!-- An "or", not a bare rule. This button is a second way to do the thing
+       above it, but a plain separator detached it from the sign-in block and
+       glued it to the Billing heading below — which has its own separator, so
+       the button sat orphaned between two rules and read as billing. Reported
+       live 2026-09-10: "it is not clear if it is about account or billing". -->
+  <div class="acct-or">or</div>
   <button class="btn-ghost" onclick={acctGoogle} disabled={billing.oauthPending}>
-    {billing.oauthPending ? "Signing in…" : "Continue with Google"}
+    <!-- "Waiting for Google", not "Signing in": through both windows the app
+         is idle and the user is the one being waited on. -->
+    {billing.oauthPending ? "Waiting for Google…" : "Continue with Google"}
   </button>
 
 {:else if account.view === "signup"}

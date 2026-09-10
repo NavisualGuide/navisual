@@ -6343,8 +6343,11 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
 /// Sign in with Google via PKCE OAuth in the system browser.
 ///
 /// **In-place identity linking (S.2.1 §4).** Opens the Google consent page in the
-/// default browser, runs a loopback HTTP server on port 9876 for the callback,
-/// exchanges the code for a session, and emits `oauth_complete` + `account_changed`.
+/// default browser, waits for the callback on the process-wide loopback server
+/// (port 9876 — see `server::OAuthCallbackServer`, which keeps listening after this
+/// command gives up so a late redirect still gets a page rather than a connection
+/// error), exchanges the code for a session, and emits `oauth_complete` +
+/// `account_changed`.
 ///
 /// The flow tries to **link** the Google identity onto the *current* (anonymous)
 /// user first — preserving its `user_profiles` row (free-request count + coins),
@@ -6367,19 +6370,17 @@ async fn start_google_oauth(
 
     let pkce = server::generate_pkce(9876);
 
-    // Bind the callback port FIRST so a busy port (a prior attempt still waiting)
-    // fails fast before we send the user to Google. One listener serves the whole
-    // flow — including the in-place-link → replace fallback's second round-trip —
-    // so we never rebind (which could race the just-closed port on Windows).
-    let listener = server::bind_callback_listener(pkce.port)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Getting the server binds the port on first use, so a genuine conflict still
+    // fails fast — before the user is sent to Google. One server serves every
+    // round-trip, including the in-place-link → replace fallback's second one.
+    let callback = server::oauth_callback_server(pkce.port).map_err(|e| e.to_string())?;
 
     // A Bearer token for the current session is required to link in place. With no
     // session yet, there's nothing to preserve → go straight to replace.
     let access_token = acct_session_token(&state).await.ok();
     let Some(access_token) = access_token else {
-        return google_oauth_replace(&state, &app, &supabase_url, &anon_key, &listener).await;
+        log::info!("[oauth] no current session to link onto; using the replace flow");
+        return google_oauth_replace(&state, &app, &supabase_url, &anon_key, &callback).await;
     };
 
     // 1) Ask GoTrue for the in-place link consent URL (Bearer = current session).
@@ -6397,23 +6398,33 @@ async fn start_google_oauth(
             // Manual linking off / not linkable → degrade to the replace sign-in so
             // Google sign-in still works (without the in-place row-preserve benefit).
             log::warn!("[oauth] in-place link unavailable ({e}); using replace flow");
-            return google_oauth_replace(&state, &app, &supabase_url, &anon_key, &listener).await;
+            return google_oauth_replace(&state, &app, &supabase_url, &anon_key, &callback).await;
         }
     };
 
-    tauri_plugin_opener::open_url(&consent_url, None::<&str>)
-        .map_err(|e| format!("Failed to open browser: {e}"))?;
+    // Claim the next callback BEFORE the browser opens, so a fast redirect can
+    // never arrive with nothing waiting for it.
+    let pending = callback.arm().map_err(|e| e.to_string())?;
 
-    match server::accept_oauth_callback(&listener)
-        .await
-        .map_err(|e| e.to_string())?
-    {
+    log::info!("[oauth] opening the Google consent page (in-place link)");
+    if let Err(e) = tauri_plugin_opener::open_url(&consent_url, None::<&str>) {
+        // Nothing will ever answer this claim — release it, or every later
+        // sign-in this session reports "already in progress".
+        callback.disarm();
+        return Err(format!("Failed to open browser: {e}"));
+    }
+
+    match callback.wait(pending).await.map_err(|e| e.to_string())? {
         server::OAuthCallback::Code(code) => {
             // Same user id, now carrying the Google identity → the row is preserved.
             let session =
                 server::exchange_pkce_code(&supabase_url, &anon_key, &code, &pkce.verifier)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| {
+                        log::warn!("[oauth] in-place link code exchange failed: {e}");
+                        e.to_string()
+                    })?;
+            log::info!("[oauth] in-place link complete, the account row is preserved");
             server::save_session(&state.supabase_session_path, &session);
             save_app_session(&state, session).await;
             let _ = app
@@ -6429,9 +6440,19 @@ async fn start_google_oauth(
             if oauth_identity_already_linked(&format!("{error} {description}")) {
                 // Returning user: this Google account is attached to a DIFFERENT
                 // Navisual account. Sign into that one (replace) so they recover it,
-                // reusing the still-bound listener for the second round-trip.
+                // arming the still-listening callback server for a second round-trip.
                 log::info!("[oauth] google identity already linked elsewhere; signing in to it");
-                google_oauth_replace(&state, &app, &supabase_url, &anon_key, &listener).await
+                // One press of "Continue with Google" is about to become a SECOND
+                // trip to Google, and the user has already finished with the first
+                // one and looked back at the panel. The new window can open behind
+                // it, and the panel gives no hint it exists. Measured live on
+                // 2026-09-10: unnoticed, it burned the whole 240 s budget; acted on,
+                // the same fallback finished in 9 s. Only this branch emits — the
+                // other two replace paths open the FIRST window, not a second.
+                let _ = app
+                    .get_webview_window("panel")
+                    .map(|w| w.emit("oauth_second_window", ()));
+                google_oauth_replace(&state, &app, &supabase_url, &anon_key, &callback).await
             } else {
                 Err(oauth_error_message(&error, &description))
             }
@@ -6443,24 +6464,26 @@ async fn start_google_oauth(
 /// `start_google_oauth` when in-place linking can't apply (manual linking off, no
 /// session to link onto, or the identity already belongs to another account).
 /// Loads/mints the Google account's OWN session, replacing the current one.
-/// Reuses the caller's already-bound loopback `listener` (no rebind).
+/// Arms the caller's already-bound callback server for a second round-trip.
 async fn google_oauth_replace(
     state: &State<'_, AppState>,
     app: &tauri::AppHandle,
     supabase_url: &str,
     anon_key: &str,
-    listener: &tokio::net::TcpListener,
+    callback: &std::sync::Arc<server::OAuthCallbackServer>,
 ) -> Result<(), String> {
     let pkce = server::generate_pkce(9876);
     let auth_url = server::google_oauth_url(supabase_url, &pkce);
 
-    tauri_plugin_opener::open_url(&auth_url, None::<&str>)
-        .map_err(|e| format!("Failed to open browser: {e}"))?;
+    let pending = callback.arm().map_err(|e| e.to_string())?;
 
-    let code = match server::accept_oauth_callback(listener)
-        .await
-        .map_err(|e| e.to_string())?
-    {
+    log::info!("[oauth] opening the Google sign-in page (replace flow)");
+    if let Err(e) = tauri_plugin_opener::open_url(&auth_url, None::<&str>) {
+        callback.disarm();
+        return Err(format!("Failed to open browser: {e}"));
+    }
+
+    let code = match callback.wait(pending).await.map_err(|e| e.to_string())? {
         server::OAuthCallback::Code(c) => c,
         server::OAuthCallback::Error { error, description } => {
             return Err(oauth_error_message(&error, &description));
@@ -6469,7 +6492,11 @@ async fn google_oauth_replace(
 
     let new_session = server::exchange_pkce_code(supabase_url, anon_key, &code, &pkce.verifier)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::warn!("[oauth] replace-flow code exchange failed: {e}");
+            e.to_string()
+        })?;
+    log::info!("[oauth] replace sign-in complete");
 
     server::save_session(&state.supabase_session_path, &new_session);
     save_app_session(state, new_session).await;

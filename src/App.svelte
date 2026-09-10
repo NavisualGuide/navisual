@@ -3034,6 +3034,18 @@ See the LICENSE file in the root of this repository for complete details.
       await billing.refresh();
     });
 
+    // A returning Google user gets TWO browser trips from one click: the
+    // in-place link is refused ("already linked to another user"), and the
+    // fallback opens a fresh sign-in window. Without this the panel just keeps
+    // saying it is working while the thing it waits for is a window the user
+    // has not noticed. `account.load()` clears the notice on the signed-out →
+    // signed-in transition, so it never outlives the flow it describes.
+    listen("oauth_second_window", () => {
+      account.notice =
+        "A second Google window has opened — choose your account there to finish. " +
+        "(This Google account already has a Navisual account, so you are being signed in to it.)";
+    });
+
     // Emitted after any account change (sign in/up/out, delete) so the Account
     // tab reflects the new identity if it's open.
     listen("account_changed", () => {
@@ -6694,6 +6706,25 @@ See the LICENSE file in the root of this repository for complete details.
     border: none;
     border-top: 1px solid var(--border);
     margin: 14px 0;
+  }
+  /* A labelled divider: the same rule as .acct-sep with a word sitting on it.
+     Binds "Continue with Google" to the sign-in form above rather than to the
+     Billing block below. */
+  :global(.acct-or) {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 14px 0;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  :global(.acct-or)::before,
+  :global(.acct-or)::after {
+    content: "";
+    flex: 1;
+    border-top: 1px solid var(--border);
   }
   /* Section heading for the Billing block merged into the Account tab. Keeps the
      word "Billing" on screen even though it left the tab strip, so anyone
