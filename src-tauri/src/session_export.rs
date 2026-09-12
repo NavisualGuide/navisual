@@ -199,9 +199,68 @@ pub struct ExportStep {
     /// Locator decision string (`hit_selection`, `hit_a11y`, `miss`, …) and timing.
     pub locator_decision: Option<String>,
     pub locator_ms: Option<u64>,
+    /// Which mark the overlay ACTUALLY drew: `box`, `subtitle`, `hint`, `candidates`
+    /// or `none` (`overlay::OverlayKind::as_str`).
+    ///
+    /// Recorded rather than inferred, because the frame alone cannot say why a mark
+    /// looks the way it does: `box` is a located target, `hint` is the model's own
+    /// bbox drawn dashed because both locator passes missed, `candidates` is a
+    /// declared tie. A re-annotator needs that to redraw faithfully.
+    ///
+    /// It is NOT the model's old `overlay_type`, which was retired on 2026-09-11 --
+    /// measured over 1,517 logged steps, that field tracked the vocabulary each
+    /// provider was handed and nothing about the step. `None` here means a session
+    /// exported before this field existed; it draws as a plain box, which is what
+    /// every located step draws now anyway.
+    pub overlay_kind: Option<String>,
+    /// Frame pixels per logical pixel, for the fixed parts of the mark.
+    ///
+    /// The overlay draws in LOGICAL px (it divides by the canvas DPR and scales back),
+    /// while this frame is in PHYSICAL pixels that may then have been downscaled on the
+    /// way to disk. The located rect survives both, because `to_frame_coords` converts
+    /// it with the frame; the CONSTANTS do not -- a 12 px pad is 24 physical px on a
+    /// 200% display, and an exporter that drew 12 would put a half-size mark around a
+    /// correctly-sized target.
+    ///
+    /// `monitor scale x (frame width / captured width)`. 1.0 on a 100% display with no
+    /// downscale, which is why this stayed invisible until someone exported from a
+    /// high-DPI laptop. Defaults to 1.0 for sessions written before it existed --
+    /// exactly how they already render.
+    #[serde(default = "unit_scale")]
+    pub mark_scale: f32,
+    /// Frame pixels at the bottom of this frame that the caption must stay clear
+    /// of -- the taskbar, in practice.
+    ///
+    /// The overlay anchors the caption to the monitor's WORK AREA, so on screen it
+    /// sits above the taskbar. A frame is a whole-monitor capture including the
+    /// taskbar, so an exporter that anchors to the frame's own bottom edge draws
+    /// the strip across the taskbar icons -- which is what the app was fixed for
+    /// on 2026-09-07, and what the export went on doing. 0 for a session written
+    /// before this field existed, or for a cropped frame that excludes it.
+    #[serde(default)]
+    pub caption_bottom_inset: u32,
     /// Set in the export preview. A redacted step keeps its structure and loses its
     /// image, so the step numbering a reader sees never develops holes (§4.4).
     pub redacted: bool,
+}
+
+/// How a step's mark was drawn, so a re-annotator can reproduce it.
+///
+/// Grouped because these two always travel together and always come from the same
+/// decision -- the moment `execute_step` settles what to put on screen.
+#[derive(Debug, Clone)]
+pub struct DrawnAs {
+    /// `overlay::OverlayKind::as_str` for the mark that was drawn.
+    pub overlay_kind: Option<String>,
+    /// Frame pixels per logical pixel. See [`ExportStep::mark_scale`].
+    pub mark_scale: f32,
+    /// Frame pixels of taskbar at the bottom. See [`ExportStep::caption_bottom_inset`].
+    pub caption_bottom_inset: u32,
+}
+
+/// Default for [`ExportStep::mark_scale`] on a session written before it existed.
+fn unit_scale() -> f32 {
+    1.0
 }
 
 impl ExportStep {
@@ -216,6 +275,9 @@ impl ExportStep {
             pointer: PointerState::Miss,
             locator_decision: None,
             locator_ms: None,
+            overlay_kind: None,
+            mark_scale: 1.0,
+            caption_bottom_inset: 0,
             redacted: false,
         }
     }
@@ -321,6 +383,7 @@ impl ExportBuffer {
         pointer: PointerState,
         decision: Option<String>,
         ms: Option<u64>,
+        drawn: DrawnAs,
     ) {
         let Some(turn) = self.turns.back_mut() else { return };
         let Some(step) = turn.assistant.steps.get_mut(step_idx) else { return };
@@ -346,6 +409,13 @@ impl ExportBuffer {
                 if !matches!(existing, PointerState::Miss | PointerState::OffFrame) => {}
             _ => step.pointer = pointer,
         }
+        if drawn.overlay_kind.is_some() {
+            step.overlay_kind = drawn.overlay_kind;
+        }
+        if drawn.mark_scale.is_finite() && drawn.mark_scale > 0.0 {
+            step.mark_scale = drawn.mark_scale;
+        }
+        step.caption_bottom_inset = drawn.caption_bottom_inset;
         if decision.is_some() {
             step.locator_decision = decision;
         }
@@ -529,6 +599,12 @@ pub struct ExportOptions {
     pub draw_caption: bool,
     pub title: String,
     pub slug: String,
+    /// The user's Pointer thickness, already mapped to a multiplier by
+    /// `stroke_scale()`. The live overlay scales every stroke by this; the exporter
+    /// used to hardcode 1.0, so any setting other than the default produced a mark
+    /// of the wrong weight. Geometry (padding, arm length, ripple growth) is layout
+    /// and deliberately does not scale -- see src/lib/overlay-weight.ts.
+    pub stroke_scale: f32,
 }
 
 impl ExportOptions {
@@ -550,7 +626,23 @@ impl Default for ExportOptions {
             draw_caption: true,
             title: String::new(),
             slug: String::new(),
+            stroke_scale: 1.0,
         }
+    }
+}
+
+/// Slider position (1-10) -> stroke weight multiplier.
+///
+/// Must stay in step with `strokeScale` in `src/lib/overlay-weight.ts`: the exported
+/// pointer and the on-screen one are supposed to be the same picture. Grouped so the
+/// default divides exactly, for the same reason the TypeScript is.
+pub fn stroke_scale(thickness: u32) -> f32 {
+    const DEFAULT_THICKNESS: f32 = 4.0;
+    let t = (thickness.clamp(1, 10)) as f32;
+    if t <= DEFAULT_THICKNESS {
+        0.6 + ((t - 1.0) / 3.0) * 0.4
+    } else {
+        1.0 + (t - DEFAULT_THICKNESS) / 6.0
     }
 }
 
@@ -669,6 +761,8 @@ impl ExportBuffer {
         // annotation is never clipped by a crop applied after it.
         let crop = opts.crop_to_app != opts.crop_steps.contains(&flat_idx);
         let mut origin = (0i32, 0i32);
+        let full_h = img.height();
+        let mut caption_inset = step.caption_bottom_inset;
         if crop {
             if let Some([ax, ay, aw, ah]) = frame.app_rect {
                 let x = ax.max(0) as u32;
@@ -681,6 +775,12 @@ impl ExportBuffer {
                 if w >= 8 && h >= 8 {
                     img = image::imageops::crop_imm(&img, x, y, w, h).to_image();
                     origin = (x as i32, y as i32);
+                    // A crop to the app window keeps only what the app occupies, so
+                    // whatever taskbar the full frame carried is no longer in this
+                    // image and the caption has the real bottom edge to itself.
+                    // Reduce the inset by however much was cut off the bottom.
+                    let cut_from_bottom = full_h.saturating_sub(y + h);
+                    caption_inset = caption_inset.saturating_sub(cut_from_bottom);
                 }
             }
         }
@@ -696,11 +796,17 @@ impl ExportBuffer {
             let mut annotated = img;
             if opts.draw_pointer {
                 if let Some([px, py, pw, ph]) = step.pointer.draw_rect() {
-                    draw_pointer(&mut annotated, px - origin.0, py - origin.1, pw, ph);
+                    draw_pointer(
+                        &mut annotated,
+                        [px - origin.0, py - origin.1, pw, ph],
+                        opts.stroke_scale,
+                        step.mark_scale,
+                        matches!(step.pointer, PointerState::Hint { .. }),
+                    );
                 }
             }
             if opts.draw_caption {
-                draw_caption(&mut annotated, &step.instruction);
+                draw_caption(&mut annotated, &step.instruction, caption_inset);
             }
             annotated.save(dir.join(ANNOTATED_DIR).join(name))?;
         }
@@ -742,6 +848,9 @@ impl ExportBuffer {
                             "checkpoint": s.checkpoint,
                             "screenshot": file_for(t.n, si),
                             "pointer": s.pointer,
+                            "overlay_kind": s.overlay_kind,
+                            "mark_scale": s.mark_scale,
+                            "caption_bottom_inset": s.caption_bottom_inset,
                             "locator": { "decision": s.locator_decision, "total_ms": s.locator_ms },
                             "redacted": s.redacted,
                         })
@@ -946,7 +1055,12 @@ fn caption_font() -> Option<&'static ab_glyph::FontVec> {
 /// is read at 1:1 on the monitor; an exported frame is a 1920-wide image shown a
 /// few hundred pixels wide in an article, so the caption is scaled to the frame
 /// instead and survives that reduction.
-fn draw_caption(img: &mut image::RgbaImage, text: &str) {
+/// `bottom_inset` is how many pixels of the frame are taskbar (or whatever else
+/// the work area excludes). The live overlay anchors the caption to the WORK AREA
+/// rather than the monitor, so the strip sits above the taskbar instead of across
+/// its icons -- fixed in the app on 2026-09-07 after a live report, and the export
+/// kept drawing over it, because it only ever knew the frame's own bottom edge.
+fn draw_caption(img: &mut image::RgbaImage, text: &str, bottom_inset: u32) {
     use ab_glyph::{Font, ScaleFont};
 
     let text = text.trim();
@@ -1012,9 +1126,11 @@ fn draw_caption(img: &mut image::RgbaImage, text: &str) {
     let strip_w = (widest.ceil() as i32 + h_pad * 2).min(w as i32);
     let strip_h = line_h * lines.len() as i32 + v_pad * 2;
     let strip_x = (w as i32 - strip_w) / 2;
-    // Floated just clear of the bottom edge, like the overlay's 10px gap.
+    // Floated just clear of the bottom edge, like the overlay's 10px gap -- where
+    // "the bottom" is the work area's, not the frame's.
     let bottom_gap = (px * 0.6).round() as i32;
-    let strip_y = (h as i32 - strip_h - bottom_gap).max(0);
+    let floor = (h as i32 - bottom_inset as i32).max(strip_h + bottom_gap);
+    let strip_y = (floor - strip_h - bottom_gap).max(0);
     let radius = (px * 0.55).round() as i32;
 
     // rgba(0,0,0,0.52) — the overlay's own value. Translucent on purpose: the
@@ -1051,6 +1167,36 @@ fn draw_caption(img: &mut image::RgbaImage, text: &str) {
     }
 }
 
+/// The rect the MARK is built on: the located rect, padded, then floored so a tiny
+/// target still gets something you can spot.
+///
+/// Extracted so it can be pinned by a test and quoted exactly. Must match `markRect`
+/// in `src/Overlay.svelte` and the `$pad`/`$MIN_MARK` block in
+/// `tools/annotate-session.ps1` -- the three are supposed to produce the same
+/// picture, and `exporter_and_annotator_draw_the_same_pointer` checks two of them
+/// against each other for real. Geometry, so none of it scales with stroke weight.
+///
+/// Returns `(px, py, pw, ph)`, centred on the located rect.
+pub(crate) fn mark_rect(x: i32, y: i32, w: i32, h: i32, scale: f32) -> (f32, f32, f32, f32) {
+    const MIN_MARK: f32 = 36.0;
+    let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let (bw, bh) = (w as f32, h as f32);
+    // The RATIO term is scale-free -- it is a fraction of the element, which is already
+    // in frame pixels. Only the fixed bounds and the floor are logical-pixel constants.
+    let pad = (20.0 * s).min((12.0 * s).max(bw.min(bh) * 0.45));
+    let pw = (bw + pad * 2.0).max(MIN_MARK * s);
+    let ph = (bh + pad * 2.0).max(MIN_MARK * s);
+    let cx = x as f32 + bw / 2.0;
+    let cy = y as f32 + bh / 2.0;
+    (cx - pw / 2.0, cy - ph / 2.0, pw, ph)
+}
+
+/// Bracket arm length for a mark of this size. Shared for the same reason.
+pub(crate) fn mark_arm(pw: f32, ph: f32, scale: f32) -> f32 {
+    let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    (26.0 * s).min((14.0 * s).max((pw * 0.38).min(ph * 0.5)))
+}
+
 /// Draw the pointer annotation, matching what the app actually puts on screen:
 /// ripple rings, corner brackets, centre crosshair.
 ///
@@ -1066,50 +1212,112 @@ fn draw_caption(img: &mut image::RgbaImage, text: &str) {
 ///     which is one real frame of the animation rather than an invented one;
 ///   - the sweeping scan line is omitted entirely. It reads as a highlight only
 ///     because it moves; frozen it is just a bar across the element.
-fn draw_pointer(img: &mut image::RgbaImage, x: i32, y: i32, w: i32, h: i32) {
+fn draw_pointer(img: &mut image::RgbaImage, rect: [i32; 4], k: f32, mark_scale: f32, hint: bool) {
+    let [x, y, w, h] = rect;
     const ACCENT: [u8; 3] = [255, 107, 53];
     let (cx, cy) = (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
-    let (bw, bh) = (w as f32, h as f32);
+    // The live overlay pulses on a timer; a still takes the value each pulse holds at
+    // t=0, which for `(sin(0)+1)/2` is the midpoint.
+    const PULSE: f32 = 0.5;
+    let (px, py, pw, ph) = mark_rect(x, y, w, h, mark_scale);
+    // Every fixed length below is a LOGICAL-pixel constant lifted from `drawBox`, so
+    // each one needs converting into this frame's pixels. Stroke widths carry the
+    // user's thickness on top; `g` is the geometry-only multiplier.
+    let g = if mark_scale.is_finite() && mark_scale > 0.0 { mark_scale } else { 1.0 };
+    let k = k * g;
 
     // ── Ripple rings ────────────────────────────────────────────────────────
     // Ellipse, not circle: a circle sized by max(bw,bh) balloons past a long thin
     // element's short axis. Growth is capped on the short axis of a wide row for
     // the same reason (drawBox carries the same two fixes).
-    let base_rx = bw / 2.0 + 8.0;
-    let base_ry = bh / 2.0 + 8.0;
-    let growth = bw.min(bh) * 0.7;
-    let ry_growth = if bw > bh * 2.0 { growth.min(bh * 0.4) } else { growth };
+    let base_rx = pw / 2.0 + 8.0 * g;
+    let base_ry = ph / 2.0 + 8.0 * g;
+    let growth = pw.min(ph) * 0.7;
+    let ry_growth = if pw > ph * 2.0 { growth.min(ph * 0.4) } else { growth };
     for i in 0..3 {
         let phase = i as f32 / 3.0;
         let rx = base_rx + phase * growth;
         let ry = base_ry + phase * ry_growth;
-        let alpha = ((1.0 - phase) * 0.55 * 255.0) as u8;
-        let thickness = (2.5 - phase * 1.8).max(1.0);
+        let alpha = ((1.0 - phase) * if hint { 0.40 } else { 0.55 } * 255.0) as u8;
+        let thickness = (if hint { 2.0 - phase * 1.4 } else { 2.5 - phase * 1.8 } * k).max(1.0);
         stroke_ellipse(img, cx, cy, rx, ry, [ACCENT[0], ACCENT[1], ACCENT[2], alpha], thickness);
     }
 
     // ── Corner brackets ─────────────────────────────────────────────────────
     // A dark stroke under the accent one, so the mark survives on any background.
-    let arm = 26.0_f32.min(14.0_f32.max((bw * 0.38).min(bh * 0.5)));
+    let arm = mark_arm(pw, ph, g);
     for &(ox, oy, dx, dy) in &[
-        (x as f32, y as f32, 1.0, 1.0),
-        (x as f32 + bw, y as f32, -1.0, 1.0),
-        (x as f32, y as f32 + bh, 1.0, -1.0),
-        (x as f32 + bw, y as f32 + bh, -1.0, -1.0),
+        (px, py, 1.0, 1.0),
+        (px + pw, py, -1.0, 1.0),
+        (px, py + ph, 1.0, -1.0),
+        (px + pw, py + ph, -1.0, -1.0),
     ] {
-        for (colour, t) in [([0u8, 0, 0, 191], 5.5_f32), ([ACCENT[0], ACCENT[1], ACCENT[2], 255], 3.0)] {
-            stroke_line(img, ox + dx * arm, oy, ox, oy, colour, t);
-            stroke_line(img, ox, oy, ox, oy + dy * arm, colour, t);
+        let layers = if hint {
+            // Looser and more tentative: thinner, softer, and dashed.
+            [
+                ([0u8, 0, 0, 166], 4.5 * k),
+                ([ACCENT[0], ACCENT[1], ACCENT[2], ((0.72 + PULSE * 0.15) * 255.0) as u8], 2.5 * k),
+            ]
+        } else {
+            [
+                ([0u8, 0, 0, 191], 5.5 * k),
+                ([ACCENT[0], ACCENT[1], ACCENT[2], 255], 3.0 * k),
+            ]
+        };
+        for (colour, t) in layers {
+            if hint {
+                dashed_line(img, ox + dx * arm, oy, ox, oy, colour, t, 5.0 * g, 4.0 * g);
+                dashed_line(img, ox, oy, ox, oy + dy * arm, colour, t, 5.0 * g, 4.0 * g);
+            } else {
+                stroke_line(img, ox + dx * arm, oy, ox, oy, colour, t);
+                stroke_line(img, ox, oy, ox, oy + dy * arm, colour, t);
+            }
         }
-        fill_disc(img, ox, oy, 3.5, [ACCENT[0], ACCENT[1], ACCENT[2], 255]);
+        // No corner dot on a hint -- it is an exact-centre cue, and a hint has no
+        // exact centre to claim.
+        if !hint {
+            fill_disc(img, ox, oy, 3.5 * k, [ACCENT[0], ACCENT[1], ACCENT[2], 255]);
+        }
     }
 
     // ── Centre crosshair ────────────────────────────────────────────────────
     // The app pulses this between 0.35 and 0.60 alpha; a still takes the midpoint.
-    let cr = 5.0;
-    let cross = [ACCENT[0], ACCENT[1], ACCENT[2], (0.475 * 255.0) as u8];
-    stroke_line(img, cx - cr, cy, cx + cr, cy, cross, 1.5);
-    stroke_line(img, cx, cy - cr, cx, cy + cr, cross, 1.5);
+    // A hint draws no crosshair for the same reason it draws no corner dots: both are
+    // exact-centre cues, and the whole point of the dashed mark is that the centre is
+    // the model's estimate, not a located element.
+    if !hint {
+        let cr = 5.0 * g;
+        let cross = [ACCENT[0], ACCENT[1], ACCENT[2], (0.475 * 255.0) as u8];
+        stroke_line(img, cx - cr, cy, cx + cr, cy, cross, 1.5 * k);
+        stroke_line(img, cx, cy - cr, cx, cy + cr, cross, 1.5 * k);
+    }
+}
+
+/// Stroke a segment as a dash pattern, matching canvas `setLineDash([on, off])`.
+#[allow(clippy::too_many_arguments)]
+fn dashed_line(
+    img: &mut image::RgbaImage,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    c: [u8; 4],
+    t: f32,
+    on: f32,
+    off: f32,
+) {
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len <= 0.0 || on <= 0.0 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let mut at = 0.0;
+    while at < len {
+        let end = (at + on).min(len);
+        stroke_line(img, x0 + ux * at, y0 + uy * at, x0 + ux * end, y0 + uy * end, c, t);
+        at += on + off;
+    }
 }
 
 /// Alpha-blend one pixel, clipped to the image.
@@ -1146,11 +1354,20 @@ fn stroke_ellipse(
         for px in x0..=x1 {
             let dx = (px as f32 + 0.5 - cx) / rx;
             let dy = (py as f32 + 0.5 - cy) / ry;
-            let norm = (dx * dx + dy * dy).sqrt();
-            // Convert the normalised distance back into approximate pixels so the
-            // stroke has even width on both axes.
-            let scale = rx.min(ry);
-            let dist = ((norm - 1.0) * scale).abs();
+            // First-order distance to the implicit ellipse: |f| / |grad f|, where
+            // f = (dx^2 + dy^2 - 1) and grad f = (2dx/rx, 2dy/ry).
+            //
+            // This used to scale the normalised distance by rx.min(ry), which is only
+            // right where the curve runs along the LONG axis. On a wide row -- the
+            // commonest target shape here -- the ends came out ~rx/ry times too thick,
+            // so the exporter laid down half again as much ink as the re-annotator for
+            // the same ripple. Caught by `exporter_and_annotator_draw_the_same_pointer`
+            // on a 260x22 rect; invisible on anything near-square, which is why the
+            // earlier by-eye comparison never showed it.
+            let f = dx * dx + dy * dy - 1.0;
+            let (gx, gy) = (dx / rx, dy / ry);
+            let grad = 2.0 * (gx * gx + gy * gy).sqrt();
+            let dist = if grad > 1e-6 { f.abs() / grad } else { f.abs() * rx.min(ry) };
             let coverage = (half + 0.5 - dist).clamp(0.0, 1.0);
             blend_px(img, px, py, c, coverage);
         }
@@ -1424,7 +1641,7 @@ mod tests {
         let mut b = ExportBuffer::new();
         let (u, a) = turn_with(UserInputKind::Task, 1);
         b.push(u, a);
-        b.set_step_outcome(0, None, PointerState::OffFrame, Some("HitA11y".into()), None);
+        b.set_step_outcome(0, None, PointerState::OffFrame, Some("HitA11y".into()), None, DrawnAs { overlay_kind: Some("box".into()), mark_scale: 1.0, caption_bottom_inset: 0 });
         let step = &b.turns()[0].assistant.steps[0];
         assert!(matches!(step.pointer, PointerState::OffFrame));
         assert_eq!(step.pointer.label(), "off-screen");
@@ -1437,8 +1654,8 @@ mod tests {
             let mut b = ExportBuffer::new();
             let (u, a) = turn_with(UserInputKind::Task, 1);
             b.push(u, a);
-            b.set_step_outcome(0, None, PointerState::Hit { rect: [1, 2, 3, 4] }, None, None);
-            b.set_step_outcome(0, None, later.clone(), None, None);
+            b.set_step_outcome(0, None, PointerState::Hit { rect: [1, 2, 3, 4] }, None, None, DrawnAs { overlay_kind: Some("box".into()), mark_scale: 1.0, caption_bottom_inset: 0 });
+            b.set_step_outcome(0, None, later.clone(), None, None, DrawnAs { overlay_kind: Some("box".into()), mark_scale: 1.0, caption_bottom_inset: 0 });
             assert!(
                 matches!(b.turns()[0].assistant.steps[0].pointer, PointerState::Hit { .. }),
                 "a re-render must not erase the outcome the first locate established"
@@ -1451,8 +1668,8 @@ mod tests {
         let mut b = ExportBuffer::new();
         let (u, a) = turn_with(UserInputKind::Task, 1);
         b.push(u, a);
-        b.set_step_outcome(0, None, PointerState::Hit { rect: [1, 2, 3, 4] }, None, None);
-        b.set_step_outcome(0, None, PointerState::Miss, None, None);
+        b.set_step_outcome(0, None, PointerState::Hit { rect: [1, 2, 3, 4] }, None, None, DrawnAs { overlay_kind: Some("box".into()), mark_scale: 1.0, caption_bottom_inset: 0 });
+        b.set_step_outcome(0, None, PointerState::Miss, None, None, DrawnAs { overlay_kind: Some("box".into()), mark_scale: 1.0, caption_bottom_inset: 0 });
         assert!(matches!(
             b.turns()[0].assistant.steps[0].pointer,
             PointerState::Hit { .. }
@@ -1465,7 +1682,7 @@ mod tests {
         let mut b = ExportBuffer::new();
         let (u, a) = turn_with(UserInputKind::Task, 1);
         b.push(u, a);
-        b.set_step_outcome(0, None, PointerState::Hit { rect: [5, 5, 10, 10] }, None, None);
+        b.set_step_outcome(0, None, PointerState::Hit { rect: [5, 5, 10, 10] }, None, None, DrawnAs { overlay_kind: Some("box".into()), mark_scale: 1.0, caption_bottom_inset: 0 });
         b.mark_rejected(0);
         match &b.turns()[0].assistant.steps[0].pointer {
             PointerState::Corrected { rejected, accepted } => {
@@ -1558,11 +1775,58 @@ mod tests {
             app_rect: Some([4, 4, 20, 16]),
         });
         s.pointer = pointer;
+        s.overlay_kind = Some(crate::overlay::OverlayKind::Box.as_str().to_string());
         b.push(
             UserInput::new(UserInputKind::Task, Some("turn copilot off".into())),
             AssistantTurn { steps: vec![s], ..Default::default() },
         );
         b
+    }
+
+    /// The kind vocabulary is a wire format: it is written into every exported
+    /// `session.json` and read back by tools/annotate-session.ps1. Renaming a variant
+    /// would silently change how an existing export re-renders, so pin all six.
+    #[test]
+    fn overlay_kind_wire_names_are_stable() {
+        use crate::overlay::OverlayKind as K;
+        assert_eq!(K::Box.as_str(), "box");
+        assert_eq!(K::Subtitle.as_str(), "subtitle");
+        assert_eq!(K::AppBoundary.as_str(), "app_boundary");
+        assert_eq!(K::Hint.as_str(), "hint");
+        assert_eq!(K::Candidates.as_str(), "candidates");
+        assert_eq!(K::None.as_str(), "none");
+    }
+
+    /// The stroke multiplier is duplicated in three places that must draw the same
+    /// picture: `strokeScale` in src/lib/overlay-weight.ts (the live overlay),
+    /// `stroke_scale` here (the exporter), and the `$k` expression in
+    /// tools/annotate-session.ps1 (the re-annotator). Nothing type-checks one
+    /// against the others, so pin the four anchors overlay-weight.ts documents.
+    #[test]
+    fn stroke_scale_matches_the_overlay_mapping() {
+        assert!((stroke_scale(1) - 0.60).abs() < 1e-6);
+        // The default must be an EXACT no-op, not 0.9999999 -- that is why the
+        // TypeScript groups its arithmetic, and why this asserts equality.
+        assert_eq!(stroke_scale(4), 1.0);
+        assert!((stroke_scale(7) - 1.50).abs() < 1e-6);
+        assert!((stroke_scale(10) - 2.00).abs() < 1e-6);
+        // Out of range clamps rather than producing a degenerate or huge mark.
+        assert_eq!(stroke_scale(0), stroke_scale(1));
+        assert_eq!(stroke_scale(99), stroke_scale(10));
+    }
+
+    /// A step exported before `overlay_kind` existed reads back as unknown. It still
+    /// renders, as a plain box -- which is what every located step draws now, so an
+    /// old export and a new one are indistinguishable at the pointer.
+    #[test]
+    fn a_step_without_an_overlay_kind_still_renders() {
+        let step: ExportStep = serde_json::from_str(
+            r#"{"instruction":"x","target_text":null,"target_role":null,"clipboard":null,
+                 "checkpoint":true,"pointer":{"state":"miss"},"locator_decision":null,
+                 "locator_ms":null,"redacted":false}"#,
+        )
+        .expect("legacy step should still deserialize");
+        assert_eq!(step.overlay_kind, None);
     }
 
     #[test]
@@ -1584,6 +1848,8 @@ mod tests {
         assert_eq!(v["turns"][0]["user"]["kind"], "task");
         assert_eq!(v["turns"][0]["user"]["typed"], true);
         assert_eq!(v["turns"][0]["assistant"]["steps"][0]["pointer"]["state"], "hit");
+        // The resolved kind rides in session.json; annotate-session.ps1 branches on it.
+        assert_eq!(v["turns"][0]["assistant"]["steps"][0]["overlay_kind"], "box");
         // §4.3: the path recorded must be the one actually written.
         let rel = v["turns"][0]["assistant"]["steps"][0]["screenshot"].as_str().unwrap();
         assert!(out.join(rel).is_file(), "recorded screenshot path must exist");
@@ -1698,11 +1964,11 @@ mod tests {
         let base = image::RgbaImage::from_pixel(600, 200, image::Rgba([30, 30, 30, 255]));
 
         let mut cjk = base.clone();
-        draw_caption(&mut cjk, "点击顶部工具栏中的三点按钮");
+        draw_caption(&mut cjk, "点击顶部工具栏中的三点按钮", 0);
         assert_ne!(cjk.as_raw(), base.as_raw(), "Chinese must actually rasterise");
 
         let mut latin = base.clone();
-        draw_caption(&mut latin, "Click the three-dots button");
+        draw_caption(&mut latin, "Click the three-dots button", 0);
         assert_ne!(latin.as_raw(), base.as_raw());
         assert_ne!(cjk.as_raw(), latin.as_raw(), "different text, different pixels");
     }
@@ -1723,11 +1989,12 @@ mod tests {
                 p.0 = [38, 41, 50, 255];
             }
         }
-        draw_pointer(&mut img, 700, 300, 120, 40);
+        draw_pointer(&mut img, [700, 300, 120, 40], 1.0, 1.0, false);
         draw_caption(
             &mut img,
             "You are now on the customization page! You can adjust the font size using \
              the slider, select an accent color under 颜色, or switch your background theme.",
+            0,
         );
         img.save(&out).unwrap();
     }
@@ -1736,7 +2003,7 @@ mod tests {
     fn an_empty_caption_leaves_the_frame_alone() {
         let base = image::RgbaImage::from_pixel(400, 120, image::Rgba([10, 10, 10, 255]));
         let mut img = base.clone();
-        draw_caption(&mut img, "   ");
+        draw_caption(&mut img, "   ", 0);
         assert_eq!(img.as_raw(), base.as_raw(), "no text, no band");
     }
 
@@ -1841,29 +2108,270 @@ mod tests {
 
 #[cfg(all(test, windows))]
 mod pointer_parity {
-    /// Renders `draw_pointer` onto a real exported frame so it can be compared, by
-    /// eye, against what `tools/annotate-session.ps1` produces for the same rect.
-    /// The two implementations must draw the same picture — the script exists to redo
-    /// what the export already did — and nothing else checks that they agree.
+    //! The exported pointer and the re-annotated one must be the same picture.
+    //!
+    //! `tools/annotate-session.ps1` exists to REDO what the export already did, so a
+    //! divergence between them silently rewrites history: re-running the script on an
+    //! old session would produce a figure that never matched the user's screen. Two
+    //! such divergences shipped undetected because the only check here was a manual,
+    //! `#[ignore]`d harness compared by eye -- the script drew three nested rectangles
+    //! for months under a comment claiming it matched the app, and later drew the mark
+    //! with no padding while the overlay padded every rect by 12 px.
+    use std::path::{Path, PathBuf};
+
+    /// Bounding box of pixels that differ from the flat background, plus their count.
     ///
-    ///   cargo test --lib pointer_parity -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn render_sample() {
-        let src = std::env::var("NAVISUAL_FRAME").unwrap_or_default();
-        let rect: Vec<i32> = std::env::var("NAVISUAL_RECT")
-            .unwrap_or_default()
-            .split(',')
-            .filter_map(|v| v.trim().parse().ok())
-            .collect();
-        if src.is_empty() || rect.len() != 4 {
-            println!("set NAVISUAL_FRAME=<png> and NAVISUAL_RECT=x,y,w,h");
-            return;
+    /// Comparing ink EXTENT rather than exact pixels is deliberate: the two renderers
+    /// anti-alias differently (hand-rolled coverage vs GDI+), so identical geometry
+    /// still differs pixel-for-pixel. Extent is what actually regressed both times.
+    fn ink(img: &image::RgbaImage, bg: [u8; 3]) -> (i64, i64, i64, i64, u64) {
+        let (mut x0, mut y0, mut x1, mut y1, mut n) = (i64::MAX, i64::MAX, -1i64, -1i64, 0u64);
+        for (x, y, px) in img.enumerate_pixels() {
+            let d = (0..3)
+                .map(|i| (px.0[i] as i32 - bg[i] as i32).abs())
+                .max()
+                .unwrap_or(0);
+            if d > 24 {
+                x0 = x0.min(x as i64);
+                y0 = y0.min(y as i64);
+                x1 = x1.max(x as i64);
+                y1 = y1.max(y as i64);
+                n += 1;
+            }
         }
-        let mut img = image::open(&src).expect("open frame").to_rgba8();
-        super::draw_pointer(&mut img, rect[0], rect[1], rect[2], rect[3]);
-        let out = std::env::temp_dir().join("rust-pointer.png");
-        img.save(&out).expect("save");
-        println!("wrote {}", out.to_string_lossy());
+        (x0, y0, x1, y1, n)
+    }
+
+    /// Write the minimum an export needs for the script to re-annotate it.
+    fn fixture(dir: &Path, rect: [i32; 4], frame: (u32, u32), state: &str) -> PathBuf {
+        let clean = dir.join(super::CLEAN_DIR);
+        std::fs::create_dir_all(&clean).expect("steps dir");
+        let bg = image::RgbaImage::from_pixel(frame.0, frame.1, image::Rgba([20, 20, 20, 255]));
+        bg.save(clean.join("01-parity.png")).expect("frame");
+        let session = serde_json::json!({
+            "schema": 2, "title": "parity", "slug": "parity",
+            "app": {"exe": "test", "name": "Test", "window_title": "Test"},
+            "navisual_version": "test", "provider": "test", "model": null,
+            "created_local": "2026-09-11T00:00:00-07:00",
+            "turns": [{
+                "n": 1,
+                "user": {"kind": "task", "text": "parity", "typed": true, "reason": null},
+                "assistant": {"instruction": "parity", "steps": [{
+                    "instruction": "parity", "target_text": null, "target_role": null,
+                    "clipboard": null, "checkpoint": true,
+                    "screenshot": "steps-annotated/01-parity.png",
+                    "pointer": {"state": state, "rect": rect},
+                    "overlay_kind": "box",
+                    "locator": {"decision": null, "total_ms": null}, "redacted": false
+                }]}
+            }]
+        });
+        std::fs::write(
+            dir.join("session.json"),
+            serde_json::to_vec_pretty(&session).unwrap(),
+        )
+        .expect("session.json");
+        clean.join("01-parity.png")
+    }
+
+    /// Render the same rect through both implementations and compare what they drew.
+    ///
+    /// Skips (rather than fails) when PowerShell cannot run, so a box without a shell
+    /// does not turn a missing dependency into a red build.
+    #[test]
+    fn exporter_and_annotator_draw_the_same_pointer() {
+        const BG: [u8; 3] = [20, 20, 20];
+        // A tight OCR word, a square glyph under the size floor, a wide row, a button.
+        // A tight OCR word, a square glyph under the size floor, a wide row, a button,
+        // and the dashed hint -- the styles have to match too, not just the geometry.
+        for (tag, rect, state) in [
+            ("tiny_word", [180, 200, 23, 8], "hit"),
+            ("small_icon", [180, 200, 17, 17], "hit"),
+            ("wide_row", [120, 200, 260, 22], "hit"),
+            ("button", [140, 180, 125, 60], "hit"),
+            ("hint_button", [140, 180, 125, 60], "hint"),
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("navisual-parity-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("dir");
+            let clean = fixture(&dir, rect, (520, 440), state);
+
+            // A: the exporter.
+            let mut a = image::open(&clean).expect("frame").to_rgba8();
+            let hint = state == "hint";
+            super::draw_pointer(&mut a, rect, 1.0, 1.0, hint);
+
+            // B: the re-annotator, over the same untouched frame.
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join("tools")
+                .join("annotate-session.ps1");
+            let run = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&script)
+                .arg("-Path")
+                .arg(&dir)
+                .args(["-NoCaption", "-OutDir", "steps-ps"])
+                .output();
+            let Ok(run) = run else {
+                eprintln!("skipping pointer parity: powershell unavailable");
+                return;
+            };
+            assert!(
+                run.status.success(),
+                "annotate-session.ps1 failed: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            let b_path = dir.join("steps-ps").join("01-parity.png");
+            assert!(b_path.is_file(), "{tag}: script wrote no image");
+            let b = image::open(&b_path).expect("ps output").to_rgba8();
+
+            let (ax0, ay0, ax1, ay1, an) = ink(&a, BG);
+            let (bx0, by0, bx1, by1, bn) = ink(&b, BG);
+            assert!(an > 0 && bn > 0, "{tag}: one of them drew nothing");
+
+            // Extent must agree within a few px of anti-aliasing and stroke rounding.
+            // A missing beacon moved this by ~86 px; missing padding, by 24.
+            for (what, av, bv) in [
+                ("left", ax0, bx0),
+                ("top", ay0, by0),
+                ("right", ax1, bx1),
+                ("bottom", ay1, by1),
+            ] {
+                assert!(
+                    (av - bv).abs() <= 3,
+                    "{tag}: mark {what} edge differs -- exporter {av}, script {bv} (rect {rect:?}). The two must draw the same picture."
+                );
+            }
+            // And they must lay down a comparable amount of ink, so neither can quietly
+            // drop a whole element (the scan line, the crosshair) inside the same extent.
+            let (lo, hi) = (an.min(bn) as f64, an.max(bn) as f64);
+            assert!(
+                lo / hi > 0.70,
+                "{tag}: ink differs too much -- exporter {an}px, script {bn}px"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A hint must not look like a located hit. Both renderers agreeing is only worth
+    /// something if they agree on a mark that still says "approximately here" --
+    /// dashed brackets, no corner dots, no crosshair. Reported live on 2026-09-11:
+    /// "step 12 is an AI estimate pointer. I see a solid one."
+    #[test]
+    fn a_hint_is_visibly_softer_than_a_hit() {
+        let blank = || image::RgbaImage::from_pixel(400, 360, image::Rgba([20, 20, 20, 255]));
+        let rect = [140, 150, 125, 60];
+        let (mut hit, mut hint) = (blank(), blank());
+        super::draw_pointer(&mut hit, rect, 1.0, 1.0, false);
+        super::draw_pointer(&mut hint, rect, 1.0, 1.0, true);
+
+        let (hx0, hy0, hx1, hy1, hit_n) = ink(&hit, [20, 20, 20]);
+        let (nx0, ny0, nx1, ny1, hint_n) = ink(&hint, [20, 20, 20]);
+        // Same footprint -- it points at the same place.
+        for (av, bv) in [(hx0, nx0), (hy0, ny0), (hx1, nx1), (hy1, ny1)] {
+            assert!((av - bv).abs() <= 3, "hint should occupy the same area as a hit");
+        }
+        // But visibly less ink: dashes, no dots, no crosshair, thinner strokes.
+        assert!(
+            (hint_n as f64) < (hit_n as f64) * 0.85,
+            "hint drew {hint_n}px against a hit's {hit_n}px -- not distinguishable"
+        );
+        // The centre must be empty on a hint: no crosshair claiming an exact spot.
+        let (cx, cy) = (rect[0] + rect[2] / 2, rect[1] + rect[3] / 2);
+        let centre_ink = |img: &image::RgbaImage| {
+            let mut n = 0;
+            for dy in -6i32..=6 {
+                for dx in -6i32..=6 {
+                    let p = img.get_pixel((cx + dx) as u32, (cy + dy) as u32);
+                    if (p.0[0] as i32 - 20).abs() > 24 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(centre_ink(&hit) > 0, "a hit draws a crosshair");
+        assert_eq!(centre_ink(&hint), 0, "a hint must not draw a crosshair");
+    }
+
+    /// The geometry every renderer has to agree on, pinned against hand-checked
+    /// values. `markRect` in `src/Overlay.svelte` and the `$pad`/`$MIN_MARK` block in
+    /// `tools/annotate-session.ps1` must produce these same numbers.
+    #[test]
+    fn mark_geometry_is_pinned() {
+        // rect -> (px, py, pw, ph); pad = clamp(12, 20, min(w,h) * 0.45)
+        for (rect, want) in [
+            ([100, 100, 87, 22], (88.0f32, 88.0f32, 111.0f32, 46.0f32)), // pad 12, the floor
+            ([100, 100, 125, 60], (80.0, 80.0, 165.0, 100.0)),           // pad 20, the ceiling
+            ([100, 100, 60, 60], (80.0, 80.0, 100.0, 100.0)),            // pad 27 -> 20
+            // MIN_MARK lifts anything under 36 px on either axis.
+            ([100, 100, 23, 8], (88.0, 86.0, 47.0, 36.0)),
+            ([100, 100, 4, 4], (84.0, 84.0, 36.0, 36.0)),
+        ] {
+            let got = super::mark_rect(rect[0], rect[1], rect[2], rect[3], 1.0);
+            let fields = [
+                (got.0, want.0),
+                (got.1, want.1),
+                (got.2, want.2),
+                (got.3, want.3),
+            ];
+            for (i, (g, w)) in fields.iter().enumerate() {
+                assert!(
+                    (g - w).abs() < 0.01,
+                    "rect {rect:?} field {i}: got {g}, want {w}"
+                );
+            }
+            let (px, py, pw, ph) = got;
+            // The mark is always centred on the located rect, never offset.
+            assert!(((px + pw / 2.0) - (rect[0] as f32 + rect[2] as f32 / 2.0)).abs() < 0.01);
+            assert!(((py + ph / 2.0) - (rect[1] as f32 + rect[3] as f32 / 2.0)).abs() < 0.01);
+            // And never smaller than the element it marks.
+            assert!(
+                pw >= rect[2] as f32 && ph >= rect[3] as f32,
+                "mark must not clip the target"
+            );
+        }
+    }
+
+    /// On a high-DPI display the frame is in physical pixels while the overlay drew in
+    /// logical ones, so the fixed parts of the mark have to be converted. The located
+    /// rect does not -- it was already carried into frame space.
+    #[test]
+    fn mark_scale_converts_the_constants_but_not_the_element() {
+        // A 200% display: the same element arrives twice as large in the frame, and
+        // the pad around it must double too.
+        let at1 = super::mark_rect(100, 100, 87, 22, 1.0);
+        let at2 = super::mark_rect(200, 200, 174, 44, 2.0);
+        let pad1 = (at1.2 - 87.0) / 2.0;
+        let pad2 = (at2.2 - 174.0) / 2.0;
+        assert!((pad2 - pad1 * 2.0).abs() < 0.01, "pad {pad1} -> {pad2}, want doubled");
+
+        // The floor scales with it, so a tiny glyph is lifted by the same amount of
+        // PERCEIVED space on either display.
+        let tiny1 = super::mark_rect(0, 0, 4, 4, 1.0);
+        let tiny2 = super::mark_rect(0, 0, 8, 8, 2.0);
+        assert!((tiny1.2 - 36.0).abs() < 0.01);
+        assert!((tiny2.2 - 72.0).abs() < 0.01);
+
+        // Bracket arms: both BOUNDS scale, while the ratio between them does not --
+        // it is a fraction of a mark already measured in frame pixels.
+        assert!((super::mark_arm(400.0, 300.0, 1.0) - 26.0).abs() < 0.01); // ceiling
+        assert!((super::mark_arm(400.0, 300.0, 2.0) - 52.0).abs() < 0.01); // ceiling, doubled
+        assert!((super::mark_arm(20.0, 20.0, 1.0) - 14.0).abs() < 0.01); // floor
+        assert!((super::mark_arm(20.0, 20.0, 2.0) - 28.0).abs() < 0.01); // floor, doubled
+        assert!((super::mark_arm(200.0, 100.0, 2.0) - 50.0).abs() < 0.01); // ratio binds
+
+        // A nonsense scale is ignored rather than collapsing or exploding the mark.
+        assert_eq!(super::mark_rect(0, 0, 40, 40, f32::NAN), super::mark_rect(0, 0, 40, 40, 1.0));
+        assert_eq!(super::mark_rect(0, 0, 40, 40, 0.0), super::mark_rect(0, 0, 40, 40, 1.0));
     }
 }

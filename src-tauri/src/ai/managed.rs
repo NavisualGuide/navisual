@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::ai::prompts::SYSTEM_PROMPT;
-use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType, Role};
+use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role};
 use crate::server::{
     load_session, refresh_session, save_session, sign_in_anonymously, SupabaseSession,
 };
@@ -460,7 +460,6 @@ impl ManagedClient {
                                 target_role: None,
                                 target_region: None,
                                 target_nearby_text: None,
-                                overlay_type: OverlayType::None,
                                 clipboard: None,
                                 checkpoint: true,
                                 target_bbox: None,
@@ -561,6 +560,12 @@ fn recover_leaked_pseudocall(content: &str) -> Option<NavigateStepResponse> {
         content,
         "instruction:",
         &[
+            // Deliberately kept after `overlay_type` was retired from the schema
+            // (2026-09-11). This list is not a schema -- it is the set of strings that
+            // can terminate a leaked `instruction:` value. Models still emit the field
+            // from cached prompts and from older turns in the conversation window, and
+            // dropping the marker would swallow the rest of the blob into the
+            // instruction text.
             ",overlay_type:",
             ",target_bbox:",
             ",target_role:",
@@ -598,7 +603,6 @@ fn recover_leaked_pseudocall(content: &str) -> Option<NavigateStepResponse> {
             target_role: None,
             target_region: None,
             target_nearby_text: None,
-            overlay_type: OverlayType::Arrow,
             clipboard: None,
             checkpoint: true,
             target_bbox,
@@ -681,10 +685,6 @@ pub(crate) fn navigate_step_tool() -> Value {
                                              "bottom-left","bottom-center","bottom-right"]
                                 },
                                 "target_nearby_text": {"type": "string"},
-                                "overlay_type": {
-                                    "type": "string",
-                                    "enum": ["arrow","highlight","circle","none"]
-                                },
                                 "clipboard": {"type": "string"},
                                 "checkpoint": {"type": "boolean"},
                                 "target_bbox": {

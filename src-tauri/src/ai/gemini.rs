@@ -81,10 +81,6 @@ impl GeminiClient {
                                     "enum": ["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"]
                                 },
                                 "target_nearby_text": {"type": "string"},
-                                "overlay_type": {
-                                    "type": "string",
-                                    "enum": ["arrow", "highlight", "circle", "none"]
-                                },
                                 "clipboard": {"type": "string"},
                                 "checkpoint": {"type": "boolean"},
                                 "target_bbox": {
@@ -367,7 +363,6 @@ impl GeminiClient {
                         target_role,
                         target_region: None,
                         target_nearby_text: None,
-                        overlay_type: crate::ai::types::OverlayType::None,
                         clipboard: None,
                         checkpoint,
                         target_bbox: None,

@@ -78,16 +78,6 @@ fn bbox_from_value(value: &serde_json::Value) -> Option<[f64; 4]> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum OverlayType {
-    Arrow,
-    Highlight,
-    Circle,
-    Subtitle,
-    None,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum TargetRole {
     Button,
     Tab,
@@ -128,8 +118,6 @@ pub struct GuidanceStep {
     pub target_region: Option<TargetRegion>,
     #[serde(default, deserialize_with = "lax_option")]
     pub target_nearby_text: Option<String>,
-    #[serde(default = "default_overlay", deserialize_with = "lax_overlay")]
-    pub overlay_type: OverlayType,
     #[serde(default, deserialize_with = "lax_option")]
     pub clipboard: Option<String>,
     #[serde(default = "default_true")]
@@ -171,23 +159,6 @@ where
         serde_json::Value::String(s) => s.trim().parse::<u32>().ok(),
         _ => None,
     })
-}
-
-fn default_overlay() -> OverlayType {
-    OverlayType::Arrow
-}
-
-/// Lax `OverlayType` deserializer: an unrecognised value (e.g. a model inventing
-/// `"pointer"`) falls back to the default instead of failing the whole response
-/// parse — which on the json-object providers (OpenAI/DeepSeek/Qwen) would drop
-/// into the raw-JSON-as-instruction path. Mirrors [`lax_option`]; closes the
-/// last un-lax field on [`GuidanceStep`].
-fn lax_overlay<'de, D>(deserializer: D) -> Result<OverlayType, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value::<OverlayType>(value).unwrap_or_else(|_| default_overlay()))
 }
 
 fn default_true() -> bool {
@@ -475,16 +446,18 @@ mod tests {
     fn minimal_step_gets_defaults() {
         let s = step(r#"{"instruction": "Click the button"}"#);
         assert!(s.checkpoint, "checkpoint defaults to true");
-        assert!(matches!(s.overlay_type, OverlayType::Arrow));
         assert!(s.target_text.is_none());
         assert!(s.target_bbox.is_none());
     }
 
     #[test]
-    fn invented_overlay_type_falls_back_to_arrow() {
-        // A model inventing "pointer" must not fail the whole response parse.
-        let s = step(r#"{"instruction": "x", "overlay_type": "pointer"}"#);
-        assert!(matches!(s.overlay_type, OverlayType::Arrow));
+    fn a_stale_overlay_type_is_ignored_not_fatal() {
+        // `overlay_type` was retired (2026-09-11): the mark is chosen locally from
+        // the resolved rect, not by the model. Models still emit it from cached
+        // prompts and older conversation turns carry it, so it must parse as an
+        // unknown field and be dropped -- never fail the response.
+        let s = step(r#"{"instruction": "x", "overlay_type": "circle"}"#);
+        assert_eq!(s.instruction, "x");
     }
 
     #[test]

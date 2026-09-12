@@ -37,6 +37,17 @@
 
 .PARAMETER OutDir
   Destination subfolder. Defaults to `steps-annotated`.
+
+.PARAMETER Thickness
+  The Pointer thickness slider position (1-10) the session ran at, mapped to the
+  same stroke multiplier the live overlay uses. Defaults to 4, the no-op position.
+
+.PARAMETER CaptionInset
+  Pixels at the bottom of each frame that the caption must stay clear of -- the
+  taskbar. Normally read per step from `caption_bottom_inset` in session.json;
+  pass this to override it, which is what a session exported before that field
+  existed needs (48 for a Windows 11 taskbar at 100% scaling).
+
 #>
 
 [CmdletBinding()]
@@ -45,6 +56,8 @@ param(
   [int[]]$Steps,
   [switch]$NoPointer,
   [switch]$NoCaption,
+  [ValidateRange(1, 10)][int]$Thickness = 4,
+  [ValidateRange(0, 400)][int]$CaptionInset = -1,
   [string]$OutDir = "steps-annotated"
 )
 
@@ -72,6 +85,18 @@ New-Item -ItemType Directory -Force $dest | Out-Null
 
 # Accent orange, matching the app and the site.
 $accent = [System.Drawing.Color]::FromArgb(255, 255, 107, 53)
+
+# Slider position -> stroke weight multiplier. Must stay in step with strokeScale in
+# src/lib/overlay-weight.ts and stroke_scale() in src-tauri/src/session_export.rs:
+# the exported pointer and the on-screen one are supposed to be the same picture.
+# Only STROKE WIDTHS scale. Geometry -- padding, arm length, ripple growth --
+# is layout and stays put.
+$k = if ($Thickness -le 4) { 0.6 + (($Thickness - 1) / 3.0) * 0.4 }
+     else { 1.0 + ($Thickness - 4) / 6.0 }
+
+# The live overlay pulses on a timer; a still takes the value each pulse holds at
+# t=0, which for (sin(0)+1)/2 is the midpoint.
+$pulse = 0.5
 $written = 0
 $skipped = 0
 $flat = 0
@@ -113,17 +138,45 @@ foreach ($turn in $session.turns) {
       $cx = $bx + $bw / 2.0
       $cy = $by + $bh / 2.0
 
+      # The rect the MARK is built on: the located rect, padded, then floored so a
+      # tiny target still gets something you can spot. Must match markRect in
+      # src/Overlay.svelte and the pad/MIN_MARK block in draw_pointer() in
+      # session_export.rs -- the three are supposed to produce the same picture.
+      # Geometry, so none of it scales with $k.
+      # Frame px per logical px. The overlay draws in logical pixels; this frame is
+      # physical and may have been downscaled. The located rect was already converted
+      # with the frame -- only the fixed constants below need it. Absent (a session
+      # exported before the field existed) means 1.0, which is what they already were.
+      $markScale = 1.0
+      if ($null -ne $step.PSObject.Properties['mark_scale']) {
+        $ms = [double]$step.mark_scale
+        if ($ms -gt 0 -and -not [double]::IsNaN($ms)) { $markScale = $ms }
+      }
+
+      # A hint is the model's own bbox, drawn because both locator passes missed. The
+      # app marks that difference -- dashed brackets, no corner dots, no crosshair,
+      # softer alphas -- and an export that drew the confident mark instead would claim
+      # a precision the session never had.
+      $isHint = ($step.pointer.state -eq 'hint')
+
+      $MIN_MARK = 36.0 * $markScale
+      $pad = [Math]::Min(20.0 * $markScale, [Math]::Max(12.0 * $markScale, [Math]::Min($bw, $bh) * 0.45))
+      $pw = [Math]::Max($bw + $pad * 2.0, $MIN_MARK)
+      $ph = [Math]::Max($bh + $pad * 2.0, $MIN_MARK)
+      $px = $cx - $pw / 2.0; $py = $cy - $ph / 2.0
+
       # Ripple rings. Ellipse, not circle: a circle sized by the long axis balloons
       # past a thin element's short axis. Growth is capped on the short axis of a
       # wide row for the same reason.
-      $growth   = [Math]::Min($bw, $bh) * 0.7
-      $ryGrowth = if ($bw -gt $bh * 2.0) { [Math]::Min($growth, $bh * 0.4) } else { $growth }
+      $growth   = [Math]::Min($pw, $ph) * 0.7
+      $ryGrowth = if ($pw -gt $ph * 2.0) { [Math]::Min($growth, $ph * 0.4) } else { $growth }
       foreach ($i in 0, 1, 2) {
         $phase = $i / 3.0
-        $rx = $bw / 2.0 + 8.0 + $phase * $growth
-        $ry = $bh / 2.0 + 8.0 + $phase * $ryGrowth
-        $a  = [int]((1.0 - $phase) * 0.55 * 255)
-        $wd = [Math]::Max(1.0, 2.5 - $phase * 1.8)
+        $rx = $pw / 2.0 + 8.0 * $markScale + $phase * $growth
+        $ry = $ph / 2.0 + 8.0 * $markScale + $phase * $ryGrowth
+        $a  = [int]((1.0 - $phase) * $(if ($isHint) { 0.40 } else { 0.55 }) * 255)
+        $taper = if ($isHint) { 2.0 - $phase * 1.4 } else { 2.5 - $phase * 1.8 }
+        $wd = [Math]::Max(1.0, $taper * $k * $markScale)
         $pen = New-Object System.Drawing.Pen(
           [System.Drawing.Color]::FromArgb($a, $accent.R, $accent.G, $accent.B), $wd)
         $g.DrawEllipse($pen, $cx - $rx, $cy - $ry, $rx * 2.0, $ry * 2.0)
@@ -132,10 +185,25 @@ foreach ($turn in $session.turns) {
 
       # Corner brackets: a dark stroke under the accent one, so the mark survives on
       # any background.
-      $arm = [Math]::Min(26.0, [Math]::Max(14.0, [Math]::Min($bw * 0.38, $bh * 0.5)))
-      $shadow = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(191, 0, 0, 0), 5.5)
-      $bright = New-Object System.Drawing.Pen(
-        [System.Drawing.Color]::FromArgb(255, $accent.R, $accent.G, $accent.B), 3.0)
+      $arm = [Math]::Min(26.0 * $markScale, [Math]::Max(14.0 * $markScale, [Math]::Min($pw * 0.38, $ph * 0.5)))
+      if ($isHint) {
+        $shadow = New-Object System.Drawing.Pen(
+          [System.Drawing.Color]::FromArgb(166, 0, 0, 0), [single](4.5 * $k * $markScale))
+        $bright = New-Object System.Drawing.Pen(
+          [System.Drawing.Color]::FromArgb([int]((0.72 + $pulse * 0.15) * 255),
+            $accent.R, $accent.G, $accent.B), [single](2.5 * $k * $markScale))
+        foreach ($pen in $shadow, $bright) {
+          $pen.DashStyle = 'Custom'
+          # GDI+ dash lengths are multiples of the pen width; canvas setLineDash is in
+          # pixels, so divide through to get the same 5-on/4-off pattern.
+          $pen.DashPattern = @([single](5.0 * $markScale / $pen.Width), [single](4.0 * $markScale / $pen.Width))
+        }
+      } else {
+        $shadow = New-Object System.Drawing.Pen(
+          [System.Drawing.Color]::FromArgb(191, 0, 0, 0), [single](5.5 * $k * $markScale))
+        $bright = New-Object System.Drawing.Pen(
+          [System.Drawing.Color]::FromArgb(255, $accent.R, $accent.G, $accent.B), [single](3.0 * $k * $markScale))
+      }
       $dot = New-Object System.Drawing.SolidBrush(
         [System.Drawing.Color]::FromArgb(255, $accent.R, $accent.G, $accent.B))
       # Indices, not an array of arrays: PowerShell flattens nested arrays built with
@@ -144,25 +212,33 @@ foreach ($turn in $session.turns) {
       foreach ($corner in 0, 1, 2, 3) {
         $left = ($corner -eq 0 -or $corner -eq 2)
         $top  = ($corner -lt 2)
-        $ox = if ($left) { $bx } else { $bx + $bw }
-        $oy = if ($top)  { $by } else { $by + $bh }
+        $ox = if ($left) { $px } else { $px + $pw }
+        $oy = if ($top)  { $py } else { $py + $ph }
         $dx = if ($left) { 1.0 } else { -1.0 }
         $dy = if ($top)  { 1.0 } else { -1.0 }
         foreach ($pen in $shadow, $bright) {
           $g.DrawLine($pen, $ox + $dx * $arm, $oy, $ox, $oy)
           $g.DrawLine($pen, $ox, $oy, $ox, $oy + $dy * $arm)
         }
-        $g.FillEllipse($dot, $ox - 3.5, $oy - 3.5, 7.0, 7.0)
+        if (-not $isHint) {
+          $dotR = 3.5 * $k * $markScale
+          $g.FillEllipse($dot, $ox - $dotR, $oy - $dotR, $dotR * 2.0, $dotR * 2.0)
+        }
       }
       $shadow.Dispose(); $bright.Dispose(); $dot.Dispose()
 
       # Centre crosshair. The app pulses this between 0.35 and 0.60 alpha; a still
       # takes the midpoint.
-      $cross = New-Object System.Drawing.Pen(
-        [System.Drawing.Color]::FromArgb([int](0.475 * 255), $accent.R, $accent.G, $accent.B), 1.5)
-      $g.DrawLine($cross, $cx - 5.0, $cy, $cx + 5.0, $cy)
-      $g.DrawLine($cross, $cx, $cy - 5.0, $cx, $cy + 5.0)
-      $cross.Dispose()
+      if (-not $isHint) {
+        $cross = New-Object System.Drawing.Pen(
+          [System.Drawing.Color]::FromArgb([int](0.475 * 255), $accent.R, $accent.G, $accent.B),
+          [single](1.5 * $k * $markScale))
+        $cr = 5.0 * $markScale
+        $g.DrawLine($cross, $cx - $cr, $cy, $cx + $cr, $cy)
+        $g.DrawLine($cross, $cx, $cy - $cr, $cx, $cy + $cr)
+        $cross.Dispose()
+      }
+
     }
 
     if (-not $NoCaption -and $step.instruction) {
@@ -187,7 +263,20 @@ foreach ($turn in $session.turns) {
       $stripW  = [Math]::Min([int]$measured.Width + $hPad * 2, $bmp.Width)
       $stripH  = [int]$measured.Height + $vPad * 2
       $stripX  = [int](($bmp.Width - $stripW) / 2)
-      $stripY  = $bmp.Height - $stripH - [int]($size * 0.6)
+      # The live overlay anchors the caption to the monitor's WORK AREA, not the
+      # monitor, so the strip sits above the taskbar instead of across its icons
+      # (fixed in the app 2026-09-07 after a live report). A frame is a whole-
+      # monitor capture WITH the taskbar in it, so anchoring to the frame's own
+      # bottom edge reintroduces exactly that defect in the exported figure.
+      $inset = 0
+      if ($CaptionInset -ge 0) {
+        $inset = $CaptionInset
+      } elseif ($null -ne $step.PSObject.Properties['caption_bottom_inset']) {
+        $inset = [int]$step.caption_bottom_inset
+      }
+      $gap = [int]($size * 0.6)
+      $floor = [Math]::Max($bmp.Height - $inset, $stripH + $gap)
+      $stripY = [Math]::Max($floor - $stripH - $gap, 0)
       $radius  = [int]($size * 0.55)
 
       # Rounded rect via a path, so the corners match the app's 10px radius look.

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::ai::managed::navigate_step_tool;
 use crate::ai::prompts::SYSTEM_PROMPT;
-use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType, Role};
+use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role};
 
 /// Same schema instruction as Ollama — DeepSeek doesn't support function-calling
 /// for vision models, so we use prompt engineering + response_format:json_object.
@@ -21,7 +21,6 @@ Example (copy this structure exactly):
       "instruction": "Click the Layout tab at the top of the ribbon.",
       "target_text": "Layout",
       "target_role": "tab",
-      "overlay_type": "arrow",
       "checkpoint": true
     }
   ],
@@ -34,7 +33,6 @@ Step fields (inside "steps" array only):
 - instruction: what the user should do (required)
 - target_text: 1-5 words visible on screen (optional)
 - target_role: button|tab|link|textbox|menuitem|checkbox|radio|combobox|slider|image|heading|other (optional)
-- overlay_type: "arrow" for clickable targets, "subtitle" for keyboard/scroll steps with no target (default arrow)
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
 - clipboard: text to copy to clipboard (optional)
 - target_bbox: [ymin, xmin, ymax, xmax] as NORMALIZED 0-1000 coordinates (0 = top/left edge, 1000 = bottom/right edge of the image, regardless of pixel size; NOT pixels) (REQUIRED whenever target_text is set, even if target_element_id is also set — the only time to omit it is a step with no target_text at all)
@@ -606,7 +604,6 @@ fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
             target_role: None,
             target_region: None,
             target_nearby_text: None,
-            overlay_type: OverlayType::None,
             clipboard: None,
             checkpoint: true,
             target_bbox: None,
@@ -630,7 +627,6 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
             target_role: None,
             target_region: None,
             target_nearby_text: None,
-            overlay_type: OverlayType::None,
             clipboard: None,
             checkpoint: true,
             target_bbox: None,

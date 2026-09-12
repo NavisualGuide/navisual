@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::ai::prompts::SYSTEM_PROMPT;
-use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, OverlayType, Role};
+use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role};
 
 /// Appended to the system prompt so the model knows to return JSON.
 /// Vision models in Ollama don't support the tools/function-calling API,
@@ -21,7 +21,6 @@ Example (copy this structure exactly):
       "instruction": "Click the Layout tab at the top of the ribbon.",
       "target_text": "Layout",
       "target_role": "tab",
-      "overlay_type": "arrow",
       "checkpoint": true
     }
   ],
@@ -34,7 +33,6 @@ Step fields (inside "steps" array only):
 - instruction: what the user should do (required)
 - target_text: the EXACT visible label of the element to point at, 1-5 words (REQUIRED — this is what locates the on-screen element). For a step with no on-screen target (scrolling, pressing a key), use an empty string "".
 - target_role: button|tab|link|textbox|menuitem|checkbox|radio|combobox|slider|image|heading|other (optional)
-- overlay_type: "arrow" for clickable targets, "subtitle" for keyboard/scroll steps with no target (default arrow)
 - checkpoint: true = wait for user confirmation, false = auto-advance (required)
 - clipboard: text to copy to clipboard (optional)
 - target_bbox: [ymin, xmin, ymax, xmax] as NORMALIZED 0-1000 coordinates (0 = top/left edge, 1000 = bottom/right edge of the image, regardless of pixel size; NOT pixels) (optional, omit when no target_text)
@@ -251,7 +249,6 @@ impl OllamaClient {
                 target_role: None,
                 target_region: None,
                 target_nearby_text: None,
-                overlay_type: OverlayType::None,
                 clipboard: None,
                 checkpoint: true,
                 target_bbox: None,
@@ -300,8 +297,7 @@ fn navigate_step_schema() -> Value {
                                 "radio", "combobox", "slider", "image", "heading", "other"
                             ]
                         },
-                        "overlay_type": { "type": "string", "maxLength": 16 },
-                        "clipboard": { "type": "string", "maxLength": 2000 },
+                                "clipboard": { "type": "string", "maxLength": 2000 },
                         "target_bbox": { "type": "array", "items": { "type": "number" } },
                         "target_element_id": { "type": "integer" },
                         "checkpoint": { "type": "boolean" }

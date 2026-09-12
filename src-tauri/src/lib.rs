@@ -22,7 +22,7 @@ use ai::config::Config;
 use ai::cost_tracker::CostTracker;
 use ai::router::AiRouter;
 use ai::session::SessionManager;
-use ai::types::{GuidanceStep, OverlayType};
+use ai::types::{GuidanceStep};
 
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -854,15 +854,6 @@ fn compute_ai_bbox_for_step(
     ai::bbox::ai_bbox_to_screen_rect(raw, format, ai_w, ai_h, rect).map(|vd| vd.into_inner())
 }
 
-fn overlay_kind_for_step(overlay_type: &OverlayType) -> overlay::OverlayKind {
-    match overlay_type {
-        OverlayType::Arrow => overlay::OverlayKind::Arrow,
-        OverlayType::Highlight | OverlayType::Circle => overlay::OverlayKind::Box,
-        OverlayType::Subtitle => overlay::OverlayKind::Subtitle,
-        OverlayType::None => overlay::OverlayKind::None,
-    }
-}
-
 /// The locate half of `execute_step` — target-text validation, pack hints, option
 /// building, and the orchestrator call, with no drawing. Extracted (Flow A) so
 /// `retry_locate`'s candidate collection can run additional locates without
@@ -1071,14 +1062,20 @@ fn execute_step(
         ),
     };
 
-    let mut kind = overlay_kind_for_step(&step.overlay_type);
+    // The mark is chosen HERE, from what the locate actually established, not by the
+    // model. `overlay_type` was retired on 2026-09-11: measured over 1,517 logged
+    // steps, a model's choice tracked the vocabulary its provider was handed and
+    // nothing about the step -- schema providers emitted no `subtitle` (absent from
+    // their enum), prompt providers emitted no `highlight`/`circle` (absent from
+    // their prompt), and `highlight`/`circle` rendered identically anyway. Choosing
+    // the mark depends on the resolved rect, which the model never sees; it is a
+    // positioning decision, and positioning is the local side's job.
+    let mut kind = if located.is_some() {
+        overlay::OverlayKind::Box
+    } else {
+        overlay::OverlayKind::None
+    };
     let mut bbox = located.as_ref().map(|r| r.bbox);
-
-    // When the locator found a target, always show at least an arrow — never
-    // suppress the pointer just because the model returned overlay_type:none.
-    if located.is_some() && matches!(kind, overlay::OverlayKind::None) {
-        kind = overlay::OverlayKind::Arrow;
-    }
 
     // Hint fallback: when A11y *and* OCR both missed but the AI returned a
     // target_bbox, emit a diffuse highlight at the inflated AI bbox so the
@@ -1284,6 +1281,11 @@ fn execute_step(
             bbox,
             hint_shown,
             trace.as_ref(),
+            // The RESOLVED kind, not the model's overlay_type: highlight and circle
+            // both collapse to box, none is promoted to arrow once a target is
+            // located, and hint/candidates are decided here. Only this tells a
+            // re-annotator what to draw.
+            kind,
         );
     }
 
@@ -1386,6 +1388,7 @@ fn record_export_step(
     drawn: Option<capture::Rect>,
     hint_shown: bool,
     trace: Option<&locator::trace::LocateTrace>,
+    overlay_kind: overlay::OverlayKind,
 ) {
     let Some(state) = app.try_state::<AppState>() else { return };
 
@@ -1427,10 +1430,46 @@ fn record_export_step(
     let decision = trace.map(|t| format!("{:?}", t.final_decision));
     let ms = trace.map(|t| t.elapsed_ms as u64);
 
+    // Frame pixels per logical pixel, so the exporter can draw the mark at the size it
+    // had on screen. Two factors, and both are needed: the monitor's scale (the overlay
+    // draws in logical px, this frame is physical) and any downscale applied on the way
+    // to disk. The located rect needs neither -- `to_frame_coords` already carried it.
+    let mark_scale = capture::monitor_scale_for_rect(&frame_rect)
+        * (w as f32 / frame_rect.width.max(1) as f32);
+
+    // How much of the bottom of this frame is taskbar. The overlay anchors the
+    // caption to the monitor's WORK AREA so it sits above the taskbar rather than
+    // across its icons; a frame is the whole monitor, so the exporter needs telling
+    // where that work area ended or it draws the strip over the taskbar -- which is
+    // precisely the defect the app was fixed for on 2026-09-07.
+    let caption_bottom_inset = capture::work_area_containing(
+        frame_rect.x + frame_rect.width as i32 / 2,
+        frame_rect.y + frame_rect.height as i32 / 2,
+    )
+    .map(|wa| {
+        let frame_bottom = frame_rect.y + frame_rect.height as i32;
+        let work_bottom = wa.y + wa.height as i32;
+        let px = (frame_bottom - work_bottom).max(0) as f32;
+        // frame_rect is screen pixels; the saved image may be downscaled.
+        (px * (h as f32 / frame_rect.height.max(1) as f32)).round() as u32
+    })
+    .unwrap_or(0);
+
     state
         .export
         .lock()
-        .set_step_outcome(step_index, Some(frame), pointer, decision, ms);
+        .set_step_outcome(
+            step_index,
+            Some(frame),
+            pointer,
+            decision,
+            ms,
+            session_export::DrawnAs {
+                overlay_kind: Some(overlay_kind.as_str().to_string()),
+                mark_scale,
+                caption_bottom_inset,
+            },
+        );
 }
 
 // ---------- Autopilot screen-change polling + stale-response detection ----------
@@ -5699,6 +5738,15 @@ fn export_session(
         draw_caption,
         title: title.clone(),
         slug: slug.unwrap_or_default(),
+        // The exported pointer is meant to be the same picture as the on-screen one,
+        // so it honours the user's Pointer thickness instead of assuming the default.
+        stroke_scale: session_export::stroke_scale(
+            state
+                .ai_router
+                .try_lock()
+                .map(|r| r.config.overlay_thickness)
+                .unwrap_or(4),
+        ),
     };
 
     let mut buf = state.export.lock();

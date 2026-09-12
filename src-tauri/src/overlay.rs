@@ -24,9 +24,13 @@ use crate::capture::Rect;
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverlayKind {
-    /// Arrow pointing at bbox from the nearest panel edge.
-    Arrow,
-    /// Rounded highlight box around bbox.
+    /// The pointer: ripple rings, corner brackets, crosshair, scan line.
+    ///
+    /// The only mark drawn for a located target. A second `Arrow` variant -- this
+    /// plus a beacon on a drop-line above the element -- was retired on 2026-09-11
+    /// along with the model-facing `overlay_type` that selected it: a small target
+    /// is handled by the minimum mark size in `markRect` (src/Overlay.svelte), which
+    /// needs no size judgement from the model.
     Box,
     /// Subtitle strip along the bottom of the active screen.
     Subtitle,
@@ -45,6 +49,24 @@ pub enum OverlayKind {
     /// No draw — clears the overlay.
     None,
 }
+
+impl OverlayKind {
+    /// The wire name recorded in an exported `session.json`, so a re-annotator can
+    /// redraw the mark the overlay actually drew. Matches the `snake_case` Serialize
+    /// rename above; spelled out rather than derived through serde so the exporter
+    /// and `tools/annotate-session.ps1` agree on a fixed vocabulary.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Box => "box",
+            Self::Subtitle => "subtitle",
+            Self::AppBoundary => "app_boundary",
+            Self::Hint => "hint",
+            Self::Candidates => "candidates",
+            Self::None => "none",
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OverlayUpdate {
