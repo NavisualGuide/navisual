@@ -3217,8 +3217,22 @@ See the LICENSE file in the root of this repository for complete details.
   <main>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
     <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
-      <span class="header-dot"></span>
-      <span class="header-title">Navisual</span>
+      <!-- The mark, not a dot. This was a 9px orange circle that carried no state
+           (the real status light is .status-dot, in the status bar) and said
+           nothing -- which became the problem the moment a narrow panel hid the
+           wordmark beside it and left the dot standing in for the product name.
+           The goldfish says it at any width, so the wordmark below is now cheap
+           to drop rather than load-bearing.
+           <img src>, never inline <svg>: this WebView2 build squashes an inline
+           svg flex child to ~2px, and an externally referenced file is treated as
+           an opaque image resource instead. Same path the collapsed icon and the
+           conversation label already use.
+           The alt carries the name and the visible wordmark is aria-hidden, so
+           the product is announced exactly once at every width -- `display: none`
+           removes the wordmark from the accessibility tree too, which would
+           otherwise leave a narrow panel with no accessible name at all. -->
+      <img src="/goldfish.svg" class="header-mark" alt="Navisual" draggable="false" />
+      <span class="header-title" aria-hidden="true">Navisual</span>
       <button
         class="header-shared"
         class:header-shared-pinned={pinnedHwnd !== null || fullScreenTarget}
@@ -5279,13 +5293,13 @@ See the LICENSE file in the root of this repository for complete details.
     background: var(--surface-1);
   }
 
-  .header-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--accent-500);
-    box-shadow: 0 0 10px rgba(255, 107, 53, 0.5);
+  .header-mark {
+    display: block;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
     flex-shrink: 0;
+    user-select: none;
   }
 
   .header-title {
@@ -5384,22 +5398,24 @@ See the LICENSE file in the root of this repository for complete details.
      then the informational free-tier label. Each is something the user either
      already knows or can read one click away; the chip is neither. */
 
-  /* The wordmark is the first to go. It names the window the user is already
-     looking at, while the chip beside it names the app they are being guided
-     through -- keeping "Navisual" and hiding "VS Code" is exactly backwards. */
+  /* Detail goes before identity. "↑ 0.7.22" (61px with its margin) becomes a
+     bare "↑" -- still a visible nudge, still clickable, and the version is in
+     its tooltip and in About. The "Free tier" label goes with it: it states a
+     thing Settings also states. The reddening "N left" chip is deliberately NOT
+     hidden -- that one is timely and actionable, and is the whole reason the
+     count surfaces at all. */
   @media (max-width: 460px) {
-    .header-title { display: none; }
+    .header-update-version { display: none; }
+    .header-balance-free { display: none; }
   }
 
-  @media (max-width: 420px) {
-    /* "↑ 0.7.22" (61px with its margin) becomes "↑". Still a visible nudge,
-       still clickable, and the version is in the tooltip and About. */
-    .header-update-version { display: none; }
-    /* The "Free tier" label is informational -- it tells you a thing you can
-       also see in Settings. The reddening "N left" chip is NOT hidden: that one
-       is a timely, actionable warning, and is the whole reason the count
-       surfaces at all. */
-    .header-balance-free { display: none; }
+  /* The wordmark is last, and only at widths where nothing else is left to give
+     -- on instruction, over the update chip. It costs little by the time it
+     goes: .header-mark is still there, and a goldfish is not an ambiguous dot.
+     The app chip beside it keeps its label at every width, which is the point:
+     the panel should never stop saying which app it is guiding. */
+  @media (max-width: 410px) {
+    .header-title { display: none; }
   }
   .header-shared:hover { background: var(--surface-4); color: var(--text-primary); }
   .header-shared-pinned { background: var(--accent-soft); color: var(--accent-400); }
