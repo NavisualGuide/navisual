@@ -1807,6 +1807,17 @@ See the LICENSE file in the root of this repository for complete details.
     // against the old frame: the window stayed 72x65 around a 56x56 icon, and the
     // leftover transparent L showed whatever was behind it -- reported as a stray
     // close button appearing next to the fish.
+    //
+    // Resizing off FIRST, and for two reasons at once. The obvious one: a 56px
+    // goldfish has no resize affordance and nothing sensible to resize TO, but the
+    // window still carried a sizing border, so catching its edge dragged the icon
+    // into an arbitrary rectangle (reported live). The structural one: WS_THICKFRAME
+    // is what AdjustWindowRectEx adds frame margins for, so dropping it is also what
+    // makes the window rect equal the client rect -- which is the condition the
+    // caption-row removal needs, and the exact thing whose absence broke the three
+    // attempts recorded in set_panel_border. Same ordering rule as the border below:
+    // the size has to be computed against the frame it will actually have.
+    try { await getCurrentWindow().setResizable(false); } catch (_) {}
     try { await invoke("set_panel_border", { enabled: false }); } catch (_) {}
     try { await getCurrentWindow().setSize(new LogicalSize(ICON_SIZE, ICON_SIZE)); }
     catch (e) { console.error("collapseToIcon:", e); }
@@ -1820,6 +1831,9 @@ See the LICENSE file in the root of this repository for complete details.
     iconMode = false;
     // Restore the frame BEFORE sizing, for the same reason collapse suppresses it
     // before sizing: the size is computed against whichever frame is in effect.
+    // The panel is resizable and must be again before its size is restored --
+    // it is also what the dock divider drags.
+    try { await getCurrentWindow().setResizable(true); } catch (_) {}
     try { await invoke("set_panel_border", { enabled: true }); } catch (_) {}
     try {
       // A docked panel expands back into its dock at the width the user left it,

@@ -11,6 +11,7 @@ use super::Rect;
 use anyhow::{anyhow, Result};
 use image::{ImageBuffer, Rgba};
 use std::mem;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, FALSE, HWND, LPARAM, LRESULT, POINT, RECT, TRUE, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -35,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
     GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
-    SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_SYSCOMMAND, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    HTCLIENT, SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_NCCALCSIZE, WM_NCHITTEST, WM_SYSCOMMAND, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -883,6 +884,14 @@ pub fn set_window_frame(hwnd_raw: usize, target: Rect) -> bool {
 ///
 /// Deliberately only `SC_MINIMIZE`: Show Desktop and Win+M minimize by a different
 /// path and are left alone, because "hide everything" should mean everything.
+/// While true, the panel's window has NO non-client area at all: `WM_NCCALCSIZE`
+/// hands the whole window rect back as the client rect, so there is no frame ring
+/// and no caption row for DWM to paint.
+///
+/// Set only while collapsed. The expanded panel keeps the ordinary Windows 11
+/// frame, which is what it should look like and what v0.7.15 shipped.
+static NO_NONCLIENT: AtomicBool = AtomicBool::new(false);
+
 pub fn intercept_panel_minimize() -> bool {
     unsafe extern "system" fn panel_subclass_proc(
         hwnd: HWND,
@@ -894,6 +903,46 @@ pub fn intercept_panel_minimize() -> bool {
     ) -> LRESULT {
         // The low 4 bits of wParam are reserved by Windows for internal use, hence
         // the 0xFFF0 mask that every SC_ comparison needs.
+        // Collapsed: claim the entire window rect as client area.
+        //
+        // Returning 0 for wParam=TRUE without touching rgrc[0] tells Windows the
+        // client occupies the whole proposed window rect -- so there is no frame
+        // ring, and therefore no caption row. That row is the whole reason this
+        // exists: it can be RECOLOURED but never made transparent (measured in
+        // v0.7.17 -- white paints #FFFFFF, black #000000, COLOR_NONE paints
+        // #2B2B2B), and it was set to black so it would disappear into the icon's
+        // drop shadow. Which it does, on a dark desktop. On a light one it is a
+        // hard black rule floating above the fish -- reported live, and confirmed
+        // from the screenshot: a 1px row of pure (0,0,0), 50px wide against the
+        // icon body's 44px, detached from the artwork by the shadow band.
+        //
+        // There is no colour that is invisible over an arbitrary desktop, so the
+        // row has to go rather than be re-tinted. v0.7.17 named this exact
+        // mechanism as the way out after three other attempts each traded the line
+        // for something worse (dropping WS_CAPTION leaves a legacy sizing frame;
+        // dropping WS_THICKFRAME too desynced the window rect from the client and
+        // put a transparent strip over the desktop; NCRENDERING_POLICY reproduces
+        // the first). Those failed because the window rect and the client rect
+        // disagreed -- which is precisely what this message makes impossible.
+        if msg == WM_NCCALCSIZE && wparam.0 != 0 && NO_NONCLIENT.load(Ordering::Relaxed) {
+            return LRESULT(0);
+        }
+        // Collapsed: every point is client, so no edge is a resize grip.
+        //
+        // A 56px goldfish has no resize affordance and nothing sensible to resize
+        // TO, but catching its edge still dragged it into an arbitrary rectangle
+        // (reported live). `set_resizable(false)` is called on the way in and is
+        // NOT what fixes it: measured on the live collapsed window, WS_THICKFRAME
+        // is still set afterwards -- tao keeps it on an undecorated window, where
+        // it is also what carries the drop shadow and snap behaviour. So the
+        // guarantee is made here instead of inferred from a style bit.
+        //
+        // Answering HTCLIENT everywhere is safe because nothing about this window
+        // wants a frame hit: the fish is dragged by its own pointer handlers in
+        // the webview (handleIconPointerdown -> startDragging), never by HTCAPTION.
+        if msg == WM_NCHITTEST && NO_NONCLIENT.load(Ordering::Relaxed) {
+            return LRESULT(HTCLIENT as isize);
+        }
         if msg == WM_SYSCOMMAND && (wparam.0 as u32) & 0xFFF0 == SC_MINIMIZE {
             if let Some(app) = crate::APP_HANDLE.get() {
                 use tauri::Emitter;
@@ -981,6 +1030,27 @@ pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
     //
     // Deleting the row needs the client to fill the whole window rect, which is
     // WM_NCCALCSIZE territory and governs the resize border and drag region with it.
+    // The real fix for the caption row is to have no non-client area at all while
+    // collapsed -- see NO_NONCLIENT and the WM_NCCALCSIZE arm in the subclass. The
+    // DWM colours below stay as a belt-and-braces layer: they are what the window
+    // looks like in the instants before the frame recalc lands, and they are the
+    // whole story on a build where the subclass failed to install.
+    NO_NONCLIENT.store(!enabled, Ordering::Relaxed);
+    unsafe {
+        // Nothing moves, resizes or restacks -- SWP_FRAMECHANGED is the only reason
+        // for this call: it makes Windows re-send WM_NCCALCSIZE so the change above
+        // takes effect now rather than at the next incidental resize.
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+
     let (border, caption) = if enabled {
         (DWMWA_COLOR_DEFAULT, DWMWA_COLOR_DEFAULT)
     } else {
