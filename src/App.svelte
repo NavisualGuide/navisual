@@ -3257,8 +3257,11 @@ See the LICENSE file in the root of this repository for complete details.
         <button class="header-balance header-balance-free" onclick={() => openSettings("account")} title="You're on the free tier — click for billing">Free tier</button>
       {/if}
       {#if pendingUpdate}
-        <button class="header-update" onclick={() => openAbout("about")} title="Update available">
-          ↑ {pendingUpdate.version}
+        <!-- The version sits in its own span so a narrow panel can drop it and
+             keep the arrow: the chip's job is "there is an update", and the
+             number is detail the tooltip and About both carry. -->
+        <button class="header-update" onclick={() => openAbout("about")} title="Update available — v{pendingUpdate.version}">
+          ↑<span class="header-update-version"> {pendingUpdate.version}</span>
         </button>
       {/if}
       <div class="header-actions">
@@ -5350,7 +5353,20 @@ See the LICENSE file in the root of this repository for complete details.
     padding: 3px 9px 3px 8px;
     border-radius: var(--r-pill);
     flex-shrink: 1;
-    min-width: 0;
+    /* A FLOOR, not min-width: 0 -- reported live as "the switch app is hidden
+       here" on a 360px docked panel with an update pending.
+       This chip was the only item in the titlebar that could shrink to nothing,
+       so it absorbed every pixel of shortfall while .header-actions (126px of
+       icons), the wordmark and the update chip all refused to give any. Measured
+       at 360px with an update pending: the chip rendered 19px wide against 46px
+       of its own chrome (8+9 padding, 6px dot, two 6px gaps, 11px caret), so
+       only the dot survived the overflow clip. At 400px it was still 45px --
+       label zero. The user lost both the name of the app being guided and the
+       only always-visible way to switch it.
+       78px keeps roughly five characters plus the ellipsis, which is enough to
+       name the app. Below that the media queries under this rule give the space
+       back by dropping things that are decoration. */
+    min-width: 78px;
     max-width: 160px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -5358,6 +5374,32 @@ See the LICENSE file in the root of this repository for complete details.
     cursor: pointer;
     font-family: inherit;
     transition: background 120ms ease-out, color 120ms ease-out;
+  }
+
+  /* ── Titlebar priority under pressure ──────────────────────────────────────
+     Something has to give in a 360px titlebar, and the order is the point.
+     Keep: the four action buttons (no other route to Quit or Settings), and the
+     target chip (what Navisual is looking at, and the only switch control).
+     Give up, in this order: the wordmark, then the update chip's version number,
+     then the informational free-tier label. Each is something the user either
+     already knows or can read one click away; the chip is neither. */
+
+  /* The wordmark is the first to go. It names the window the user is already
+     looking at, while the chip beside it names the app they are being guided
+     through -- keeping "Navisual" and hiding "VS Code" is exactly backwards. */
+  @media (max-width: 460px) {
+    .header-title { display: none; }
+  }
+
+  @media (max-width: 420px) {
+    /* "↑ 0.7.22" (61px with its margin) becomes "↑". Still a visible nudge,
+       still clickable, and the version is in the tooltip and About. */
+    .header-update-version { display: none; }
+    /* The "Free tier" label is informational -- it tells you a thing you can
+       also see in Settings. The reddening "N left" chip is NOT hidden: that one
+       is a timely, actionable warning, and is the whole reason the count
+       surfaces at all. */
+    .header-balance-free { display: none; }
   }
   .header-shared:hover { background: var(--surface-4); color: var(--text-primary); }
   .header-shared-pinned { background: var(--accent-soft); color: var(--accent-400); }
