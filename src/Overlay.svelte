@@ -6,7 +6,7 @@
 
   type Rect = { x: number; y: number; width: number; height: number };
   type OverlayUpdate = {
-    kind: "arrow" | "box" | "subtitle" | "app_boundary" | "hint" | "candidates" | "none";
+    kind: "box" | "subtitle" | "app_boundary" | "hint" | "candidates" | "none";
     bbox: Rect | null;
     text: string | null;
     virtual_origin: [number, number];
@@ -38,7 +38,7 @@
   // Must match lib.rs's APP_BOUNDARY_DURATION_MS (no shared constant across
   // the Rust/Svelte boundary — keep both in sync by hand if this changes).
   const APP_BOUNDARY_DURATION_MS = 3_000; // 250ms flash + 1.75s solid + 1s ease-out fade
-  // Plain object — NOT $state. drawBox/drawArrow read this in rAF callbacks where
+  // Plain object — NOT $state. drawBox/drawHint read this in rAF callbacks where
   // Svelte's reactive getters don't fire; mutating fields in-place ensures every
   // frame sees the latest values without any signal overhead.
   let theme: OverlayTheme = {
@@ -52,6 +52,50 @@
   // here are hand-tuned ratios, not free numbers — see src/lib/overlay-weight.ts for why
   // this scales rather than sets them, and why it is independent of display DPI.
   const strokeScale = () => weightOf(theme.thickness);
+
+  /** Smallest mark we will draw, on either axis, in logical px.
+   *
+   *  A 17x17 toolbar glyph or an 8 px-tall OCR word gets a mark barely bigger than
+   *  itself, which is exactly the target you most need help finding. Measured over
+   *  196 real locates: the median mark is 55 px on its short axis and a 36 px floor
+   *  lifts only the bottom 18% — a floor, not a redesign. (The alternative, a second
+   *  pointer style for small targets, was rejected: it made the mark's appearance
+   *  depend on a size judgement the model was making blind.) */
+  const MIN_MARK = 36;
+
+  /** The rect the MARK is built on: the located rect, padded, then floored.
+   *
+   *  The brackets used to sit exactly on the located rect and the ripples only 8 px
+   *  past it, which reads as tracing the control rather than pointing at it -- and a
+   *  locator that returns a tight text rect (an OCR word, a label without its button)
+   *  made it look cramped. Measured against a live pointer on OrcaSlicer's "New
+   *  Project": the on-screen mark ran ~102x39 around an ~87x22 element, which this
+   *  reproduces. The located rect itself is never modified, so the crosshair and the
+   *  reported position still name the real element.
+   *
+   *  THREE RENDERERS MUST AGREE. This, `mark_rect` in src-tauri/src/session_export.rs
+   *  (the export) and the $pad/$MIN_MARK block in tools/annotate-session.ps1 (the
+   *  re-annotator) all have to produce the same picture -- the script exists to redo
+   *  what the export already did, and the export exists to reproduce what was on
+   *  screen. Two divergences already shipped unnoticed. The Rust side pins the
+   *  geometry in `mark_geometry_is_pinned` and renders both implementations against
+   *  each other in `exporter_and_annotator_draw_the_same_pointer`; if you change the
+   *  numbers here, change them there and re-run those tests.
+   *
+   *  This REPLACES a flat `padding = 12` that used to be applied at the render
+   *  dispatch, in physical px, before the DPR divide -- which is why the exported
+   *  pointer looked tighter than the on-screen one for so long: the exporter drew
+   *  from the located rect and never knew about it. Padding lives here now, in
+   *  logical px, so all three renderers can share one rule. Geometry, not weight, so
+   *  none of it scales with Pointer thickness -- see src/lib/overlay-weight.ts. */
+  function markRect(bx: number, by: number, bw: number, bh: number) {
+    const pad = Math.min(20, Math.max(12, Math.min(bw, bh) * 0.45));
+    let pw = bw + pad * 2, ph = bh + pad * 2;
+    const cx = bx + bw / 2, cy = by + bh / 2;
+    pw = Math.max(pw, MIN_MARK);
+    ph = Math.max(ph, MIN_MARK);
+    return { px: cx - pw / 2, py: cy - ph / 2, pw, ph };
+  }
 
   function hexToRgb(hex: string): [number, number, number] {
     const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
@@ -89,6 +133,7 @@
     const pulse = (Math.sin(t / 700) + 1) / 2;
     const cx = bx + bw / 2;
     const cy = by + bh / 2;
+    const { px, py, pw, ph } = markRect(bx, by, bw, bh);
 
     // ── 1. RIPPLE RINGS from element center ──────────────────────────────
     // Ellipse, not circle: a circle sized by max(bw,bh) balloons hugely past a
@@ -96,14 +141,14 @@
     // shape now follows the element's own aspect ratio, and the outward growth
     // is capped by the SHORTER axis so it stays a modest puff on any shape
     // instead of an extreme one on long/thin targets.
-    const baseRx = bw / 2 + 8;
-    const baseRy = bh / 2 + 8;
-    const growth = Math.min(bw, bh) * 0.7;
+    const baseRx = pw / 2 + 8;
+    const baseRy = ph / 2 + 8;
+    const growth = Math.min(pw, ph) * 0.7;
     // On a wide, thin row (a sidebar/list item — bw ≫ bh) cap how far the ring grows on its
     // SHORT axis so it stays a flat puff hugging the row instead of a tall oval that swallows
     // the items above and below (live 2026-07-24: the Settings sidebar ring overshot its
     // neighbours). Square/tall targets keep the full, circular growth.
-    const ryGrowth = bw > bh * 2 ? Math.min(growth, bh * 0.4) : growth;
+    const ryGrowth = pw > ph * 2 ? Math.min(growth, ph * 0.4) : growth;
     for (let i = 0; i < 3; i++) {
       const phase = ((t / 1500 + i / 3) % 1);
       const rx = baseRx + phase * growth;
@@ -120,7 +165,7 @@
     }
 
     // ── 2. CORNER BRACKETS (no full border) ──────────────────────────────
-    const arm = Math.min(26, Math.max(14, Math.min(bw * 0.38, bh * 0.5)));
+    const arm = Math.min(26, Math.max(14, Math.min(pw * 0.38, ph * 0.5)));
     ctx.lineCap = "square";
     ctx.lineJoin = "miter";
 
@@ -147,29 +192,29 @@
       ctx.shadowBlur = 0;
     }
 
-    bracket(bx,      by,      1, 1);
-    bracket(bx + bw, by,     -1, 1);
-    bracket(bx,      by + bh, 1, -1);
-    bracket(bx + bw, by + bh,-1, -1);
+    bracket(px,      py,      1, 1);
+    bracket(px + pw, py,     -1, 1);
+    bracket(px,      py + ph, 1, -1);
+    bracket(px + pw, py + ph,-1, -1);
 
     // ── 3. SCAN LINE sweeping top→bottom ─────────────────────────────────
     const scanPhase = (t / 1500) % 1;
-    const scanY     = by + scanPhase * bh;
+    const scanY     = py + scanPhase * ph;
     const scanAlpha = Math.sin(scanPhase * Math.PI) * 0.7;
-    const grad = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+    const grad = ctx.createLinearGradient(px, 0, px + pw, 0);
     grad.addColorStop(0,    `rgba(${r},${g},${b},0)`);
     grad.addColorStop(0.15, `rgba(${r},${g},${b},${scanAlpha})`);
     grad.addColorStop(0.5,  `rgba(255, 210, 140, ${scanAlpha})`);
     grad.addColorStop(0.85, `rgba(${r},${g},${b},${scanAlpha})`);
     grad.addColorStop(1,    `rgba(${r},${g},${b},0)`);
     ctx.fillStyle = grad;
-    ctx.fillRect(bx, scanY - 1.5 * k, bw, 3 * k);
+    ctx.fillRect(px, scanY - 1.5 * k, pw, 3 * k);
     // Bright core of the scan line
     ctx.strokeStyle = `rgba(255, 230, 170, ${scanAlpha * 0.9})`;
     ctx.lineWidth = 1 * k;
     ctx.shadowColor = "rgba(255, 180, 80, 0.9)";
     ctx.shadowBlur = 8;
-    ctx.beginPath(); ctx.moveTo(bx, scanY); ctx.lineTo(bx + bw, scanY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px, scanY); ctx.lineTo(px + pw, scanY); ctx.stroke();
     ctx.shadowBlur = 0;
 
     // ── 4. CROSSHAIR dot at center (subtle) ──────────────────────────────
@@ -180,69 +225,6 @@
     ctx.shadowColor = theme.color; ctx.shadowBlur = 5;
     ctx.beginPath(); ctx.moveTo(cx - cr, cy); ctx.lineTo(cx + cr, cy); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(cx, cy - cr); ctx.lineTo(cx, cy + cr); ctx.stroke();
-    ctx.shadowBlur = 0;
-    ctx.restore();
-  }
-
-  // Arrow variant: same bracket+ripple combo, but adds a floating beacon
-  // above the element instead of the old solid triangle.
-  function drawArrow(
-    ctx: CanvasRenderingContext2D,
-    bx: number, by: number, bw: number, bh: number,
-    t: number,
-  ) {
-    drawBox(ctx, bx, by, bw, bh, t);
-
-    // Beacon + drop-line + halo rings are fixed-pixel — scale for high-DPI (see drawBox).
-    const scale = dprOf(ctx);
-    ctx.save();
-    ctx.scale(scale, scale);
-    bx /= scale; by /= scale; bw /= scale; bh /= scale;
-    const [r, g, b] = hexToRgb(theme.color);
-    const k = strokeScale();
-    const pulse = (Math.sin(t / 600) + 1) / 2;
-    const cx = bx + bw / 2;
-    const beaconY = by - 44;
-
-    // Drop line — dashed, fading toward element
-    const lineGrd = ctx.createLinearGradient(0, beaconY + 14, 0, by);
-    lineGrd.addColorStop(0, `rgba(${r},${g},${b},${0.6 + pulse * 0.25})`);
-    lineGrd.addColorStop(1, `rgba(${r},${g},${b},0.05)`);
-    ctx.strokeStyle = lineGrd;
-    ctx.lineWidth = 1.5 * k;
-    ctx.setLineDash([5, 5]);
-    ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(cx, beaconY + 14); ctx.lineTo(cx, by); ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Halo rings from beacon
-    for (let i = 0; i < 2; i++) {
-      const phase = ((t / 900 + i * 0.5) % 1);
-      const rr = 12 + phase * 30;
-      const aa = (1 - phase) * 0.5;
-      ctx.beginPath(); ctx.arc(cx, beaconY, rr, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(${r},${g},${b},${aa})`;
-      ctx.lineWidth = 1.5 * k;
-      ctx.stroke();
-    }
-
-    // Beacon core — white outer, accent inner
-    ctx.shadowColor = theme.color;
-    ctx.shadowBlur = 18 + pulse * 20;
-    ctx.fillStyle = "#fff";
-    ctx.beginPath(); ctx.arc(cx, beaconY, 7.5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = theme.color;
-    ctx.beginPath(); ctx.arc(cx, beaconY, 5, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0;
-
-    // Tiny downward chevron below beacon
-    const chevY = beaconY + 13;
-    ctx.strokeStyle = `rgba(${r},${g},${b},${0.55 + pulse * 0.3})`;
-    ctx.lineWidth = 2 * k; ctx.lineCap = "round"; ctx.lineJoin = "round";
-    ctx.shadowColor = theme.color; ctx.shadowBlur = 6;
-    ctx.beginPath();
-    ctx.moveTo(cx - 5, chevY); ctx.lineTo(cx, chevY + 5); ctx.lineTo(cx + 5, chevY);
-    ctx.stroke();
     ctx.shadowBlur = 0;
     ctx.restore();
   }
@@ -583,17 +565,18 @@
     const pulse = (Math.sin(t / 700) + 1) / 2;
     const cx = bx + bw / 2;
     const cy = by + bh / 2;
+    const { px, py, pw, ph } = markRect(bx, by, bw, bh);
 
     // ── RIPPLE RINGS — same animation as drawBox, slightly fainter ──
     // Ellipse, not circle — see drawBox's identical fix for why.
-    const baseRx = bw / 2 + 8;
-    const baseRy = bh / 2 + 8;
-    const growth = Math.min(bw, bh) * 0.7;
+    const baseRx = pw / 2 + 8;
+    const baseRy = ph / 2 + 8;
+    const growth = Math.min(pw, ph) * 0.7;
     // On a wide, thin row (a sidebar/list item — bw ≫ bh) cap how far the ring grows on its
     // SHORT axis so it stays a flat puff hugging the row instead of a tall oval that swallows
     // the items above and below (live 2026-07-24: the Settings sidebar ring overshot its
     // neighbours). Square/tall targets keep the full, circular growth.
-    const ryGrowth = bw > bh * 2 ? Math.min(growth, bh * 0.4) : growth;
+    const ryGrowth = pw > ph * 2 ? Math.min(growth, ph * 0.4) : growth;
     for (let i = 0; i < 3; i++) {
       const phase = ((t / 1500 + i / 3) % 1);
       const rx = baseRx + phase * growth;
@@ -610,7 +593,7 @@
     }
 
     // ── DASHED CORNER BRACKETS — looser, more tentative than drawBox ──
-    const arm = Math.min(26, Math.max(14, Math.min(bw * 0.38, bh * 0.5)));
+    const arm = Math.min(26, Math.max(14, Math.min(pw * 0.38, ph * 0.5)));
     ctx.save();
     ctx.lineCap = "butt";
     ctx.lineJoin = "miter";
@@ -632,10 +615,10 @@
       ctx.shadowBlur = 0;
     }
 
-    bracket(bx,      by,      1, 1);
-    bracket(bx + bw, by,     -1, 1);
-    bracket(bx,      by + bh, 1, -1);
-    bracket(bx + bw, by + bh,-1, -1);
+    bracket(px,      py,      1, 1);
+    bracket(px + pw, py,     -1, 1);
+    bracket(px,      py + ph, 1, -1);
+    bracket(px + pw, py + ph,-1, -1);
     ctx.restore();   // inner: dash settings
     ctx.restore();   // outer: high-DPI transform
   }
@@ -788,7 +771,7 @@
         return;
       }
 
-      // Subtitle is drawn alongside every overlay type (arrow, box, hint, subtitle).
+      // Subtitle is drawn alongside every overlay kind (box, hint, subtitle).
       // Rust always passes step.instruction as u.text.
       if (theme.subtitle_enabled && u.text) {
         drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.work_area, u.text);
@@ -812,14 +795,14 @@
         // next real click in the app resolves the ambiguity — no picker UI.
         drawCandidates(ctx, u.candidates, ox, oy, t);
       } else if (u.bbox) {
-        const padding = 12;
-        const bx = u.bbox.x - ox - padding;
-        const by = u.bbox.y - oy - padding;
-        const bw = u.bbox.width + padding * 2;
-        const bh = u.bbox.height + padding * 2;
+        // The located rect, unpadded — markRect() inside each draw function owns
+        // how far the mark stands off it, so the exporter can share the same rule.
+        const bx = u.bbox.x - ox;
+        const by = u.bbox.y - oy;
+        const bw = u.bbox.width;
+        const bh = u.bbox.height;
 
-        if (u.kind === "arrow") drawArrow(ctx, bx, by, bw, bh, t);
-        else if (u.kind === "hint") drawHint(ctx, bx, by, bw, bh, t);
+        if (u.kind === "hint") drawHint(ctx, bx, by, bw, bh, t);
         else if (u.kind !== "app_boundary") drawBox(ctx, bx, by, bw, bh, t);
       }
 
