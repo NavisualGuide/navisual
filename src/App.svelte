@@ -2492,7 +2492,29 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Best-effort test-user feedback → Supabase (see submit_feedback in lib.rs).
   // "worked" on Next; a reason category on Wrong. Failures are ignored.
+  // The three AUTOMATIC kinds carry no instruction text.
+  //
+  // `worked` / `worked_auto` / `task_complete` fire without the user choosing to
+  // report anything — `worked` alone was 1,317 of ~1,442 rows in the live table,
+  // 1,295 of them carrying an instruction. That text exists on a REPORT to make it
+  // legible ("the AI said X, the user said wrong spot"); on a success it is inert.
+  // Checked before cutting it: nothing reads it. No script in tools/ queries this
+  // table, and model-comparison.md — the document that actually picks models —
+  // cites it nowhere, because every model decision came from the local batteries
+  // and locate_log.jsonl instead.
+  //
+  // What the row was built for still works untouched. The commit that introduced
+  // it (b42dac3, 2026-05-25) says `worked` exists so that "pressing Next logs an
+  // implicit success row for a per-model success rate" — a DENOMINATOR, which
+  // needs `kind` + `model` + `provider` and nothing else.
+  //
+  // Reports keep it, since that is where it earns its place. And a dev running
+  // with training capture on loses nothing either: prompt_log.jsonl holds the full
+  // prompt and response locally, joined to this row by request_id.
+  const AUTOMATIC_KINDS = ["worked", "worked_auto", "task_complete"];
+
   async function logFeedback(kind: string, note: string) {
+    const automatic = AUTOMATIC_KINDS.includes(kind);
     try {
       await invoke("submit_feedback", {
         payload: {
@@ -2501,7 +2523,7 @@ See the LICENSE file in the root of this repository for complete details.
           app_version: appVersion,
           provider: settingsForm.api_provider,
           model: routedModel || activeModel,
-          instruction: currentInstruction || null,
+          instruction: automatic ? null : (currentInstruction || null),
           target_text: steps[stepIndex]?.target_text ?? null,
           located: !!locateResult,
           locate_role: locateResult?.role ?? null,
