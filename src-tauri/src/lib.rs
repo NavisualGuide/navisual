@@ -6485,11 +6485,21 @@ async fn start_google_oauth(
             // Surface the exact GoTrue error so a returning-user/conflict callback is
             // diagnosable live (and confirms the heuristic below matched its wording).
             log::info!("[oauth] link callback returned error: {error} — {description}");
-            if oauth_identity_already_linked(&format!("{error} {description}")) {
-                // Returning user: this Google account is attached to a DIFFERENT
-                // Navisual account. Sign into that one (replace) so they recover it,
-                // arming the still-listening callback server for a second round-trip.
-                log::info!("[oauth] google identity already linked elsewhere; signing in to it");
+            if oauth_link_conflict(&format!("{error} {description}")) {
+                // The conflict is someone else's -- either this Google account is
+                // attached to a DIFFERENT Navisual account, or the email behind it is.
+                // Either way the account exists, so sign into it (replace) rather than
+                // failing, arming the still-listening callback server for a second
+                // round-trip.
+                //
+                // The message below used to say "google identity already linked
+                // elsewhere", which is only ONE of the two things this branch catches
+                // and was simply false for the other: measured 2026-09-13, an account
+                // created with email+password and no Google identity at all lands here
+                // on "A user with this email address has already been registered". A
+                // log line that names the wrong cause is worse than a vague one --
+                // it is the instrument a later session reasons from.
+                log::info!("[oauth] in-place link refused ({error}: {description}); signing in to the account that owns it");
                 // One press of "Continue with Google" is about to become a SECOND
                 // trip to Google, and the user has already finished with the first
                 // one and looked back at the panel. The new window can open behind
@@ -6558,7 +6568,25 @@ async fn google_oauth_replace(
 /// True when an OAuth callback error means the provider identity is already
 /// attached to a different account (so an in-place link can't proceed and we
 /// should sign into that existing account instead).
-fn oauth_identity_already_linked(haystack: &str) -> bool {
+/// Does this GoTrue callback error mean "you cannot link, but that account exists
+/// and you can sign into it"?
+///
+/// It matches TWO different conflicts, which is why it is not named for either:
+///
+///   the Google identity is already attached to another Navisual account
+///     -- the returning-user case (verified 2026-06-20)
+///   the EMAIL is already registered to another Navisual account, with no Google
+///     identity on it at all -- someone who signed up with a password first, then
+///     pressed Continue with Google. Verified live 2026-09-13 with the verbatim
+///     string `invalid_request - A user with this email address has already been
+///     registered`, which reaches this via "already" + "regist".
+///
+/// Both end the same way, which is what makes one matcher legitimate: the replace
+/// flow signs into the account that already owns the conflict. In the second case
+/// GoTrue links Google onto that account on the way through, so the user ends up
+/// with ONE row carrying both identities and keeps their coins -- measured, not
+/// assumed (`server-plan.md` §4).
+fn oauth_link_conflict(haystack: &str) -> bool {
     let h = haystack.to_lowercase();
     h.contains("already")
         && (h.contains("link")
