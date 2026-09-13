@@ -199,10 +199,30 @@ impl ManagedClient {
         // to lack this line never sends the header at all, which the relay
         // reads as "old" unambiguously. Bump only if this contract changes.
         req = req.header("X-App-Version", env!("CARGO_PKG_VERSION"));
-        let resp = req.json(&payload).send().await.map_err(|e| {
-            log::warn!("[managed] relay request failed to send: {e}");
-            e
-        })?;
+        // A send-level failure -- the relay could not be REACHED at all: offline,
+        // DNS, TLS, Supabase itself down. It never reaches the 5xx branch below,
+        // because there is no response to read a status from, so it used to
+        // propagate the raw reqwest error straight into the conversation: a
+        // sentence naming supabase.co, a vendor the user has no relationship with
+        // and that this product never mentions anywhere else.
+        //
+        // That is the same mistake the 5xx branch already fixed once, a few lines
+        // below, for the same reason (v0.7.20: a 502 dumped its whole HTML error
+        // page into the chat). A hard outage was getting WORSE treatment than a
+        // 5xx purely because it died earlier in the function.
+        //
+        // It also lands at the worst possible moment. Managed is the DEFAULT
+        // provider, so this is a first-run experience: the user has typed one task
+        // and the only thing on screen is a DNS error. Naming the two ways out is
+        // the whole point -- both work right now, and neither is discoverable from
+        // an error string. The detail stays in the log, where it is diagnosable.
+        let resp = match req.json(&payload).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("[managed] relay request failed to send: {e}");
+                bail!("Navisual server is temporarily unavailable. Retry later or switch to your own API key or Ollama in Settings → Provider.");
+            }
+        };
 
         let status = resp.status();
 

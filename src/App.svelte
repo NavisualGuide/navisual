@@ -2969,7 +2969,13 @@ See the LICENSE file in the root of this repository for complete details.
       try {
         await invokeReady("sign_in_anon");
       } catch (e) {
-        addToHistory("system", "⚠️ Managed sign-in failed: " + String(e));
+        // Same wording as an unreachable relay (ai/managed.rs), deliberately: this
+        // fires FIRST on a fresh install, before the user has typed anything, and
+        // it is the sentence that decides whether the product looks broken or
+        // merely busy. The raw error named supabase.co and offered no way forward;
+        // the detail is in the log.
+        console.warn("managed sign-in failed:", e);
+        addToHistory("system", "⚠️ Navisual server is temporarily unavailable. Retry later or switch to your own API key or Ollama in Settings → Provider.");
       }
       // Cold-start balance fetch — invokeReady retries while Rust setup() is
       // still registering state on a fresh install.
