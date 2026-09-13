@@ -655,6 +655,70 @@ See the LICENSE file in the root of this repository for complete details.
   type VoiceInfo = { id: string; name: string; };
   let availableVoices = $state<VoiceInfo[]>([]);
 
+  // ── The right-click menu, built once and rendered twice ────────────────────
+  //
+  // The collapsed fish and the expanded panel now offer the same actions, and
+  // they are ONE list rather than two that look alike. Rule 18 in CLAUDE.md is
+  // about this menu family losing actions: three have been silently clipped off
+  // `···` over time. Two hand-maintained copies is the same failure with extra
+  // steps -- add an action to one, forget the other, and the difference is
+  // invisible until someone goes looking for it while collapsed.
+  //
+  // Context differences are the only branching, and there are exactly three:
+  // Chat and Expand make sense only while collapsed (there is nowhere to type
+  // and nothing to expand from otherwise), and Collapse only while expanded.
+  type PanelMenuItem =
+    | { sep: true }
+    | { sep?: false; label: string; hotkey?: string; disabled?: boolean; danger?: boolean; run: () => void };
+
+  function buildMenu(ctx: "icon" | "panel"): PanelMenuItem[] {
+    const icon = ctx === "icon";
+    const items: PanelMenuItem[] = [
+      { label: "→ Next", hotkey: settingsForm.hotkey_next || undefined,
+        disabled: actionDisabled, run: () => nextStep() },
+    ];
+    if (icon) items.push({ label: "💬 Chat", run: () => openIconChat() });
+    items.push({ sep: true });
+
+    // Target + layout. dockPanel() already expands first when collapsed, so
+    // "Dock left" from the fish does the obvious thing without a special case.
+    items.push({ label: "🎯 Switch app", run: () => openTargetPicker() });
+    items.push({ label: "◧ Dock left", run: () => dockPanel("left") });
+    items.push({ label: "◨ Dock right", run: () => dockPanel("right") });
+    items.push({ sep: true });
+
+    // What the guidance is doing to your screen and speakers.
+    items.push({ label: isMuted ? "🔊 Unmute" : "🔇 Mute", run: () => toggleMute() });
+    items.push({
+      label: settingsForm.subtitle_enabled ? "💬 Caption: on" : "💬 Caption: off",
+      run: () => quickToggleSubtitle(),
+    });
+    items.push({
+      label: isOverlayCleared ? "👁 Show" : "✕ Clear",
+      run: () => (isOverlayCleared ? quickShowScreen() : quickClearScreen()),
+    });
+    items.push({ sep: true });
+
+    if (icon) {
+      items.push({ label: "↗ Expand", hotkey: settingsForm.hotkey_icon || undefined,
+                   run: () => expandToPanel() });
+    } else {
+      items.push({ label: "⊟ Collapse", hotkey: settingsForm.hotkey_icon || undefined,
+                   run: () => collapseToIcon() });
+    }
+    items.push({ label: "✕ Quit", danger: true, run: () => closeWindow() });
+    return items;
+  }
+
+  // Panel menu: position is the click, clamped so it never opens off-window.
+  let panelMenu = $state<{ x: number; y: number } | null>(null);
+  const PANEL_MENU_W = 208;
+  function closePanelMenu() { panelMenu = null; }
+  async function runPanelMenuItem(run: () => void) {
+    closePanelMenu();
+    await Promise.resolve(run());
+  }
+
   function handlePanelContextMenu(e: MouseEvent) {
     // App-wide (see the <svelte:window> binding). Escape hatches, in order of
     // how often they matter:
@@ -676,6 +740,19 @@ See the LICENSE file in the root of this repository for complete details.
     const t = e.target as HTMLElement | null;
     if (t && t.closest("textarea, input, [contenteditable]")) return;
     e.preventDefault();
+    // Everywhere the browser menu was suppressed, ours takes its place. The
+    // escape hatches above are untouched and still win: a live selection or a
+    // text field gets WebView2's own contextual menu, because that is where Copy
+    // and Paste live and this menu has no business replacing them.
+    //
+    // The collapsed fish is not handled here — it has its own oncontextmenu that
+    // opens the same list in the grown-window surface (iconSurface === "menu").
+    if (iconMode) return;
+    const pad = 8;
+    panelMenu = {
+      x: Math.min(e.clientX, Math.max(pad, window.innerWidth - PANEL_MENU_W - pad)),
+      y: e.clientY,
+    };
   }
 
   async function openTargetPicker(mode: "target" | "dock" = "target") {
@@ -1638,10 +1715,19 @@ See the LICENSE file in the root of this repository for complete details.
   // Where the icon sat before it grew, in logical px, so shrinking puts it back.
   let iconRestorePos: { x: number; y: number } | null = null;
 
+  // Widest row measured at 159px natural ("↗ Expand" plus its Ctrl+Shift+~ cap),
+  // so 190 still has room after the menu grew to ten items.
   const ICON_MENU_W = 190;
-  // 56 for the fish plus four ~34px rows and the surface's own padding. Measured
-  // rather than guessed: at 172 the Quit row was cut in half.
-  const ICON_MENU_H = 212;
+  // Measured, not guessed — the same way 212 was, and for the same reason: a
+  // fixed-size window gives CSS nowhere to overflow to, so a short guess simply
+  // cuts the last row in half (at 212 with four rows it was Quit).
+  //
+  // Re-measured against the real stylesheet when the menu went from four rows to
+  // ten plus three separators: item 30px, flex gap 2px, separator 1px with 8px of
+  // margin, menu padding 4px, the menu itself offset 56px below the top for the
+  // fish, and 22px of shell chrome below it. The ten-row box is 359px, so
+  // 56 + 359 + 22 = 437. The extra 3px is slack, not arithmetic.
+  const ICON_MENU_H = 440;
   const ICON_HINT_W = 268;
   // 56 for the fish, then the title, two lines of body and the Got-it button.
   // Third surface in a row whose first guess was too short — a fixed-size window
@@ -3041,6 +3127,7 @@ See the LICENSE file in the root of this repository for complete details.
     // they came back.
     window.addEventListener("blur", () => { if (iconSurface) closeIconSurface(); });
     window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && panelMenu) { e.preventDefault(); closePanelMenu(); }
       if (e.key === "Escape" && iconSurface) { e.preventDefault(); closeIconSurface(); }
     });
 
@@ -3210,24 +3297,18 @@ See the LICENSE file in the root of this repository for complete details.
          Wrong is deliberately absent: 2 corrections in 574 AI calls and 0 local
          retries in 66 locate traces make it dead pixels. -->
     <div class="icon-menu" role="menu">
-      <button class="icon-menu-item" role="menuitem"
-        disabled={actionDisabled}
-        onclick={() => iconMenuAction(() => nextStep())}>
-        <span>→ Next</span>
-        {#if settingsForm.hotkey_next}<kbd class="hk-key">{prettyHotkey(settingsForm.hotkey_next)}</kbd>{/if}
-      </button>
-      <button class="icon-menu-item" role="menuitem" onclick={openIconChat}>
-        <span>💬 Chat</span>
-      </button>
-      <button class="icon-menu-item" role="menuitem"
-        onclick={() => iconMenuAction(expandToPanel)}>
-        <span>↗ Expand</span>
-        {#if settingsForm.hotkey_icon}<kbd class="hk-key">{prettyHotkey(settingsForm.hotkey_icon)}</kbd>{/if}
-      </button>
-      <button class="icon-menu-item icon-menu-quit" role="menuitem"
-        onclick={() => iconMenuAction(closeWindow)}>
-        <span>✕ Quit</span>
-      </button>
+      {#each buildMenu("icon") as item}
+        {#if item.sep}
+          <div class="icon-menu-sep" role="separator"></div>
+        {:else}
+          <button class="icon-menu-item" class:icon-menu-quit={item.danger} role="menuitem"
+            disabled={item.disabled}
+            onclick={() => iconMenuAction(item.run)}>
+            <span>{item.label}</span>
+            {#if item.hotkey}<kbd class="hk-key">{prettyHotkey(item.hotkey)}</kbd>{/if}
+          </button>
+        {/if}
+      {/each}
     </div>
   {:else if iconSurface === "hint"}
     <!-- Shown once, unprompted, the first time a step arrives while collapsed. -->
@@ -3261,6 +3342,32 @@ See the LICENSE file in the root of this repository for complete details.
   {/if}
   </div>
 {:else}
+  {#if panelMenu}
+    <!-- Backdrop first so ANY click elsewhere closes it, including on the panel's
+         own controls — a menu that survives the click that dismissed it is the
+         papercut this pattern always ships with. Right-click on the backdrop
+         re-opens at the new point rather than leaving a stuck menu. -->
+    <div class="panel-menu-backdrop"
+      onclick={closePanelMenu}
+      oncontextmenu={(e) => { e.preventDefault(); panelMenu = { x: Math.min(e.clientX, Math.max(8, window.innerWidth - PANEL_MENU_W - 8)), y: e.clientY }; }}
+      role="presentation"></div>
+    <div class="panel-menu" role="menu"
+      style="left: {panelMenu.x}px; top: {panelMenu.y}px; width: {PANEL_MENU_W}px;">
+      {#each buildMenu("panel") as item}
+        {#if item.sep}
+          <div class="panel-menu-sep" role="separator"></div>
+        {:else}
+          <button class="panel-menu-item" class:panel-menu-danger={item.danger} role="menuitem"
+            disabled={item.disabled}
+            onclick={() => runPanelMenuItem(item.run)}>
+            <span>{item.label}</span>
+            {#if item.hotkey}<kbd class="hk-key">{prettyHotkey(item.hotkey)}</kbd>{/if}
+          </button>
+        {/if}
+      {/each}
+    </div>
+  {/if}
+
   <main>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
     <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
@@ -5117,6 +5224,58 @@ See the LICENSE file in the root of this repository for complete details.
     cursor: pointer;
     white-space: nowrap;
   }
+  .icon-menu-sep,
+  .panel-menu-sep {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border);
+  }
+
+  /* Above the modal backdrop's z-index 100 so a right-click still reaches it,
+     and above the titlebar's 200 for the same reason. */
+  .panel-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+  }
+  .panel-menu {
+    position: fixed;
+    z-index: 301;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    /* A 9-item menu opened near the bottom edge would otherwise run off; the
+       panel is only 380px tall at its minimum. */
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+  }
+  .panel-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 7px 9px;
+    font-size: 12.5px;
+    font-family: inherit;
+    text-align: left;
+    color: var(--text-primary);
+    background: none;
+    border: none;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+  }
+  .panel-menu-item:hover:not(:disabled) { background: var(--surface-3); }
+  .panel-menu-item:disabled { color: var(--disabled-text); cursor: not-allowed; }
+  .panel-menu-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--danger);
+  }
+
   .icon-menu-item:hover:not(:disabled) { background: var(--surface-3); }
   .icon-menu-item:disabled { opacity: 0.4; cursor: default; }
   .icon-menu-quit:hover { background: rgba(239, 68, 68, 0.18); color: var(--danger); }
