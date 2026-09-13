@@ -238,6 +238,9 @@ pub struct TargetWindowInfo {
     pub title: String,
     pub exe_stem: String,
     pub display_name: String,
+    /// Picking this one will restore it. The row says so rather than surprising
+    /// the user with their own window reappearing.
+    pub minimized: bool,
 }
 
 /// Map well-known exe stems to friendly display names.
@@ -453,7 +456,7 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
 
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
         let state = &mut *(lparam.0 as *mut State);
-        if !is_target_candidate(hwnd, state.our_pid) {
+        if !is_listable_window(hwnd, state.our_pid) {
             return TRUE;
         }
         let mut buf = [0u16; 256];
@@ -469,9 +472,22 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
             .unwrap_or("Unknown")
             .to_string();
 
+        let minimized = unsafe { IsIconic(hwnd).as_bool() };
+
         // One entry per (app, distinguishable title) — skip only true duplicates.
+        // EnumWindows walks z-order, so first-seen is normally the right one to
+        // keep. The exception is a minimized twin: z-order does not reliably put a
+        // shown window ahead of a minimized one with the same title, and keeping
+        // the minimized hwnd would mean picking "Word" restores a window the user
+        // can already see while leaving the one they meant untouched. A shown
+        // window therefore replaces a minimized entry with the same key; nothing
+        // else ever replaces anything.
         let key = (exe_stem.to_lowercase(), title.to_lowercase());
-        if state.seen_keys.contains(&key) {
+        if let Some(i) = state.seen_keys.iter().position(|k| *k == key) {
+            if state.results[i].minimized && !minimized {
+                state.results[i].hwnd = hwnd.0 as usize;
+                state.results[i].minimized = false;
+            }
             return TRUE;
         }
         state.seen_keys.push(key);
@@ -496,6 +512,7 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
             title,
             exe_stem,
             display_name,
+            minimized,
         });
         TRUE
     }
@@ -509,7 +526,49 @@ pub fn list_target_windows() -> Vec<TargetWindowInfo> {
     unsafe {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
+    // Windows the user can actually SEE come first.
+    //
+    // Measured on a real desktop the moment minimized windows were allowed in: 18 of
+    // 20 candidates were minimized, and z-order alone interleaved them -- the two
+    // visible apps landed 1st and 10th in a list of 20. The point of this picker is
+    // "which app do you want help with", and the answer is usually one that is in
+    // front of you; burying it under everything merely open is a worse list than the
+    // one that omitted them.
+    //
+    // A STABLE sort by the flag alone, so within each group the existing order
+    // survives untouched -- EnumWindows walks z-order, which is what makes the most
+    // recently active window the first shown entry.
+    state.results.sort_by_key(|w| w.minimized);
     state.results
+}
+
+/// Restore `hwnd` if it is minimized, and report whether it is genuinely back.
+///
+/// Returns true when the window is usable (already shown, or successfully
+/// restored). `ShowWindow` can be refused -- a window whose thread is hung, or one
+/// an app minimizes by its own policy -- and the caller must not carry on to
+/// capture a window that never came back: that turns a visible "the app is
+/// minimized" into a blank screenshot, which is the harder failure to read.
+///
+/// Only ever called from an explicit user pick. Restoring a window nobody asked
+/// about is the panel-nudging instinct this project discarded once already; doing
+/// it because the user just chose that app is carrying out the instruction.
+pub fn restore_window(hwnd_raw: usize) -> bool {
+    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return false;
+        }
+        if !IsIconic(hwnd).as_bool() {
+            return true;
+        }
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let back = !IsIconic(hwnd).as_bool();
+        if !back {
+            log::warn!("[target] SW_RESTORE did not take on hwnd {hwnd_raw:#x}");
+        }
+        back
+    }
 }
 
 /// Return the screen rect of `hwnd` without visibility checks — used to get
@@ -1849,8 +1908,32 @@ fn is_webview2_renderer(pid: u32) -> bool {
 /// - Gaming overlays (NVIDIA GeForce, Steam, Xbox Game Bar, Discord, AMD)
 /// - Our own background/renderer processes (Tauri/WebView2 overlay canvas)
 fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
+    candidate_window(hwnd, our_pid, false)
+}
+
+/// The PICKER's test: everything `is_target_candidate` requires, except that a
+/// minimized window still qualifies.
+///
+/// Deliberately a separate entry point rather than a loosened `is_target_candidate`.
+/// That function has five other callers and every one of them is choosing a window
+/// to CAPTURE -- auto-detect, the foreground walk, the title search. A minimized
+/// window has no pixels, so letting one through there would trade "the app is
+/// missing from a list" for "the screenshot is blank", which is much harder to
+/// diagnose. Strict stays strict by construction; only the list is loose, and
+/// `pin_target_window` restores what the user picks before anything captures it.
+fn is_listable_window(hwnd: HWND, our_pid: u32) -> bool {
+    candidate_window(hwnd, our_pid, true)
+}
+
+fn candidate_window(hwnd: HWND, our_pid: u32, allow_minimized: bool) -> bool {
     unsafe {
-        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return false;
+        }
+        // Minimizing does not clear WS_VISIBLE, so this is the only thing that
+        // distinguishes a minimized window from a shown one here.
+        let minimized = IsIconic(hwnd).as_bool();
+        if minimized && !allow_minimized {
             return false;
         }
         let mut pid: u32 = 0;
@@ -1891,12 +1974,19 @@ fn is_target_candidate(hwnd: HWND, our_pid: u32) -> bool {
             return false;
         }
 
-        let mut wr = RECT::default();
-        if GetWindowRect(hwnd, &mut wr).is_err() {
-            return false;
-        }
-        if (wr.right - wr.left) <= 100 || (wr.bottom - wr.top) <= 100 {
-            return false;
+        // Size gate -- real windows are bigger than 100px on both axes; ghosts and
+        // overlay slivers are not. SKIPPED for a minimized window, because Windows
+        // parks one at -32000,-32000 at 160x28 (measured on this project's own
+        // collapsed icon), so the height test would reject every minimized window
+        // and quietly undo the whole point of `is_listable_window`.
+        if !minimized {
+            let mut wr = RECT::default();
+            if GetWindowRect(hwnd, &mut wr).is_err() {
+                return false;
+            }
+            if (wr.right - wr.left) <= 100 || (wr.bottom - wr.top) <= 100 {
+                return false;
+            }
         }
         let mut buf = [0u16; 128];
         let n = GetClassNameW(hwnd, &mut buf);

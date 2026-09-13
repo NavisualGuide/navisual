@@ -509,6 +509,8 @@ pub use win::find_window_by_title;
 pub use win::exe_stem_for_hwnd;
 #[cfg(windows)]
 pub use win::pid_for_hwnd;
+#[cfg(windows)]
+pub use win::restore_window;
 
 /// Item 1: enumerate all candidate windows for the target-picker dropdown.
 #[cfg(windows)]
@@ -691,6 +693,90 @@ mod export_cost_tests {
     /// ships. Measured both ways on one 1920x1080 monitor: export frame 602 ms debug
     /// vs 124 ms release, AI JPEG 2140 ms vs 142 ms. A debug figure was quoted as a
     /// per-request user cost once already; don't repeat it.
+    /// Live probe for `restore_window`: does picking a minimized app actually
+    /// bring it back? Names the window by title substring, so it can be pointed at
+    /// something harmless.
+    ///
+    /// `NAVISUAL_TEST_TITLE=Calculator cargo test --lib -- --ignored restore_window_live --nocapture`
+    ///
+    /// Puts the window back the way it found it, so running this does not leave the
+    /// desktop rearranged.
+    #[test]
+    #[ignore]
+    fn restore_window_live() {
+        let needle = std::env::var("NAVISUAL_TEST_TITLE").unwrap_or_default();
+        if needle.is_empty() {
+            println!("set NAVISUAL_TEST_TITLE to a minimized window's title substring");
+            return;
+        }
+        let needle_low = needle.to_lowercase();
+        let Some(w) = super::list_target_windows()
+            .into_iter()
+            .find(|w| w.title.to_lowercase().contains(&needle_low))
+        else {
+            println!("no window matching {needle:?}");
+            return;
+        };
+        println!("found {:?} minimized={}", w.title, w.minimized);
+        assert!(w.minimized, "minimize it first — this probe tests the restore path");
+
+        let ok = super::restore_window(w.hwnd);
+        let still_iconic = super::list_target_windows()
+            .into_iter()
+            .find(|x| x.hwnd == w.hwnd)
+            .map(|x| x.minimized);
+        println!("restore_window -> {ok}; still minimized: {still_iconic:?}");
+        assert!(ok, "restore_window reported failure");
+        assert_eq!(still_iconic, Some(false), "window did not actually come back");
+
+        // Leave the desktop as it was found.
+        unsafe {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
+            let _ = ShowWindow(HWND(w.hwnd as *mut std::ffi::c_void), SW_MINIMIZE);
+        }
+        println!("re-minimized; desktop restored");
+    }
+
+    /// Live probe: what the target picker would show right now, and whether a
+    /// minimized window survives the filter with its flag set.
+    ///
+    /// `cargo test --lib -- --ignored target_picker_live --nocapture`
+    ///
+    /// Minimize a real app first. It should appear with `MIN`, and any app that is
+    /// on screen should appear without it. Two things this is here to catch, both
+    /// of which would silently undo the feature: a minimized window failing the
+    /// 100px size gate (Windows parks one at 160x28), and a minimized twin winning
+    /// the (exe, title) dedupe over a window the user can actually see.
+    #[test]
+    #[ignore]
+    fn target_picker_live() {
+        let list = super::list_target_windows();
+        println!("{} window(s) the picker would offer:", list.len());
+        let mut minimized = 0;
+        for w in &list {
+            if w.minimized {
+                minimized += 1;
+            }
+            println!(
+                "  {:<3} {:<22} {}",
+                if w.minimized { "MIN" } else { "" },
+                w.display_name,
+                if w.title.len() > 52 { &w.title[..52] } else { &w.title }
+            );
+        }
+        println!("{minimized} of {} are minimized", list.len());
+        // A duplicate (exe, title) pair means the dedupe let a twin through.
+        let mut keys: Vec<(String, String)> = list
+            .iter()
+            .map(|w| (w.exe_stem.to_lowercase(), w.title.to_lowercase()))
+            .collect();
+        let before = keys.len();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(before, keys.len(), "duplicate (exe, title) in the picker list");
+    }
+
     #[test]
     #[ignore]
     fn export_frame_cost() {

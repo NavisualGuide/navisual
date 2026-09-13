@@ -525,7 +525,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Target-window picker (item 1)
-  type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; };
+  type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; minimized: boolean; };
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   // "target" = pick what Navisual assists with; "dock" = pick what fills the
@@ -734,8 +734,13 @@ See the LICENSE file in the root of this repository for complete details.
       await invoke("unpin_target_window");
       pinnedHwnd = null;
     } else {
-      await invoke("pin_target_window", { hwnd });
+      // false = it was minimized and did not come back. Say so instead of letting
+      // the next capture return a blank window, which reads as a Navisual fault.
+      const usable = await invoke<boolean>("pin_target_window", { hwnd });
       pinnedHwnd = hwnd;
+      if (usable === false) {
+        addToHistory("system", "That window is minimized and wouldn't restore — bring it up yourself, then try again.");
+      }
       // While docked, "the app I'm being guided through" and "the app filling the rest
       // of the screen" are the same choice — so the always-visible header chip does
       // both, rather than making the dock version live only in the ··· menu, which is
@@ -3937,6 +3942,10 @@ See the LICENSE file in the root of this repository for complete details.
           {#if w.display_name && w.display_name !== primary}
             <span class="target-pick-sub">{w.display_name}</span>
           {/if}
+          <!-- Say it, rather than have the user's own window reappear unannounced
+               when they pick it. Picking a minimized app restores it — see
+               pin_target_window. -->
+          {#if w.minimized}<span class="target-pick-min">Minimized</span>{/if}
         </button>
       {/each}
       {#if targetPickerMode === "dock"}
@@ -5570,6 +5579,17 @@ See the LICENSE file in the root of this repository for complete details.
   .target-pick-selected { color: var(--accent, #ff6b35); }
   .target-pick-check { font-size: 11px; grid-row: 1 / 3; }
   .target-pick-name { font-weight: 500; }
+  .target-pick-min {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    background: var(--surface-3);
+    border-radius: var(--r-pill);
+    padding: 1px 7px;
+    margin-left: 6px;
+    flex-shrink: 0;
+  }
+
   .target-pick-sub {
     grid-column: 2;
     font-size: 10px;

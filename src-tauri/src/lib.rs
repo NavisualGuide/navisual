@@ -5322,8 +5322,20 @@ fn list_target_windows() -> Vec<capture::TargetWindowInfo> {
 
 /// Item 1 — pin a specific window as the guidance target. Survives new tasks;
 /// only cleared by `unpin_target_window` or when the window is no longer valid.
+///
+/// Returns whether the window is usable. The picker can offer a MINIMIZED window
+/// (see `is_listable_window`) and picking one restores it — the user just said
+/// this is the app they want help with, and an app they cannot find in the list
+/// is a worse answer than one that comes back when chosen. False means the
+/// restore did not take, and the caller should say so rather than let the next
+/// capture come back blank.
 #[tauri::command]
-fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
+fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) -> bool {
+    // Before anything reads pixels from it.
+    #[cfg(windows)]
+    let usable = capture::restore_window(hwnd);
+    #[cfg(not(windows))]
+    let usable = true;
     {
         let mut g = state.guidance.lock();
         g.pinned_hwnd = Some(hwnd);
@@ -5344,6 +5356,7 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) {
     announce_shared_app(&app, Some(hwnd), true);
     #[cfg(not(windows))]
     let _ = app;
+    usable
 }
 
 /// Select a full-screen capture target — the user-initiated replacement for the old
