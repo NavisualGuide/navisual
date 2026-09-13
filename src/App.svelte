@@ -3939,13 +3939,24 @@ See the LICENSE file in the root of this repository for complete details.
           <!-- Primary = the window title (what the user actually sees on screen);
                subtitle = the friendly app name for identity, when it adds info. -->
           <span class="target-pick-name">{primary.length > 46 ? primary.slice(0, 44) + "…" : primary}</span>
-          {#if w.display_name && w.display_name !== primary}
-            <span class="target-pick-sub">{w.display_name}</span>
+          <!-- The second row of the item's grid, as ONE cell: the short app name and
+               the Minimized badge sit side by side in it. The badge started as a
+               third child of the grid with no cell of its own, so it auto-placed
+               into an implicit third row and stretched the full width -- which with
+               a pill radius on a wide box drew a bar across the item. Sharing the
+               sub-line is also a row shorter per entry, and this list can run to
+               twenty. -->
+          {#if (w.display_name && w.display_name !== primary) || w.minimized}
+            <span class="target-pick-meta">
+              {#if w.display_name && w.display_name !== primary}
+                <span class="target-pick-sub">{w.display_name}</span>
+              {/if}
+              <!-- Say it, rather than have the user's own window reappear
+                   unannounced when they pick it — picking a minimized app restores
+                   it, see pin_target_window. -->
+              {#if w.minimized}<span class="target-pick-min">Minimized</span>{/if}
+            </span>
           {/if}
-          <!-- Say it, rather than have the user's own window reappear unannounced
-               when they pick it. Picking a minimized app restores it — see
-               pin_target_window. -->
-          {#if w.minimized}<span class="target-pick-min">Minimized</span>{/if}
         </button>
       {/each}
       {#if targetPickerMode === "dock"}
@@ -5580,18 +5591,32 @@ See the LICENSE file in the root of this repository for complete details.
   .target-pick-check { font-size: 11px; grid-row: 1 / 3; }
   .target-pick-name { font-weight: 500; }
   .target-pick-min {
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 500;
+    line-height: 1.5;
     color: var(--text-tertiary);
     background: var(--surface-3);
     border-radius: var(--r-pill);
-    padding: 1px 7px;
-    margin-left: 6px;
+    padding: 0 6px;
+    /* Meaningful now: the parent is a flex row, so the badge keeps its width and
+       the app name beside it is what gives way. It was a no-op while this sat
+       directly in the grid. */
     flex-shrink: 0;
   }
 
-  .target-pick-sub {
+  /* Row 2 of .target-pick-item, holding the sub-line and the badge. */
+  .target-pick-meta {
     grid-column: 2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .target-pick-sub {
+    /* No grid-column any more — it is a flex child of .target-pick-meta now, and
+       min-width: 0 is what lets a long app name ellipsis instead of shoving the
+       badge out of the row. */
+    min-width: 0;
     font-size: 10px;
     color: var(--text-tertiary);
     overflow: hidden;
