@@ -694,7 +694,13 @@ See the LICENSE file in the root of this repository for complete details.
       run: () => quickToggleSubtitle(),
     });
     items.push({
-      label: isOverlayCleared ? "👁 Show" : "✕ Clear",
+      // Named for what it actually clears. "Clear" alone sat next to the step
+      // counter in the header, where the pointer it hides is the thing you are
+      // looking at; in a ten-item menu it could as easily mean clear the session
+      // or the conversation (reported live). "Overlay" is deliberately avoided --
+      // v0.4 E.11 retired it from user-facing strings in favour of naming the
+      // things themselves.
+      label: isOverlayCleared ? "👁 Show pointer & caption" : "✕ Clear pointer & caption",
       run: () => (isOverlayCleared ? quickShowScreen() : quickClearScreen()),
     });
     items.push({ sep: true });
@@ -756,6 +762,15 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   async function openTargetPicker(mode: "target" | "dock" = "target") {
+    // Expand first if collapsed. The picker's markup lives inside the panel
+    // branch of the template, so while iconMode is true it is not in the DOM at
+    // all -- opening it from the fish's menu set the flag and drew nothing
+    // (reported live). Nor would a modal have been usable in a 56px window.
+    //
+    // Same shape as dockPanel(), which has opened with this line since the dock
+    // shipped: an action the user picked while collapsed, that only the panel can
+    // show, expands to show it.
+    if (iconMode) await expandToPanel();
     targetPickerMode = mode;
     dismissTargetHint(); // they found the picker — the coach mark is no longer needed
     [targetWindows, monitors] = await Promise.all([
