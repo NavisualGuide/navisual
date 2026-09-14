@@ -819,7 +819,9 @@ mod export_cost_tests {
         if occluders.is_empty() {
             println!("  (nothing)");
         }
-        for (t, p, r, ex) in &occluders {
+        for o in &occluders {
+            let (t, p, r, ex, alpha) =
+                (&o.title, o.pid, o.rect, o.ex_style, o.uniform_alpha);
             // 0x20 = WS_EX_TRANSPARENT (click-through), 0x80000 = WS_EX_LAYERED,
             // 0x8 = WS_EX_TOPMOST. A click-through layered window is invisible to
             // the user by construction -- it cannot be "covering" anything.
@@ -833,8 +835,17 @@ mod export_cost_tests {
             if ex & 0x8 != 0 {
                 flags.push("TOPMOST");
             }
+            let transparency = match alpha {
+                Some(a) => format!("uniform alpha {a}/255 (LWA flags {})", o.layer_flags),
+                None if ex & 0x80000 != 0 && o.layer_flags != 0 => {
+                    format!("COLOUR-KEY only, visible (LWA flags {})", o.layer_flags)
+                }
+                None if ex & 0x80000 != 0 => "PER-PIXEL alpha (no single value)".to_string(),
+                None => "opaque".to_string(),
+            };
             println!(
-                "  '{}' pid={} {}x{} @ {},{} ex=0x{:X} {}",
+                "  {}'{}' pid={} {}x{} @ {},{} ex=0x{:X} {} | {}",
+                if o.skipped_by_filter { "[filtered] " } else { "[COVERS]   " },
                 if t.is_empty() { "<untitled>" } else { t.as_str() },
                 p,
                 r.width,
@@ -842,7 +853,8 @@ mod export_cost_tests {
                 r.x,
                 r.y,
                 ex,
-                flags.join(" ")
+                flags.join(" "),
+                transparency
             );
         }
 

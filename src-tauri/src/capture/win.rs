@@ -36,7 +36,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
     GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
-    HTCLIENT, SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_NCCALCSIZE, WM_NCHITTEST, WM_SYSCOMMAND, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    HTCLIENT, SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_NCCALCSIZE, WM_NCHITTEST, WM_SYSCOMMAND, GetLayeredWindowAttributes, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -1777,13 +1778,50 @@ fn rect_subtract_many(a: Rect, covered: &[Rect]) -> Vec<Rect> {
 /// pixels, a data leak. Callers that capture for the AI should refuse before
 /// reaching this state — see `window_fully_occluded` + the pinned-target guard in
 /// `guide()`/`send_correction()`.)
+/// A window at or below this layer alpha is treated as contributing nothing to the
+/// screen, so it never counts as covering the target.
+///
+/// **Not zero, deliberately.** A hard cliff at 0 meant a window at alpha 1 -- 0.4% of
+/// each pixel, invisible to anybody -- greyed the entire capture, which is the same
+/// failure this filter exists to prevent, arriving by a different door. Low-alpha
+/// full-screen windows are a real pattern (dimmers, tinting and presence tools).
+///
+/// 16/255 is 6%. Measured by compositing a crimson panel carrying white text over a
+/// real screenshot at 0/4/8/16/32/64/128/255: nothing of the overlay is readable until
+/// about 32, and the content underneath stays fully usable well past that. So at 16
+/// both directions still agree -- nothing leaks, and nothing worth keeping is thrown
+/// away. One composite over one background, so this is an informed bound rather than a
+/// proven one; high-contrast content would surface slightly earlier.
+const INVISIBLE_ALPHA_MAX: u8 = 16;
+
 pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
     keep_rects_inner(target, bbox, std::process::id(), &[]).0
 }
 
 /// What the z-order walk concluded: the keep-set, plus each window it counted as
 /// covering the target as (title, pid, full rect, extended style).
-type KeepAndOccluders = (Vec<Rect>, Vec<(String, u32, Rect, u32)>);
+/// One window the z-order walk considered, for diagnostics only.
+#[derive(Debug, Clone)]
+pub struct OccluderInfo {
+    pub title: String,
+    pub pid: u32,
+    pub rect: Rect,
+    pub ex_style: u32,
+    /// The single layer alpha when the window has one. `None` on a LAYERED window
+    /// means PER-PIXEL alpha (`UpdateLayeredWindow`), i.e. it may be transparent in
+    /// some areas and opaque in others -- which no rectangle test can represent.
+    #[allow(dead_code)] // read by the `#[ignore]` keep_rects_live probe
+    pub uniform_alpha: Option<u8>,
+    /// Raw LWA_* flags, so the diagnostic can show whether the alpha byte was
+    /// meaningful (LWA_ALPHA = 2) or whether the window only set a colour key
+    /// (LWA_COLORKEY = 1), in which case it is visible and the alpha means nothing.
+    #[allow(dead_code)] // read by the `#[ignore]` keep_rects_live probe
+    pub layer_flags: u32,
+    /// True when the overlay filter excluded it, so it did NOT cover anything.
+    pub skipped_by_filter: bool,
+}
+
+type KeepAndOccluders = (Vec<Rect>, Vec<OccluderInfo>);
 
 /// Diagnostic twin: the same walk, returning what it counted as covering the
 /// target alongside the keep-set. `our_pid` is the process whose windows are
@@ -1835,7 +1873,7 @@ fn keep_rects_inner(
         /// Topmost few OTHER-app windows overlapping `bbox`, in z-order, recorded
         /// only so an empty keep-set can name what buried the target. Diagnostic:
         /// nothing here feeds the mask.
-        occluders: Vec<(String, u32, Rect, u32)>,
+        occluders: Vec<OccluderInfo>,
     }
 
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
@@ -1882,10 +1920,100 @@ fn keep_rects_inner(
         // LAYERED). WS_EX_TRANSPARENT alone is decisive on its own: clicks pass
         // straight through, so nothing of it is on screen to leak.
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+
+        // The uniform layer alpha, when the window has one. `GetLayeredWindowAttributes`
+        // succeeds only for `SetLayeredWindowAttributes` windows; it FAILS for
+        // `UpdateLayeredWindow` ones, which carry PER-PIXEL alpha and may be
+        // transparent in some areas and opaque in others. That failure is itself
+        // information: such a window cannot be judged by a rectangle, so it is
+        // treated as covering (grey), never as absent (leak).
+        let mut key = windows::Win32::Foundation::COLORREF(0);
+        let mut alpha: u8 = 0;
+        let mut flags: LAYERED_WINDOW_ATTRIBUTES_FLAGS = Default::default();
+        // The flags say WHICH of the two returned values the window actually set.
+        // LWA_ALPHA means the alpha byte is real. LWA_COLORKEY means the window instead
+        // nominated one COLOUR to render transparent -- every other pixel is fully
+        // visible, and the alpha byte means nothing. Reading alpha without checking the
+        // flag would see a zero that was never set and skip a plainly visible window,
+        // which is the leak this whole filter exists to avoid.
+        let uniform_alpha = GetLayeredWindowAttributes(
+            hwnd,
+            Some(&mut key),
+            Some(&mut alpha),
+            Some(&mut flags),
+        )
+        .is_ok()
+        .then_some(())
+        .filter(|_| (flags.0 & LWA_ALPHA.0) != 0)
+        .map(|_| alpha);
+        let layer_flags = flags.0;
+
+        // ONE fact and one accepted risk -- they are not the same strength, and
+        // conflating them is what made the first version of this filter wrong.
+        //
+        // A uniform alpha at or below INVISIBLE_ALPHA_MAX is as close to a fact as this
+        // gets: with LWA_ALPHA set the value is the whole window's opacity, and at 6% or
+        // less nothing it draws is legible in the blend. NVIDIA's second overlay sits at
+        // the floor of that range, measured: `uniform alpha 0/255, LWA flags 2`.
+        //
+        // `WS_EX_TRANSPARENT` is NOT a visibility statement. It means clicks pass
+        // through -- nothing more. A click-through window can draw whatever it likes,
+        // and OUR OWN OVERLAY is the proof: click-through, per-pixel alpha, spanning
+        // the whole desktop, and its entire job is to draw a visible pointer and
+        // caption. Steam, Discord and Xbox Game Bar are the same shape, and so is
+        // NVIDIA's `DT` window, which reports PER-PIXEL alpha and today happens to
+        // draw nothing.
+        //
+        // Skipping them anyway is a deliberate trade, not a no-leak guarantee. The
+        // alternative is counting a full-screen click-through overlay as covering
+        // everything, which is exactly the all-grey capture this filter exists to
+        // stop. What such an overlay contributes is a HUD drawn on top of the user's
+        // own screen, so the AI seeing it matches what the user sees -- materially
+        // different from the case the fail-safe is really for, where another app's
+        // window fully covers the target and the AI reads that app while believing it
+        // is looking at the target.
+        //
+        // If a HUD's content ever needs excluding, metadata cannot decide it: neither
+        // style bits nor WindowFromPoint (which ignores WS_EX_TRANSPARENT entirely)
+        // can see what a per-pixel window actually painted.
+        //
+        // The earlier `WS_EX_TOOLWINDOW && WS_EX_LAYERED` shorthand is GONE because it
+        // was demonstrably wrong: a tool window at 50% opacity carries both bits, is
+        // plainly visible on screen, and was being skipped -- so its content would
+        // have blended into the capture and gone to the AI. Measured with a crimson
+        // 700x700 test window at `uniform alpha 127/255`, which the shorthand filtered
+        // and this rule correctly counts.
+        //
+        // The trade is deliberate: a per-pixel-alpha HUD that is not click-through now
+        // counts as covering, so a capture behind one greys instead of leaking. That is
+        // the safe direction, and the `[capture] keep-set EMPTY` line names the window
+        // responsible, so it is one log line to diagnose rather than three months.
         let click_through = (ex_style & WS_EX_TRANSPARENT.0) != 0;
-        let layered_toolwindow = (ex_style & WS_EX_TOOLWINDOW.0) != 0
-            && (ex_style & WS_EX_LAYERED.0) != 0;
-        if click_through || layered_toolwindow {
+        let invisible = uniform_alpha.is_some_and(|a| a <= INVISIBLE_ALPHA_MAX);
+        let filtered = click_through || invisible;
+
+        // Recorded before the decision, and only when it overlaps the area in
+        // question, so the diagnostic can show what was EXCLUDED as well as what
+        // covered the target. A filter that hides its own reasoning is the same
+        // shape as the bug this whole path exists to explain.
+        if pid != state.target_pid && state.occluders.len() < 8 {
+            if let Some(r_probe) = frame_rect_of(hwnd) {
+                let hit = rect_intersect(&r_probe, &state.bbox);
+                if hit.width > 0 && hit.height > 0 {
+                    state.occluders.push(OccluderInfo {
+                        title: get_window_title(hwnd.0 as usize),
+                        pid,
+                        rect: r_probe,
+                        ex_style,
+                        uniform_alpha,
+                        layer_flags,
+                        skipped_by_filter: filtered,
+                    });
+                }
+            }
+        }
+
+        if filtered {
             return TRUE;
         }
 
@@ -1901,13 +2029,6 @@ fn keep_rects_inner(
         if pid == state.target_pid {
             let visible = rect_subtract_many(r, &state.covered);
             state.keep.extend(visible);
-        } else if state.occluders.len() < 6 {
-            let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-            // r_full, not r: the clipped rect always equals the target's, which
-            // tells you nothing about whether this thing spans the whole screen.
-            state
-                .occluders
-                .push((get_window_title(hwnd.0 as usize), pid, r_full, ex));
         }
         state.covered.push(r);
         TRUE
@@ -1938,21 +2059,21 @@ fn keep_rects_inner(
             state
                 .occluders
                 .iter()
-                .map(|(t, p, r, ex)| {
+                .filter(|o| !o.skipped_by_filter)
+                .map(|o| {
                     format!(
-                        "'{}'(pid {} {}x{}@{},{} ex=0x{:X}{})",
-                        if t.is_empty() { "<untitled>" } else { t.as_str() },
-                        p,
-                        r.width,
-                        r.height,
-                        r.x,
-                        r.y,
-                        ex,
-                        if (ex & WS_EX_TRANSPARENT.0) != 0 {
-                            " CLICK-THROUGH"
+                        "'{}'(pid {} {}x{}@{},{} ex=0x{:X})",
+                        if o.title.is_empty() {
+                            "<untitled>"
                         } else {
-                            ""
-                        }
+                            o.title.as_str()
+                        },
+                        o.pid,
+                        o.rect.width,
+                        o.rect.height,
+                        o.rect.x,
+                        o.rect.y,
+                        o.ex_style
                     )
                 })
                 .collect::<Vec<_>>()
