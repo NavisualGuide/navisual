@@ -738,6 +738,157 @@ mod export_cost_tests {
         println!("re-minimized; desktop restored");
     }
 
+    /// Live probe for the capture mask: would this window come back as a grey
+    /// rectangle, and if so, what buried it?
+    ///
+    /// `NAVISUAL_TEST_TITLE="System Properties" cargo test --lib -- --ignored keep_rects_live --nocapture`
+    ///
+    /// Born from a live report on 2026-09-14: System Properties captured as a flat
+    /// grey box, so the model saw a blank picture, concluded something was covering
+    /// the window, and spent four requests asking the user to move the panel -- while
+    /// the dialog sat in plain view. The mask greys the whole frame when the keep-set
+    /// is empty (deliberate: it refuses to leak the occluder's pixels), but nothing
+    /// on that path logged anything, so the reason was unknowable after the fact.
+    ///
+    /// Read-only: enumerates and measures, touches no window.
+    #[test]
+    #[ignore]
+    fn keep_rects_live() {
+        let needle = std::env::var("NAVISUAL_TEST_TITLE").unwrap_or_default();
+        if needle.is_empty() {
+            println!("set NAVISUAL_TEST_TITLE to a substring of the window's title");
+            return;
+        }
+        let needle_low = needle.to_lowercase();
+        let Some(w) = super::list_target_windows()
+            .into_iter()
+            .find(|w| w.title.to_lowercase().contains(&needle_low))
+        else {
+            println!("no window matching {needle:?}");
+            return;
+        };
+
+        println!("target      : {:?}", w.title);
+        println!("  app       : {} (hwnd {})", w.display_name, w.hwnd);
+        println!("  minimized : {}", w.minimized);
+
+        // pid_union_rect is what capture_active_window_jpeg uses as the capture
+        // rect, so the probe measures the same frame the AI would have received.
+        let Some(rect) = super::win::pid_union_rect_raw(w.hwnd) else {
+            println!("  NO UNION RECT -- the handle is dead or has no geometry");
+            return;
+        };
+        println!(
+            "  rect      : {}x{} @ {},{}",
+            rect.width, rect.height, rect.x, rect.y
+        );
+
+        // The mask skips the CALLING process's own windows. Run out-of-process and
+        // the app's full-desktop overlay is no longer skipped, so the probe would
+        // invent an occlusion that does not exist in the app. Pass the running
+        // app's pid via NAVISUAL_TEST_PID to reproduce what the app actually sees.
+        let our_pid: u32 = std::env::var("NAVISUAL_TEST_PID")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(std::process::id);
+        if our_pid != std::process::id() {
+            println!("  (treating pid {our_pid} as \"ours\", i.e. the app's own windows)");
+        }
+
+        // NAVISUAL_TEST_IGNORE_PIDS="123,456" pretends those processes are gone,
+        // which isolates whether one overlay is the whole story.
+        let ignore: Vec<u32> = std::env::var("NAVISUAL_TEST_IGNORE_PIDS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        if !ignore.is_empty() {
+            println!("  (pretending these pids do not exist: {ignore:?})");
+        }
+        let (keep, occluders) =
+            super::win::keep_rects_diagnostic(w.hwnd, &rect, our_pid, &ignore);
+        let total: i64 = keep.iter().map(|r| r.width as i64 * r.height as i64).sum();
+        let area = (rect.width as i64 * rect.height as i64).max(1);
+
+        println!("\nkeep-set    : {} rect(s), {}% of the frame", keep.len(), total * 100 / area);
+        for r in &keep {
+            println!("  keep      : {}x{} @ {},{}", r.width, r.height, r.x, r.y);
+        }
+
+        println!("\ncounted as covering it (z-order, topmost first):");
+        if occluders.is_empty() {
+            println!("  (nothing)");
+        }
+        for (t, p, r, ex) in &occluders {
+            // 0x20 = WS_EX_TRANSPARENT (click-through), 0x80000 = WS_EX_LAYERED,
+            // 0x8 = WS_EX_TOPMOST. A click-through layered window is invisible to
+            // the user by construction -- it cannot be "covering" anything.
+            let mut flags = Vec::new();
+            if ex & 0x20 != 0 {
+                flags.push("CLICK-THROUGH");
+            }
+            if ex & 0x80000 != 0 {
+                flags.push("LAYERED");
+            }
+            if ex & 0x8 != 0 {
+                flags.push("TOPMOST");
+            }
+            println!(
+                "  '{}' pid={} {}x{} @ {},{} ex=0x{:X} {}",
+                if t.is_empty() { "<untitled>" } else { t.as_str() },
+                p,
+                r.width,
+                r.height,
+                r.x,
+                r.y,
+                ex,
+                flags.join(" ")
+            );
+        }
+
+        // window_fully_occluded is the exact condition the refuse-before-capture
+        // guard in guide() branches on, so print it beside the keep-set.
+        println!("
+window_fully_occluded() -> {}", super::window_fully_occluded(w.hwnd));
+
+        // Now exercise the REAL entry point with a logger attached, so the line
+        // that ships is the line that gets read, not one inferred from the code.
+        {
+            use std::sync::{Mutex, OnceLock};
+            static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+            struct Cap;
+            impl log::Log for Cap {
+                fn enabled(&self, _: &log::Metadata) -> bool {
+                    true
+                }
+                fn log(&self, r: &log::Record) {
+                    if let Some(m) = LINES.get() {
+                        m.lock().unwrap().push(format!("{} {}", r.level(), r.args()));
+                    }
+                }
+                fn flush(&self) {}
+            }
+            LINES.get_or_init(|| Mutex::new(Vec::new()));
+            let _ = log::set_boxed_logger(Box::new(Cap));
+            log::set_max_level(log::LevelFilter::Trace);
+
+            LINES.get().unwrap().lock().unwrap().clear();
+            let _ = super::win::pid_visible_keep_rects_raw(w.hwnd, &rect);
+            println!("\nwhat the shipped log line actually says:");
+            for l in LINES.get().unwrap().lock().unwrap().iter() {
+                println!("  {l}");
+            }
+        }
+
+        if keep.is_empty() {
+            println!("\n>>> THIS WINDOW WOULD CAPTURE AS A FLAT GREY BOX <<<");
+        } else if total * 100 / area < 90 {
+            println!("\n>>> partially greyed: {}% kept <<<", total * 100 / area);
+        } else {
+            println!("\ncaptures cleanly");
+        }
+    }
+
     /// Live probe: what the target picker would show right now, and whether a
     /// minimized window survives the filter with its flag set.
     ///

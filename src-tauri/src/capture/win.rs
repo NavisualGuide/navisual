@@ -36,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
     GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
-    HTCLIENT, SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_NCCALCSIZE, WM_NCHITTEST, WM_SYSCOMMAND, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    HTCLIENT, SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_NCCALCSIZE, WM_NCHITTEST, WM_SYSCOMMAND, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -1778,21 +1778,64 @@ fn rect_subtract_many(a: Rect, covered: &[Rect]) -> Vec<Rect> {
 /// reaching this state — see `window_fully_occluded` + the pinned-target guard in
 /// `guide()`/`send_correction()`.)
 pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
+    keep_rects_inner(target, bbox, std::process::id(), &[]).0
+}
+
+/// What the z-order walk concluded: the keep-set, plus each window it counted as
+/// covering the target as (title, pid, full rect, extended style).
+type KeepAndOccluders = (Vec<Rect>, Vec<(String, u32, Rect, u32)>);
+
+/// Diagnostic twin: the same walk, returning what it counted as covering the
+/// target alongside the keep-set. `our_pid` is the process whose windows are
+/// skipped as "ours" -- pass the running app's pid from an out-of-process probe,
+/// or the mask will count that app's own full-desktop overlay as an occluder and
+/// report a failure that only exists in the probe.
+#[allow(dead_code)] // used by the `#[ignore]` keep_rects_live probe
+pub fn keep_rects_diagnostic(
+    hwnd_raw: usize,
+    bbox: &Rect,
+    our_pid: u32,
+    ignore_pids: &[u32],
+) -> KeepAndOccluders {
+    keep_rects_inner(HWND(hwnd_raw as *mut _), bbox, our_pid, ignore_pids)
+}
+
+fn keep_rects_inner(
+    target: HWND,
+    bbox: &Rect,
+    our_pid: u32,
+    ignore_pids: &[u32],
+) -> KeepAndOccluders {
     let mut target_pid: u32 = 0;
     unsafe {
         GetWindowThreadProcessId(target, Some(&mut target_pid));
     }
     if target_pid == 0 {
-        return frame_rect_of(target).into_iter().collect();
+        // A dead or stale HWND lands here, and `frame_rect_of` then yields None --
+        // an empty vec, which greys the whole frame exactly like full occlusion
+        // does. Distinguishing the two in the log matters: one is "another window
+        // is on top", the other is "we are tracking a window that no longer
+        // exists", and they have nothing to do with each other.
+        let fallback: Vec<Rect> = frame_rect_of(target).into_iter().collect();
+        log::warn!(
+            "[capture] target HWND has no pid (dead or stale handle) | fallback keep-set: {} rect(s){}",
+            fallback.len(),
+            if fallback.is_empty() { " -> WHOLE FRAME GREYED" } else { "" }
+        );
+        return (fallback, Vec::new());
     }
-    let our_pid = std::process::id();
 
     struct State {
         bbox: Rect,
         our_pid: u32,
+        ignore_pids: Vec<u32>,
         target_pid: u32,
         covered: Vec<Rect>,
         keep: Vec<Rect>,
+        /// Topmost few OTHER-app windows overlapping `bbox`, in z-order, recorded
+        /// only so an empty keep-set can name what buried the target. Diagnostic:
+        /// nothing here feeds the mask.
+        occluders: Vec<(String, u32, Rect, u32)>,
     }
 
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
@@ -1802,7 +1845,7 @@ pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
         }
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 || pid == state.our_pid {
+        if pid == 0 || pid == state.our_pid || state.ignore_pids.contains(&pid) {
             // Our own panel/overlay is handled by the separate `exclude` pass.
             return TRUE;
         }
@@ -1816,6 +1859,36 @@ pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
         if cloaked != 0 {
             return TRUE;
         }
+
+        // The Generic Overlay Filter, which this walk never inherited.
+        //
+        // `candidate_window`, `pid_union_rect` and `target_visible_in_rect` have all
+        // skipped background overlays since 7c59c95 (2026-05-05) on the principle
+        // that a window which cannot receive a mouse click is not a window the user
+        // is looking at. This function landed 24 days later (a13312a) and did not
+        // carry the rule over, so NVIDIA's full-screen overlay counted as covering
+        // every window on the primary monitor, the keep-set came back empty, and the
+        // mask greyed the entire frame -- an all-grey screenshot to the AI, which
+        // then reasoned about it as if it were the screen.
+        //
+        // Narrower than the picker's version on purpose. The picker asks "should this
+        // be offered as a target?", where over-skipping costs a missing list entry.
+        // Here the question is "may these pixels be blanked?", and wrongly skipping a
+        // real window LEAKS its content to the AI -- the exact thing the empty-keep-set
+        // fail-safe exists to prevent. So a bare WS_EX_TOOLWINDOW is not enough: a
+        // floating tool palette (Photoshop, CAD) is a toolwindow and is genuinely
+        // visible. Requiring LAYERED with it keeps those counting as occluders, while
+        // both NVIDIA surfaces qualify (0x800A8 and 0x8080080 are each TOOLWINDOW +
+        // LAYERED). WS_EX_TRANSPARENT alone is decisive on its own: clicks pass
+        // straight through, so nothing of it is on screen to leak.
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let click_through = (ex_style & WS_EX_TRANSPARENT.0) != 0;
+        let layered_toolwindow = (ex_style & WS_EX_TOOLWINDOW.0) != 0
+            && (ex_style & WS_EX_LAYERED.0) != 0;
+        if click_through || layered_toolwindow {
+            return TRUE;
+        }
+
         let Some(r_full) = frame_rect_of(hwnd) else {
             return TRUE;
         };
@@ -1828,6 +1901,13 @@ pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
         if pid == state.target_pid {
             let visible = rect_subtract_many(r, &state.covered);
             state.keep.extend(visible);
+        } else if state.occluders.len() < 6 {
+            let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            // r_full, not r: the clipped rect always equals the target's, which
+            // tells you nothing about whether this thing spans the whole screen.
+            state
+                .occluders
+                .push((get_window_title(hwnd.0 as usize), pid, r_full, ex));
         }
         state.covered.push(r);
         TRUE
@@ -1836,16 +1916,76 @@ pub fn pid_visible_keep_rects(target: HWND, bbox: &Rect) -> Vec<Rect> {
     let mut state = State {
         bbox: *bbox,
         our_pid,
+        ignore_pids: ignore_pids.to_vec(),
         target_pid,
         covered: Vec::new(),
         keep: Vec::new(),
+        occluders: Vec::new(),
     };
     unsafe {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
 
+    // One line per capture, because a greyed frame is invisible from outside: the
+    // AI just receives a blank picture and reasons about it as if it were the
+    // screen. v0.7.24 spent four requests and four increasingly desperate "please
+    // move the panel" instructions on exactly that, and the log could not say why
+    // -- this whole path emitted nothing. Rule 1: ship the log line with the fix.
+    if state.keep.is_empty() {
+        let who = if state.occluders.is_empty() {
+            "nothing enumerated above it".to_string()
+        } else {
+            state
+                .occluders
+                .iter()
+                .map(|(t, p, r, ex)| {
+                    format!(
+                        "'{}'(pid {} {}x{}@{},{} ex=0x{:X}{})",
+                        if t.is_empty() { "<untitled>" } else { t.as_str() },
+                        p,
+                        r.width,
+                        r.height,
+                        r.x,
+                        r.y,
+                        ex,
+                        if (ex & WS_EX_TRANSPARENT.0) != 0 {
+                            " CLICK-THROUGH"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        log::warn!(
+            "[capture] keep-set EMPTY -> WHOLE FRAME GREYED | target pid={target_pid} rect={:?} bbox={}x{}@{},{} | topmost over it: {who}",
+            frame_rect_of(target),
+            bbox.width,
+            bbox.height,
+            bbox.x,
+            bbox.y
+        );
+    } else {
+        let area: i64 = state
+            .keep
+            .iter()
+            .map(|r| r.width as i64 * r.height as i64)
+            .sum();
+        let bbox_area = (bbox.width as i64 * bbox.height as i64).max(1);
+        log::info!(
+            "[capture] keep-set {} rect(s), {}% of the frame kept | target pid={target_pid} bbox={}x{}@{},{}",
+            state.keep.len(),
+            area * 100 / bbox_area,
+            bbox.width,
+            bbox.height,
+            bbox.x,
+            bbox.y
+        );
+    }
+
     // Empty when fully occluded — returned as-is (fail-safe; see the doc comment).
-    state.keep
+    (state.keep, state.occluders)
 }
 
 /// Convenience wrapper for callers that hold a raw HWND value (usize).

@@ -3323,19 +3323,34 @@ async fn guide(
     };
 
     // Data-leak guard: a screen BitBlt of a window's rect grabs whatever is
-    // *visually* there, so a PINNED target that's fully hidden behind another app
-    // would be captured as the OCCLUDING app's pixels and sent to the AI. The user
-    // chose "refuse + prompt" over auto-raising (which steals focus / is unreliable),
-    // so bail before capturing and tell them to bring it forward. (Scoped to pinned:
-    // in auto-detect the tracker keeps the target on the foreground, and the capture
-    // mask now fails safe — greys, never leaks — if a stale target is ever occluded.)
+    // *visually* there, so a target that's fully hidden behind another app would be
+    // captured as the OCCLUDING app's pixels and sent to the AI. The user chose
+    // "refuse + prompt" over auto-raising (which steals focus / is unreliable), so
+    // bail before capturing and tell them to bring it forward.
+    //
+    // This used to be scoped to PINNED targets, on the reasoning that "in auto-detect
+    // the tracker keeps the target on the foreground, so it cannot be occluded, and
+    // the mask fails safe anyway". Both halves turned out to be wrong on 2026-09-14.
+    // `target_hwnd` is a STORED handle, not a live foreground lookup, so it goes stale
+    // the moment focus moves — and failing safe means the AI receives a flat grey
+    // rectangle, which it cannot recognise as "no data". It reasons about the blank
+    // image instead: once producing four escalating "please move the panel" steps, and
+    // once producing a confident, plausible, entirely invented instruction. The second
+    // is the dangerous one, and neither is something a user can diagnose.
+    //
+    // `stored_hwnd` is `pinned_hwnd.or(target_hwnd)`, so dropping the `is_pinned`
+    // condition is the whole change: the pinned case behaves exactly as before.
     #[cfg(windows)]
-    if !is_fs && is_pinned {
+    if !is_fs {
         if let Some(hwnd) = stored_hwnd {
             if capture::window_fully_occluded(hwnd) {
                 let app = capture::get_window_info_for_hwnd(hwnd)
                     .map(|i| i.app_name)
-                    .unwrap_or_else(|| "The pinned app".to_string());
+                    .unwrap_or_else(|| {
+                        // Only claim a pin when there is one; in auto-detect this
+                        // window is simply whatever was last in front.
+                        if is_pinned { "The pinned app" } else { "The target app" }.to_string()
+                    });
                 return Ok(GuideResponse {
                     goal: session_goal(&state),
                     plan_outline: session_plan_outline(&state),
@@ -4618,6 +4633,13 @@ async fn send_correction(
     // Same refuse-don't-leak guard as guide(): a fully occluded pinned target
     // would BitBlt as an all-grey image (the occlusion mask fails safe) — a
     // wasted request and a confused AI reply instead of a clear error.
+    //
+    // Still pinned-only here, and deliberately so rather than by oversight: the
+    // lines above null `target_hwnd` precisely so an auto-detect correction
+    // re-discovers the foreground window at capture time. There is therefore no
+    // auto-detect handle to test yet, and the window that WILL be chosen is the
+    // foreground one, which cannot be fully occluded by definition. guide() is
+    // different because it reads a handle that was stored earlier and can be stale.
     #[cfg(windows)]
     if !is_fs {
         if let Some(hwnd) = pinned_hwnd {
