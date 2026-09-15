@@ -853,11 +853,27 @@ See the LICENSE file in the root of this repository for complete details.
       // both, rather than making the dock version live only in the ··· menu, which is
       // exactly where this project keeps losing actions. (The explicit
       // "Fill the rest with…" entry stays for anyone who looks there first.)
+      //
+      // BUT NOT WHILE COLLAPSED. `dockSide` survives collapse on purpose, so that
+      // expanding returns the panel to its dock — which means a pick from the fish
+      // was still resizing the chosen app to sit beside a panel that is currently a
+      // 56px floating icon. There is no "rest of the screen" to fill, so the move has
+      // nothing to justify it, and unbidden window-moving is the instinct rule 15
+      // exists to stop (the panel-nudging fix was built and deliberately discarded).
+      // Restoring a minimized pick still happens — `pin_target_window` does that
+      // above, and bringing a window back is not the same as moving it.
+      //
+      // The choice is still recorded, so expanding re-docks around the app the user
+      // actually picked rather than a stale partner: `expandToPanel` calls
+      // `applyDock` + `scheduleDockSync`, and that is the moment the layout is real
+      // again and a move is warranted.
       if (dockSide) {
         dockPartner = hwnd;
         saveDock();
-        try { await invoke("dock_fill", { hwnd, side: dockSide }); }
-        catch (e) { console.error("dock_fill:", e); }
+        if (!iconMode) {
+          try { await invoke("dock_fill", { hwnd, side: dockSide }); }
+          catch (e) { console.error("dock_fill:", e); }
+        }
       }
     }
   }
