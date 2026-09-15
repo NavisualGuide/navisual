@@ -762,22 +762,34 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   async function openTargetPicker(mode: "target" | "dock" = "target") {
-    // Expand first if collapsed. The picker's markup lives inside the panel
-    // branch of the template, so while iconMode is true it is not in the DOM at
-    // all -- opening it from the fish's menu set the flag and drew nothing
-    // (reported live). Nor would a modal have been usable in a 56px window.
-    //
-    // Same shape as dockPanel(), which has opened with this line since the dock
-    // shipped: an action the user picked while collapsed, that only the panel can
-    // show, expands to show it.
-    if (iconMode) await expandToPanel();
     targetPickerMode = mode;
     dismissTargetHint(); // they found the picker — the coach mark is no longer needed
     [targetWindows, monitors] = await Promise.all([
       invoke<TargetWindowInfo[]>("list_target_windows"),
       invoke<MonitorInfo[]>("list_monitors"),
     ]);
+
+    // Collapsed: show the list in a grown icon window rather than expanding the
+    // panel. v0.7.24 expanded first, because the picker's markup lives in the panel
+    // branch of the template and was simply not in the DOM while collapsed -- that
+    // made the action work, but it answered a different question. Picking an app is
+    // not a reason to leave collapsed mode. The rows are the SAME snippet the panel
+    // renders, so the two lists cannot drift (the `buildMenu` lesson).
+    //
+    // Dock mode still expands: it exists to tile the panel beside an app, so the
+    // panel has to be there anyway, and `dockPanel()` has expanded since it shipped.
+    if (iconMode && mode === "target") {
+      await openIconTargets();
+      return;
+    }
+    if (iconMode) await expandToPanel();
     targetPickerOpen = true;
+  }
+
+  async function openIconTargets() {
+    if (iconSurface) await closeIconSurface();
+    await growIconWindow(ICON_TARGETS_W, ICON_TARGETS_H);
+    iconSurface = "targets";
   }
 
   // One-time coach mark on the target-app chip — testers didn't realise the
@@ -821,6 +833,9 @@ See the LICENSE file in the root of this repository for complete details.
   async function selectTarget(hwnd: number | null) {
     targetPickerOpen = false;
     targetPickerMode = "target";
+    // Chosen from the fish: shrink straight back to 56px. Leaving the grown window
+    // up after a pick would strand the user in a surface whose job is finished.
+    if (iconSurface === "targets") await closeIconSurface();
     fullScreenTarget = false;
     if (hwnd === null) {
       await invoke("unpin_target_window");
@@ -854,6 +869,7 @@ See the LICENSE file in the root of this repository for complete details.
   async function selectDesktop(monitorIndex: number | null) {
     targetPickerOpen = false;
     targetPickerMode = "target";
+    if (iconSurface === "targets") await closeIconSurface();
     await invoke("pin_full_screen_target", { monitorIndex });
     pinnedHwnd = null;
     fullScreenTarget = true;
@@ -1722,7 +1738,7 @@ See the LICENSE file in the root of this repository for complete details.
   // would be the worst kind of surprise. So the window ORIGIN is adjusted by
   // exactly the amount it grew, in whichever direction keeps the fish still —
   // which also gives the edge flip any context menu needs, for free.
-  type IconSurface = null | "menu" | "chat" | "hint";
+  type IconSurface = null | "menu" | "chat" | "hint" | "targets";
   let iconSurface = $state<IconSurface>(null);
   let iconFlipX = $state(false);
   let iconFlipY = $state(false);
@@ -1748,6 +1764,15 @@ See the LICENSE file in the root of this repository for complete details.
   // Third surface in a row whose first guess was too short — a fixed-size window
   // gives CSS nowhere to overflow to, so these are measured on screen, not reasoned.
   const ICON_HINT_H = 168;
+  // The target list, opened from the fish. Wider than the menu because rows carry
+  // a window TITLE, and as tall as the menu so the two feel like the same surface.
+  // Unlike the menu, the height does not have to fit the content: the list is
+  // scrollable, so a long list scrolls rather than being cut. That is the whole
+  // lesson of ICON_MENU_H, where a fixed window gave CSS nowhere to overflow and a
+  // short guess sliced the last row in half.
+  const ICON_TARGETS_W = 300;
+  const ICON_TARGETS_H = 440;
+
   const ICON_CHAT_W = 340;
   // 56 for the fish, then the input, the send row and the surface's padding. At
   // 104 only 48px was left below the fish for all three.
@@ -3250,6 +3275,42 @@ See the LICENSE file in the root of this repository for complete details.
      the fish's own handler still runs and still opens its menu. -->
 <svelte:window oncontextmenu={handlePanelContextMenu} />
 
+  <!-- ONE definition of what a target row looks like, rendered by the panel's
+       picker and by the collapsed fish's target surface. Two hand-maintained
+       copies is how the `···` menu lost three actions over time; the same
+       reasoning that made buildMenu(ctx) a single list applies here. -->
+  {#snippet targetWindowRows()}
+      {#each targetWindows as w (w.hwnd)}
+        {@const primary = w.title || w.display_name}
+        {@const chosen = targetPickerMode === "dock" ? dockPartner === w.hwnd : pinnedHwnd === w.hwnd}
+        <button class="target-pick-item" class:target-pick-selected={chosen}
+          onclick={() => (targetPickerMode === "dock" ? fillDockPartner(w.hwnd) : selectTarget(w.hwnd))}>
+          <span class="target-pick-check">{chosen ? "✓" : ""}</span>
+          <!-- Primary = the window title (what the user actually sees on screen);
+               subtitle = the friendly app name for identity, when it adds info. -->
+          <span class="target-pick-name">{primary.length > 46 ? primary.slice(0, 44) + "…" : primary}</span>
+          <!-- The second row of the item's grid, as ONE cell: the short app name and
+               the Minimized badge sit side by side in it. The badge started as a
+               third child of the grid with no cell of its own, so it auto-placed
+               into an implicit third row and stretched the full width -- which with
+               a pill radius on a wide box drew a bar across the item. Sharing the
+               sub-line is also a row shorter per entry, and this list can run to
+               twenty. -->
+          {#if (w.display_name && w.display_name !== primary) || w.minimized}
+            <span class="target-pick-meta">
+              {#if w.display_name && w.display_name !== primary}
+                <span class="target-pick-sub">{w.display_name}</span>
+              {/if}
+              <!-- Say it, rather than have the user's own window reappear
+                   unannounced when they pick it — picking a minimized app restores
+                   it, see pin_target_window. -->
+              {#if w.minimized}<span class="target-pick-min">Minimized</span>{/if}
+            </span>
+          {/if}
+        </button>
+      {/each}
+  {/snippet}
+
 {#if iconMode}
   <!-- Icon mode: goldfish icon — mousedown starts drag; click expands.
        The ring and the thinking state are here rather than in the panel because
@@ -3324,6 +3385,19 @@ See the LICENSE file in the root of this repository for complete details.
           </button>
         {/if}
       {/each}
+    </div>
+  {:else if iconSurface === "targets"}
+    <!-- Switch app without expanding. The list is the panel's, rendered in the
+         grown icon window; unlike the menu it SCROLLS, so a twenty-window desktop
+         is fine in a fixed-height window instead of being cut off. -->
+    <div class="icon-targets" role="listbox" aria-label="Choose target app">
+      <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null && !fullScreenTarget}
+        onclick={() => selectTarget(null)}>
+        <span class="target-pick-check">{pinnedHwnd === null && !fullScreenTarget ? "✓" : ""}</span>
+        <span class="target-pick-name">Auto-detect</span>
+        <span class="target-pick-meta"><span class="target-pick-sub">follow the foreground window</span></span>
+      </button>
+      {@render targetWindowRows()}
     </div>
   {:else if iconSurface === "hint"}
     <!-- Shown once, unprompted, the first time a step arrives while collapsed. -->
@@ -4080,35 +4154,7 @@ See the LICENSE file in the root of this repository for complete details.
           <span class="target-pick-sub">follow the foreground window</span>
         </button>
       {/if}
-      {#each targetWindows as w (w.hwnd)}
-        {@const primary = w.title || w.display_name}
-        {@const chosen = targetPickerMode === "dock" ? dockPartner === w.hwnd : pinnedHwnd === w.hwnd}
-        <button class="target-pick-item" class:target-pick-selected={chosen}
-          onclick={() => (targetPickerMode === "dock" ? fillDockPartner(w.hwnd) : selectTarget(w.hwnd))}>
-          <span class="target-pick-check">{chosen ? "✓" : ""}</span>
-          <!-- Primary = the window title (what the user actually sees on screen);
-               subtitle = the friendly app name for identity, when it adds info. -->
-          <span class="target-pick-name">{primary.length > 46 ? primary.slice(0, 44) + "…" : primary}</span>
-          <!-- The second row of the item's grid, as ONE cell: the short app name and
-               the Minimized badge sit side by side in it. The badge started as a
-               third child of the grid with no cell of its own, so it auto-placed
-               into an implicit third row and stretched the full width -- which with
-               a pill radius on a wide box drew a bar across the item. Sharing the
-               sub-line is also a row shorter per entry, and this list can run to
-               twenty. -->
-          {#if (w.display_name && w.display_name !== primary) || w.minimized}
-            <span class="target-pick-meta">
-              {#if w.display_name && w.display_name !== primary}
-                <span class="target-pick-sub">{w.display_name}</span>
-              {/if}
-              <!-- Say it, rather than have the user's own window reappear
-                   unannounced when they pick it — picking a minimized app restores
-                   it, see pin_target_window. -->
-              {#if w.minimized}<span class="target-pick-min">Minimized</span>{/if}
-            </span>
-          {/if}
-        </button>
-      {/each}
+      {@render targetWindowRows()}
       {#if targetPickerMode === "dock"}
         <!-- nothing further: a screen isn't a window to dock beside the panel -->
       {:else if monitors.length > 1}
@@ -5791,7 +5837,37 @@ See the LICENSE file in the root of this repository for complete details.
   .target-pick-item:hover { background: var(--surface-3); }
   .target-pick-selected { color: var(--accent, #ff6b35); }
   .target-pick-check { font-size: 11px; grid-row: 1 / 3; }
-  .target-pick-name { font-weight: 500; }
+  .target-pick-name {
+    font-weight: 500;
+    /* min-width: 0 is what lets a long title ellipsis inside the grid's 1fr track
+       instead of widening the row. The JS cap at 46 chars stays as a bound on
+       absurd titles, but it is width-agnostic and cannot do this job on its own --
+       in the 300px icon surface a 46-char title would simply overflow. */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The collapsed fish's target list. Fills the grown window and scrolls, which is
+     why its height does not have to fit the content the way .icon-menu's does. */
+  .icon-targets {
+    position: absolute;
+    top: 56px;
+    left: 0;
+    width: 100%;
+    height: calc(100% - 56px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+  }
   .target-pick-min {
     font-size: 10px;
     font-weight: 500;
