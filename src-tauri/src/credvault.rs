@@ -12,8 +12,12 @@
 //! in lib.rs) moves it into the vault on the next launch, so the plaintext
 //! window is one session at most.
 //!
-//! Not covered (deliberately, for now): `supabase_session.json` (auth tokens,
-//! separate file/lifecycle) and non-secret settings.
+//! Also covered since 2026-09-15: the Supabase session's tokens
+//! (`SUPABASE_SESSION`, see `server::save_session`). They were the one secret
+//! left in plaintext, and the most valuable -- a refresh token mints access
+//! tokens indefinitely, and GoTrue lets a bearer token change the account
+//! password with no re-authentication, so a single file read was an account
+//! takeover. Not covered: non-secret settings.
 
 /// `.env` placeholder meaning "the real value is in the Credential Manager".
 /// Chosen to be self-explanatory to a user reading their `.env`.
@@ -35,8 +39,8 @@ mod imp {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::ERROR_NOT_FOUND;
     use windows::Win32::Security::Credentials::{
-        CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
-        CRED_TYPE_GENERIC,
+        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS,
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
     };
 
     fn target_for(env_name: &str) -> Vec<u16> {
@@ -64,6 +68,27 @@ mod imp {
         let ok = unsafe { CredWriteW(&cred, 0) }.is_ok();
         if !ok {
             log::warn!("[credvault] CredWriteW failed for {env_name} — keeping plaintext fallback");
+        }
+        ok
+    }
+
+    /// Delete the secret stored under `Navisual/<env_name>`. Returns whether
+    /// anything was removed. Signing out has to reach the vault too, or the
+    /// refresh token outlives the session that is supposedly gone.
+    pub fn remove(env_name: &str) -> bool {
+        let target = target_for(env_name);
+        let ok = unsafe {
+            CredDeleteW(
+                windows::core::PCWSTR(target.as_ptr()),
+                CRED_TYPE_GENERIC,
+                None,
+            )
+        }
+        .is_ok();
+        if !ok {
+            // ERROR_NOT_FOUND is the normal case for a session that was never
+            // vaulted, so this is debug rather than warn.
+            log::debug!("[credvault] CredDeleteW found nothing for {env_name}");
         }
         ok
     }
@@ -108,9 +133,12 @@ mod imp {
     pub fn read(_env_name: &str) -> Option<String> {
         None
     }
+    pub fn remove(_env_name: &str) -> bool {
+        false
+    }
 }
 
-pub use imp::{read, store};
+pub use imp::{read, store, remove};
 
 #[cfg(all(test, windows))]
 mod tests {

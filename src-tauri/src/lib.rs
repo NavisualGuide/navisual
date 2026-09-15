@@ -6487,7 +6487,9 @@ async fn start_google_oauth(
 
     // Claim the next callback BEFORE the browser opens, so a fast redirect can
     // never arrive with nothing waiting for it.
-    let pending = callback.arm().map_err(|e| e.to_string())?;
+    let pending = callback
+        .arm_with_state(Some(pkce.state.clone()))
+        .map_err(|e| e.to_string())?;
 
     log::info!("[oauth] opening the Google consent page (in-place link)");
     if let Err(e) = tauri_plugin_opener::open_url(&consent_url, None::<&str>) {
@@ -6568,7 +6570,9 @@ async fn google_oauth_replace(
     let pkce = server::generate_pkce(9876);
     let auth_url = server::google_oauth_url(supabase_url, &pkce);
 
-    let pending = callback.arm().map_err(|e| e.to_string())?;
+    let pending = callback
+        .arm_with_state(Some(pkce.state.clone()))
+        .map_err(|e| e.to_string())?;
 
     log::info!("[oauth] opening the Google sign-in page (replace flow)");
     if let Err(e) = tauri_plugin_opener::open_url(&auth_url, None::<&str>) {
@@ -6756,7 +6760,10 @@ async fn reset_to_anonymous(
         r.clear_managed_session();
     }
     *state.supabase_session.lock().await = None;
-    let _ = std::fs::remove_file(&state.supabase_session_path);
+    // Both halves: the file AND the Credential Manager entry. A vault entry that
+    // outlives its file is a refresh token nobody can see but anyone with the
+    // machine can still use.
+    server::clear_session(&state.supabase_session_path);
     let new_session = server::sign_in_anonymously(url, key)
         .await
         .map_err(|e| e.to_string())?;
@@ -6903,9 +6910,49 @@ async fn verify_password_reset(
 }
 
 /// Change the password of the signed-in account.
+///
+/// Requires the CURRENT password, verified against GoTrue before the change is
+/// sent. Without it, a bearer token alone was enough to set a new password --
+/// and since a stored refresh token mints bearer tokens on demand, whoever could
+/// read the session could take the account and lock the owner out. The tokens now
+/// live in the Credential Manager, which is the main fix; this closes the other
+/// half, where someone simply walks up to an unlocked machine.
+///
+/// The check is here rather than only in the UI because the UI is not a security
+/// boundary -- every Tauri command is callable from the page.
+///
+/// Google-only accounts have no password to verify: GoTrue owns their
+/// credentials, and `providers` says so. They are setting one for the first time,
+/// so `current_password` is accepted as empty for them and rejected for everyone
+/// else.
 #[tauri::command]
-async fn change_password(state: State<'_, AppState>, new_password: String) -> Result<(), String> {
+async fn change_password(
+    state: State<'_, AppState>,
+    current_password: String,
+    new_password: String,
+) -> Result<(), String> {
     let (url, key, token) = managed_auth_ctx(&state).await?;
+
+    let info = server::get_account_info(&url, &key, &token)
+        .await
+        .map_err(|e| e.to_string())?;
+    let has_password = info.providers.iter().any(|p| p == "email");
+
+    if has_password {
+        let email = info
+            .email
+            .clone()
+            .ok_or("This account has no email address to verify against.")?;
+        if current_password.is_empty() {
+            return Err("Enter your current password.".to_string());
+        }
+        // A sign-in is the verification. It mints a throwaway session that is
+        // deliberately NOT saved -- the live one keeps its own tokens.
+        server::sign_in_email(&url, &key, &email, &current_password)
+            .await
+            .map_err(|_| "Current password is incorrect.".to_string())?;
+    }
+
     server::change_password(&url, &key, &token, &new_password)
         .await
         .map_err(|e| e.to_string())
@@ -7282,6 +7329,11 @@ pub fn run() {
             let cost_tracker = CostTracker::new(Some(app_data_dir.join("usage.json")));
             let session_manager = SessionManager::new(app_data_dir.join("sessions"));
             let supabase_session_path = app_data_dir.join("supabase_session.json");
+
+            // A session written before the tokens moved into the Credential Manager is
+            // rewritten here, so the plaintext window is one launch at most — the same
+            // shape as `migrate_env_secrets` does for BYOK keys.
+            server::migrate_session_to_vault(&supabase_session_path);
 
             // Load the Supabase session from disk so account identity survives
             // restarts — regardless of which AI provider is active.

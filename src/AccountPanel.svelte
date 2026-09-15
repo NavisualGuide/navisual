@@ -45,9 +45,20 @@
   const showBilling = $derived(account.view === "account" || account.view === "signin");
 
   let acctEmail = $state("");
+  // 6 was the floor for both this UI and GoTrue's default, which is thin for an
+  // account carrying a coin balance. 8 is the usual modern minimum (NIST 800-63B);
+  // raising it here only tightens things, since the server minimum is a floor and
+  // this app is its only client. The complements are server-side and live in the
+  // Supabase dashboard: raise GoTrue's own minimum to match, and turn on leaked-
+  // password protection, which checks Have I Been Pwned WITHOUT the app ever
+  // talking to a third party itself.
+  const MIN_PASSWORD = 8;
   let acctPassword = $state("");
   let acctCode = $state(""); // 6-digit OTP
   let acctNewPassword = $state("");
+  // Proof you are the account holder, not just someone at an unlocked machine.
+  // The backend verifies it against GoTrue; this field only collects it.
+  let acctCurrentPassword = $state("");
   let acctBusy = $state(false);
   let showChangePw = $state(false);
   let showDeleteConfirm = $state(false);
@@ -65,8 +76,8 @@
   async function acctSignUp() {
     if (acctBusy) return;
     account.error = ""; account.notice = "";
-    if (!acctEmail.trim() || acctPassword.length < 6) {
-      account.error = "Enter an email and a password of at least 6 characters.";
+    if (!acctEmail.trim() || acctPassword.length < MIN_PASSWORD) {
+      account.error = `Enter an email and a password of at least ${MIN_PASSWORD} characters.`;
       return;
     }
     acctBusy = true;
@@ -191,7 +202,7 @@
   async function acctVerifyReset() {
     if (acctBusy) return;
     account.error = "";
-    if (acctCode.trim().length < 6 || acctNewPassword.length < 6) {
+    if (acctCode.trim().length < 6 || acctNewPassword.length < MIN_PASSWORD) {
       account.error = "Enter the code from your email and a new password (min 6 characters).";
       return;
     }
@@ -215,11 +226,18 @@
   async function acctChangePassword() {
     if (acctBusy) return;
     account.error = ""; account.notice = "";
-    if (acctNewPassword.length < 6) { account.error = "New password must be at least 6 characters."; return; }
+    if (acctNewPassword.length < MIN_PASSWORD) {
+      account.error = `New password must be at least ${MIN_PASSWORD} characters.`;
+      return;
+    }
     acctBusy = true;
     try {
-      await invoke("change_password", { newPassword: acctNewPassword });
+      await invoke("change_password", {
+        currentPassword: acctCurrentPassword,
+        newPassword: acctNewPassword,
+      });
       acctNewPassword = "";
+      acctCurrentPassword = "";
       showChangePw = false;
       account.notice = "Password changed.";
     } catch (e) {
@@ -323,7 +341,7 @@
   </div>
   <div class="setting-group">
     <label class="setting-label" for="acct-pw-up">Password</label>
-    <input id="acct-pw-up" class="setting-input" type="password" autocomplete="new-password" bind:value={acctPassword} placeholder="At least 6 characters" />
+    <input id="acct-pw-up" class="setting-input" type="password" autocomplete="new-password" bind:value={acctPassword} placeholder={`At least ${MIN_PASSWORD} characters`} />
   </div>
   <div class="setting-group" style="margin-top: 10px;">
     <button class="btn-primary" onclick={acctSignUp} disabled={acctBusy}>{acctBusy ? "Sending code…" : "Create account"}</button>
@@ -365,7 +383,7 @@
   </div>
   <div class="setting-group">
     <label class="setting-label" for="acct-newpw-r">New password</label>
-    <input id="acct-newpw-r" class="setting-input" type="password" autocomplete="new-password" bind:value={acctNewPassword} placeholder="At least 6 characters" />
+    <input id="acct-newpw-r" class="setting-input" type="password" autocomplete="new-password" bind:value={acctNewPassword} placeholder={`At least ${MIN_PASSWORD} characters`} />
   </div>
   <div class="setting-group" style="margin-top: 10px;">
     <button class="btn-primary" onclick={acctVerifyReset} disabled={acctBusy}>{acctBusy ? "Saving…" : "Set new password"}</button>
@@ -393,11 +411,21 @@
       </div>
     {:else}
       <div class="setting-group" style="margin-top: 12px;">
-        <label class="setting-label" for="acct-newpw">New password</label>
-        <input id="acct-newpw" class="setting-input" type="password" bind:value={acctNewPassword} placeholder="At least 6 characters" />
+        <!-- Proving you know the current one is what stops someone at an unlocked
+             machine taking the account. Only shown when there IS one to prove:
+             a Google account setting its first Navisual password has none, and
+             the backend applies the same rule rather than trusting this form. -->
+        {#if account.hasPassword}
+          <label class="setting-label" for="acct-curpw">Current password</label>
+          <input id="acct-curpw" class="setting-input" type="password" autocomplete="current-password"
+            bind:value={acctCurrentPassword} placeholder="Your current password" />
+        {/if}
+        <label class="setting-label" for="acct-newpw" style="margin-top:8px;">New password</label>
+        <input id="acct-newpw" class="setting-input" type="password" autocomplete="new-password"
+          bind:value={acctNewPassword} placeholder={`At least ${MIN_PASSWORD} characters`} />
         <div style="display:flex; gap:8px; margin-top:8px;">
           <button class="btn-primary" onclick={acctChangePassword} disabled={acctBusy}>{acctBusy ? "Saving…" : "Save password"}</button>
-          <button class="btn-ghost" onclick={() => { showChangePw = false; acctNewPassword = ""; }}>Cancel</button>
+          <button class="btn-ghost" onclick={() => { showChangePw = false; acctNewPassword = ""; acctCurrentPassword = ""; }}>Cancel</button>
         </div>
       </div>
     {/if}

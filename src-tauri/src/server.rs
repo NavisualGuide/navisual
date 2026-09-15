@@ -213,7 +213,10 @@ pub async fn submit_feedback(
 pub struct OAuthPkce {
     pub verifier: String,
     pub challenge: String, // base64url(SHA-256(verifier))
+    /// Includes `?st=<state>` — see `generate_pkce`.
     pub redirect_uri: String,
+    /// Per-attempt nonce echoed back in the callback query.
+    pub state: String,
     pub port: u16,
 }
 
@@ -227,10 +230,24 @@ pub fn generate_pkce(port: u16) -> OAuthPkce {
     let verifier = URL_SAFE_NO_PAD.encode(raw.as_bytes());
     let hash = Sha256::digest(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(hash);
+
+    // A per-attempt nonce, carried IN the redirect URI rather than as an OAuth
+    // `state` parameter: GoTrue mints and signs its own `state` for the Google
+    // leg and does not pass ours through, but it does redirect to the exact
+    // `redirect_to` it was given, query string included.
+    //
+    // PKCE already defeats the attack that `state` classically prevents -- an
+    // injected code is bound to the attacker's `code_challenge` and cannot be
+    // redeemed with our verifier. What this adds is narrower: the loopback port
+    // is reachable by any local process and any web page the user visits, so
+    // without it anything could hit /callback?error=... and kill a sign-in that
+    // was legitimately in flight.
+    let state = uuid::Uuid::new_v4().simple().to_string();
     OAuthPkce {
+        redirect_uri: format!("http://localhost:{}/callback?st={}", port, state),
         verifier,
         challenge,
-        redirect_uri: format!("http://localhost:{}/callback", port),
+        state,
         port,
     }
 }
@@ -294,6 +311,7 @@ const OAUTH_CALLBACK_TIMEOUT_SECS: u64 = 240;
 /// The outcome parsed from the OAuth loopback callback: either the PKCE auth
 /// `code`, or an `error` GoTrue redirected back with (e.g. the identity is
 /// already linked to a different account during an in-place link attempt).
+#[derive(Debug)]
 pub enum OAuthCallback {
     Code(String),
     Error { error: String, description: String },
@@ -310,6 +328,8 @@ enum CallbackState {
     Armed {
         tx: tokio::sync::oneshot::Sender<OAuthCallback>,
         bounced: bool,
+        /// The `st` value this attempt put in its redirect URI, when it had one.
+        expected_state: Option<String>,
     },
     /// The waiting sign-in got its callback. A second hit (a refresh, a
     /// duplicate tab) must not be reported to the user as an expiry.
@@ -343,7 +363,18 @@ impl OAuthCallbackServer {
     /// Claim the next callback for a sign-in that is about to open the browser.
     /// Fails when one is already waiting — two concurrent sign-ins would race
     /// for the same redirect, and the loser would silently steal it.
+    #[cfg(test)]
     pub fn arm(&self) -> Result<tokio::sync::oneshot::Receiver<OAuthCallback>> {
+        self.arm_with_state(None)
+    }
+
+    /// `arm`, plus the per-attempt nonce the callback must echo back. Kept as a
+    /// separate entry point so the existing `arm()` callers -- ten of them tests
+    /// about the state machine, which this does not change -- stay as they are.
+    pub fn arm_with_state(
+        &self,
+        expected_state: Option<String>,
+    ) -> Result<tokio::sync::oneshot::Receiver<OAuthCallback>> {
         let mut st = self.state.lock();
         // Liveness, not just state: a claim whose receiver has gone (its command
         // was dropped without waiting) has nobody behind it, and treating that as
@@ -356,7 +387,11 @@ impl OAuthCallbackServer {
             log::info!("[oauth] taking over an abandoned sign-in claim");
         }
         let (tx, rx) = tokio::sync::oneshot::channel();
-        *st = CallbackState::Armed { tx, bounced: false };
+        *st = CallbackState::Armed {
+            tx,
+            bounced: false,
+            expected_state,
+        };
         Ok(rx)
     }
 
@@ -503,7 +538,43 @@ async fn handle_callback_conn(
         return;
     }
 
-    let (code, error, description) = parse_callback_query(query);
+    let (code, error, description, st) = parse_callback_query(query);
+
+    let expected_state: Option<String> = {
+        let guard = server.state.lock();
+        match &*guard {
+            CallbackState::Armed { expected_state, .. } => expected_state.clone(),
+            _ => None,
+        }
+    };
+    let expected_state = expected_state.as_deref();
+
+    // Reject a callback that carries the WRONG nonce outright: that is not our
+    // round trip, so it is either a stray hit on the loopback port or something
+    // trying to interfere with a sign-in in flight.
+    //
+    // A callback with NO nonce is still accepted, deliberately. This rides inside
+    // `redirect_to`, and whether GoTrue preserves a query string there has not yet
+    // been proven against the live project -- failing closed on an unproven
+    // assumption would break sign-in entirely, which is far worse than the nuisance
+    // this prevents. The log line says which case occurred, so one real sign-in
+    // settles it and this can become fail-closed.
+    if let (Some(got), Some(want)) = (st.as_deref(), expected_state) {
+        if got != want {
+            log::warn!("[oauth] callback nonce did not match the attempt in flight — ignoring");
+            let _ = stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = stream.flush().await;
+            return;
+        }
+        log::info!("[oauth] callback nonce matched");
+    } else if expected_state.is_some() {
+        log::warn!(
+            "[oauth] callback carried no nonce — GoTrue did not preserve the redirect query; \
+             accepting (see generate_pkce)"
+        );
+    }
     let parsed = match (code, error) {
         (Some(code), _) => Some(OAuthCallback::Code(code)),
         (None, Some(error)) => Some(OAuthCallback::Error { error, description }),
@@ -569,9 +640,10 @@ fn decide_callback_response(
     CallbackPage::Close
 }
 
-/// Pull `code` / `error` / `error_description` out of the callback query.
-fn parse_callback_query(query: &str) -> (Option<String>, Option<String>, String) {
+/// Pull `code` / `error` / `error_description` / `st` out of the callback query.
+fn parse_callback_query(query: &str) -> (Option<String>, Option<String>, String, Option<String>) {
     let (mut code, mut error, mut description) = (None, None, String::new());
+    let mut st = None;
     for pair in query.split('&') {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
@@ -582,10 +654,11 @@ fn parse_callback_query(query: &str) -> (Option<String>, Option<String>, String)
             // Fallback only — prefer the human-readable `error` over the code.
             "error_code" if error.is_none() => error = Some(url_decode(v)),
             "error_description" => description = url_decode(v),
+            "st" => st = Some(url_decode(v)),
             _ => {}
         }
     }
-    (code, error, description)
+    (code, error, description, st)
 }
 
 /// The pages the callback server can serve. The browser is the surface the user
@@ -1106,15 +1179,77 @@ async fn friendly_auth_error(resp: reqwest::Response) -> String {
     raw
 }
 
-pub fn load_session(path: &Path) -> Option<SupabaseSession> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+/// Credential Manager entry holding the whole session as JSON.
+pub const SESSION_VAULT_KEY: &str = "SUPABASE_SESSION";
+
+/// True when `s` is the on-disk marker rather than a real session.
+fn is_vaulted(s: &SupabaseSession) -> bool {
+    s.refresh_token == crate::credvault::SENTINEL || s.access_token == crate::credvault::SENTINEL
 }
 
-pub fn save_session(path: &Path, session: &SupabaseSession) {
-    if let Ok(json) = serde_json::to_string_pretty(session) {
-        let _ = std::fs::write(path, json);
+pub fn load_session(path: &Path) -> Option<SupabaseSession> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let on_disk: SupabaseSession = serde_json::from_str(&text).ok()?;
+    if !is_vaulted(&on_disk) {
+        // A session written before the tokens moved into the vault. Usable as-is;
+        // `migrate_session_to_vault` re-saves it so the plaintext window is one
+        // launch at most, the same shape as the `.env` secret migration.
+        return Some(on_disk);
     }
+    let json = crate::credvault::read(SESSION_VAULT_KEY)?;
+    serde_json::from_str(&json).ok()
+}
+
+/// Write the session, keeping the tokens out of the file when the Credential
+/// Manager will take them.
+///
+/// The file stays, holding only `expires_at` and two sentinels: something has to
+/// record that a session EXISTS and when it lapses, and keeping the same shape
+/// means `load_session` stays one code path. On a vault failure the real JSON is
+/// written instead -- losing the session outright would sign the user out for a
+/// reason they cannot see, and that is the same trade `credvault::store`'s own
+/// doc comment makes for BYOK keys.
+pub fn save_session(path: &Path, session: &SupabaseSession) {
+    let Ok(json) = serde_json::to_string_pretty(session) else {
+        return;
+    };
+    if crate::credvault::store(SESSION_VAULT_KEY, &json) {
+        let marker = serde_json::json!({
+            "access_token": crate::credvault::SENTINEL,
+            "refresh_token": crate::credvault::SENTINEL,
+            "expires_at": session.expires_at,
+        });
+        if let Ok(text) = serde_json::to_string_pretty(&marker) {
+            let _ = std::fs::write(path, text);
+        }
+        return;
+    }
+    let _ = std::fs::write(path, json);
+}
+
+/// Remove both halves. Called wherever the session file is deleted -- a vault
+/// entry that outlives its file is a refresh token nobody can see but anyone
+/// with the machine can still use.
+pub fn clear_session(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    crate::credvault::remove(SESSION_VAULT_KEY);
+}
+
+/// Move a pre-vault plaintext session into the Credential Manager on startup.
+/// Returns true when it actually rewrote something.
+pub fn migrate_session_to_vault(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(session) = serde_json::from_str::<SupabaseSession>(&text) else {
+        return false;
+    };
+    if is_vaulted(&session) {
+        return false;
+    }
+    save_session(path, &session);
+    log::info!("[auth] moved the stored session out of plaintext and into the Credential Manager");
+    true
 }
 
 #[cfg(test)]
@@ -1255,6 +1390,63 @@ mod tests {
 
     /// Everything above tests the decision; this tests the socket underneath it
     /// - bind, accept, read, respond - which is the half that turns a bound port
+    /// The loopback port is reachable by any local process and by any web page the
+    /// user visits, so a sign-in in flight can be interfered with. The nonce is what
+    /// tells our own round trip apart from everything else hitting /callback.
+    ///
+    /// All three outcomes matter, and the third is the one that would be a
+    /// regression if someone later "tightened" it: a callback with NO nonce is
+    /// still accepted, because whether GoTrue preserves a query string on
+    /// `redirect_to` is not yet proven against the live project and failing closed
+    /// on an unproven assumption would break sign-in outright.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_callback_carrying_the_wrong_nonce_is_ignored() {
+        let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+        let server = std::sync::Arc::new(idle_server());
+        tokio::spawn(accept_callbacks(listener, server.clone()));
+
+        let mut pending = server.arm_with_state(Some("goodnonce".into())).unwrap();
+
+        // Somebody else's hit: refused, and the real sign-in is still waiting.
+        let body = http_get(addr, "/callback?code=evil&st=wrongnonce").await;
+        assert!(
+            body.starts_with("HTTP/1.1 400"),
+            "a mismatched nonce should be refused, got: {body}"
+        );
+        assert!(
+            pending.try_recv().is_err(),
+            "the sign-in must still be waiting after a foreign callback"
+        );
+
+        // Ours: delivered.
+        let _ = http_get(addr, "/callback?code=real&st=goodnonce").await;
+        match pending.try_recv() {
+            Ok(OAuthCallback::Code(c)) => assert_eq!(c, "real"),
+            other => panic!("the matching callback should have been delivered, got {other:?}"),
+        }
+    }
+
+    /// Fail-open while the redirect-query question is unsettled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_callback_with_no_nonce_is_still_accepted() {
+        let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+        let server = std::sync::Arc::new(idle_server());
+        tokio::spawn(accept_callbacks(listener, server.clone()));
+
+        let mut pending = server.arm_with_state(Some("goodnonce".into())).unwrap();
+        let _ = http_get(addr, "/callback?code=stripped").await;
+        match pending.try_recv() {
+            Ok(OAuthCallback::Code(c)) => assert_eq!(c, "stripped"),
+            other => panic!("a nonce-less callback must not be dropped, got {other:?}"),
+        }
+    }
+
     /// into a page the browser can actually show. Port 0 lets the OS pick, so it
     /// never fights the real 9876 or another test run.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1297,13 +1489,13 @@ mod tests {
 
     #[test]
     fn callback_query_parsing_prefers_the_readable_error() {
-        let (code, err, desc) =
+        let (code, err, desc, _st) =
             parse_callback_query("error_code=422&error=server_error&error_description=Already+linked");
         assert!(code.is_none());
         assert_eq!(err.as_deref(), Some("server_error"));
         assert_eq!(desc, "Already linked");
 
-        let (code, err, _) = parse_callback_query("code=f280bfa0-3db1-4ed9");
+        let (code, err, _, _st) = parse_callback_query("code=f280bfa0-3db1-4ed9");
         assert_eq!(code.as_deref(), Some("f280bfa0-3db1-4ed9"));
         assert!(err.is_none());
     }
