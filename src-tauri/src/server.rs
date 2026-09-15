@@ -1470,6 +1470,20 @@ mod tests {
     /// URL from `location.pathname`. It must carry `location.search` across, or
     /// requiring the nonce refuses every OAuth error -- which is exactly what the
     /// bounce exists to deliver.
+    /// Dump the real bounce page so its JS can be exercised in a browser -- the
+    /// assertion above only proves the string contains `location.search`, not that
+    /// the script does the right thing with it.
+    ///
+    /// `cargo test --lib -- --ignored dump_bounce_page --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_bounce_page() {
+        let out = std::env::var("NAVISUAL_BOUNCE_OUT").unwrap_or_default();
+        assert!(!out.is_empty(), "set NAVISUAL_BOUNCE_OUT to a file path");
+        std::fs::write(&out, CallbackPage::Bounce.render()).unwrap();
+        println!("wrote {out}");
+    }
+
     #[test]
     fn the_bounce_carries_the_existing_query_across() {
         let page = CallbackPage::Bounce.render();
