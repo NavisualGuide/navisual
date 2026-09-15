@@ -549,31 +549,36 @@ async fn handle_callback_conn(
     };
     let expected_state = expected_state.as_deref();
 
-    // Reject a callback that carries the WRONG nonce outright: that is not our
-    // round trip, so it is either a stray hit on the loopback port or something
-    // trying to interfere with a sign-in in flight.
+    // While a sign-in is armed, the callback must carry that attempt's nonce.
+    // Anything else hitting the loopback port -- another local process, or a page
+    // the user is browsing -- is refused instead of being handed to the sign-in.
     //
-    // A callback with NO nonce is still accepted, deliberately. This rides inside
-    // `redirect_to`, and whether GoTrue preserves a query string there has not yet
-    // been proven against the live project -- failing closed on an unproven
-    // assumption would break sign-in entirely, which is far worse than the nuisance
-    // this prevents. The log line says which case occurred, so one real sign-in
-    // settles it and this can become fail-closed.
-    if let (Some(got), Some(want)) = (st.as_deref(), expected_state) {
-        if got != want {
-            log::warn!("[oauth] callback nonce did not match the attempt in flight — ignoring");
-            let _ = stream
-                .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
-                .await;
-            let _ = stream.flush().await;
-            return;
+    // This started fail-open, because it rides inside `redirect_to` and whether
+    // GoTrue preserves a query string there was unproven. It is proven now: a real
+    // Google sign-in on 2026-09-15 logged `callback nonce matched` on BOTH legs of
+    // the replace flow, the second of which is the fragment bounce. So a missing
+    // nonce is no longer a possibility to tolerate; it is a callback that did not
+    // come from us.
+    if let Some(want) = expected_state {
+        match st.as_deref() {
+            Some(got) if got == want => log::info!("[oauth] callback nonce matched"),
+            Some(_) => {
+                log::warn!("[oauth] callback nonce did not match the attempt in flight — ignoring");
+                let _ = stream
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                    .await;
+                let _ = stream.flush().await;
+                return;
+            }
+            None => {
+                log::warn!("[oauth] callback carried no nonce — not ours, ignoring");
+                let _ = stream
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                    .await;
+                let _ = stream.flush().await;
+                return;
+            }
         }
-        log::info!("[oauth] callback nonce matched");
-    } else if expected_state.is_some() {
-        log::warn!(
-            "[oauth] callback carried no nonce — GoTrue did not preserve the redirect query; \
-             accepting (see generate_pkce)"
-        );
     }
     let parsed = match (code, error) {
         (Some(code), _) => Some(OAuthCallback::Code(code)),
@@ -687,8 +692,16 @@ impl CallbackPage {
             CallbackPage::Bounce => html_page(
                 "You can close this tab",
                 "Navisual has what it needs. Head back to the app to carry on.",
+                // location.pathname, not href: the fragment becomes the query. But the
+                // existing query has to survive that, because it carries the `st` nonce --
+                // rebuilding from pathname alone dropped it, and this is the ONE path that
+                // carries OAuth errors, so requiring the nonce would have refused every
+                // "identity already linked" conflict and broken the replace flow.
+                // Fragment params go last so they win any duplicate key; `st` appears only
+                // in the query, so there is nothing to collide with.
                 "<script>(function(){var h=location.hash?location.hash.slice(1):'';\
-                 if(h){location.replace(location.pathname+'?'+h);}})();</script>",
+                 if(!h)return;var q=location.search?location.search.slice(1)+'&'+h:h;\
+                 location.replace(location.pathname+'?'+q);})();</script>",
             ),
             CallbackPage::Expired => html_page(
                 "This sign-in expired",
@@ -1429,9 +1442,11 @@ mod tests {
         }
     }
 
-    /// Fail-open while the redirect-query question is unsettled.
+    /// Settled on 2026-09-15: a real sign-in logged `callback nonce matched` on
+    /// both legs, so GoTrue does preserve the redirect query and a nonce-less
+    /// callback is not ours.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_callback_with_no_nonce_is_still_accepted() {
+    async fn a_callback_with_no_nonce_is_refused() {
         let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = std_listener.local_addr().unwrap();
         std_listener.set_nonblocking(true).unwrap();
@@ -1440,11 +1455,28 @@ mod tests {
         tokio::spawn(accept_callbacks(listener, server.clone()));
 
         let mut pending = server.arm_with_state(Some("goodnonce".into())).unwrap();
-        let _ = http_get(addr, "/callback?code=stripped").await;
-        match pending.try_recv() {
-            Ok(OAuthCallback::Code(c)) => assert_eq!(c, "stripped"),
-            other => panic!("a nonce-less callback must not be dropped, got {other:?}"),
-        }
+        let body = http_get(addr, "/callback?code=stripped").await;
+        assert!(
+            body.starts_with("HTTP/1.1 400"),
+            "a nonce-less callback should be refused, got: {body}"
+        );
+        assert!(
+            pending.try_recv().is_err(),
+            "the sign-in must still be waiting"
+        );
+    }
+
+    /// The bounce is the one path that can lose the nonce, because it rebuilds the
+    /// URL from `location.pathname`. It must carry `location.search` across, or
+    /// requiring the nonce refuses every OAuth error -- which is exactly what the
+    /// bounce exists to deliver.
+    #[test]
+    fn the_bounce_carries_the_existing_query_across() {
+        let page = CallbackPage::Bounce.render();
+        assert!(
+            page.contains("location.search"),
+            "the bounce must preserve the query string holding `st`"
+        );
     }
 
     /// into a page the browser can actually show. Port 0 lets the OS pick, so it
