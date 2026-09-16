@@ -2417,6 +2417,14 @@ See the LICENSE file in the root of this repository for complete details.
 
     history = [];
     for (const t of resumed.turns) {
+      // A "Next" completion is stored as a machine-built `[User completed: "..."]`
+      // user turn -- the app's words, not the person's. Show it as the clean
+      // system note the live session uses, not as a user bubble with brackets.
+      if (t.content.startsWith('[User completed: "') && t.content.endsWith('"]')) {
+        const inner = t.content.slice('[User completed: "'.length, t.content.length - '"]'.length);
+        await addToHistory("system", `✓ Completed — ${inner}`);
+        continue;
+      }
       // The backend's roles are the model's, not the panel's: `assistant` is what
       // the panel calls `ai`, and anything unrecognised is shown as a system note
       // rather than dropped -- a turn the user can see is a turn they can judge.
@@ -5864,12 +5872,13 @@ See the LICENSE file in the root of this repository for complete details.
   /* Same surface as .target-picker so the two cannot drift visually; only the
      anchor differs. The target picker hangs off the app chip in the titlebar,
      this one off its button in the action row, so it opens upward from the
-     bottom and spans the panel width — task descriptions are sentences, not
-     window titles, and 320px would ellipsise most of them away. */
+     bottom. Its edges sit 8px in from the window -- the same inset as the target
+     picker -- which, anchored to .action-row (itself 5px in from the window:
+     main's 4px margin + 1px border), is 3px left/right here. */
   .session-picker {
     position: absolute;
-    left: 0;
-    right: 0;
+    left: 3px;
+    right: 3px;
     bottom: calc(100% + 6px);
     max-height: 62vh;
     overflow-y: auto;
