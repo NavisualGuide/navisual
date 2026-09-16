@@ -526,6 +526,17 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Target-window picker (item 1)
   type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; minimized: boolean; };
+  type StoredSession = {
+    id: string;
+    task_description: string;
+    summary_text: string | null;
+    turns: number;
+    last_active_at: string;
+  };
+  let sessionPickerOpen = $state(false);
+  let storedSessions = $state<StoredSession[]>([]);
+  let sessionPickerLoading = $state(false);
+
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   // "target" = pick what Navisual assists with; "dock" = pick what fills the
@@ -2338,6 +2349,90 @@ See the LICENSE file in the root of this repository for complete details.
     coldStartPrefill();
   }
 
+  // "2 hours ago". Coarse on purpose: the list answers "which one was I in?",
+  // and a precise timestamp is noise against a task description.
+  function whenAgo(iso: string): string {
+    const then = Date.parse(iso);
+    if (Number.isNaN(then)) return "";
+    const mins = Math.round((Date.now() - then) / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+    const days = Math.round(hours / 24);
+    if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+    return new Date(then).toLocaleDateString();
+  }
+
+  async function openSessionPicker() {
+    showQuickMenu = false;
+    sessionPickerOpen = true;
+    sessionPickerLoading = true;
+    try {
+      storedSessions = await invoke<StoredSession[]>("list_sessions");
+    } catch (_) {
+      storedSessions = [];
+    }
+    sessionPickerLoading = false;
+  }
+
+  // Reopening a session puts the panel where `newSession` puts it and then fills
+  // the conversation back in. Everything volatile is cleared the same way for the
+  // same reason: the steps, the located rect and the overlay all describe a screen
+  // that is no longer there. What comes back is the talk, the task and the plan.
+  async function resumeStoredSession(id: string) {
+    sessionPickerOpen = false;
+    cancelRequest();
+    planExpanded = false;
+    isOverlayCleared = false;
+    let resumed: {
+      session_id: string;
+      goal: string;
+      plan_outline: string[];
+      plan_completed_count: number;
+      state_summary: string;
+      turns: { role: string; content: string; timestamp: string }[];
+    };
+    try {
+      resumed = await invoke("resume_session", { sessionId: id });
+    } catch (e) {
+      await addToHistory("error", `That session could not be reopened: ${e}`);
+      return;
+    }
+
+    task = "";
+    steps = [];
+    stepIndex = 0;
+    currentInstruction = "";
+    streamStepsSeen = 0;
+    locateResult = null;
+    locateTrace = null;
+    staleResponse = false;
+    clearPrefill();
+
+    sessionId = resumed.session_id;
+    sessionGoal = resumed.goal;
+    sessionPlanOutline = resumed.plan_outline;
+    sessionPlanCompletedCount = resumed.plan_completed_count;
+
+    history = [];
+    for (const t of resumed.turns) {
+      // The backend's roles are the model's, not the panel's: `assistant` is what
+      // the panel calls `ai`, and anything unrecognised is shown as a system note
+      // rather than dropped -- a turn the user can see is a turn they can judge.
+      const role: HistoryRole =
+        t.role === "assistant" ? "ai"
+        : t.role === "user" ? "user"
+        : t.role === "correction" ? "correction"
+        : "system";
+      await addToHistory(role, t.content);
+    }
+    await addToHistory(
+      "system",
+      "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen \u2014 and guidance follows the app you click into next.",
+    );
+  }
+
   function applyResponse(res: GuideResponse, idx: number, token: number) {
     if (token !== requestToken) return;
     // D1: a no-step, no-question reply while steps were in flight = the AI saying
@@ -4109,6 +4204,11 @@ See the LICENSE file in the root of this repository for complete details.
       <button class="btn-action btn-new" onclick={newSession} title="Clear session and start fresh">
         ＋ New task
       </button>
+      <button class="btn-action btn-history" class:btn-history-open={sessionPickerOpen}
+        onclick={() => { if (sessionPickerOpen) sessionPickerOpen = false; else openSessionPicker(); }}
+        title="Recent tasks — reopen one to carry on">
+        🕓
+      </button>
       <button class="btn-action btn-mic" class:btn-mic-active={isRecording}
         onclick={toggleVoiceInput}
         disabled={!settingsForm.voice_input_enabled}
@@ -4152,6 +4252,37 @@ See the LICENSE file in the root of this repository for complete details.
   </main>
 
   <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden -->
+  <!-- Recent tasks (session-history-plan.md §3.2). Same overlay surface as the
+       target picker — proven at this app's widths, and it costs nothing when
+       closed, which a permanent sidebar would not in a 380px docked panel. It is
+       NOT in the ··· menu: rule 18, three actions have been clipped off that
+       already. Anchored to the bottom because that is where its button is. -->
+  {#if sessionPickerOpen}
+    <div class="target-picker-backdrop" role="presentation" onclick={() => { sessionPickerOpen = false; }}></div>
+    <div class="session-picker" role="listbox" aria-label="Recent tasks">
+      <div class="target-pick-head">Recent tasks</div>
+      {#if sessionPickerLoading}
+        <div class="session-pick-empty">Loading…</div>
+      {:else if storedSessions.length === 0}
+        <div class="session-pick-empty">No earlier tasks yet. They're saved here as you go.</div>
+      {:else}
+        {#each storedSessions as sess (sess.id)}
+          <button class="target-pick-item" class:target-pick-selected={sess.id === sessionId}
+            onclick={() => resumeStoredSession(sess.id)}>
+            <span class="target-pick-check">{sess.id === sessionId ? "✓" : ""}</span>
+            <span class="target-pick-name">{sess.task_description || "Untitled task"}</span>
+            <span class="target-pick-sub">
+              {whenAgo(sess.last_active_at)} · {sess.turns} turn{sess.turns === 1 ? "" : "s"}
+            </span>
+            {#if sess.summary_text}
+              <span class="session-pick-summary">{sess.summary_text}</span>
+            {/if}
+          </button>
+        {/each}
+      {/if}
+    </div>
+  {/if}
+
   {#if targetPickerOpen}
     <div class="target-picker-backdrop" role="presentation" onclick={() => { targetPickerOpen = false; targetPickerMode = "target"; }}></div>
     <div class="target-picker" role="listbox" aria-label={targetPickerMode === "dock" ? "Choose the app to fill the rest of the screen" : "Choose target app"}>
@@ -5733,6 +5864,55 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   /* Target-window picker (item 1) */
+  /* Same surface as .target-picker so the two cannot drift visually; only the
+     anchor differs. The target picker hangs off the app chip in the titlebar,
+     this one off its button in the action row, so it opens upward from the
+     bottom and spans the panel width — task descriptions are sentences, not
+     window titles, and 320px would ellipsise most of them away. */
+  .session-picker {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 52px;
+    max-height: 62vh;
+    overflow-y: auto;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 6px;
+    z-index: 999;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  }
+  .session-pick-empty {
+    padding: 10px 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  /* The model's running summary, as a third line. Two lines then ellipsis: it is
+     context, and a summary that pushes the next task off the list costs more than
+     it gives. */
+  .session-pick-summary {
+    grid-column: 2;
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.8;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .btn-history {
+    flex: 0 0 34px;
+    padding: 8px 0;
+    font-size: 13px;
+  }
+  .btn-history:hover { background: var(--surface-4); color: var(--text-primary); }
+  .btn-history-open {
+    background: var(--surface-4);
+    color: var(--text-primary);
+  }
+
   .target-picker-backdrop {
     position: fixed;
     inset: 0;
