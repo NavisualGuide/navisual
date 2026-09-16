@@ -17,6 +17,12 @@ const EVICTION_BATCH: usize = 6;
 /// first phrasing is the stale one.
 const MAX_PINNED_TURNS: usize = 5;
 
+/// How many finished sessions are kept on disk. Twenty is a starting number, not a
+/// derived one: it is about two weeks of the founder's own use, it fits a list the user
+/// can read without searching (§8 of the plan: "20 sessions do not need search"), and it
+/// is small enough that `list_sessions` parsing all of them stays free.
+pub const SESSION_HISTORY_KEEP: usize = 20;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSummary {
     pub summary_text: String,
@@ -261,17 +267,184 @@ impl SessionManager {
         }
     }
 
-    #[allow(dead_code)]
+    /// Read a stored session and make it the live one.
+    ///
+    /// **The in-flight step state is dropped on the way in.** A session is not a
+    /// document — it is a position in a task, on a machine whose screen has since
+    /// changed. `current_step_sequence` and `current_step_index` describe a screen that
+    /// no longer exists, and restoring them would have the app advance through steps
+    /// against windows that may not be open. The next request re-captures and re-plans.
+    /// What is kept is what gives the model context to carry on: the conversation, the
+    /// task, the plan outline and the state summary.
+    ///
+    /// The caller is responsible for the parts that live outside the session — the
+    /// stored target HWND and the export ring. See `resume_session` in `lib.rs`.
     pub fn load_session(&mut self, session_id: &str) -> Option<Session> {
         let file_path = self.session_dir.join(format!("{}.json", session_id));
-        if let Ok(content) = fs::read_to_string(file_path) {
-            if let Ok(session) = serde_json::from_str::<Session>(&content) {
-                self.current_session = Some(session.clone());
-                return Some(session);
+        let content = fs::read_to_string(file_path).ok()?;
+        let mut session = serde_json::from_str::<Session>(&content).ok()?;
+        session.current_step_sequence.clear();
+        session.current_step_index = 0;
+        // Resuming is the user saying "I am working on this now", so it moves to the top
+        // of the list and out of the prune's reach. Without this a session you reopened
+        // and then left for an hour could be retired while it was on screen, because
+        // only `add_turn` moves the stamp and reading one adds no turn.
+        session.last_active_at = Local::now().to_rfc3339();
+        self.current_session = Some(session.clone());
+        self.save_session(Some(&session));
+        Some(session)
+    }
+
+    /// How many session files exist, without parsing any of them.
+    fn count_sessions(&self) -> usize {
+        fs::read_dir(&self.session_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Every stored session, newest first, as the summaries a list needs.
+    ///
+    /// Ordered by `last_active_at` read from INSIDE each file rather than by the file's
+    /// mtime: a backup or sync client rewrites mtime, which would silently reorder
+    /// "recent" and — once `prune` uses the same order — retire the wrong ones. mtime is
+    /// only the fallback for a file whose stamp will not parse.
+    pub fn list_sessions(&self) -> Vec<SessionSummary> {
+        let mut out: Vec<SessionSummary> = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.session_dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            // A half-written or hand-edited file is skipped, not fatal: one bad file
+            // must not cost the user the whole list.
+            let Ok(session) = serde_json::from_str::<Session>(&text) else {
+                continue;
+            };
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let sort_key = chrono::DateTime::parse_from_rfc3339(&session.last_active_at)
+                .map(|t| t.timestamp())
+                .unwrap_or(mtime);
+            out.push(SessionSummary {
+                sort_key,
+                id: session.id.to_string(),
+                task_description: session.task_description.clone(),
+                summary_text: session
+                    .current_state_summary
+                    .as_ref()
+                    .map(|s| s.summary_text.clone()),
+                turns: session.conversation.len(),
+                last_active_at: session.last_active_at.clone(),
+            });
+        }
+        out.sort_by(|a, b| b.sort_key.cmp(&a.sort_key).then_with(|| b.id.cmp(&a.id)));
+        out
+    }
+
+    /// Keep the `keep` most recent sessions; retire the rest.
+    ///
+    /// **The first run archives instead of deleting.** Going from an unbounded store to a
+    /// bounded one destroys whatever was already there, and export does not exist yet, so
+    /// there would be no way to get any of it back. Surplus moves to `archive-<date>/`
+    /// once, guarded by a marker file; every later prune deletes normally. That way the
+    /// irreversible step is taken by a person emptying that folder, not by an app update.
+    ///
+    /// Returns (deleted, archived).
+    pub fn prune(&self, keep: usize) -> (usize, usize) {
+        // Cheap gate first. This is called after every save, and the answer is almost
+        // always "nothing to do" — counting directory entries costs one syscall walk,
+        // where `list_sessions` reads and parses every file, on the guidance hot path
+        // while the router lock is held.
+        if self.count_sessions() <= keep {
+            return (0, 0);
+        }
+        let all = self.list_sessions();
+        if all.len() <= keep {
+            return (0, 0);
+        }
+        // Never retire the live session. Prune runs on the same timeline as the thing
+        // writing these files, and deleting the one in use is a self-inflicted bug.
+        let active = self.current_session.as_ref().map(|s| s.id.to_string());
+
+        let marker = self.session_dir.join(".pruned");
+        let archive_dir = (!marker.exists()).then(|| {
+            self.session_dir
+                .join(format!("archive-{}", Local::now().format("%Y-%m-%d")))
+        });
+        if let Some(dir) = &archive_dir {
+            if let Err(e) = fs::create_dir_all(dir) {
+                // Cannot archive => do not delete. Losing the sessions is the worse
+                // outcome; carrying too many for one more launch is the better one.
+                log::warn!("[sessions] first prune skipped, cannot create {dir:?}: {e}");
+                return (0, 0);
             }
         }
-        None
+
+        let (mut deleted, mut archived) = (0usize, 0usize);
+        for s in all.iter().skip(keep) {
+            if active.as_deref() == Some(s.id.as_str()) {
+                continue;
+            }
+            let path = self.session_dir.join(format!("{}.json", s.id));
+            match &archive_dir {
+                Some(dir) => match fs::rename(&path, dir.join(format!("{}.json", s.id))) {
+                    Ok(()) => archived += 1,
+                    Err(e) => log::warn!("[sessions] could not archive {path:?}: {e}"),
+                },
+                None => match fs::remove_file(&path) {
+                    Ok(()) => deleted += 1,
+                    Err(e) => log::warn!("[sessions] could not remove {path:?}: {e}"),
+                },
+            }
+        }
+        if let Some(dir) = &archive_dir {
+            let _ = fs::write(&marker, "sessions pruned at least once\n");
+            log::info!(
+                "[sessions] first prune: {} of {} moved to {} rather than deleted",
+                archived,
+                all.len(),
+                dir.display()
+            );
+        } else if deleted > 0 {
+            log::info!(
+                "[sessions] pruned {deleted} of {}, keeping the most recent {keep}",
+                all.len()
+            );
+        }
+        (deleted, archived)
     }
+}
+
+/// One row of the history list. Deliberately not the whole `Session`: the list renders
+/// twenty of these and never needs the conversation bodies.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub task_description: String,
+    /// The model's own running summary — the obvious second line for a row.
+    pub summary_text: Option<String>,
+    pub turns: usize,
+    pub last_active_at: String,
+    /// Epoch seconds parsed from `last_active_at`, or mtime if that failed. Internal:
+    /// the UI sorts by nothing, it renders the order it is given.
+    #[serde(skip)]
+    sort_key: i64,
 }
 
 #[cfg(test)]
@@ -410,5 +583,176 @@ mod tests {
         let back: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(back.conversation[0].content, "step 1\nstep 2");
         assert_eq!(back.conversation[0].screenshot_hash.as_deref(), Some("..."));
+    }
+
+    /// A `SessionManager` over a fresh temp dir, plus that dir's path.
+    fn temp_manager(tag: &str) -> (SessionManager, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "navisual-session-test-{}-{}",
+            tag,
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        (SessionManager::new(dir.clone()), dir)
+    }
+
+    /// Write a session whose `last_active_at` is `minutes_ago`, and whose file mtime is
+    /// therefore NOT in the same order (every file is written now, newest-mtime-last).
+    fn write_session(mgr: &SessionManager, task: &str, minutes_ago: i64) -> Uuid {
+        let mut session = Session::new(task.to_string());
+        session.last_active_at = (Local::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339();
+        mgr.save_session(Some(&session));
+        session.id
+    }
+
+    #[test]
+    fn list_sessions_orders_by_stamp_not_mtime() {
+        let (mgr, dir) = temp_manager("order");
+        // Written oldest-stamp-first, so mtime order is the REVERSE of the right answer.
+        write_session(&mgr, "oldest", 300);
+        write_session(&mgr, "middle", 200);
+        write_session(&mgr, "newest", 100);
+
+        let listed = mgr.list_sessions();
+        let tasks: Vec<&str> = listed.iter().map(|s| s.task_description.as_str()).collect();
+        assert_eq!(tasks, vec!["newest", "middle", "oldest"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_sessions_skips_unparseable_files_without_losing_the_rest() {
+        let (mgr, dir) = temp_manager("garbage");
+        write_session(&mgr, "good", 10);
+        fs::write(dir.join("not-a-session.json"), "{ half-written").unwrap();
+
+        let listed = mgr.list_sessions();
+        assert_eq!(listed.len(), 1, "one bad file must not cost the whole list");
+        assert_eq!(listed[0].task_description, "good");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn first_prune_archives_and_later_prunes_delete() {
+        let (mgr, dir) = temp_manager("archive");
+        for i in 0..5 {
+            write_session(&mgr, &format!("task {i}"), 500 - i);
+        }
+
+        // First run: nothing is destroyed, the surplus is moved.
+        let (deleted, archived) = mgr.prune(2);
+        assert_eq!((deleted, archived), (0, 3));
+        assert_eq!(mgr.list_sessions().len(), 2);
+        let archive: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(archive.len(), 1, "exactly one archive dir");
+        assert_eq!(fs::read_dir(archive[0].path()).unwrap().count(), 3);
+
+        // Second run, now over the limit again: the marker means these really go.
+        for i in 0..3 {
+            write_session(&mgr, &format!("later {i}"), 100 - i);
+        }
+        let (deleted, archived) = mgr.prune(2);
+        assert_eq!((deleted, archived), (3, 0));
+        assert_eq!(mgr.list_sessions().len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_never_retires_the_active_session() {
+        let (mut mgr, dir) = temp_manager("active");
+        // The active session is the OLDEST, so ordering alone would retire it first.
+        let mut active = Session::new("the live one".to_string());
+        active.last_active_at = (Local::now() - chrono::Duration::minutes(900)).to_rfc3339();
+        mgr.save_session(Some(&active));
+        let active_id = active.id;
+        mgr.current_session = Some(active);
+        for i in 0..4 {
+            write_session(&mgr, &format!("task {i}"), 100 - i);
+        }
+        fs::write(dir.join(".pruned"), "already").unwrap();
+
+        mgr.prune(2);
+        let ids: Vec<String> = mgr.list_sessions().into_iter().map(|s| s.id).collect();
+        assert!(
+            ids.contains(&active_id.to_string()),
+            "the session being written to must survive its own prune"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn loading_a_session_keeps_the_context_and_drops_the_screen_position() {
+        let (mut mgr, dir) = temp_manager("load");
+        let mut session = Session::new("rename a layer".to_string());
+        session.add_turn("user", "rename a layer".to_string(), None);
+        session.add_turn("assistant", "Click the Layers tab".to_string(), None);
+        session.set_plan_outline(vec!["open Layers".to_string(), "rename".to_string()]);
+        session.set_plan_completed_count(1);
+        session.current_state_summary = Some(StateSummary {
+            summary_text: "Layers panel open".to_string(),
+            turn_index: 2,
+        });
+        session.current_step_sequence =
+            vec![serde_json::from_str::<GuidanceStep>(r#"{"instruction":"Click Layers"}"#).unwrap()];
+        session.current_step_index = 1;
+        let id = session.id;
+        mgr.save_session(Some(&session));
+        mgr.current_session = None;
+
+        let loaded = mgr.load_session(&id.to_string()).expect("stored session");
+
+        // Kept: what lets the model carry on.
+        assert_eq!(loaded.conversation.len(), 2);
+        assert_eq!(loaded.task_description, "rename a layer");
+        assert_eq!(loaded.plan_outline.len(), 2);
+        assert_eq!(loaded.plan_completed_count, 1);
+        assert_eq!(
+            loaded.current_state_summary.as_ref().map(|s| s.summary_text.as_str()),
+            Some("Layers panel open")
+        );
+        // Dropped: what describes a screen that no longer exists.
+        assert!(loaded.current_step_sequence.is_empty());
+        assert_eq!(loaded.current_step_index, 0);
+        // And it is the live session now, with the drop persisted rather than in-memory
+        // only — a reload must not resurrect the stale position.
+        assert_eq!(mgr.current_session.as_ref().map(|s| s.id), Some(id));
+        let again = mgr.load_session(&id.to_string()).expect("still there");
+        assert!(again.current_step_sequence.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resuming_moves_a_session_out_of_the_prune_s_reach() {
+        let (mut mgr, dir) = temp_manager("resume-order");
+        let stale = write_session(&mgr, "the old one", 5000);
+        for i in 0..3 {
+            write_session(&mgr, &format!("task {i}"), 100 - i);
+        }
+        assert_eq!(mgr.list_sessions().last().unwrap().id, stale.to_string());
+
+        mgr.load_session(&stale.to_string()).expect("stored session");
+
+        assert_eq!(
+            mgr.list_sessions().first().unwrap().id,
+            stale.to_string(),
+            "reopening a session is the user saying they are working on it now"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_under_the_limit_does_nothing() {
+        let (mgr, dir) = temp_manager("noop");
+        write_session(&mgr, "only", 10);
+        assert_eq!(mgr.prune(20), (0, 0));
+        assert!(
+            !dir.join(".pruned").exists(),
+            "a no-op prune must not burn the one-time archive grace"
+        );
+        assert_eq!(mgr.list_sessions().len(), 1);
+        let _ = fs::remove_dir_all(dir);
     }
 }
