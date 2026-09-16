@@ -4188,6 +4188,30 @@ See the LICENSE file in the root of this repository for complete details.
 
     <!-- Action row: Next · Autopilot · New Task · 🎤 · ··· -->
     <div class="action-row">
+      {#if sessionPickerOpen}
+        <div class="session-picker" role="listbox" aria-label="Recent tasks">
+          <div class="target-pick-head">Recent tasks</div>
+          {#if sessionPickerLoading}
+            <div class="session-pick-empty">Loading…</div>
+          {:else if storedSessions.length === 0}
+            <div class="session-pick-empty">No earlier tasks yet. They're saved here as you go.</div>
+          {:else}
+            {#each storedSessions as sess (sess.id)}
+              <button class="target-pick-item" class:target-pick-selected={sess.id === sessionId}
+                onclick={() => resumeStoredSession(sess.id)}>
+                <span class="target-pick-check">{sess.id === sessionId ? "✓" : ""}</span>
+                <span class="target-pick-name">{sess.task_description || "Untitled task"}</span>
+                <span class="target-pick-sub">
+                  {whenAgo(sess.last_active_at)} · {sess.turns} turn{sess.turns === 1 ? "" : "s"}
+                </span>
+                {#if sess.summary_text}
+                  <span class="session-pick-summary">{sess.summary_text}</span>
+                {/if}
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {/if}
       <button class="btn-action btn-next" onclick={() => nextStep()} disabled={actionDisabled} title="Next step (Ctrl+`)">
         → Next
       </button>
@@ -4252,36 +4276,9 @@ See the LICENSE file in the root of this repository for complete details.
   </main>
 
   <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden -->
-  <!-- Recent tasks (session-history-plan.md §3.2). Same overlay surface as the
-       target picker — proven at this app's widths, and it costs nothing when
-       closed, which a permanent sidebar would not in a 380px docked panel. It is
-       NOT in the ··· menu: rule 18, three actions have been clipped off that
-       already. Anchored to the bottom because that is where its button is. -->
-  {#if sessionPickerOpen}
-    <div class="target-picker-backdrop" role="presentation" onclick={() => { sessionPickerOpen = false; }}></div>
-    <div class="session-picker" role="listbox" aria-label="Recent tasks">
-      <div class="target-pick-head">Recent tasks</div>
-      {#if sessionPickerLoading}
-        <div class="session-pick-empty">Loading…</div>
-      {:else if storedSessions.length === 0}
-        <div class="session-pick-empty">No earlier tasks yet. They're saved here as you go.</div>
-      {:else}
-        {#each storedSessions as sess (sess.id)}
-          <button class="target-pick-item" class:target-pick-selected={sess.id === sessionId}
-            onclick={() => resumeStoredSession(sess.id)}>
-            <span class="target-pick-check">{sess.id === sessionId ? "✓" : ""}</span>
-            <span class="target-pick-name">{sess.task_description || "Untitled task"}</span>
-            <span class="target-pick-sub">
-              {whenAgo(sess.last_active_at)} · {sess.turns} turn{sess.turns === 1 ? "" : "s"}
-            </span>
-            {#if sess.summary_text}
-              <span class="session-pick-summary">{sess.summary_text}</span>
-            {/if}
-          </button>
-        {/each}
-      {/if}
-    </div>
-  {/if}
+  <!-- Recent tasks (session-history-plan.md §3.2): the list itself lives inside
+       .action-row, anchored just above its button; only the click-away backdrop
+       stays here, fixed over the whole window. -->
 
   {#if targetPickerOpen}
     <div class="target-picker-backdrop" role="presentation" onclick={() => { targetPickerOpen = false; targetPickerMode = "target"; }}></div>
@@ -5870,10 +5867,10 @@ See the LICENSE file in the root of this repository for complete details.
      bottom and spans the panel width — task descriptions are sentences, not
      window titles, and 320px would ellipsise most of them away. */
   .session-picker {
-    position: fixed;
-    left: 8px;
-    right: 8px;
-    bottom: 52px;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 6px);
     max-height: 62vh;
     overflow-y: auto;
     background: var(--surface-2);
@@ -6897,6 +6894,10 @@ See the LICENSE file in the root of this repository for complete details.
     gap: 6px;
     padding: 0 12px 10px;
     flex-shrink: 0;
+    /* The recent-tasks list anchors to this, opening upward just above the
+       buttons -- so it stays clear of its button regardless of how tall the
+       footer below happens to be (its shortcut legend wraps in a narrow panel). */
+    position: relative;
   }
 
   .btn-action {
