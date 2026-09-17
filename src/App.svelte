@@ -2479,10 +2479,16 @@ See the LICENSE file in the root of this repository for complete details.
     sessionImportBusy = true;
     try {
       const out = await invoke<{
-        imported: { task: string; replaced: boolean; already: boolean; frames: number; at_risk: boolean }[];
+        imported: { task: string; id: string; replaced: boolean; already: boolean; frames: number; at_risk: boolean }[];
         skipped: number;
       } | null>("import_session_html");
       if (!out) return;
+      // Replacing the session that is open right now leaves the panel showing the old
+      // content, and the next turn would save that stale in-memory state back over the
+      // import. Reset the panel -- the imported state is in the list, one click away.
+      if (out.imported.some((i) => i.replaced && i.id === sessionId)) {
+        await newSession();
+      }
       if (out.imported.length === 0) {
         await addToHistory(
           "system",

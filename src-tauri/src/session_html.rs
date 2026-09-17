@@ -108,6 +108,13 @@ pub fn session_to_html(session: &Session, frames_dir: &Path, thickness: u32) -> 
     let mut pending: Option<String> = None;
 
     for turn in &session.conversation {
+        // A frame belongs to the user turn just before this one. Normally its assistant
+        // follows and flushes it into place below; two user turns back to back (a request
+        // that failed after the turn was written left no assistant turn) would otherwise
+        // have the second turn's picture overwrite the first one's.
+        if pending.is_some() && turn.role != "assistant" {
+            body.push_str(&pending.take().unwrap());
+        }
         let figure = |name: &str, caption: &str| -> String {
             match frame_data_uri(&frames_dir.join(name), turn.mark.as_ref(), thickness) {
                 // `data-frame` carries the stored name so an import can put each picture back
@@ -380,6 +387,19 @@ pub fn import_artifact(
         return Ok(None);
     };
 
+    // The id travels inside the file and then into path joins. A hand-edited artifact
+    // could carry anything there; an id that is not uuid-shaped is not trusted, and the
+    // session simply arrives as a new one.
+    if session.id.to_string().len() != 36
+        || !session
+            .id
+            .to_string()
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        session.id = uuid::Uuid::new_v4();
+    }
+
     let original_id = session.id.to_string();
     let taken = manager.session_exists(&original_id);
     let replaced = taken;
@@ -447,10 +467,13 @@ pub fn import_artifact(
     // failure is not worth interrupting guidance for. For an import it is the whole point, so
     // the file is checked rather than assumed: reporting "imported" for a session that is not
     // on disk is the one answer that helps nobody.
-    anyhow::ensure!(
-        manager.session_exists(&id),
-        "the session could not be written to disk"
-    );
+    if !manager.session_exists(&id) {
+        // The pictures were extracted before this write, and without the session they
+        // point at nothing. Take them back down, then fail loudly rather than report an
+        // import that is not on disk.
+        let _ = std::fs::remove_dir_all(manager.frames_dir(&id));
+        anyhow::bail!("the session could not be written to disk");
+    }
     let at_risk = manager
         .list_sessions()
         .iter()
