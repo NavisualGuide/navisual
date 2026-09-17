@@ -3,7 +3,7 @@ use crate::session_export::PointerState;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// How many turns are dropped at once when the window overflows. Larger = the retained slice
@@ -387,7 +387,29 @@ impl SessionManager {
     /// the JSON layout stays flat (every reader and writer here assumes it) and because this
     /// gives `prune` exactly one extra thing to move or delete when a session is retired.
     pub fn frames_dir(&self, session_id: &str) -> PathBuf {
-        self.session_dir.join("frames").join(session_id)
+        Self::frames_dir_in(&self.session_dir, session_id)
+    }
+
+    /// The same directory, worked out from a sessions directory alone — so a caller that
+    /// only has the path (the HTML export, which runs after the router lock is released)
+    /// does not re-derive the layout and cannot get it subtly wrong.
+    pub fn frames_dir_in(session_dir: &Path, session_id: &str) -> PathBuf {
+        session_dir.join("frames").join(session_id)
+    }
+
+    /// Every stored session, newest first and loaded in full — for the HTML export, which
+    /// needs the conversations rather than the list's summaries.
+    ///
+    /// Read-only like `frame_mark`: exporting a session must not make it the live one.
+    pub fn all_sessions(&self) -> Vec<Session> {
+        self.list_sessions()
+            .into_iter()
+            .filter_map(|summary| {
+                let path = self.session_dir.join(format!("{}.json", summary.id));
+                let text = fs::read_to_string(path).ok()?;
+                serde_json::from_str::<Session>(&text).ok()
+            })
+            .collect()
     }
 
     /// The mark recorded with a stored frame, without making that session current.

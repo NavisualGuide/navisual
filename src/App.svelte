@@ -555,6 +555,7 @@ See the LICENSE file in the root of this repository for complete details.
   let sessionPickerOpen = $state(false);
   let storedSessions = $state<StoredSession[]>([]);
   let sessionPickerLoading = $state(false);
+  let sessionExportBusy = $state(false);
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   // "target" = pick what Navisual assists with; "dock" = pick what fills the
@@ -2425,6 +2426,27 @@ See the LICENSE file in the root of this repository for complete details.
     const days = Math.round(hours / 24);
     if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
     return new Date(then).toLocaleDateString();
+  }
+
+  // Every stored session as one self-contained HTML file each, into a folder the user
+  // picks — that choice is the consent, the same shape as the live session export. Nothing
+  // is written until it is made, and a cancelled dialog is a normal outcome, not an error.
+  async function exportStoredSessions() {
+    sessionExportBusy = true;
+    try {
+      const out = await invoke<{ folder: string; count: number } | null>("export_sessions_html");
+      if (out) {
+        sessionPickerOpen = false;
+        await addToHistory(
+          "system",
+          `Exported ${out.count} session${out.count === 1 ? "" : "s"} to ${out.folder}`,
+        );
+      }
+    } catch (e) {
+      await addToHistory("error", `Could not export the sessions: ${e}`);
+    } finally {
+      sessionExportBusy = false;
+    }
   }
 
   async function openSessionPicker() {
@@ -4310,6 +4332,12 @@ See the LICENSE file in the root of this repository for complete details.
                 {/if}
               </button>
             {/each}
+            <!-- One file per session, readable in any browser with no Navisual — see the
+                 plan's §6. It lives here rather than in the ··· menu because this is where
+                 the sessions already are, and rule 18 says the menu loses actions. -->
+            <button class="session-pick-export" onclick={exportStoredSessions} disabled={sessionExportBusy}>
+              {sessionExportBusy ? "Exporting…" : `Export all ${storedSessions.length} as HTML…`}
+            </button>
           {/if}
         </div>
       {/if}
@@ -5994,6 +6022,23 @@ See the LICENSE file in the root of this repository for complete details.
     z-index: 999;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   }
+  .session-pick-export {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    padding: 9px 8px;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 var(--r-md) var(--r-md);
+    background: none;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 12px;
+    text-align: center;
+    cursor: pointer;
+  }
+  .session-pick-export:hover:not(:disabled) { background: var(--surface-4); color: var(--text-primary); }
+  .session-pick-export:disabled { opacity: 0.6; cursor: default; }
   .session-pick-empty {
     padding: 10px 8px;
     font-size: 12px;

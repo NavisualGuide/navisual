@@ -14,6 +14,7 @@ mod overlay;
 mod packs;
 mod prompt_log;
 mod server;
+mod session_html;
 mod session_export;
 mod track;
 mod tts;
@@ -3244,9 +3245,12 @@ fn make_chat_thumbnail(jpeg_bytes: &[u8]) -> Option<String> {
 /// stays that way in the record and can be re-read, re-drawn or ignored later.
 /// Decode a stored frame, draw the mark it was recorded with, and hand back the pixels.
 ///
+/// `pub(crate)` because §6's HTML export embeds the same picture: one compositor for the
+/// panel, the artifact and the exporter, or the three drift.
+///
 /// Split from the command so the drawing can be tested without an `AppState` -- the half
 /// of §4.3 that no unit test could otherwise reach, since it only happens in the panel.
-fn compose_stored_frame(
+pub(crate) fn compose_stored_frame(
     png: &[u8],
     mark: Option<&crate::ai::session::StoredMark>,
     thickness: u32,
@@ -3321,6 +3325,54 @@ async fn session_frame(
         enc.encode_image(&out).map_err(|e| e.to_string())?;
     }
     Ok(Some(capture::to_base64(&buf)))
+}
+
+/// Every stored session, one self-contained HTML file each, plus an index — plan §6.
+///
+/// Deliberately not `export_session`: that one writes an annotated folder from the live
+/// frame ring for the session in progress, while this writes stored sessions read from disk,
+/// including ones from weeks ago whose pictures exist only if the user asked for them. The
+/// folder dialog is the consent — one choice per export, rather than a path configured once
+/// and forgotten.
+///
+/// `None` means the dialog was cancelled, which is the normal path rather than an error.
+#[tauri::command]
+async fn export_sessions_html(
+    state: State<'_, AppState>,
+) -> Result<Option<SessionExportSummary>, String> {
+    let start = Some(session_export::default_destination().join("sessions"));
+    let Some(dest) = session_export::pick_folder(start) else {
+        return Ok(None);
+    };
+
+    // Collected under the lock, written outside it: a few megabytes of HTML should not hold
+    // up the guidance loop.
+    let (sessions, session_dir, thickness) = {
+        let router = state.ai_router.lock().await;
+        (
+            router.session_manager.all_sessions(),
+            router.session_manager.session_dir.clone(),
+            router.config.overlay_thickness,
+        )
+    };
+
+    let count = session_html::write_all(&session_dir, &sessions, &dest, thickness)
+        .map_err(|e| format!("{e:#}"))?;
+    log::info!(
+        "[sessions] exported {count} session(s) to {}",
+        dest.display()
+    );
+    Ok(Some(SessionExportSummary {
+        folder: dest.display().to_string(),
+        count,
+    }))
+}
+
+/// What an HTML session export wrote, for the panel to report.
+#[derive(serde::Serialize)]
+struct SessionExportSummary {
+    folder: String,
+    count: usize,
 }
 
 /// Return the full-resolution chat screenshot as base64 (for the lightbox).
@@ -7850,6 +7902,7 @@ pub fn run() {
             list_tts_voices,
             get_chat_full_screenshot,
             session_frame,
+            export_sessions_html,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
