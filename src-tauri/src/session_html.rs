@@ -348,8 +348,10 @@ fn embedded_frames(html: &str) -> Vec<(String, String, Vec<u8>)> {
 pub struct ImportOutcome {
     pub task: String,
     pub id: String,
-    /// Imported under a fresh id because that one was already taken here.
-    pub copied: bool,
+    /// The same id was here with different content, and the file won.
+    pub replaced: bool,
+    /// The file is already here, identical — the no-op a re-import is supposed to be.
+    pub already: bool,
     /// How many pictures came back out of the file.
     pub frames: usize,
     /// Older than the sessions the app keeps, so the next prune retires it unless it is
@@ -378,11 +380,33 @@ pub fn import_artifact(
         return Ok(None);
     };
 
-    let copied = manager.session_exists(&session.id.to_string());
-    if copied {
-        session.id = uuid::Uuid::new_v4();
+    let original_id = session.id.to_string();
+    let taken = manager.session_exists(&original_id);
+    let replaced = taken;
+    if taken {
+        // Same id, same content: the same file being imported again. A no-op, said gently
+        // rather than done -- the one case where not writing is the whole point.
+        if let Some(stored) = manager.session_by_id(&original_id) {
+            if serde_json::to_value(&stored).ok() == serde_json::to_value(&session).ok() {
+                log::info!("[sessions] import of {original_id} skipped: already here, identical");
+                return Ok(Some(ImportOutcome {
+                    task: session.task_description,
+                    id: original_id,
+                    replaced: false,
+                    already: true,
+                    frames: 0,
+                    at_risk: false,
+                }));
+            }
+        }
+        // Same id, different content: the file the user chose wins. Replacing is the point
+        // of re-importing (2026-09-17 decision) -- the export they picked is the state they
+        // want, even when it is an older one. The old frames go with the old content: a
+        // frame the new turns do not reference would be an orphan with nothing pointing at
+        // it, the disk-creep shape this store has already paid for once.
+        let _ = std::fs::remove_dir_all(manager.frames_dir(&original_id));
     }
-    let id = session.id.to_string();
+    let id = original_id.clone();
 
     let mut frames = 0usize;
     for (name, ext, bytes) in embedded_frames(html) {
@@ -435,14 +459,15 @@ pub fn import_artifact(
     log::info!(
         "[sessions] imported \"{}\" ({}{} frame(s){})",
         session.task_description,
-        if copied { "copy, " } else { "" },
+        if replaced { "replaced, " } else { "" },
         frames,
         if at_risk { ", older than the kept window" } else { "" }
     );
     Ok(Some(ImportOutcome {
         task: session.task_description,
         id,
-        copied,
+        replaced,
+        already: false,
         frames,
         at_risk,
     }))
@@ -618,7 +643,7 @@ mod tests {
         let outcome = import_artifact(&manager, &html)
             .expect("imports")
             .expect("it is a session file");
-        assert!(!outcome.copied, "a free id keeps its identity");
+        assert!(!outcome.replaced, "a free id keeps its identity");
         assert_eq!(outcome.frames, 0);
 
         let back = manager
@@ -635,20 +660,51 @@ mod tests {
     }
 
     #[test]
-    fn importing_the_same_file_twice_copies_rather_than_overwrites() {
-        let (manager, dir) = store("no-overwrite");
+    fn importing_the_same_file_twice_is_a_no_op_the_second_time() {
+        let (manager, dir) = store("no-duplicate");
         let original = Session::new("A task".to_string());
         let html = session_to_html(&original, Path::new("nowhere"), 4);
 
         let first = import_artifact(&manager, &html).unwrap().unwrap();
-        assert!(!first.copied);
+        assert!(!first.replaced && !first.already);
         let second = import_artifact(&manager, &html).unwrap().unwrap();
-        assert!(second.copied, "the id was taken, so this one is a copy");
-        assert_ne!(first.id, second.id);
+        assert!(
+            second.already,
+            "the same file again is 'already here', not a second session"
+        );
         assert_eq!(
             manager.all_sessions().len(),
-            2,
-            "the session that was already here is still here"
+            1,
+            "pressing Import twice must not fill the list with photocopies"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The user's call on 2026-09-17: the same id with different content is replaced by
+    /// the file, because the file is the state they chose. The test pins the price of that
+    /// too -- a turn made after the export is gone afterwards, which is why the report says
+    /// "replaced".
+    #[test]
+    fn an_export_that_fell_behind_replaces_what_is_here() {
+        let (manager, dir) = store("diverged-replace");
+        let mut original = Session::new("A task".to_string());
+        original.add_turn_pinned("user", "help".to_string(), None, false);
+        let html = session_to_html(&original, Path::new("nowhere"), 4);
+        manager.save_session(Some(&original));
+        // The session continues after the export.
+        let mut current = original.clone();
+        current.add_turn("assistant", "Click Save".to_string(), None);
+        manager.save_session(Some(&current));
+
+        let outcome = import_artifact(&manager, &html).unwrap().unwrap();
+        assert!(outcome.replaced, "different content under the same id is replaced");
+        assert!(!outcome.already);
+        assert_eq!(manager.all_sessions().len(), 1, "still one session, one id");
+        let back = manager.session_by_id(&original.id.to_string()).expect("stored");
+        assert_eq!(
+            back.conversation.len(),
+            original.conversation.len(),
+            "the export's content won; the turn made after it is gone"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -675,10 +731,13 @@ mod tests {
         manager.save_frame(&original.id.to_string(), 0, &png).unwrap();
 
         let html = session_to_html(&original, &manager.frames_dir(&original.id.to_string()), 4);
-        let outcome = import_artifact(&manager, &html).unwrap().unwrap();
+        // Into a FRESH store: importing back where the file came from is (correctly) the
+        // identical no-op, and would never exercise the picture extraction.
+        let (imported_into, dir2) = store("frame-back-target");
+        let outcome = import_artifact(&imported_into, &html).unwrap().unwrap();
         assert_eq!(outcome.frames, 1, "the picture came back out of the file");
 
-        let back = manager
+        let back = imported_into
             .all_sessions()
             .into_iter()
             .find(|s| s.id.to_string() == outcome.id)
@@ -697,6 +756,7 @@ mod tests {
             "the pointer is already in those pixels; a mark would draw a second one"
         );
         let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
     }
 
     #[test]

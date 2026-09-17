@@ -779,6 +779,14 @@ See the LICENSE file in the root of this repository for complete details.
     if (sel && !sel.isCollapsed && sel.toString().trim()) return;
     const t = e.target as HTMLElement | null;
     if (t && t.closest("textarea, input, [contenteditable]")) return;
+    // The picker overlays sit above the panel's own surface; its menu opened under them, at
+    // the click point, listing actions that make no sense for a list row. Suppressed rather
+    // than given a menu of its own: every action a row needs is already on it (open, tick to
+    // export) or at the top of the list (live report 2026-09-17).
+    if (sessionPickerOpen || targetPickerOpen) {
+        e.preventDefault();
+        return;
+    }
     e.preventDefault();
     // Everywhere the browser menu was suppressed, ours takes its place. The
     // escape hatches above are untouched and still win: a live selection or a
@@ -2471,7 +2479,7 @@ See the LICENSE file in the root of this repository for complete details.
     sessionImportBusy = true;
     try {
       const out = await invoke<{
-        imported: { task: string; copied: boolean; frames: number; at_risk: boolean }[];
+        imported: { task: string; replaced: boolean; already: boolean; frames: number; at_risk: boolean }[];
         skipped: number;
       } | null>("import_session_html");
       if (!out) return;
@@ -2484,21 +2492,27 @@ See the LICENSE file in the root of this repository for complete details.
         );
         return;
       }
-      const detail = out.imported
-        .map((i) => {
-          const notes = [
-            i.copied ? "saved as a copy" : "",
-            i.frames ? `${i.frames} picture${i.frames === 1 ? "" : "s"}` : "",
-            i.at_risk ? "older than the ones kept, so open it to keep it" : "",
-          ].filter(Boolean);
-          return `\u201c${i.task}\u201d${notes.length ? ` (${notes.join(", ")})` : ""}`;
-        })
-        .join("\n");
-      await addToHistory(
-        "system",
-        `Imported ${out.imported.length} session${out.imported.length === 1 ? "" : "s"}:\n${detail}` +
-          (out.skipped ? `\n${out.skipped} file(s) skipped -- not sessions.` : ""),
-      );
+      const added = out.imported.filter((i) => !i.already);
+      const duplicates = out.imported.filter((i) => i.already);
+      const lines: string[] = [];
+      if (added.length) {
+        const detail = added
+          .map((i) => {
+            const notes = [
+              i.replaced
+                ? "replaced"
+                : "", 
+              i.frames ? `${i.frames} pics` : "",
+              i.at_risk ? "open to keep" : "",
+            ].filter(Boolean);
+            return `\u201c${i.task}\u201d${notes.length ? ` (${notes.join(", ")})` : ""}`;
+          })
+          .join(" · ");
+        lines.push(`Imported ${added.length}: ${detail}`);
+      }
+      if (duplicates.length) lines.push(`${duplicates.length} already here -- skipped.`);
+      if (out.skipped) lines.push(`${out.skipped} not sessions -- skipped.`);
+      await addToHistory("system", lines.join("\n"));
       await openSessionPicker();
     } catch (e) {
       await addToHistory("error", `Could not import: ${e}`);
@@ -4372,6 +4386,9 @@ See the LICENSE file in the root of this repository for complete details.
       {#if sessionPickerOpen}
         <div class="session-picker" role="listbox" aria-label="Recent tasks">
           <div class="target-pick-head">Recent tasks</div>
+          <!-- The list is the whole store, and the store is bounded: saying so here is the
+               difference between a limit and a surprise when an old one disappears. -->
+          <p class="session-pick-hint">Only the 20 most recent are saved — export a session to keep it past that.</p>
           <!-- Export and import live at the TOP, where they can be found without scrolling
                past twenty rows -- the plan's own §6 actions, and rule 18's lesson about
                controls that get buried. -->
@@ -4486,6 +4503,12 @@ See the LICENSE file in the root of this repository for complete details.
   <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden.
        The recent-tasks list is not here: it is a child of .action-row so it opens from
        just above its own button (session-history-plan.md §3.2). -->
+  {#if sessionPickerOpen}
+    <!-- Clicking anywhere outside the list dismisses it -- the list itself sits above this
+         (999 vs 998), so a click on a row still lands on the row. -->
+    <div class="session-picker-backdrop" role="presentation"
+      onclick={() => { sessionPickerOpen = false; }}></div>
+  {/if}
   {#if targetPickerOpen}
     <div class="target-picker-backdrop" role="presentation" onclick={() => { targetPickerOpen = false; targetPickerMode = "target"; }}></div>
     <div class="target-picker" role="listbox" aria-label={targetPickerMode === "dock" ? "Choose the app to fill the rest of the screen" : "Choose target app"}>
@@ -6101,6 +6124,12 @@ See the LICENSE file in the root of this repository for complete details.
     z-index: 999;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   }
+  .session-pick-hint {
+    margin: 0 2px 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.85;
+  }
   .session-pick-actions {
     display: flex;
     gap: 6px;
@@ -6144,7 +6173,8 @@ See the LICENSE file in the root of this repository for complete details.
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .target-picker-backdrop {
+  .target-picker-backdrop,
+  .session-picker-backdrop {
     position: fixed;
     inset: 0;
     z-index: 998;

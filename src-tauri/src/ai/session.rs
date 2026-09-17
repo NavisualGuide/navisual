@@ -448,6 +448,13 @@ impl SessionManager {
         self.session_dir.join(format!("{session_id}.json")).exists()
     }
 
+    /// One stored session by id, read-only — for comparing against an import without
+    /// making anything current.
+    pub fn session_by_id(&self, session_id: &str) -> Option<Session> {
+        let text = fs::read_to_string(self.session_dir.join(format!("{session_id}.json"))).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
     /// How many session files exist, without parsing any of them.
     fn count_sessions(&self) -> usize {
         fs::read_dir(&self.session_dir)
