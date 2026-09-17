@@ -3234,6 +3234,11 @@ async fn guide(
     state: State<'_, AppState>,
     task: String,
     is_reply: bool,
+    // What moved the session on, when the frontend knows it did not come from a click in the
+    // guided app: the Next control, Autopilot (a screen change), or the user saying the step
+    // was already done. Stored on the turn purely so a reopened row says what actually
+    // happened instead of crediting the user with an action they never took.
+    advance: Option<String>,
 ) -> Result<GuideResponse, String> {
     // Flow A: any candidate boxes on screen are resolved by the state the user's
     // click left behind — read it before this request changes anything.
@@ -4063,7 +4068,7 @@ async fn guide(
         // exactly `task.starts_with("[User completed:")`, set at the top of this fn).
         let pinned = !task.is_empty() && !is_next_requery;
         session.add_turn_pinned("user", user_turn_text, None, pinned);
-        session.set_last_user_turn_clicked(clicked.clone());
+        session.set_last_user_turn_facts(clicked.clone(), advance.clone());
         let content = steps
             .iter()
             .map(|s| s.instruction.clone())

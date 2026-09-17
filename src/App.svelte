@@ -549,7 +549,7 @@ See the LICENSE file in the root of this repository for complete details.
     plan_outline: string[];
     plan_completed_count: number;
     current_state_summary: { summary_text: string; turn_index: number } | null;
-    conversation: { role: string; content: string; timestamp: string; clicked?: string | null }[];
+    conversation: { role: string; content: string; timestamp: string; clicked?: string | null; advanced_by?: string | null }[];
   };
   let sessionPickerOpen = $state(false);
   let storedSessions = $state<StoredSession[]>([]);
@@ -1444,19 +1444,26 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Attach a new thumbnail to a history entry, fading out all previous thumbnails.
-  // A completion row says the fact, not the step restated: what the user clicked, or --
-  // when the click observable had nothing for it (a Next pressed with no click in the app,
-  // or a session stored before clicks were recorded) -- just that it completed.
-  function completionLabel(click?: string | null): string {
-    return click ? `✓ You clicked ${click}` : "✓ Completed";
+  // A completion row states what actually moved the step on, strongest evidence first: the
+  // click the hook resolved; failing that, what the frontend knows advanced it -- the Next
+  // control, Autopilot (a screen change the user did not cause) or the user saying the step
+  // was already done. "✓ Completed" survives only as the fallback for turns stored before
+  // any of that was recorded. Saying "Completed" when the user merely pressed Next would
+  // claim they did the step, and Autopilot's advances are not the user's at all.
+  function completionLabel(click?: string | null, advancedBy?: string | null): string {
+    if (click) return `✓ You clicked ${click}`;
+    if (advancedBy === "autopilot") return "✓ Autopilot advanced";
+    if (advancedBy === "already_done") return "✓ You marked it already done";
+    if (advancedBy === "next") return "✓ You pressed Next";
+    return "✓ Completed";
   }
 
   // The click arrives with the response, after the row was already created, so this
   // rewrites the row's label rather than adding a line under it. The backend consumes the
   // click, so one click decorates exactly one row.
-  function attachClick(entryId: number, click: string) {
+  function attachClick(entryId: number, click: string, advancedBy?: string | null) {
     const entry = history.find(h => h.id === entryId);
-    if (entry) entry.text = completionLabel(click);
+    if (entry) entry.text = completionLabel(click, advancedBy);
   }
 
   function attachThumb(entryId: number, thumbB64: string) {
@@ -2460,7 +2467,7 @@ See the LICENSE file in the root of this repository for complete details.
         // for, and it is already on screen as the step above; restating it in the row made
         // every completion a wall of the same sentence twice. What is left is the fact --
         // that it was completed, and (below) what the user actually clicked.
-        await addToHistory("completed", completionLabel(t.clicked));
+        await addToHistory("completed", completionLabel(t.clicked, t.advanced_by));
         continue;
       }
       // The backend's roles are the model's, not the panel's: `assistant` is what
@@ -2605,7 +2612,11 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  async function nextStep(viaAutopilot = false, skipFeedback = false) {
+  // `advance` names what moved the step on for the completion row and the stored turn: the
+  // Next control unless a caller says otherwise. Autopilot is derived from its own argument,
+  // because a screen change advancing the session is not a user action at all.
+  async function nextStep(viaAutopilot = false, skipFeedback = false, advance = "next") {
+    const advanceKind = viaAutopilot ? "autopilot" : advance;
     // Don't allow next while an AI call is in flight — the hotkey can fire
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
@@ -2676,7 +2687,7 @@ See the LICENSE file in the root of this repository for complete details.
       // plain re-analysis stay quiet system notes.
       const reQueryId = await addToHistory(completed ? "completed" : "system",
         unanswered ? "↷ Skipped the question — re-analysing…"
-        : completed ? "✓ Completed" : "Re-analysing…");
+        : completed ? completionLabel(null, advanceKind) : "Re-analysing…");
       try {
         const res = await invoke<GuideResponse>("guide", {
           task: unanswered
@@ -2688,11 +2699,12 @@ See the LICENSE file in the root of this repository for complete details.
               + `continue without an answer, ask again in a shorter, simpler form.]`
             : completed ? `[User completed: "${completed}"]` : "",
           isReply: false,
+          advance: completed ? advanceKind : null,
         });
         stopTimer();
         if (token !== requestToken) return;
         if (res.chat_thumb_b64) attachThumb(reQueryId, res.chat_thumb_b64);
-        if (res.last_click) attachClick(reQueryId, res.last_click);
+        if (res.last_click) attachClick(reQueryId, res.last_click, advanceKind);
         if (!res.ok) {
           phase = prevPhase;
           lastRequestFailed = true;
@@ -2920,7 +2932,7 @@ See the LICENSE file in the root of this repository for complete details.
     // step) the AI genuinely must re-plan → normal correction below.
     if (category === "already_done" && !note && stepIndex + 1 < steps.length) {
       addToHistory("system", "Skipping the already-done step — moving on (no AI request used).");
-      await nextStep(false, true);
+      await nextStep(false, true, "already_done");
       return;
     }
     if (category === "wrong_spot" && locateResult) {

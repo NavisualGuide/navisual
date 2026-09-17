@@ -53,6 +53,13 @@ pub struct Turn {
     /// matching a `null` on every assistant turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clicked: Option<String>,
+    /// What moved the session on when the user did not click in the guided app:
+    /// `next` (the button, hotkey or menu), `autopilot` (a screen change advanced it) or
+    /// `already_done` (the user said the step was already satisfied). Stored for the same
+    /// reason `clicked` is -- so a reopened row does not claim an action the user never
+    /// took, and Autopilot does not get credited to them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,9 +130,10 @@ impl Session {
             screenshot_hash,
             timestamp: Local::now().to_rfc3339(),
             pinned,
-            // Filled in right after by `set_last_user_turn_clicked`, which has the hook's
-            // answer; a turn is built by its caller, the click is not.
+            // Filled in right after by `set_last_user_turn_facts`, which has the hook's
+            // answer and the frontend's; a turn is built by its caller, those facts are not.
             clicked: None,
+            advanced_by: None,
         });
         self.last_active_at = Local::now().to_rfc3339();
         if pinned {
@@ -191,15 +199,18 @@ impl Session {
         );
     }
 
-    /// Record what the user clicked on the user turn already in the conversation.
+    /// Record the observable facts about the user turn already in the conversation: what
+    /// they clicked, if anything, and what advanced the step when they did not.
     ///
     /// Set after the fact rather than passed to `add_turn` for two reasons: only USER turns
-    /// carry it (the assistant turn that follows must not inherit it), and the click comes
-    /// from the click hook, not from the caller building the turn. Searches backwards for the
-    /// user turn, so the order of pushes here cannot silently attach it to the wrong side.
-    pub fn set_last_user_turn_clicked(&mut self, clicked: Option<String>) {
+    /// carry these (the assistant turn that follows must not inherit them), and the click
+    /// comes from the click hook rather than from the caller building the turn. Searches
+    /// backwards for the user turn, so the order of pushes here cannot silently attach them
+    /// to the wrong side.
+    pub fn set_last_user_turn_facts(&mut self, clicked: Option<String>, advanced_by: Option<String>) {
         if let Some(turn) = self.conversation.iter_mut().rev().find(|t| t.role == "user") {
             turn.clicked = clicked;
+            turn.advanced_by = advanced_by;
         }
     }
 
@@ -635,7 +646,7 @@ mod tests {
         let mut session = Session::new("task".to_string());
         session.add_turn_pinned("user", "[User completed: \"Click Save\"]".to_string(), None, false);
         session.add_turn("assistant", "next step".to_string(), None);
-        session.set_last_user_turn_clicked(Some("Button \"Save\"".to_string()));
+        session.set_last_user_turn_facts(Some("Button \"Save\"".to_string()), Some("next".to_string()));
 
         assert_eq!(
             session.conversation[0].clicked.as_deref(),
@@ -646,6 +657,11 @@ mod tests {
             session.conversation[1].clicked, None,
             "the assistant turn the app wrote must not inherit it"
         );
+        assert_eq!(
+            session.conversation[1].advanced_by, None,
+            "and must not inherit what advanced the step either"
+        );
+        assert_eq!(session.conversation[0].advanced_by.as_deref(), Some("next"));
     }
 
     #[test]
