@@ -154,6 +154,20 @@ pub struct Config {
     /// find the session already recorded, not start from empty.
     pub session_export_enabled: bool,
 
+    /// Keep the frame each step was guided from, beside its stored session, so reopening a
+    /// session can show what the screen looked like when that step was given (plan §4).
+    ///
+    /// **Off by default, and that is the point.** "Frames never touch disk unless you turn
+    /// this on" is the simplest sentence in the privacy story and the first one a sceptical
+    /// user checks. Optional rather than never, because the capability already exists three
+    /// times over — debug captures, training capture, session export — so the only honest
+    /// question was ever whether it becomes the default.
+    ///
+    /// What gets stored is the **OCR frame**: the same masked region as the AI's own picture,
+    /// at native resolution, and it is what the locator read (§4.2). Never the export frame,
+    /// which is the whole unmasked monitor.
+    pub session_screenshots: bool,
+
     /// Include the *text* of the paragraph the cursor is in, in the `[App State — Word]`
     /// block. Default on — it is what lets the AI say "you're in the Outlook heading"
     /// rather than "you're on line 1".
@@ -231,6 +245,7 @@ impl Default for Config {
             debug_screenshot_enabled: false,
             training_capture_enabled: false,
             session_export_enabled: false,
+            session_screenshots: false,
             word_state_paragraph_text: true,
             gemini_thinking_budget: None,
         }
@@ -463,6 +478,9 @@ impl Config {
         }
         if let Ok(v) = env::var("SESSION_EXPORT_ENABLED") {
             config.session_export_enabled = truthy(&v);
+        }
+        if let Ok(v) = env::var("SESSION_SCREENSHOTS") {
+            config.session_screenshots = truthy(&v);
         }
 
         // Merged-switch migration (see `merged_switch`).

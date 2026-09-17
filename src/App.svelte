@@ -118,6 +118,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_log_files_enabled: boolean;
     training_capture_enabled: boolean;
     session_export_enabled: boolean;
+    session_screenshots: boolean;
     task_suggestions: boolean;
     developer_mode: boolean;
   };
@@ -995,6 +996,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_log_files_enabled: false,
     training_capture_enabled: false,
     session_export_enabled: false,
+    session_screenshots: false,
     task_suggestions: true,
     developer_mode: false,
   };
@@ -5056,6 +5058,20 @@ See the LICENSE file in the root of this repository for complete details.
                 auto-advance. <strong>Less</strong> ignores small changes (typing, minor updates);
                 <strong>More</strong> reacts to smaller ones like a dialog opening. The default is a
                 good balance.
+              </p>
+            </div>
+            <div class="setting-group">
+              <p class="setting-label">Saved sessions</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.session_screenshots} />
+                <span>Keep each step's screenshot with the saved session</span>
+              </label>
+              <p class="setting-hint" style="margin-top:4px">
+                Off by default, and it is the only setting here that would put a picture of your
+                screen on disk. What is kept is the same cropped, masked frame the AI was shown —
+                never the whole monitor — so reopening a session can show what that step looked
+                like. The most recent 20 sessions are kept; older ones are deleted with their
+                screenshots.
               </p>
             </div>
 

@@ -60,6 +60,13 @@ pub struct Turn {
     /// took, and Autopilot does not get credited to them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced_by: Option<String>,
+    /// File name of this turn's frame inside the session's own frame directory, when the
+    /// user asked for screenshots to be kept (plan §4). A name rather than a path: the
+    /// directory is the manager's business, and moving a session to the archive must not
+    /// have to rewrite every turn. `None` for every turn captured while the setting was off,
+    /// which is every turn of every session stored before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +141,7 @@ impl Session {
             // answer and the frontend's; a turn is built by its caller, those facts are not.
             clicked: None,
             advanced_by: None,
+            frame: None,
         });
         self.last_active_at = Local::now().to_rfc3339();
         if pinned {
@@ -207,10 +215,16 @@ impl Session {
     /// comes from the click hook rather than from the caller building the turn. Searches
     /// backwards for the user turn, so the order of pushes here cannot silently attach them
     /// to the wrong side.
-    pub fn set_last_user_turn_facts(&mut self, clicked: Option<String>, advanced_by: Option<String>) {
+    pub fn set_last_user_turn_facts(
+        &mut self,
+        clicked: Option<String>,
+        advanced_by: Option<String>,
+        frame: Option<String>,
+    ) {
         if let Some(turn) = self.conversation.iter_mut().rev().find(|t| t.role == "user") {
             turn.clicked = clicked;
             turn.advanced_by = advanced_by;
+            turn.frame = frame;
         }
     }
 
@@ -331,6 +345,26 @@ impl SessionManager {
         Some(session)
     }
 
+    /// Where one session's frames live: `sessions/frames/<id>/`.
+    ///
+    /// A directory beside the session files rather than inside a per-session folder, because
+    /// the JSON layout stays flat (every reader and writer here assumes it) and because this
+    /// gives `prune` exactly one extra thing to move or delete when a session is retired.
+    pub fn frames_dir(&self, session_id: &str) -> PathBuf {
+        self.session_dir.join("frames").join(session_id)
+    }
+
+    /// Write one frame, named for the turn it belongs to. Returns the file name to record on
+    /// that turn; `None` when it could not be written — a frame that fails to save must never
+    /// cost the session it belongs to, and the caller has nothing better to do than carry on.
+    pub fn save_frame(&self, session_id: &str, turn_index: usize, png: &[u8]) -> Option<String> {
+        let dir = self.frames_dir(session_id);
+        fs::create_dir_all(&dir).ok()?;
+        let name = format!("{turn_index}.png");
+        fs::write(dir.join(&name), png).ok()?;
+        Some(name)
+    }
+
     /// How many session files exist, without parsing any of them.
     fn count_sessions(&self) -> usize {
         fs::read_dir(&self.session_dir)
@@ -438,13 +472,36 @@ impl SessionManager {
                 continue;
             }
             let path = self.session_dir.join(format!("{}.json", s.id));
+            let frames = self.frames_dir(&s.id);
             match &archive_dir {
                 Some(dir) => match fs::rename(&path, dir.join(format!("{}.json", s.id))) {
-                    Ok(()) => archived += 1,
+                    Ok(()) => {
+                        archived += 1;
+                        // The pictures belong to the session, so they move with it: an archive
+                        // holding transcripts whose frames were deleted is not an archive.
+                        if frames.is_dir() {
+                            let dest = dir.join("frames");
+                            let _ = fs::create_dir_all(&dest);
+                            if let Err(e) = fs::rename(&frames, dest.join(&s.id)) {
+                                log::warn!(
+                                    "[sessions] archived {} but not its frames: {e}",
+                                    s.id
+                                );
+                            }
+                        }
+                    }
                     Err(e) => log::warn!("[sessions] could not archive {path:?}: {e}"),
                 },
                 None => match fs::remove_file(&path) {
-                    Ok(()) => deleted += 1,
+                    Ok(()) => {
+                        deleted += 1;
+                        // Orphaned frames would outlive the transcript with nothing pointing
+                        // at them -- invisible disk creep, and the reason prune knows about
+                        // this directory at all.
+                        if frames.is_dir() {
+                            let _ = fs::remove_dir_all(&frames);
+                        }
+                    }
                     Err(e) => log::warn!("[sessions] could not remove {path:?}: {e}"),
                 },
             }
@@ -646,7 +703,11 @@ mod tests {
         let mut session = Session::new("task".to_string());
         session.add_turn_pinned("user", "[User completed: \"Click Save\"]".to_string(), None, false);
         session.add_turn("assistant", "next step".to_string(), None);
-        session.set_last_user_turn_facts(Some("Button \"Save\"".to_string()), Some("next".to_string()));
+        session.set_last_user_turn_facts(
+            Some("Button \"Save\"".to_string()),
+            Some("next".to_string()),
+            Some("4.png".to_string()),
+        );
 
         assert_eq!(
             session.conversation[0].clicked.as_deref(),
@@ -662,6 +723,11 @@ mod tests {
             "and must not inherit what advanced the step either"
         );
         assert_eq!(session.conversation[0].advanced_by.as_deref(), Some("next"));
+        assert_eq!(session.conversation[0].frame.as_deref(), Some("4.png"));
+        assert_eq!(
+            session.conversation[1].frame, None,
+            "and the assistant turn gets no frame either"
+        );
     }
 
     #[test]
@@ -684,6 +750,63 @@ mod tests {
         let json = r#"{"role":"user","content":"hi","screenshot_hash":null,"timestamp":"2026-09-16T00:00:00-07:00","pinned":false}"#;
         let turn: Turn = serde_json::from_str(json).expect("older turns must still load");
         assert_eq!(turn.clicked, None);
+    }
+
+    #[test]
+    fn a_frame_is_written_under_the_session_that_owns_it() {
+        let (mgr, dir) = temp_manager("frame-write");
+        let id = write_session(&mgr, "task", 10).to_string();
+        let name = mgr.save_frame(&id, 3, b"png-bytes").expect("frame is written");
+
+        assert_eq!(name, "3.png", "named for the turn it belongs to");
+        assert_eq!(fs::read(mgr.frames_dir(&id).join(&name)).unwrap(), b"png-bytes");
+        // Beside the session files, never among them: every reader here walks `*.json`.
+        assert_eq!(mgr.list_sessions().len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_retired_session_takes_its_frames_with_it() {
+        let (mgr, dir) = temp_manager("frame-prune");
+        for i in 0..5 {
+            let id = write_session(&mgr, &format!("task {i}"), 500 - i).to_string();
+            mgr.save_frame(&id, 0, b"x").expect("frame");
+        }
+        // Marker present => the delete path, not the one-time archive.
+        fs::write(dir.join(".pruned"), "already").unwrap();
+        mgr.prune(2);
+
+        let kept = fs::read_dir(dir.join("frames")).unwrap().count();
+        assert_eq!(
+            kept, 2,
+            "an orphaned frame would outlive its transcript with nothing pointing at it"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_first_prune_archives_frames_with_their_session() {
+        let (mgr, dir) = temp_manager("frame-archive");
+        for i in 0..5 {
+            let id = write_session(&mgr, &format!("task {i}"), 500 - i).to_string();
+            mgr.save_frame(&id, 0, b"x").expect("frame");
+        }
+        let (deleted, archived) = mgr.prune(2);
+        assert_eq!((deleted, archived), (0, 3));
+
+        let archive = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with("archive-"))
+            .expect("an archive directory");
+        assert_eq!(
+            fs::read_dir(archive.join("frames")).unwrap().count(),
+            3,
+            "the pictures move with their sessions -- an archive without them is not one"
+        );
+        assert_eq!(fs::read_dir(dir.join("frames")).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -3029,6 +3029,11 @@ struct SettingsPayload {
     /// itself runs regardless, so enabling this mid-session finds it already full.
     #[serde(default)]
     session_export_enabled: bool,
+    /// Keep each step's frame beside its stored session (plan §4). User-facing, off by
+    /// default, and applied from the call site rather than the config flag -- the same
+    /// lesson v0.7.19 learned when a feature meant to be opt-in charged everyone.
+    #[serde(default)]
+    session_screenshots: bool,
     /// Read-only — true when the process was launched with NAVISUAL_DEV=true.
     /// Frontend uses this to show/hide the Developer settings tab. Never
     /// written by save_settings (it's deserialized but ignored on the way in).
@@ -4026,6 +4031,24 @@ async fn guide(
     // response is built outside the session block below.
     let clicked = last_click::take(LAST_CLICK_MAX_AGE);
 
+    // §4: the frame this step was guided from, written beside the session when the user has
+    // asked for that. Written before the block below borrows the manager mutably, and a
+    // failed write is deliberately not an error the session pays for: no frame is a smaller
+    // loss than no session. `pre_ocr` is the OCR PNG -- the masked, native-resolution frame
+    // the locator read, never the unmasked whole-monitor export frame.
+    let frame = if router.config.session_screenshots {
+        match (&router.session_manager.current_session, pre_ocr.as_ref()) {
+            (Some(session), Some((png, _))) => router.session_manager.save_frame(
+                &session.id.to_string(),
+                session.conversation.len(),
+                png,
+            ),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     if let Some(session) = &mut router.session_manager.current_session {
         // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
         // the field leaves the stored goal alone rather than wiping it — the failure mode here
@@ -4068,7 +4091,7 @@ async fn guide(
         // exactly `task.starts_with("[User completed:")`, set at the top of this fn).
         let pinned = !task.is_empty() && !is_next_requery;
         session.add_turn_pinned("user", user_turn_text, None, pinned);
-        session.set_last_user_turn_facts(clicked.clone(), advance.clone());
+        session.set_last_user_turn_facts(clicked.clone(), advance.clone(), frame.clone());
         let content = steps
             .iter()
             .map(|s| s.instruction.clone())
@@ -6269,6 +6292,7 @@ fn payload_from_config(c: &Config) -> SettingsPayload {
         training_capture_enabled: c.training_capture_enabled,
         task_suggestions: c.task_suggestions,
         session_export_enabled: c.session_export_enabled,
+        session_screenshots: c.session_screenshots,
         developer_mode: developer_mode_enabled(),
     }
 }
@@ -6383,6 +6407,10 @@ async fn save_settings(
         (
             "SESSION_EXPORT_ENABLED".into(),
             payload.session_export_enabled.to_string(),
+        ),
+        (
+            "SESSION_SCREENSHOTS".into(),
+            payload.session_screenshots.to_string(),
         ),
     ];
 
