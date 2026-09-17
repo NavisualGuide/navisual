@@ -60,7 +60,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_screenshot_path: string | null;
     chat_thumb_b64: string | null;
     /// What the user clicked to produce this turn, resolved to a control by the backend
-    /// (`Button "Insert"`). Null when no click was recorded -- see `attachClick`.
+    /// (`Button "Insert"`). Null when no click was recorded -- see `completionLabel`.
     last_click: string | null;
     locate_trace: LocateTrace | null;
     ai_bbox: Rect | null;
@@ -76,7 +76,7 @@ See the LICENSE file in the root of this repository for complete details.
   // turn -- so it renders on the user side of the transcript, in the user pill. It
   // is a role rather than a style flag because every other row is told apart by role.
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error" | "completed";
-  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean; click?: string };
+  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
     api_provider: string;
@@ -1444,12 +1444,19 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Attach a new thumbnail to a history entry, fading out all previous thumbnails.
-  // What the user clicked, hung on the row it completed. Attached the same way the
-  // thumbnail is: the row is created when the request starts, the fact arrives with the
-  // response, and the backend consumes the click so one click decorates one row.
+  // A completion row says the fact, not the step restated: what the user clicked, or --
+  // when the click observable had nothing for it (a Next pressed with no click in the app,
+  // or a session stored before clicks were recorded) -- just that it completed.
+  function completionLabel(click?: string | null): string {
+    return click ? `✓ You clicked ${click}` : "✓ Completed";
+  }
+
+  // The click arrives with the response, after the row was already created, so this
+  // rewrites the row's label rather than adding a line under it. The backend consumes the
+  // click, so one click decorates exactly one row.
   function attachClick(entryId: number, click: string) {
     const entry = history.find(h => h.id === entryId);
-    if (entry) entry.click = click;
+    if (entry) entry.text = completionLabel(click);
   }
 
   function attachThumb(entryId: number, thumbB64: string) {
@@ -2449,9 +2456,11 @@ See the LICENSE file in the root of this repository for complete details.
       // user turn — the app's words, not the person's. Show it as the clean
       // system note the live session uses, not as a user bubble with brackets.
       if (t.content.startsWith('[User completed: "') && t.content.endsWith('"]')) {
-        const inner = t.content.slice('[User completed: "'.length, t.content.length - '"]'.length);
-        const rowId = await addToHistory("completed", `✓ Completed — ${inner}`);
-        if (t.clicked) attachClick(rowId, t.clicked);
+        // The instruction itself is deliberately NOT repeated here. It is what we asked
+        // for, and it is already on screen as the step above; restating it in the row made
+        // every completion a wall of the same sentence twice. What is left is the fact --
+        // that it was completed, and (below) what the user actually clicked.
+        await addToHistory("completed", completionLabel(t.clicked));
         continue;
       }
       // The backend's roles are the model's, not the panel's: `assistant` is what
@@ -2578,7 +2587,6 @@ See the LICENSE file in the root of this repository for complete details.
       stopTimer();
       if (token !== requestToken) return;
       if (res.chat_thumb_b64) attachThumb(userEntryId, res.chat_thumb_b64);
-      if (res.last_click) attachClick(userEntryId, res.last_click);
       if (!res.ok) {
         phase = prevPhase;
         lastRequestFailed = true;
@@ -2668,7 +2676,7 @@ See the LICENSE file in the root of this repository for complete details.
       // plain re-analysis stay quiet system notes.
       const reQueryId = await addToHistory(completed ? "completed" : "system",
         unanswered ? "↷ Skipped the question — re-analysing…"
-        : completed ? `✓ Completed — re-analysing…` : "Re-analysing…");
+        : completed ? "✓ Completed" : "Re-analysing…");
       try {
         const res = await invoke<GuideResponse>("guide", {
           task: unanswered
@@ -4074,9 +4082,6 @@ See the LICENSE file in the root of this repository for complete details.
           </span>
           <div class="h-body">
             <span class="h-text">{entry.text}</span>
-            {#if entry.click}
-              <span class="h-click">↳ clicked {entry.click}</span>
-            {/if}
             {#if entry.meta && debugShowInfo}
               <span class="h-meta">{entry.meta}</span>
             {/if}
@@ -6767,10 +6772,12 @@ See the LICENSE file in the root of this repository for complete details.
      only rather than a caps tag in a gutter. (Redesign 2026-09-07.)
 
      `completed` rides the user side because that is what it records: the step
-     the USER just performed. It is not in the user's words -- "✓ Completed —"
-     and the instruction after it are the app's -- so it is a role of its own
-     and not simply `user`. Leaving it a centred system note made the one row
-     the user actually caused the quietest thing on screen. */
+     the USER just performed, and its words are the app's, not the user's -- so it is a
+     role of its own and not simply `user`. It reads "✓ You clicked Button \"Save\"" -- the
+     fact and nothing else: the instruction it completed is already the step above it, and
+     restating it made every completion the same sentence twice. Without a click it falls
+     back to plain "✓ Completed". Leaving it a centred system note made the one row the
+     user actually caused the quietest thing on screen. */
   .h-user,
   .h-completed { flex-direction: row-reverse; }
   .h-user .h-label,
@@ -6791,16 +6798,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .h-user .h-text,
   .h-completed .h-text { color: var(--on-accent); }
-  /* The click is the fact, the instruction above it is only what we asked for -- so it sits
-     under it, quieter, in the same pill. Dimmed rather than recoloured: it has to stay
-     legible on the accent fill in both themes. */
-  .h-click {
-    display: block;
-    margin-top: 4px;
-    font-size: 11.5px;
-    color: var(--on-accent);
-    opacity: 0.72;
-  }
+
   .h-user .h-meta { color: var(--on-accent-dim); }
 
   .h-ai .h-text  { color: var(--text-primary); }
