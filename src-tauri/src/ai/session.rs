@@ -46,9 +46,12 @@ pub struct Turn {
     /// What the user actually clicked to produce this turn, as a resolved control
     /// (`Button "Insert"`) from `last_click`. Stored so a reopened session shows the same
     /// thing the live one did -- the row records an action, and the action is the click,
-    /// not the sentence we asked for. `#[serde(default)]` so older turns load without it;
-    /// `None` on every assistant turn and on any request where no click was recorded.
-    #[serde(default)]
+    /// not the sentence we asked for. `#[serde(default)]` so older turns load without it.
+    ///
+    /// Not serialized when absent, so the key's presence in a file is itself the fact:
+    /// `grep clicked` finds the turns where the user actually did something, instead of
+    /// matching a `null` on every assistant turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clicked: Option<String>,
 }
 
@@ -642,6 +645,20 @@ mod tests {
         assert_eq!(
             session.conversation[1].clicked, None,
             "the assistant turn the app wrote must not inherit it"
+        );
+    }
+
+    #[test]
+    fn a_turn_without_a_click_does_not_write_the_key() {
+        // The key's presence has to mean "the user clicked something" -- otherwise every
+        // assistant turn in every file carries `"clicked":null` and grepping for the real
+        // ones is useless.
+        let mut session = Session::new("task".to_string());
+        session.add_turn("assistant", "next step".to_string(), None);
+        let json = serde_json::to_string(&session).expect("serialises");
+        assert!(
+            !json.contains("clicked"),
+            "an absent click must not be written at all"
         );
     }
 
