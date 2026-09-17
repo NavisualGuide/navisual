@@ -2902,6 +2902,12 @@ struct GuideResponse {
     /// one). Always `<= plan_outline.len()` — see `Session::set_plan_completed_count`.
     plan_completed_count: usize,
     provider: String,
+    /// What the user clicked to produce this turn, as a resolved control from `last_click`
+    /// (`Button "Insert"`). Carried on the response so the panel can show it against the
+    /// step it completed -- the click is the fact, the instruction is only what we asked
+    /// for, and the two disagreeing is the case worth seeing. `None` when no click was
+    /// recorded, which is also what gets stored on the turn.
+    last_click: Option<String>,
     /// The model that actually handled this request. For managed this is the concrete
     /// model OpenRouter routed to (the relay sends the `openrouter/free` router); for
     /// other providers it's the configured model. Surfaced in the debug drawer + logged.
@@ -3352,6 +3358,7 @@ async fn guide(
                         if is_pinned { "The pinned app" } else { "The target app" }.to_string()
                     });
                 return Ok(GuideResponse {
+        last_click: None,
                     goal: session_goal(&state),
                     plan_outline: session_plan_outline(&state),
                     plan_completed_count: session_plan_completed_count(&state),
@@ -3560,6 +3567,7 @@ async fn guide(
         }
         Err(()) => {
             return Ok(GuideResponse {
+        last_click: None,
                 goal: session_goal(&state),
                 plan_outline: session_plan_outline(&state),
                 plan_completed_count: session_plan_completed_count(&state),
@@ -3951,6 +3959,7 @@ async fn guide(
                 let _ = app.emit("insufficient_coins", ());
             }
             return Ok(GuideResponse {
+        last_click: None,
                 goal: session_goal(&state),
                 plan_outline: session_plan_outline(&state),
                 plan_completed_count: session_plan_completed_count(&state),
@@ -4006,6 +4015,12 @@ async fn guide(
     let provider = router.config.api_provider.clone();
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
+    // What the user clicked, consumed once so it decorates exactly one row -- this request's.
+    // `describe` read the same click for the prompt above and deliberately does not consume it:
+    // the prompt is built first and must keep seeing it. At function scope, because the
+    // response is built outside the session block below.
+    let clicked = last_click::take(LAST_CLICK_MAX_AGE);
+
     if let Some(session) = &mut router.session_manager.current_session {
         // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
         // the field leaves the stored goal alone rather than wiping it — the failure mode here
@@ -4048,6 +4063,7 @@ async fn guide(
         // exactly `task.starts_with("[User completed:")`, set at the top of this fn).
         let pinned = !task.is_empty() && !is_next_requery;
         session.add_turn_pinned("user", user_turn_text, None, pinned);
+        session.set_last_user_turn_clicked(clicked.clone());
         let content = steps
             .iter()
             .map(|s| s.instruction.clone())
@@ -4089,6 +4105,7 @@ async fn guide(
         anchor_autopilot_baseline(&state).await;
         emit_stale_if_drifted(&app, pre_hash, *stale_post.lock(), ai_elapsed_ms);
         return Ok(GuideResponse {
+        last_click: None,
             goal: session_goal(&state),
             plan_outline: session_plan_outline(&state),
             plan_completed_count: session_plan_completed_count(&state),
@@ -4213,6 +4230,7 @@ async fn guide(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        last_click: clicked,
         goal: session_goal(&state),
         plan_outline: session_plan_outline(&state),
         plan_completed_count: session_plan_completed_count(&state),
@@ -4360,6 +4378,7 @@ async fn next_step(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        last_click: None,
         goal: session_goal(&state),
         plan_outline: session_plan_outline(&state),
         plan_completed_count: session_plan_completed_count(&state),
@@ -4565,6 +4584,7 @@ async fn retry_locate(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        last_click: None,
         goal: session_goal(&state),
         plan_outline: session_plan_outline(&state),
         plan_completed_count: session_plan_completed_count(&state),
@@ -5108,6 +5128,7 @@ async fn send_correction(
         anchor_autopilot_baseline(&state).await;
         emit_stale_if_drifted(&app, pre_hash, *stale_post.lock(), ai_elapsed_ms);
         return Ok(GuideResponse {
+        last_click: None,
             goal: session_goal(&state),
             plan_outline: session_plan_outline(&state),
             plan_completed_count: session_plan_completed_count(&state),
@@ -5223,6 +5244,7 @@ async fn send_correction(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        last_click: None,
         goal: session_goal(&state),
         plan_outline: session_plan_outline(&state),
         plan_completed_count: session_plan_completed_count(&state),

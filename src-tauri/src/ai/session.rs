@@ -43,6 +43,13 @@ pub struct Turn {
     /// `#[serde(default)]` so sessions saved before this field load as unpinned.
     #[serde(default)]
     pub pinned: bool,
+    /// What the user actually clicked to produce this turn, as a resolved control
+    /// (`Button "Insert"`) from `last_click`. Stored so a reopened session shows the same
+    /// thing the live one did -- the row records an action, and the action is the click,
+    /// not the sentence we asked for. `#[serde(default)]` so older turns load without it;
+    /// `None` on every assistant turn and on any request where no click was recorded.
+    #[serde(default)]
+    pub clicked: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +120,9 @@ impl Session {
             screenshot_hash,
             timestamp: Local::now().to_rfc3339(),
             pinned,
+            // Filled in right after by `set_last_user_turn_clicked`, which has the hook's
+            // answer; a turn is built by its caller, the click is not.
+            clicked: None,
         });
         self.last_active_at = Local::now().to_rfc3339();
         if pinned {
@@ -176,6 +186,18 @@ impl Session {
             pinned.len(),
             MAX_PINNED_TURNS
         );
+    }
+
+    /// Record what the user clicked on the user turn already in the conversation.
+    ///
+    /// Set after the fact rather than passed to `add_turn` for two reasons: only USER turns
+    /// carry it (the assistant turn that follows must not inherit it), and the click comes
+    /// from the click hook, not from the caller building the turn. Searches backwards for the
+    /// user turn, so the order of pushes here cannot silently attach it to the wrong side.
+    pub fn set_last_user_turn_clicked(&mut self, clicked: Option<String>) {
+        if let Some(turn) = self.conversation.iter_mut().rev().find(|t| t.role == "user") {
+            turn.clicked = clicked;
+        }
     }
 
     pub fn update_state(&mut self, summary_text: String) {
@@ -603,6 +625,32 @@ mod tests {
         session.last_active_at = (Local::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339();
         mgr.save_session(Some(&session));
         session.id
+    }
+
+    #[test]
+    fn click_attaches_to_the_user_turn_not_the_assistant_one() {
+        let mut session = Session::new("task".to_string());
+        session.add_turn_pinned("user", "[User completed: \"Click Save\"]".to_string(), None, false);
+        session.add_turn("assistant", "next step".to_string(), None);
+        session.set_last_user_turn_clicked(Some("Button \"Save\"".to_string()));
+
+        assert_eq!(
+            session.conversation[0].clicked.as_deref(),
+            Some("Button \"Save\""),
+            "the click belongs to what the user did"
+        );
+        assert_eq!(
+            session.conversation[1].clicked, None,
+            "the assistant turn the app wrote must not inherit it"
+        );
+    }
+
+    #[test]
+    fn turns_written_before_the_click_field_still_load() {
+        // A stored turn without `clicked` — the shape every session on disk has today.
+        let json = r#"{"role":"user","content":"hi","screenshot_hash":null,"timestamp":"2026-09-16T00:00:00-07:00","pinned":false}"#;
+        let turn: Turn = serde_json::from_str(json).expect("older turns must still load");
+        assert_eq!(turn.clicked, None);
     }
 
     #[test]
