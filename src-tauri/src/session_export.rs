@@ -1212,7 +1212,7 @@ pub(crate) fn mark_arm(pw: f32, ph: f32, scale: f32) -> f32 {
 ///     which is one real frame of the animation rather than an invented one;
 ///   - the sweeping scan line is omitted entirely. It reads as a highlight only
 ///     because it moves; frozen it is just a bar across the element.
-fn draw_pointer(img: &mut image::RgbaImage, rect: [i32; 4], k: f32, mark_scale: f32, hint: bool) {
+pub(crate) fn draw_pointer(img: &mut image::RgbaImage, rect: [i32; 4], k: f32, mark_scale: f32, hint: bool) {
     let [x, y, w, h] = rect;
     const ACCENT: [u8; 3] = [255, 107, 53];
     let (cx, cy) = (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);

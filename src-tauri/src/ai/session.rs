@@ -1,4 +1,5 @@
 use crate::ai::types::{GuidanceStep, Message, Role};
+use crate::session_export::PointerState;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -67,6 +68,28 @@ pub struct Turn {
     /// which is every turn of every session stored before this existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
+    /// Where the pointer landed on that frame, and what it takes to redraw it (§4.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<StoredMark>,
+}
+
+/// What was drawn on a stored frame, kept so the picture can be redrawn WITH its pointer
+/// rather than having one burned into it.
+///
+/// The rect is in the pixels of the frame stored on the same turn, never the export ring's
+/// frame: the two cover different regions, and a rect read against the wrong one points at
+/// the wrong place. `PointerState` is reused wholesale from the exporter so the two cannot
+/// describe one step's outcome differently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredMark {
+    pub pointer: PointerState,
+    /// Frame pixels per logical pixel, for the fixed-size parts of the mark (§4.4).
+    ///
+    /// Never assume 1.0. The overlay draws in logical px while the frame is physical, so on
+    /// a 200% display this is 2.0 even at native resolution — and assuming 1.0 draws a
+    /// half-size mark, which is invisible on a 100% display and was expensive the first time
+    /// it happened to an exported session.
+    pub mark_scale: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +165,7 @@ impl Session {
             clicked: None,
             advanced_by: None,
             frame: None,
+            mark: None,
         });
         self.last_active_at = Local::now().to_rfc3339();
         if pinned {
@@ -225,6 +249,18 @@ impl Session {
             turn.clicked = clicked;
             turn.advanced_by = advanced_by;
             turn.frame = frame;
+        }
+    }
+
+    /// Record what was drawn for this turn's step, once the locator has decided it.
+    ///
+    /// Separate from `set_last_user_turn_facts` because of WHEN it is known: the facts come
+    /// from the capture and the click hook, both settled before the turn is written, while
+    /// the pointer's outcome only exists after `execute_step` has run — which is after the
+    /// session was saved, so the caller saves again.
+    pub fn set_last_user_turn_mark(&mut self, mark: Option<StoredMark>) {
+        if let Some(turn) = self.conversation.iter_mut().rev().find(|t| t.role == "user") {
+            turn.mark = mark;
         }
     }
 
@@ -352,6 +388,20 @@ impl SessionManager {
     /// gives `prune` exactly one extra thing to move or delete when a session is retired.
     pub fn frames_dir(&self, session_id: &str) -> PathBuf {
         self.session_dir.join("frames").join(session_id)
+    }
+
+    /// The mark recorded with a stored frame, without making that session current.
+    ///
+    /// Read-only on purpose: showing a picture must not change which session is live, which
+    /// is why this parses the file rather than going through `load_session`.
+    pub fn frame_mark(&self, session_id: &str, frame: &str) -> Option<StoredMark> {
+        let text = fs::read_to_string(self.session_dir.join(format!("{session_id}.json"))).ok()?;
+        let session: Session = serde_json::from_str(&text).ok()?;
+        session
+            .conversation
+            .iter()
+            .find(|t| t.frame.as_deref() == Some(frame))
+            .and_then(|t| t.mark.clone())
     }
 
     /// Write one frame, named for the turn it belongs to. Returns the file name to record on
@@ -750,6 +800,53 @@ mod tests {
         let json = r#"{"role":"user","content":"hi","screenshot_hash":null,"timestamp":"2026-09-16T00:00:00-07:00","pinned":false}"#;
         let turn: Turn = serde_json::from_str(json).expect("older turns must still load");
         assert_eq!(turn.clicked, None);
+    }
+
+    #[test]
+    fn a_stored_frame_carries_its_mark_and_reads_back() {
+        use crate::session_export::PointerState;
+        let (mut mgr, dir) = temp_manager("frame-mark");
+        let mut session = Session::new("task".to_string());
+        session.add_turn_pinned("user", "hi".to_string(), None, false);
+        session.set_last_user_turn_facts(None, None, Some("0.png".to_string()));
+        session.set_last_user_turn_mark(Some(StoredMark {
+            pointer: PointerState::Hit { rect: [10, 20, 30, 40] },
+            mark_scale: 2.0,
+        }));
+        mgr.save_session(Some(&session));
+
+        let id = session.id.to_string();
+        let mark = mgr.frame_mark(&id, "0.png").expect("the mark comes back");
+        assert!(matches!(mark.pointer, PointerState::Hit { rect: [10, 20, 30, 40] }));
+        assert_eq!(mark.mark_scale, 2.0);
+        assert!(mgr.frame_mark(&id, "1.png").is_none(), "no frame, no mark");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reading_a_frame_mark_leaves_the_live_session_alone() {
+        use crate::session_export::PointerState;
+        let (mut mgr, dir) = temp_manager("frame-mark-readonly");
+        // A session on disk with a frame...
+        let mut stored = Session::new("stored".to_string());
+        stored.add_turn_pinned("user", "hi".to_string(), None, false);
+        stored.set_last_user_turn_facts(None, None, Some("0.png".to_string()));
+        stored.set_last_user_turn_mark(Some(StoredMark {
+            pointer: PointerState::Miss,
+            mark_scale: 1.0,
+        }));
+        mgr.save_session(Some(&stored));
+        // ...and a DIFFERENT one that is live.
+        let live = Session::new("live".to_string());
+        mgr.current_session = Some(live.clone());
+
+        assert!(mgr.frame_mark(&stored.id.to_string(), "0.png").is_some());
+        assert_eq!(
+            mgr.current_session.as_ref().map(|s| s.task_description.clone()),
+            Some("live".to_string()),
+            "looking at a picture must not make its session the live one"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

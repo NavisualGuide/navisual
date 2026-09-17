@@ -76,7 +76,7 @@ See the LICENSE file in the root of this repository for complete details.
   // turn -- so it renders on the user side of the transcript, in the user pill. It
   // is a role rather than a style flag because every other row is told apart by role.
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error" | "completed";
-  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
+  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean; storedFrame?: { sessionId: string; frame: string } };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
     api_provider: string;
@@ -550,7 +550,7 @@ See the LICENSE file in the root of this repository for complete details.
     plan_outline: string[];
     plan_completed_count: number;
     current_state_summary: { summary_text: string; turn_index: number } | null;
-    conversation: { role: string; content: string; timestamp: string; clicked?: string | null; advanced_by?: string | null }[];
+    conversation: { role: string; content: string; timestamp: string; clicked?: string | null; advanced_by?: string | null; frame?: string | null }[];
   };
   let sessionPickerOpen = $state(false);
   let storedSessions = $state<StoredSession[]>([]);
@@ -1391,11 +1391,15 @@ See the LICENSE file in the root of this repository for complete details.
   let _lightboxPrevSize: { w: number; h: number } | null = null;
   let _lightboxPrevPos: { x: number; y: number } | null = null;
 
-  async function openLightbox() {
+  // `stored` is set on a row that has a picture on disk; without it this is the live
+  // session's own screenshot. Both come back as base64 JPEG and render the same way.
+  async function openLightbox(stored?: { sessionId: string; frame: string }) {
     lightboxLoading = true;
     lightboxSrc = null;
     try {
-      lightboxSrc = await invoke<string | null>("get_chat_full_screenshot");
+      lightboxSrc = stored
+        ? await invoke<string | null>("session_frame", { sessionId: stored.sessionId, frame: stored.frame, thumb: false })
+        : await invoke<string | null>("get_chat_full_screenshot");
     } catch (_) {}
     lightboxLoading = false;
     if (!lightboxSrc) return;
@@ -1466,6 +1470,23 @@ See the LICENSE file in the root of this repository for complete details.
   function attachClick(entryId: number, click: string, advancedBy?: string | null) {
     const entry = history.find(h => h.id === entryId);
     if (entry) entry.text = completionLabel(click, advancedBy);
+  }
+
+  // A reopened session's own pictures, fetched one at a time as the transcript is rebuilt.
+  // Deliberately no fading here, unlike the live thumbnails: there a thumb means "what the
+  // AI is looking at now", and only one thing can be current, while a reopened transcript
+  // is a record in which every step keeps the picture it was guided from.
+  function attachStoredFrame(entryId: number, b64: string, ref: { sessionId: string; frame: string }) {
+    const entry = history.find(h => h.id === entryId);
+    if (!entry) return;
+    entry.thumb = b64;
+    entry.storedFrame = ref;
+  }
+
+  function loadStoredThumb(entryId: number, sessionId: string, frame: string) {
+    invoke<string | null>("session_frame", { sessionId, frame, thumb: true })
+      .then((b64) => { if (b64) attachStoredFrame(entryId, b64, { sessionId, frame }); })
+      .catch(() => {});
   }
 
   function attachThumb(entryId: number, thumbB64: string) {
@@ -2469,7 +2490,10 @@ See the LICENSE file in the root of this repository for complete details.
         // for, and it is already on screen as the step above; restating it in the row made
         // every completion a wall of the same sentence twice. What is left is the fact --
         // that it was completed, and (below) what the user actually clicked.
-        await addToHistory("completed", completionLabel(t.clicked, t.advanced_by));
+        const rowId = await addToHistory("completed", completionLabel(t.clicked, t.advanced_by));
+        // Fetched in the background, one row at a time: a session with twenty frames would
+        // otherwise hold the transcript back behind a few megabytes of pictures.
+        if (t.frame) loadStoredThumb(rowId, resumed.id, t.frame);
         continue;
       }
       // The backend's roles are the model's, not the panel's: `assistant` is what
@@ -2480,11 +2504,17 @@ See the LICENSE file in the root of this repository for complete details.
         : t.role === "user" ? "user"
         : t.role === "correction" ? "correction"
         : "system";
-      await addToHistory(role, t.content);
+      const rowId = await addToHistory(role, t.content);
+      if (t.frame) loadStoredThumb(rowId, resumed.id, t.frame);
     }
+    // The old notice said screenshots were never kept. That is true of a session recorded
+    // with the setting off and false of one recorded with it on, and it is the kind of
+    // sentence that has to change when the feature does.
     await addToHistory(
       "system",
-      "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen — and guidance follows the app you click into next.",
+      resumed.conversation.some((t) => t.frame)
+        ? "Reopened. The pictures are the ones this session was guided from — guidance follows the app you click into next."
+        : "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen — and guidance follows the app you click into next.",
     );
   }
 
@@ -4104,7 +4134,7 @@ See the LICENSE file in the root of this repository for complete details.
             <button
               class="h-thumb-btn"
               class:h-thumb-fading={entry.thumbFading}
-              onclick={openLightbox}
+              onclick={() => openLightbox(entry.storedFrame)}
               title="Click to view full screenshot"
             >
               <img class="h-thumb" src="data:image/jpeg;base64,{entry.thumb}" alt="screenshot" />

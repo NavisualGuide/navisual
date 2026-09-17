@@ -941,15 +941,21 @@ fn locate_for_step(
 
 /// What `execute_step` produced, in order: the verified locate result (None on a
 /// miss), the trace, whether the diffuse AI-bbox hint ring was drawn (the frontend's
-/// third ✗ Wrong picker state — a visible hint IS rejectable), and the candidate boxes
+/// third ✗ Wrong picker state — a visible hint IS rejectable), the candidate boxes
 /// actually drawn (Flow A collection, or a Flow B ambiguity set on a miss — callers
 /// populate `GuideResponse.candidates` and arm the state-readback from it; empty when
-/// a single pointer was drawn).
+/// a single pointer was drawn), and the rect that was drawn, if any.
+///
+/// The last one is what the overlay ACTUALLY drew — the located rect, the first candidate,
+/// or the hint ring — which `located` alone cannot distinguish (a hint beside a miss looks
+/// the same from outside). A stored session needs it to redraw the same mark; nothing else
+/// should read it.
 type StepOutcome = (
     Option<locator::LocateResult>,
     Option<locator::trace::LocateTrace>,
     bool,
     Vec<capture::Rect>,
+    Option<capture::Rect>,
 );
 
 /// Do two screen-space rects overlap at all? (Used to tell when the AI's target region sits under
@@ -1289,7 +1295,10 @@ fn execute_step(
         );
     }
 
-    Ok((located, trace, hint_shown, shown_candidates))
+    // `bbox` is what the overlay actually DREW (located rect, first candidate, or the
+    // hint ring) — returned so a stored session can redraw the same mark against its own
+    // frame instead of guessing from `located`, which cannot tell a hit from a hint.
+    Ok((located, trace, hint_shown, shown_candidates, bbox))
 }
 
 /// Classify what the user actually did, for the export conversation model (§0.7).
@@ -1372,6 +1381,50 @@ fn push_export_turn(
     buf.push(user, assistant);
 }
 
+/// Where the pointer ended up for one step, in THIS frame's pixels, plus the factor its
+/// fixed-size parts need.
+///
+/// Split out of `record_export_step` when stored sessions began keeping frames of their
+/// own: the export ring's frame and a session's frame describe the same pointer, and
+/// deriving it twice is exactly how the exporter and a replay would come to disagree about
+/// a step. Both callers pass their own frame rect and pixel size; the arithmetic is shared.
+fn pointer_for_frame(
+    drawn: Option<capture::Rect>,
+    hint_shown: bool,
+    frame_rect: capture::Rect,
+    width: u32,
+    height: u32,
+) -> (session_export::PointerState, f32) {
+    // Frame-relative pixels, never virtual-desktop coordinates — §4.3's portability
+    // rule. A rect that converts to None sat outside this frame (another monitor),
+    // and drawing it clamped would put a confident marker on the wrong control.
+    //
+    // The None case splits in two, and conflating them corrupts the record: if
+    // there was no rect at all the locator genuinely missed, but if there WAS one
+    // and it simply fell outside this frame, the locator succeeded and the
+    // screenshot just cannot show it. Live 2026-09-04 produced exactly the second
+    // case — `pointer: miss` beside `locator: HitA11y`, a flat contradiction.
+    let pointer = match drawn {
+        Some(r) => match session_export::to_frame_coords(r, frame_rect, width, height) {
+            Some(rect) if hint_shown => session_export::PointerState::Hint { rect },
+            Some(rect) => session_export::PointerState::Hit { rect },
+            None => session_export::PointerState::OffFrame,
+        },
+        None => session_export::PointerState::Miss,
+    };
+
+    // Frame pixels per logical pixel, so a redraw can size the mark as it was on screen.
+    // Two factors, and both are needed: the monitor's scale (the overlay draws in logical
+    // px, the frame is physical) and any downscale on the way to disk. The located rect
+    // needs neither — `to_frame_coords` already carried it. For a stored session's frame
+    // the downscale factor is exactly 1.0 (native resolution, §4.2), which leaves the
+    // monitor scale — the factor that must never be assumed away (§4.4).
+    let mark_scale = capture::monitor_scale_for_rect(&frame_rect)
+        * (width as f32 / frame_rect.width.max(1) as f32);
+
+    (pointer, mark_scale)
+}
+
 /// Attach one step's clean frame and pointer state to the export ring buffer.
 ///
 /// Split out of `execute_step` because it is the only part that reaches for
@@ -1409,33 +1462,9 @@ fn record_export_step(
         app_rect: app_rect.and_then(|r| session_export::to_frame_coords(r, frame_rect, w, h)),
     };
 
-    // Frame-relative pixels, never virtual-desktop coordinates — §4.3's portability
-    // rule. A rect that converts to None sat outside this frame (another monitor),
-    // and drawing it clamped would put a confident marker on the wrong control.
-    //
-    // The None case splits in two, and conflating them corrupts the record: if
-    // there was no rect at all the locator genuinely missed, but if there WAS one
-    // and it simply fell outside this frame, the locator succeeded and the
-    // screenshot just cannot show it. Live 2026-09-04 produced exactly the second
-    // case — `pointer: miss` beside `locator: HitA11y`, a flat contradiction.
-    let pointer = match drawn {
-        Some(r) => match session_export::to_frame_coords(r, frame_rect, w, h) {
-            Some(rect) if hint_shown => session_export::PointerState::Hint { rect },
-            Some(rect) => session_export::PointerState::Hit { rect },
-            None => session_export::PointerState::OffFrame,
-        },
-        None => session_export::PointerState::Miss,
-    };
-
     let decision = trace.map(|t| format!("{:?}", t.final_decision));
     let ms = trace.map(|t| t.elapsed_ms as u64);
-
-    // Frame pixels per logical pixel, so the exporter can draw the mark at the size it
-    // had on screen. Two factors, and both are needed: the monitor's scale (the overlay
-    // draws in logical px, this frame is physical) and any downscale applied on the way
-    // to disk. The located rect needs neither -- `to_frame_coords` already carried it.
-    let mark_scale = capture::monitor_scale_for_rect(&frame_rect)
-        * (w as f32 / frame_rect.width.max(1) as f32);
+    let (pointer, mark_scale) = pointer_for_frame(drawn, hint_shown, frame_rect, w, h);
 
     // How much of the bottom of this frame is taskbar. The overlay anchors the
     // caption to the monitor's WORK AREA so it sits above the taskbar rather than
@@ -2149,6 +2178,118 @@ mod dock_tests {
         assert_eq!(want, 480);
         let l = dock_split(WORK, "right", want);
         assert_eq!(l.partner.width, 1440);
+    }
+}
+
+#[cfg(test)]
+mod pointer_mark_tests {
+    use super::*;
+    use crate::session_export::PointerState;
+
+    fn rect(x: i32, y: i32, w: u32, h: u32) -> capture::Rect {
+        capture::Rect { x, y, width: w, height: h }
+    }
+
+    /// The pointer's outcome and the mark's scale, derived the same way for a stored
+    /// session's frame as for the export ring's.
+    #[test]
+    fn the_mark_is_relative_to_the_frame_it_is_stored_with() {
+        let frame = rect(100, 50, 1000, 800);
+        let (mark, scale) = pointer_for_frame(Some(rect(300, 250, 40, 30)), false, frame, 1000, 800);
+
+        assert!(
+            matches!(mark, PointerState::Hit { rect: [200, 200, 40, 30] }),
+            "the drawn rect must come back in the frame's own pixels, offset by its origin"
+        );
+        // Native resolution, so the downscale term is 1 and what is left is the monitor
+        // scale -- 1.0 only because this test machine is at 100%.
+        assert!((scale - capture::monitor_scale_for_rect(&frame)).abs() < f32::EPSILON);
+    }
+
+    /// §4.4's rule, pinned by a case that fails if anyone hardcodes 1.0: a frame that was
+    /// downscaled on the way to disk must scale the mark's fixed-size parts with it.
+    #[test]
+    fn a_downscaled_frame_scales_the_mark_never_assumes_one() {
+        let frame = rect(0, 0, 1000, 800);
+        let (_, scale) = pointer_for_frame(None, false, frame, 500, 400);
+        assert!(
+            (scale - capture::monitor_scale_for_rect(&frame) * 0.5).abs() < 1e-6,
+            "half the pixels means half the scale, whatever the monitor is set to"
+        );
+    }
+
+    #[test]
+    fn a_rect_outside_the_frame_is_recorded_as_such_not_as_a_miss() {
+        let frame = rect(0, 0, 100, 100);
+        let (out, _) = pointer_for_frame(Some(rect(5000, 5000, 10, 10)), false, frame, 100, 100);
+        assert!(
+            matches!(out, PointerState::OffFrame),
+            "the locator succeeded; the screenshot just cannot show it"
+        );
+
+        let (miss, _) = pointer_for_frame(None, false, frame, 100, 100);
+        assert!(matches!(miss, PointerState::Miss), "nothing was drawn at all");
+    }
+
+    /// §4.3's drawing half: the mark lands on the picture, near the rect it was recorded
+    /// against, and the rest of the frame is untouched.
+    #[test]
+    fn a_stored_frame_is_redrawn_with_its_pointer_at_the_recorded_place() {
+        use crate::ai::session::StoredMark;
+
+        // A plain white 160x160 frame, stored as PNG exactly as the app stores one.
+        let blank = image::RgbaImage::from_pixel(160, 160, image::Rgba([255, 255, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(blank)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("test frame encodes");
+
+        let mark = StoredMark {
+            pointer: PointerState::Hit { rect: [60, 60, 40, 30] },
+            mark_scale: 1.0,
+        };
+        let out = compose_stored_frame(&png, Some(&mark), 4).expect("composes");
+
+        let changed: Vec<(u32, u32)> = out
+            .enumerate_pixels()
+            .filter(|(_, _, p)| p.0[0] != 255 || p.0[1] != 255 || p.0[2] != 255)
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        assert!(!changed.is_empty(), "the pointer has to be drawn somewhere");
+
+        // Not a bounding-box test: the mark includes the ripples, which legitimately spread
+        // well past the rect (the exporter draws the same ones). What must hold is that the
+        // mark is CENTRED on the rect it was recorded against -- a wrong origin or a wrong
+        // scale moves that centre, which is the failure §4.4 is about.
+        let (x0, y0) = changed.iter().fold((u32::MAX, u32::MAX), |a, b| (a.0.min(b.0), a.1.min(b.1)));
+        let (x1, y1) = changed.iter().fold((0, 0), |a, b| (a.0.max(b.0), a.1.max(b.1)));
+        let (cx, cy) = ((x0 + x1) as f32 / 2.0, (y0 + y1) as f32 / 2.0);
+        // Recorded rect [60, 60, 40, 30] centres at (80, 75).
+        assert!(
+            (cx - 80.0).abs() <= 4.0 && (cy - 75.0).abs() <= 4.0,
+            "mark centred at {cx},{cy}; the rect it was recorded against centres at 80,75"
+        );
+    }
+
+    #[test]
+    fn a_frame_without_a_mark_comes_back_untouched() {
+        let blank = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(blank)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("test frame encodes");
+
+        // A miss is recorded, but nothing was drawn — the picture must stay clean.
+        let miss = crate::ai::session::StoredMark { pointer: PointerState::Miss, mark_scale: 1.0 };
+        let out = compose_stored_frame(&png, Some(&miss), 4).expect("composes");
+        assert!(out.pixels().all(|p| p.0 == [255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn the_hint_ring_is_kept_distinct_from_a_hit() {
+        let frame = rect(0, 0, 100, 100);
+        let (hint, _) = pointer_for_frame(Some(rect(10, 10, 5, 5)), true, frame, 100, 100);
+        assert!(matches!(hint, PointerState::Hint { .. }));
     }
 }
 
@@ -3094,6 +3235,94 @@ fn make_chat_thumbnail(jpeg_bytes: &[u8]) -> Option<String> {
     Some(capture::to_base64(&buf))
 }
 
+/// One stored frame, with its pointer redrawn on it -- the row thumbnail or the lightbox.
+///
+/// Composed here rather than in the panel for §4.3's reason: the compositor is the
+/// exporter's, and a second drawing implementation is exactly how a replay would come to
+/// disagree with the record about the same step. Nothing is burned into the file -- the
+/// stored PNG is clean and the mark is applied per request, so a pointer that landed wrong
+/// stays that way in the record and can be re-read, re-drawn or ignored later.
+/// Decode a stored frame, draw the mark it was recorded with, and hand back the pixels.
+///
+/// Split from the command so the drawing can be tested without an `AppState` -- the half
+/// of §4.3 that no unit test could otherwise reach, since it only happens in the panel.
+fn compose_stored_frame(
+    png: &[u8],
+    mark: Option<&crate::ai::session::StoredMark>,
+    thickness: u32,
+) -> anyhow::Result<image::RgbaImage> {
+    let mut img = image::load_from_memory(png)?.to_rgba8();
+    if let Some(mark) = mark {
+        if let Some([x, y, w, h]) = mark.pointer.draw_rect() {
+            // The exporter's own compositor and the same scale it uses, from the pixels of
+            // THIS frame (§4.3). Never a second drawing implementation: a replay that drew
+            // differently from the export would be the two-renderer problem again.
+            session_export::draw_pointer(
+                &mut img,
+                [x, y, w, h],
+                session_export::stroke_scale(thickness),
+                mark.mark_scale,
+                matches!(mark.pointer, session_export::PointerState::Hint { .. }),
+            );
+        }
+    }
+    Ok(img)
+}
+
+#[tauri::command]
+async fn session_frame(
+    state: State<'_, AppState>,
+    session_id: String,
+    frame: String,
+    thumb: bool,
+) -> Result<Option<String>, String> {
+    // Both strings come from the page and are joined into a path, so both are checked
+    // rather than trusted: a bare UUID, and a plain file name inside that session's own
+    // frame directory.
+    if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err("not a session id".into());
+    }
+    if frame.contains(['/', '\\']) || frame.contains("..") || !frame.ends_with(".png") {
+        return Err("not a frame name".into());
+    }
+
+    let (path, mark, thickness) = {
+        let router = state.ai_router.lock().await;
+        (
+            router.session_manager.frames_dir(&session_id).join(&frame),
+            router.session_manager.frame_mark(&session_id, &frame),
+            router.config.overlay_thickness,
+        )
+    };
+
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            // Pruned since the list was drawn, or the archive moved it. Not an error the
+            // panel has to say anything about -- it simply has no picture for that row.
+            log::warn!("[sessions] frame not readable {path:?}: {e}");
+            return Ok(None);
+        }
+    };
+    let img = compose_stored_frame(&bytes, mark.as_ref(), thickness).map_err(|e| e.to_string())?;
+
+    let mut buf = Vec::new();
+    {
+        use image::codecs::jpeg::JpegEncoder;
+        // JPEG both ways, matching the live path's formats: a thumbnail at 160x90 q40 for
+        // the row, q75 at full size for the lightbox. The mark is drawn BEFORE the
+        // downscale, so it keeps the proportions it had on screen.
+        let out = if thumb {
+            image::DynamicImage::ImageRgba8(img).resize(160, 90, image::imageops::FilterType::Nearest)
+        } else {
+            image::DynamicImage::ImageRgba8(img)
+        };
+        let mut enc = JpegEncoder::new_with_quality(&mut buf, if thumb { 40 } else { 75 });
+        enc.encode_image(&out).map_err(|e| e.to_string())?;
+    }
+    Ok(Some(capture::to_base64(&buf)))
+}
+
 /// Return the full-resolution chat screenshot as base64 (for the lightbox).
 /// Read from in-memory state — never touched disk. Returns None if no
 /// screenshot has been captured yet this session.
@@ -4036,7 +4265,11 @@ async fn guide(
     // failed write is deliberately not an error the session pays for: no frame is a smaller
     // loss than no session. `pre_ocr` is the OCR PNG -- the masked, native-resolution frame
     // the locator read, never the unmasked whole-monitor export frame.
-    let frame = if router.config.session_screenshots {
+    let keep_frames = router.config.session_screenshots;
+    // The OCR frame's region, kept because the bytes themselves are moved into
+    // `execute_step` below and the mark needs the geometry afterwards.
+    let ocr_frame_rect = pre_ocr.as_ref().map(|(_, rect)| *rect);
+    let frame = if keep_frames {
         match (&router.session_manager.current_session, pre_ocr.as_ref()) {
             (Some(session), Some((png, _))) => router.session_manager.save_frame(
                 &session.id.to_string(),
@@ -4204,7 +4437,7 @@ async fn guide(
         );
     }
 
-    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates, drawn_rect) = execute_step(
         &app,
         &steps[0],
         new_hwnd_opt,
@@ -4231,7 +4464,7 @@ async fn guide(
             None => None,
         },
     )
-    .unwrap_or((None, None, false, Vec::new()));
+    .unwrap_or((None, None, false, Vec::new(), None));
     // Flow B: a first-locate ambiguity set was drawn — arm the state readback.
     arm_candidates_if_shown(
         &state,
@@ -4251,6 +4484,32 @@ async fn guide(
         t.ai_ttft_ms = ai_ttft_ms.map(|v| v as u32);
         t.app_name = trace_app_name(new_hwnd_opt);
         maybe_log_trace(&app, t, log_trace, training_enabled);
+    }
+
+    // §4.3: what the overlay ACTUALLY drew, recorded against the frame stored for this
+    // round. The router lock was released before `execute_step` (it runs the locator), so
+    // this takes it again briefly; if it is contended the mark is dropped rather than the
+    // response stalled -- a frame that came back without its pointer is the smaller loss.
+    if let (Some(_), Some(ocr_rect)) = (frame.as_ref(), ocr_frame_rect) {
+        // Native resolution, so the downscale term is exactly 1.0 and the factor left is
+        // the monitor scale -- computed by the same helper the export ring uses, never
+        // assumed to be 1.0 (§4.4).
+        let (pointer, mark_scale) =
+            pointer_for_frame(drawn_rect, hint_shown, ocr_rect, ocr_rect.width, ocr_rect.height);
+        match state.ai_router.try_lock() {
+            Ok(mut router) => {
+                if let Some(session) = &mut router.session_manager.current_session {
+                    session.set_last_user_turn_mark(Some(crate::ai::session::StoredMark {
+                        pointer,
+                        mark_scale,
+                    }));
+                }
+                // Saved again on purpose: the turn was written before the locate ran, so
+                // the mark had nowhere to live until now.
+                router.session_manager.save_session(None);
+            }
+            Err(_) => log::warn!("[sessions] frame stored without its pointer: router busy"),
+        }
     }
 
     // Anchor the autopilot baseline AFTER the pointer is drawn so that
@@ -4361,7 +4620,7 @@ async fn next_step(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
-    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates, _drawn_rect) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -4381,7 +4640,7 @@ async fn next_step(
         Some(step_index),
         None, // no AI capture on this path — see execute_step's pre_export
     )
-    .unwrap_or((None, None, false, Vec::new()));
+    .unwrap_or((None, None, false, Vec::new(), None));
     arm_candidates_if_shown(
         &state,
         request_id.clone(),
@@ -4567,7 +4826,7 @@ async fn retry_locate(
         candidate_boxes = locator::candidates::dedupe_candidates(candidate_boxes);
     }
 
-    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates, _drawn_rect) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -4587,7 +4846,7 @@ async fn retry_locate(
         Some(step_index),
         None, // no AI capture on this path — see execute_step's pre_export
     )
-    .unwrap_or((None, None, false, Vec::new()));
+    .unwrap_or((None, None, false, Vec::new(), None));
 
     // Arm the state-readback on whatever was actually drawn — the Flow A collection,
     // or (when the collection came up short and the retry's own locate missed on a
@@ -5224,7 +5483,7 @@ async fn send_correction(
         avoid_bboxes.as_deref().unwrap_or(&[]),
         steps[0].target_text.as_deref(),
     );
-    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates, _drawn_rect) = execute_step(
         &app,
         &steps[0],
         new_hwnd,
@@ -5247,7 +5506,7 @@ async fn send_correction(
             None => None,
         },
     )
-    .unwrap_or((None, None, false, Vec::new()));
+    .unwrap_or((None, None, false, Vec::new(), None));
     arm_candidates_if_shown(
         &state,
         Some(request_id.clone()),
@@ -7590,6 +7849,7 @@ pub fn run() {
             export_session,
             list_tts_voices,
             get_chat_full_screenshot,
+            session_frame,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
