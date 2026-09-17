@@ -109,9 +109,11 @@ pub fn session_to_html(session: &Session, frames_dir: &Path, thickness: u32) -> 
 
     for turn in &session.conversation {
         // A frame belongs to the user turn just before this one. Normally its assistant
-        // follows and flushes it into place below; two user turns back to back (a request
-        // that failed after the turn was written left no assistant turn) would otherwise
-        // have the second turn's picture overwrite the first one's.
+        // follows and flushes it into place below -- the app always writes the pair together,
+        // and a failed request writes neither, so a session the app wrote can never put two
+        // user turns back to back. The flush is for files that came from elsewhere: an
+        // imported or hand-edited conversation can, and without it the second turn's
+        // picture would silently overwrite the first one's.
         if pending.is_some() && turn.role != "assistant" {
             body.push_str(&pending.take().unwrap());
         }
