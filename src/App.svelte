@@ -2348,6 +2348,7 @@ See the LICENSE file in the root of this repository for complete details.
     steps = [];
     stepIndex = 0;
     currentInstruction = "";
+    lastCompletedInstruction = "";
     streamStepsSeen = 0;
     locateResult = null;
     locateTrace = null;
@@ -2417,6 +2418,9 @@ See the LICENSE file in the root of this repository for complete details.
     steps = [];
     stepIndex = 0;
     currentInstruction = "";
+    // The previous session's last completed step must not ride along: the first Next here
+    // would report it as complete and the model would skip that step of the new task.
+    lastCompletedInstruction = "";
     streamStepsSeen = 0;
     locateResult = null;
     locateTrace = null;
@@ -2976,8 +2980,16 @@ See the LICENSE file in the root of this repository for complete details.
     : "error"
   );
 
-  // Next/Wrong enabled whenever there's a live session (guiding, needs_input, or idle with steps).
-  let actionDisabled = $derived(phase === "thinking" || phase === "error" || (phase === "idle" && steps.length === 0));
+  // Next/Wrong enabled whenever there is a task to carry on: guiding, needs_input, or idle
+  // with either steps left to advance or a session that came back WITHOUT them. `sessionId`
+  // is what separates those two idles -- a reopened session deliberately restores no steps
+  // (they describe a screen that is gone), and greying Next out there left the user holding a
+  // restored task with no way to continue it. Pressed with nothing to advance, Next re-reads
+  // the screen and re-plans against the restored task, which is the whole point of reopening.
+  let actionDisabled = $derived(
+    phase === "thinking" || phase === "error" ||
+    (phase === "idle" && steps.length === 0 && sessionId === "")
+  );
   let isThinking = $derived(phase === "thinking");
   let activeModel = $derived(
     settingsForm.api_provider === "anthropic" ? settingsForm.anthropic_model
