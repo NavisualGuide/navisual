@@ -69,7 +69,10 @@ See the LICENSE file in the root of this repository for complete details.
     candidates: Rect[];
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
-  type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
+  // "completed" is the user's own action -- the machine-built `[User completed: "..."]`
+  // turn -- so it renders on the user side of the transcript, in the user pill. It
+  // is a role rather than a style flag because every other row is told apart by role.
+  type HistoryRole = "user" | "ai" | "correction" | "system" | "error" | "completed";
   type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
@@ -2432,7 +2435,7 @@ See the LICENSE file in the root of this repository for complete details.
       // system note the live session uses, not as a user bubble with brackets.
       if (t.content.startsWith('[User completed: "') && t.content.endsWith('"]')) {
         const inner = t.content.slice('[User completed: "'.length, t.content.length - '"]'.length);
-        await addToHistory("system", `✓ Completed — ${inner}`);
+        await addToHistory("completed", `✓ Completed — ${inner}`);
         continue;
       }
       // The backend's roles are the model's, not the panel's: `assistant` is what
@@ -2644,7 +2647,9 @@ See the LICENSE file in the root of this repository for complete details.
       startTimer();
       const token = ++requestToken;
       // Create a history entry so the screenshot thumbnail has somewhere to live.
-      const reQueryId = await addToHistory("system",
+      // Only the completion branch is the user's own action; a skipped question and a
+      // plain re-analysis stay quiet system notes.
+      const reQueryId = await addToHistory(completed ? "completed" : "system",
         unanswered ? "↷ Skipped the question — re-analysing…"
         : completed ? `✓ Completed — re-analysing…` : "Re-analysing…");
       try {
@@ -4035,7 +4040,7 @@ See the LICENSE file in the root of this repository for complete details.
                    flex children to ~2px. -->
               <img src="/goldfish.svg" class="h-label-fish" alt="Navisual" title="Navisual" draggable="false" />
             {:else}
-              {entry.role === "user" ? "You"
+              {entry.role === "user" || entry.role === "completed" ? "You"
               : entry.role === "correction" ? "Wrong"
               : entry.role === "error" ? "Error"
               : "·"}
@@ -6730,9 +6735,17 @@ See the LICENSE file in the root of this repository for complete details.
      shows it: YOU are a filled bubble on the right, NAVISUAL is plain text on
      the left beside its mark, and system notes sit centred and quiet between.
      Position and fill are the marker, so the text label becomes screen-reader
-     only rather than a caps tag in a gutter. (Redesign 2026-09-07.) */
-  .h-user { flex-direction: row-reverse; }
+     only rather than a caps tag in a gutter. (Redesign 2026-09-07.)
+
+     `completed` rides the user side because that is what it records: the step
+     the USER just performed. It is not in the user's words -- "✓ Completed —"
+     and the instruction after it are the app's -- so it is a role of its own
+     and not simply `user`. Leaving it a centred system note made the one row
+     the user actually caused the quietest thing on screen. */
+  .h-user,
+  .h-completed { flex-direction: row-reverse; }
   .h-user .h-label,
+  .h-completed .h-label,
   .h-correction .h-label {
     position: absolute;
     width: 1px;
@@ -6741,12 +6754,14 @@ See the LICENSE file in the root of this repository for complete details.
     clip: rect(0 0 0 0);
     white-space: nowrap;
   }
-  .h-user .h-body {
+  .h-user .h-body,
+  .h-completed .h-body {
     background: var(--accent-500);
     padding: 8px 12px;
     border-radius: 16px 16px 4px 16px;
   }
-  .h-user .h-text { color: var(--on-accent); }
+  .h-user .h-text,
+  .h-completed .h-text { color: var(--on-accent); }
   .h-user .h-meta { color: var(--on-accent-dim); }
 
   .h-ai .h-text  { color: var(--text-primary); }
