@@ -556,6 +556,10 @@ See the LICENSE file in the root of this repository for complete details.
   let storedSessions = $state<StoredSession[]>([]);
   let sessionPickerLoading = $state(false);
   let sessionExportBusy = $state(false);
+  let sessionImportBusy = $state(false);
+  // Ids ticked in the list. Empty means the export button offers everything, which is the
+  // common case -- "send me all of them" should not need twenty clicks.
+  let selectedSessions = $state<string[]>([]);
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   // "target" = pick what Navisual assists with; "dock" = pick what fills the
@@ -2431,12 +2435,23 @@ See the LICENSE file in the root of this repository for complete details.
   // Every stored session as one self-contained HTML file each, into a folder the user
   // picks — that choice is the consent, the same shape as the live session export. Nothing
   // is written until it is made, and a cancelled dialog is a normal outcome, not an error.
+  function toggleSessionSelection(id: string) {
+    selectedSessions = selectedSessions.includes(id)
+      ? selectedSessions.filter((s) => s !== id)
+      : [...selectedSessions, id];
+  }
+
   async function exportStoredSessions() {
     sessionExportBusy = true;
     try {
-      const out = await invoke<{ folder: string; count: number } | null>("export_sessions_html");
+      // No ticks means everything: the button's own label says which it will be, so the
+      // hand-off cannot surprise anyone.
+      const out = await invoke<{ folder: string; count: number } | null>("export_sessions_html", {
+        ids: selectedSessions,
+      });
       if (out) {
         sessionPickerOpen = false;
+        selectedSessions = [];
         await addToHistory(
           "system",
           `Exported ${out.count} session${out.count === 1 ? "" : "s"} to ${out.folder}`,
@@ -2446,6 +2461,49 @@ See the LICENSE file in the root of this repository for complete details.
       await addToHistory("error", `Could not export the sessions: ${e}`);
     } finally {
       sessionExportBusy = false;
+    }
+  }
+
+  // Reading exported files back in. Each becomes a session again; one whose id is already
+  // here arrives as a copy, because overwriting a session you are working in with the copy
+  // you took of it weeks ago is the one outcome nobody wants.
+  async function importStoredSessions() {
+    sessionImportBusy = true;
+    try {
+      const out = await invoke<{
+        imported: { task: string; copied: boolean; frames: number; at_risk: boolean }[];
+        skipped: number;
+      } | null>("import_session_html");
+      if (!out) return;
+      if (out.imported.length === 0) {
+        await addToHistory(
+          "system",
+          out.skipped === 1
+            ? "That file is not a Navisual session."
+            : `Nothing imported -- ${out.skipped} files, none of them Navisual sessions.`,
+        );
+        return;
+      }
+      const detail = out.imported
+        .map((i) => {
+          const notes = [
+            i.copied ? "saved as a copy" : "",
+            i.frames ? `${i.frames} picture${i.frames === 1 ? "" : "s"}` : "",
+            i.at_risk ? "older than the ones kept, so open it to keep it" : "",
+          ].filter(Boolean);
+          return `\u201c${i.task}\u201d${notes.length ? ` (${notes.join(", ")})` : ""}`;
+        })
+        .join("\n");
+      await addToHistory(
+        "system",
+        `Imported ${out.imported.length} session${out.imported.length === 1 ? "" : "s"}:\n${detail}` +
+          (out.skipped ? `\n${out.skipped} file(s) skipped -- not sessions.` : ""),
+      );
+      await openSessionPicker();
+    } catch (e) {
+      await addToHistory("error", `Could not import: ${e}`);
+    } finally {
+      sessionImportBusy = false;
     }
   }
 
@@ -4314,30 +4372,51 @@ See the LICENSE file in the root of this repository for complete details.
       {#if sessionPickerOpen}
         <div class="session-picker" role="listbox" aria-label="Recent tasks">
           <div class="target-pick-head">Recent tasks</div>
+          <!-- Export and import live at the TOP, where they can be found without scrolling
+               past twenty rows -- the plan's own §6 actions, and rule 18's lesson about
+               controls that get buried. -->
+          <div class="session-pick-actions">
+            <button class="session-pick-action" onclick={exportStoredSessions}
+              disabled={sessionExportBusy || storedSessions.length === 0}
+              title="One self-contained HTML file per session, readable in any browser">
+              {sessionExportBusy
+                ? "Exporting…"
+                : selectedSessions.length > 0
+                  ? `Export ${selectedSessions.length} selected…`
+                  : `Export all ${storedSessions.length}…`}
+            </button>
+            <button class="session-pick-action" onclick={importStoredSessions}
+              disabled={sessionImportBusy}
+              title="Read exported session files back in">
+              {sessionImportBusy ? "Importing…" : "Import…"}
+            </button>
+          </div>
           {#if sessionPickerLoading}
             <div class="session-pick-empty">Loading…</div>
           {:else if storedSessions.length === 0}
             <div class="session-pick-empty">No earlier tasks yet. They're saved here as you go.</div>
           {:else}
             {#each storedSessions as sess (sess.id)}
-              <button class="target-pick-item" class:target-pick-selected={sess.id === sessionId}
-                onclick={() => resumeStoredSession(sess.id)}>
-                <span class="target-pick-check">{sess.id === sessionId ? "✓" : ""}</span>
-                <span class="target-pick-name">{sess.task_description || "Untitled task"}</span>
-                <span class="target-pick-sub">
-                  {whenAgo(sess.last_active_at)} · {sess.turns} turn{sess.turns === 1 ? "" : "s"}
-                </span>
-                {#if sess.summary_text}
-                  <span class="session-pick-summary">{sess.summary_text}</span>
-                {/if}
-              </button>
+              <!-- The tick sits OUTSIDE the row's button: an input nested in a button is
+                   invalid markup, and one click would open the session as well as select it. -->
+              <div class="session-pick-row">
+                <input class="session-pick-tick" type="checkbox"
+                  checked={selectedSessions.includes(sess.id)}
+                  onchange={() => toggleSessionSelection(sess.id)}
+                  aria-label={`Select ${sess.task_description || "untitled task"}`} />
+                <button class="target-pick-item" class:target-pick-selected={sess.id === sessionId}
+                  onclick={() => resumeStoredSession(sess.id)}>
+                  <span class="target-pick-check">{sess.id === sessionId ? "✓" : ""}</span>
+                  <span class="target-pick-name">{sess.task_description || "Untitled task"}</span>
+                  <span class="target-pick-sub">
+                    {whenAgo(sess.last_active_at)} · {sess.turns} turn{sess.turns === 1 ? "" : "s"}
+                  </span>
+                  {#if sess.summary_text}
+                    <span class="session-pick-summary">{sess.summary_text}</span>
+                  {/if}
+                </button>
+              </div>
             {/each}
-            <!-- One file per session, readable in any browser with no Navisual — see the
-                 plan's §6. It lives here rather than in the ··· menu because this is where
-                 the sessions already are, and rule 18 says the menu loses actions. -->
-            <button class="session-pick-export" onclick={exportStoredSessions} disabled={sessionExportBusy}>
-              {sessionExportBusy ? "Exporting…" : `Export all ${storedSessions.length} as HTML…`}
-            </button>
           {/if}
         </div>
       {/if}
@@ -6022,23 +6101,30 @@ See the LICENSE file in the root of this repository for complete details.
     z-index: 999;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   }
-  .session-pick-export {
-    display: block;
-    width: 100%;
-    margin-top: 4px;
-    padding: 9px 8px;
-    border: 0;
-    border-top: 1px solid var(--border);
-    border-radius: 0 0 var(--r-md) var(--r-md);
-    background: none;
+  .session-pick-actions {
+    display: flex;
+    gap: 6px;
+    padding: 0 2px 6px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+  }
+  .session-pick-action {
+    flex: 1;
+    padding: 7px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: var(--surface-3);
     color: var(--text-secondary);
     font-family: inherit;
     font-size: 12px;
-    text-align: center;
+    font-weight: 600;
     cursor: pointer;
   }
-  .session-pick-export:hover:not(:disabled) { background: var(--surface-4); color: var(--text-primary); }
-  .session-pick-export:disabled { opacity: 0.6; cursor: default; }
+  .session-pick-action:hover:not(:disabled) { background: var(--surface-4); color: var(--text-primary); }
+  .session-pick-action:disabled { opacity: 0.6; cursor: default; }
+  .session-pick-row { display: flex; align-items: center; gap: 2px; }
+  .session-pick-row .target-pick-item { flex: 1 1 auto; min-width: 0; }
+  .session-pick-tick { flex: 0 0 auto; margin: 0 3px; accent-color: var(--accent-500); }
   .session-pick-empty {
     padding: 10px 8px;
     font-size: 12px;

@@ -3339,6 +3339,9 @@ async fn session_frame(
 #[tauri::command]
 async fn export_sessions_html(
     state: State<'_, AppState>,
+    // The sessions ticked in the picker, or empty for everything it was showing. The
+    // button's own label says which of the two it is offering, so nothing here guesses.
+    ids: Vec<String>,
 ) -> Result<Option<SessionExportSummary>, String> {
     let start = Some(session_export::default_destination().join("sessions"));
     let Some(dest) = session_export::pick_folder(start) else {
@@ -3356,7 +3359,16 @@ async fn export_sessions_html(
         )
     };
 
-    let count = session_html::write_all(&session_dir, &sessions, &dest, thickness)
+    let chosen: Vec<_> = if ids.is_empty() {
+        sessions
+    } else {
+        sessions
+            .into_iter()
+            .filter(|s| ids.contains(&s.id.to_string()))
+            .collect()
+    };
+
+    let count = session_html::write_all(&session_dir, &chosen, &dest, thickness)
         .map_err(|e| format!("{e:#}"))?;
     log::info!(
         "[sessions] exported {count} session(s) to {}",
@@ -3373,6 +3385,65 @@ async fn export_sessions_html(
 struct SessionExportSummary {
     folder: String,
     count: usize,
+}
+
+/// Read exported session files back into the store (plan §6).
+///
+/// Multi-select, because an export writes a whole folder and re-importing one at a time is a
+/// chore nobody finishes. The picker is the consent here too, the same shape as the export.
+///
+/// `None` means the dialog was cancelled. Files that are not sessions -- an `index.html`, or
+/// any other page the user grabbed -- are counted and skipped rather than failing the batch.
+#[tauri::command]
+async fn import_session_html(
+    state: State<'_, AppState>,
+) -> Result<Option<SessionImportSummary>, String> {
+    let start = Some(session_export::default_destination().join("sessions"));
+    let files = session_export::pick_files(start, "html");
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    // Read outside the lock: a batch of files should not hold up the guidance loop.
+    let texts: Vec<(std::path::PathBuf, String)> = files
+        .into_iter()
+        .filter_map(|path| match std::fs::read_to_string(&path) {
+            Ok(text) => Some((path, text)),
+            Err(e) => {
+                log::warn!("[sessions] could not read {path:?}: {e}");
+                None
+            }
+        })
+        .collect();
+
+    let (imported, skipped) = {
+        let router = state.ai_router.lock().await;
+        let mut imported = Vec::new();
+        let mut skipped = 0usize;
+        for (path, text) in &texts {
+            match session_html::import_artifact(&router.session_manager, text) {
+                Ok(Some(outcome)) => imported.push(outcome),
+                Ok(None) => {
+                    log::info!("[sessions] {path:?} is not a session file, skipped");
+                    skipped += 1;
+                }
+                Err(e) => {
+                    log::warn!("[sessions] could not import {path:?}: {e:#}");
+                    skipped += 1;
+                }
+            }
+        }
+        (imported, skipped)
+    };
+
+    Ok(Some(SessionImportSummary { imported, skipped }))
+}
+
+/// What an import read in, for the panel to report.
+#[derive(serde::Serialize)]
+struct SessionImportSummary {
+    imported: Vec<session_html::ImportOutcome>,
+    skipped: usize,
 }
 
 /// Return the full-resolution chat screenshot as base64 (for the lightbox).
@@ -7903,6 +7974,7 @@ pub fn run() {
             get_chat_full_screenshot,
             session_frame,
             export_sessions_html,
+            import_session_html,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

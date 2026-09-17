@@ -597,6 +597,13 @@ pub fn to_base64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// The inverse, for reading a picture back out of an artifact (§6). `None` on anything that
+/// is not valid base64, so a hand-edited file yields no picture rather than a broken one.
+pub fn from_base64(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(text).ok()
+}
+
 // ─── Side-by-side docking ───────────────────────────────────────────────────
 //
 // See `win::work_area_containing` for why Navisual tiles the panel and its

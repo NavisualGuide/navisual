@@ -430,11 +430,22 @@ impl SessionManager {
     /// that turn; `None` when it could not be written — a frame that fails to save must never
     /// cost the session it belongs to, and the caller has nothing better to do than carry on.
     pub fn save_frame(&self, session_id: &str, turn_index: usize, png: &[u8]) -> Option<String> {
+        self.save_frame_named(session_id, &format!("{turn_index}.png"), png)
+    }
+
+    /// The same write under a name the caller chooses — used by the importer, whose pictures
+    /// come out of an artifact as JPEG and must not be labelled `.png` for the sake of a
+    /// convention they no longer follow.
+    pub fn save_frame_named(&self, session_id: &str, name: &str, bytes: &[u8]) -> Option<String> {
         let dir = self.frames_dir(session_id);
         fs::create_dir_all(&dir).ok()?;
-        let name = format!("{turn_index}.png");
-        fs::write(dir.join(&name), png).ok()?;
-        Some(name)
+        fs::write(dir.join(name), bytes).ok()?;
+        Some(name.to_string())
+    }
+
+    /// Whether a session with this id is already stored.
+    pub fn session_exists(&self, session_id: &str) -> bool {
+        self.session_dir.join(format!("{session_id}.json")).exists()
     }
 
     /// How many session files exist, without parsing any of them.
@@ -827,7 +838,7 @@ mod tests {
     #[test]
     fn a_stored_frame_carries_its_mark_and_reads_back() {
         use crate::session_export::PointerState;
-        let (mut mgr, dir) = temp_manager("frame-mark");
+        let (mgr, dir) = temp_manager("frame-mark");
         let mut session = Session::new("task".to_string());
         session.add_turn_pinned("user", "hi".to_string(), None, false);
         session.set_last_user_turn_facts(None, None, Some("0.png".to_string()));

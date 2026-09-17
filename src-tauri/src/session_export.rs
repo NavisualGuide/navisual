@@ -1533,12 +1533,103 @@ pub fn pick_folder(start_in: Option<PathBuf>) -> Option<PathBuf> {
     handle.join().ok().flatten()
 }
 
+/// Native "choose one or more files" dialog, filtered to `extension`.
+///
+/// The mirror of `pick_folder`, for the other direction of §6: importing an exported
+/// session back in. Multi-select because an export writes a whole folder of them and
+/// re-importing one at a time would be a chore nobody finishes.
+#[cfg(windows)]
+pub fn pick_files(start_in: Option<PathBuf>, extension: &str) -> Vec<PathBuf> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, SHCreateItemFromParsingName, FOS_ALLOWMULTISELECT,
+        FOS_FILEMUSTEXIST, SIGDN_FILESYSPATH,
+    };
+
+    let extension = extension.to_string();
+    // Same STA thread as the folder picker, for the same reason (see above).
+    let handle = std::thread::spawn(move || -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if hr.is_err() {
+                log::warn!("[sessions] CoInitializeEx for the file picker failed: {hr:?}");
+                return out;
+            }
+            let pattern: Vec<u16> =
+                format!("*.{extension}").encode_utf16().chain(std::iter::once(0)).collect();
+            let label: Vec<u16> = format!("Navisual session (.{extension})")
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let filters = [COMDLG_FILTERSPEC {
+                pszName: PCWSTR(label.as_ptr()),
+                pszSpec: PCWSTR(pattern.as_ptr()),
+            }];
+
+            let result = (|| -> Option<()> {
+                let dialog: IFileOpenDialog =
+                    CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                dialog
+                    .SetOptions(
+                        dialog.GetOptions().ok()? | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST,
+                    )
+                    .ok()?;
+                let _ = dialog.SetFileTypes(&filters);
+                if let Some(dir) = start_in.as_ref().filter(|d| d.exists()) {
+                    let wide: Vec<u16> =
+                        dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+                    if let Ok(item) = SHCreateItemFromParsingName::<
+                        _,
+                        _,
+                        windows::Win32::UI::Shell::IShellItem,
+                    >(PCWSTR(wide.as_ptr()), None)
+                    {
+                        let _ = dialog.SetFolder(&item);
+                    }
+                }
+                // A cancelled dialog is an Err here, which is the normal path, not a
+                // failure worth logging.
+                dialog.Show(None).ok()?;
+                let items = dialog.GetResults().ok()?;
+                for i in 0..items.GetCount().ok()? {
+                    if let Ok(item) = items.GetItemAt(i) {
+                        if let Ok(pw) = item.GetDisplayName(SIGDN_FILESYSPATH) {
+                            if let Ok(path) = pw.to_string() {
+                                out.push(PathBuf::from(path));
+                            }
+                            windows::Win32::System::Com::CoTaskMemFree(Some(pw.0 as *const _));
+                        }
+                    }
+                }
+                Some(())
+            })();
+            if result.is_none() {
+                out.clear();
+            }
+            CoUninitialize();
+        }
+        out
+    });
+    handle.join().unwrap_or_default()
+}
+
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
 #[cfg(not(windows))]
 pub fn pick_folder(_start_in: Option<PathBuf>) -> Option<PathBuf> {
     None
+}
+
+#[cfg(not(windows))]
+pub fn pick_files(_start_in: Option<PathBuf>, _extension: &str) -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn about_text(dir: &Path) -> String {
