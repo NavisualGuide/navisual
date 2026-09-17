@@ -21,7 +21,7 @@ mod tts;
 use ai::config::Config;
 use ai::cost_tracker::CostTracker;
 use ai::router::AiRouter;
-use ai::session::{SessionManager, SessionSummary, SESSION_HISTORY_KEEP};
+use ai::session::{Session, SessionManager, SessionSummary, SESSION_HISTORY_KEEP};
 use ai::types::{GuidanceStep};
 
 use std::path::PathBuf;
@@ -4055,6 +4055,8 @@ async fn guide(
             .join("\n");
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
+        // Bound the store as it grows, not only at launch — a machine that stays
+        // on for days must not drift past the limit between restarts.
         router.session_manager.prune(SESSION_HISTORY_KEEP);
     }
 
@@ -5610,103 +5612,70 @@ fn new_session(state: State<'_, AppState>) {
     }
 }
 
-/// One restored conversation turn, for rebuilding the chat log in the panel.
-#[derive(serde::Serialize)]
-struct ResumedTurn {
-    role: String,
-    content: String,
-    timestamp: String,
-}
-
-/// Everything the panel needs to show a session it just reopened.
-#[derive(serde::Serialize)]
-struct ResumedSession {
-    session_id: String,
-    goal: String,
-    plan_outline: Vec<String>,
-    plan_completed_count: usize,
-    state_summary: String,
-    turns: Vec<ResumedTurn>,
-}
-
-/// Make a stored session the live one again (plan §3.3).
-///
-/// Three things are deliberately NOT restored, and each has a reason that cost a
-/// release to learn:
-///
-/// - **The target window.** `target_hwnd` is a stored handle, and the window behind it is
-///   very likely gone. A handle that outlived its window is the v0.7.25 failure exactly:
-///   the capture does not fail, it returns a grey rectangle the model then reasons about
-///   as though it were the screen. Auto-detect takes over; the user re-pins if they want to.
-/// - **The last click.** It belongs to whatever the user was doing a moment ago, not to
-///   the task being reopened, and it would be reported as fresh context on the first turn.
-/// - **The export ring.** It holds the previous task's frames and none from the reopened
-///   one, so leaving it would let Export write a folder whose pictures belong to a
-///   different task. Clearing it also settles the plan's open question the simple way:
-///   `export_status` reads the ring, so export reports nothing until new turns accrue and
-///   then covers exactly those.
+/// The stored sessions, newest first, for the history overlay. Read-only: the
+/// manager orders them, the UI renders them.
 #[tauri::command]
-async fn resume_session(
+async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
+    Ok(state
+        .ai_router
+        .lock()
+        .await
+        .session_manager
+        .list_sessions())
+}
+
+/// Load a stored session back as the current one.
+///
+/// A session is not a document — it is a position in a task on a machine whose
+/// screen has since changed (plan §3.3). What is restored: the conversation,
+/// task description, plan outline and state summary, via `SessionManager`. What is
+/// deliberately NOT restored: the pinned target HWND (a stored handle outlives its
+/// window — the exact failure v0.7.25 spent a release on; auto-detect takes over),
+/// and the step sequence/index (they describe a screen that no longer exists; the
+/// next request re-captures and re-plans). The export ring is cleared like
+/// `new_session` clears it: it holds the PREVIOUS session's frames, and exporting
+/// after a load must not write them under the loaded conversation.
+#[tauri::command]
+async fn load_session(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<ResumedSession, String> {
+) -> Result<Option<Session>, String> {
     let session = {
         let mut router = state.ai_router.lock().await;
-        router
-            .session_manager
-            .load_session(&session_id)
-            .ok_or_else(|| format!("session {session_id} could not be read"))?
+        match router.session_manager.load_session(&session_id) {
+            Some(s) => s,
+            // Not an error: the file may have been pruned or archived since the
+            // list was drawn, and the UI's answer to either is the same message.
+            None => {
+                log::warn!("[sessions] load {session_id}: no longer on disk");
+                return Ok(None);
+            }
+        }
     };
 
     state.export.lock().clear();
+    let mut g = state.guidance.lock();
+    g.session_id = Some(session.id.to_string());
+    g.steps = vec![];
+    g.state_summary = session
+        .current_state_summary
+        .as_ref()
+        .map(|s| s.summary_text.clone())
+        .unwrap_or_default();
+    g.target_hwnd = None;
+    g.context_elements = None;
+    g.needs_input = false;
+    drop(g);
+    // A click from the previous task is not "what the user just did" for the
+    // loaded one — same reasoning as `new_session`.
     last_click::clear();
-    {
-        let mut g = state.guidance.lock();
-        g.session_id = Some(session.id.to_string());
-        g.steps = vec![];
-        g.state_summary = session
-            .current_state_summary
-            .as_ref()
-            .map(|s| s.summary_text.clone())
-            .unwrap_or_default();
-        g.target_hwnd = None;
-    }
-
     log::info!(
-        "[sessions] resumed {} ({} turns)",
+        "[sessions] loaded {} ({} turns, {} plan steps)",
         session.id,
-        session.conversation.len()
+        session.conversation.len(),
+        session.plan_outline.len()
     );
-    Ok(ResumedSession {
-        session_id: session.id.to_string(),
-        goal: session.task_description.clone(),
-        plan_outline: session.plan_outline.clone(),
-        plan_completed_count: session.plan_completed_count,
-        state_summary: session
-            .current_state_summary
-            .as_ref()
-            .map(|s| s.summary_text.clone())
-            .unwrap_or_default(),
-        turns: session
-            .conversation
-            .iter()
-            .map(|t| ResumedTurn {
-                role: t.role.clone(),
-                content: t.content.clone(),
-                timestamp: t.timestamp.clone(),
-            })
-            .collect(),
-    })
-}
-
-/// The stored sessions, newest first, for the history list (plan §3.2).
-///
-/// Takes the router lock rather than `try_lock`: this is user-initiated, so waiting a
-/// moment for a concurrent locate is right where returning an empty list would be a lie.
-#[tauri::command]
-async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
-    let router = state.ai_router.lock().await;
-    Ok(router.session_manager.list_sessions())
+    Ok(Some(session))
 }
 
 /// One row in the export preview.
@@ -7429,9 +7398,8 @@ pub fn run() {
             }
             let cost_tracker = CostTracker::new(Some(app_data_dir.join("usage.json")));
             let session_manager = SessionManager::new(app_data_dir.join("sessions"));
-            // Retention runs at launch, the same shape as `cleanup_old_debug_artifacts`
-            // above. Before the frontend can call anything, so the first `list_sessions`
-            // already sees the bounded set rather than parsing whatever had accumulated.
+            // History is bounded from launch one: the corpus accumulated unbounded
+            // before this existed, and the first prune archives rather than deletes.
             session_manager.prune(SESSION_HISTORY_KEEP);
             let supabase_session_path = app_data_dir.join("supabase_session.json");
 
@@ -7561,7 +7529,7 @@ pub fn run() {
             dock_is_intact,
             new_session,
             list_sessions,
-            resume_session,
+            load_session,
             export_status,
             pick_export_folder,
             export_session,

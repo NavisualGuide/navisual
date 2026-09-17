@@ -526,6 +526,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Target-window picker (item 1)
   type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; minimized: boolean; };
+  // One row of the recent-tasks list (`SessionSummary` in ai/session.rs).
   type StoredSession = {
     id: string;
     task_description: string;
@@ -533,10 +534,20 @@ See the LICENSE file in the root of this repository for complete details.
     turns: number;
     last_active_at: string;
   };
+  // A reopened session arrives as the stored `Session` itself -- the same shape the
+  // backend writes to disk. Only these fields are read: the rest (token usage, step
+  // sequence, step index) describe a screen that no longer exists.
+  type StoredSessionDetail = {
+    id: string;
+    task_description: string;
+    plan_outline: string[];
+    plan_completed_count: number;
+    current_state_summary: { summary_text: string; turn_index: number } | null;
+    conversation: { role: string; content: string; timestamp: string }[];
+  };
   let sessionPickerOpen = $state(false);
   let storedSessions = $state<StoredSession[]>([]);
   let sessionPickerLoading = $state(false);
-
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   // "target" = pick what Navisual assists with; "dock" = pick what fills the
@@ -2385,18 +2396,17 @@ See the LICENSE file in the root of this repository for complete details.
     cancelRequest();
     planExpanded = false;
     isOverlayCleared = false;
-    let resumed: {
-      session_id: string;
-      goal: string;
-      plan_outline: string[];
-      plan_completed_count: number;
-      state_summary: string;
-      turns: { role: string; content: string; timestamp: string }[];
-    };
+    let resumed: StoredSessionDetail | null;
     try {
-      resumed = await invoke("resume_session", { sessionId: id });
+      resumed = await invoke<StoredSessionDetail | null>("load_session", { sessionId: id });
     } catch (e) {
       await addToHistory("error", `That session could not be reopened: ${e}`);
+      return;
+    }
+    // Null, not an error: the file was retired between the list being drawn and
+    // the row being clicked. Session retention is a moving target by design.
+    if (!resumed) {
+      await addToHistory("error", "That session is no longer on disk — it was retired when newer tasks arrived.");
       return;
     }
 
@@ -2410,15 +2420,15 @@ See the LICENSE file in the root of this repository for complete details.
     staleResponse = false;
     clearPrefill();
 
-    sessionId = resumed.session_id;
-    sessionGoal = resumed.goal;
+    sessionId = resumed.id;
+    sessionGoal = resumed.task_description;
     sessionPlanOutline = resumed.plan_outline;
     sessionPlanCompletedCount = resumed.plan_completed_count;
 
     history = [];
-    for (const t of resumed.turns) {
+    for (const t of resumed.conversation) {
       // A "Next" completion is stored as a machine-built `[User completed: "..."]`
-      // user turn -- the app's words, not the person's. Show it as the clean
+      // user turn — the app's words, not the person's. Show it as the clean
       // system note the live session uses, not as a user bubble with brackets.
       if (t.content.startsWith('[User completed: "') && t.content.endsWith('"]')) {
         const inner = t.content.slice('[User completed: "'.length, t.content.length - '"]'.length);
@@ -2427,7 +2437,7 @@ See the LICENSE file in the root of this repository for complete details.
       }
       // The backend's roles are the model's, not the panel's: `assistant` is what
       // the panel calls `ai`, and anything unrecognised is shown as a system note
-      // rather than dropped -- a turn the user can see is a turn they can judge.
+      // rather than dropped — a turn the user can see is a turn they can judge.
       const role: HistoryRole =
         t.role === "assistant" ? "ai"
         : t.role === "user" ? "user"
@@ -2437,7 +2447,7 @@ See the LICENSE file in the root of this repository for complete details.
     }
     await addToHistory(
       "system",
-      "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen \u2014 and guidance follows the app you click into next.",
+      "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen — and guidance follows the app you click into next.",
     );
   }
 
@@ -4194,7 +4204,7 @@ See the LICENSE file in the root of this repository for complete details.
       </div>
     {/if}
 
-    <!-- Action row: Next · Autopilot · New Task · 🎤 · ··· -->
+    <!-- Action row: Next · Autopilot · New Task · 🕓 · 🎤 · ··· -->
     <div class="action-row">
       {#if sessionPickerOpen}
         <div class="session-picker" role="listbox" aria-label="Recent tasks">
@@ -4283,11 +4293,9 @@ See the LICENSE file in the root of this repository for complete details.
     </footer>
   </main>
 
-  <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden -->
-  <!-- Recent tasks (session-history-plan.md §3.2): the list itself lives inside
-       .action-row, anchored just above its button; only the click-away backdrop
-       stays here, fixed over the whole window. -->
-
+  <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden.
+       The recent-tasks list is not here: it is a child of .action-row so it opens from
+       just above its own button (session-history-plan.md §3.2). -->
   {#if targetPickerOpen}
     <div class="target-picker-backdrop" role="presentation" onclick={() => { targetPickerOpen = false; targetPickerMode = "target"; }}></div>
     <div class="target-picker" role="listbox" aria-label={targetPickerMode === "dock" ? "Choose the app to fill the rest of the screen" : "Choose target app"}>
@@ -5908,17 +5916,6 @@ See the LICENSE file in the root of this repository for complete details.
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .btn-history {
-    flex: 0 0 34px;
-    padding: 8px 0;
-    font-size: 13px;
-  }
-  .btn-history:hover { background: var(--surface-4); color: var(--text-primary); }
-  .btn-history-open {
-    background: var(--surface-4);
-    color: var(--text-primary);
-  }
-
   .target-picker-backdrop {
     position: fixed;
     inset: 0;
@@ -6953,6 +6950,21 @@ See the LICENSE file in the root of this repository for complete details.
     background: rgba(239, 68, 68, 0.18) !important;
     border-color: rgba(239, 68, 68, 0.35) !important;
     animation: pulse 0.9s ease-in-out infinite;
+  }
+
+  /* Here, not up in the picker section: `.btn-action` sets `flex: 1` and wins on
+     source order, so a rule placed above it never applied -- the button measured
+     200x37, the width of the three primary actions, instead of the 34px every
+     other icon button is. */
+  .btn-history {
+    flex: 0 0 34px;
+    padding: 8px 0;
+    font-size: 13px;
+  }
+  .btn-history:hover { background: var(--surface-4); color: var(--text-primary); }
+  .btn-history-open {
+    background: var(--surface-4);
+    color: var(--text-primary);
   }
 
   /* Autopilot ON lights up in the accent; OFF is the same quiet pill as its
