@@ -76,7 +76,10 @@ See the LICENSE file in the root of this repository for complete details.
   // turn -- so it renders on the user side of the transcript, in the user pill. It
   // is a role rather than a style flag because every other row is told apart by role.
   type HistoryRole = "user" | "ai" | "correction" | "system" | "error" | "completed";
-  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean; storedFrame?: { sessionId: string; frame: string } };
+  // `storedFrame` points at a picture in the store; `inlineFrame` IS the picture, base64
+  // JPEG, for a session opened from a file -- those never reach disk, so there is nothing
+  // to point at. Both render identically; only the lightbox has to tell them apart.
+  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean; storedFrame?: { sessionId: string; frame: string }; inlineFrame?: string };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
     api_provider: string;
@@ -556,7 +559,10 @@ See the LICENSE file in the root of this repository for complete details.
   let storedSessions = $state<StoredSession[]>([]);
   let sessionPickerLoading = $state(false);
   let sessionExportBusy = $state(false);
-  let sessionImportBusy = $state(false);
+  let sessionImportBusy = $state(false);   // opening a session file
+  // Read from the backend rather than written here: the number belongs to
+  // SESSION_HISTORY_KEEP, and a sentence naming it must not be able to drift from it.
+  let sessionKeep = $state(20);
   // Ids ticked in the list. Empty means the export button offers everything, which is the
   // common case -- "send me all of them" should not need twenty clicks.
   let selectedSessions = $state<string[]>([]);
@@ -1406,13 +1412,22 @@ See the LICENSE file in the root of this repository for complete details.
 
   // `stored` is set on a row that has a picture on disk; without it this is the live
   // session's own screenshot. Both come back as base64 JPEG and render the same way.
-  async function openLightbox(stored?: { sessionId: string; frame: string }) {
+  async function openLightbox(entry?: HistoryEntry) {
     lightboxLoading = true;
     lightboxSrc = null;
     try {
-      lightboxSrc = stored
-        ? await invoke<string | null>("session_frame", { sessionId: stored.sessionId, frame: stored.frame, thumb: false })
-        : await invoke<string | null>("get_chat_full_screenshot");
+      // Three sources, in the order they can be answered: a picture that came out of a file
+      // is already here, one in the store is a read away, and otherwise this is the live
+      // session's own screenshot.
+      if (entry?.inlineFrame) {
+        lightboxSrc = entry.inlineFrame;
+      } else if (entry?.storedFrame) {
+        lightboxSrc = await invoke<string | null>("session_frame", {
+          sessionId: entry.storedFrame.sessionId, frame: entry.storedFrame.frame, thumb: false,
+        });
+      } else {
+        lightboxSrc = await invoke<string | null>("get_chat_full_screenshot");
+      }
     } catch (_) {}
     lightboxLoading = false;
     if (!lightboxSrc) return;
@@ -2472,56 +2487,33 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  // Reading exported files back in. Each becomes a session again; one whose id is already
-  // here arrives as a copy, because overwriting a session you are working in with the copy
-  // you took of it weeks ago is the one outcome nobody wants.
-  async function importStoredSessions() {
+  // Opening an exported session file. It goes into the PANEL, not into the list: the file
+  // is the archive and the list is the recent working set, so an opened session joins the
+  // list only if you carry on working in it. Importing into the list could not work -- the
+  // list keeps twenty, so restoring an old session raced the very prune it was exported to
+  // escape (three imported and pruned eight minutes later, 2026-09-17).
+  async function openSessionFile() {
     sessionImportBusy = true;
     try {
       const out = await invoke<{
-        imported: { task: string; id: string; replaced: boolean; already: boolean; frames: number; at_risk: boolean }[];
-        skipped: number;
-      } | null>("import_session_html");
+        session: StoredSessionDetail;
+        pictures: { turn: number; jpeg_base64: string }[];
+      } | null>("open_session_file");
       if (!out) return;
-      // Replacing the session that is open right now leaves the panel showing the old
-      // content, and the next turn would save that stale in-memory state back over the
-      // import. Reset the panel -- the imported state is in the list, one click away.
-      if (out.imported.some((i) => i.replaced && i.id === sessionId)) {
-        await newSession();
-      }
-      if (out.imported.length === 0) {
-        await addToHistory(
-          "system",
-          out.skipped === 1
-            ? "That file is not a Navisual session."
-            : `Nothing imported -- ${out.skipped} files, none of them Navisual sessions.`,
-        );
-        return;
-      }
-      const added = out.imported.filter((i) => !i.already);
-      const duplicates = out.imported.filter((i) => i.already);
-      const lines: string[] = [];
-      if (added.length) {
-        const detail = added
-          .map((i) => {
-            const notes = [
-              i.replaced
-                ? "replaced"
-                : "", 
-              i.frames ? `${i.frames} pics` : "",
-              i.at_risk ? "open to keep" : "",
-            ].filter(Boolean);
-            return `\u201c${i.task}\u201d${notes.length ? ` (${notes.join(", ")})` : ""}`;
-          })
-          .join(" · ");
-        lines.push(`Imported ${added.length}: ${detail}`);
-      }
-      if (duplicates.length) lines.push(`${duplicates.length} already here -- skipped.`);
-      if (out.skipped) lines.push(`${out.skipped} not sessions -- skipped.`);
-      await addToHistory("system", lines.join("\n"));
-      await openSessionPicker();
+      sessionPickerOpen = false;
+      await renderSession(
+        out.session,
+        null,
+        new Map(out.pictures.map((p) => [p.turn, p.jpeg_base64])),
+      );
+      await addToHistory(
+        "system",
+        out.pictures.length > 0
+          ? "Opened from a file. It joins your recent tasks only if you carry on working in it."
+          : "Opened from a file \u2014 this one was exported without pictures. It joins your recent tasks only if you carry on working in it.",
+      );
     } catch (e) {
-      await addToHistory("error", `Could not import: ${e}`);
+      await addToHistory("error", `${e}`);
     } finally {
       sessionImportBusy = false;
     }
@@ -2533,34 +2525,38 @@ See the LICENSE file in the root of this repository for complete details.
     sessionPickerLoading = true;
     try {
       storedSessions = await invoke<StoredSession[]>("list_sessions");
+      sessionKeep = await invoke<number>("session_keep_count");
+      // Also fetched at startup (see onMount): Settings names the same number, and it can be
+      // opened without ever opening this list.
     } catch (_) {
       storedSessions = [];
     }
     sessionPickerLoading = false;
   }
 
-  // Reopening a session puts the panel where `newSession` puts it and then fills
-  // the conversation back in. Everything volatile is cleared the same way for the
-  // same reason: the steps, the located rect and the overlay all describe a screen
-  // that is no longer there. What comes back is the talk, the task and the plan.
-  async function resumeStoredSession(id: string) {
-    sessionPickerOpen = false;
+  // A row's picture that arrived with the session rather than sitting in the store.
+  function attachInlineFrame(entryId: number, b64: string) {
+    const entry = history.find(h => h.id === entryId);
+    if (!entry) return;
+    entry.thumb = b64;
+    entry.inlineFrame = b64;
+  }
+
+  // Putting a session on screen, shared by reopening a stored one and opening a file. Both
+  // put the panel where `newSession` puts it and then fill the conversation back in;
+  // everything volatile is cleared the same way for the same reason -- the steps, the
+  // located rect and the overlay all describe a screen that is no longer there.
+  //
+  // `framesFrom` is the session id whose stored pictures the rows may ask for, or null for
+  // a file, whose pictures came inline in `pictures` because they are not in the store.
+  async function renderSession(
+    detail: StoredSessionDetail,
+    framesFrom: string | null,
+    pictures?: Map<number, string>,
+  ) {
     cancelRequest();
     planExpanded = false;
     isOverlayCleared = false;
-    let resumed: StoredSessionDetail | null;
-    try {
-      resumed = await invoke<StoredSessionDetail | null>("load_session", { sessionId: id });
-    } catch (e) {
-      await addToHistory("error", `That session could not be reopened: ${e}`);
-      return;
-    }
-    // Null, not an error: the file was retired between the list being drawn and
-    // the row being clicked. Session retention is a moving target by design.
-    if (!resumed) {
-      await addToHistory("error", "That session is no longer on disk — it was retired when newer tasks arrived.");
-      return;
-    }
 
     task = "";
     steps = [];
@@ -2575,46 +2571,69 @@ See the LICENSE file in the root of this repository for complete details.
     staleResponse = false;
     clearPrefill();
 
-    sessionId = resumed.id;
-    sessionGoal = resumed.task_description;
-    sessionPlanOutline = resumed.plan_outline;
-    sessionPlanCompletedCount = resumed.plan_completed_count;
+    sessionId = detail.id;
+    sessionGoal = detail.task_description;
+    sessionPlanOutline = detail.plan_outline;
+    sessionPlanCompletedCount = detail.plan_completed_count;
 
     history = [];
-    for (const t of resumed.conversation) {
-      // A "Next" completion is stored as a machine-built `[User completed: "..."]`
-      // user turn — the app's words, not the person's. Show it as the clean
-      // system note the live session uses, not as a user bubble with brackets.
-      if (t.content.startsWith('[User completed: "') && t.content.endsWith('"]')) {
-        // The instruction itself is deliberately NOT repeated here. It is what we asked
-        // for, and it is already on screen as the step above; restating it in the row made
-        // every completion a wall of the same sentence twice. What is left is the fact --
-        // that it was completed, and (below) what the user actually clicked.
-        const rowId = await addToHistory("completed", completionLabel(t.clicked, t.advanced_by));
-        // Fetched in the background, one row at a time: a session with twenty frames would
-        // otherwise hold the transcript back behind a few megabytes of pictures.
-        if (t.frame) loadStoredThumb(rowId, resumed.id, t.frame);
-        continue;
-      }
-      // The backend's roles are the model's, not the panel's: `assistant` is what
-      // the panel calls `ai`, and anything unrecognised is shown as a system note
-      // rather than dropped — a turn the user can see is a turn they can judge.
-      const role: HistoryRole =
-        t.role === "assistant" ? "ai"
+    let index = 0;
+    for (const t of detail.conversation) {
+      const at = index;
+      index += 1;
+      // A "Next" completion is stored as a machine-built `[User completed: "..."]` user
+      // turn -- the app's words, not the person's. Show it as the clean system note the
+      // live session uses, not as a user bubble with brackets.
+      const completed = t.content.startsWith('[User completed: "') && t.content.endsWith('"]');
+      // The instruction itself is deliberately NOT repeated on a completion row. It is what
+      // we asked for, and it is already on screen as the step above; restating it made every
+      // completion a wall of the same sentence twice.
+      const role: HistoryRole = completed
+        ? "completed"
+        : t.role === "assistant" ? "ai"
         : t.role === "user" ? "user"
         : t.role === "correction" ? "correction"
+        // Anything unrecognised is shown as a system note rather than dropped -- a turn the
+        // user can see is a turn they can judge.
         : "system";
-      const rowId = await addToHistory(role, t.content);
-      if (t.frame) loadStoredThumb(rowId, resumed.id, t.frame);
+      const rowId = await addToHistory(
+        role,
+        completed ? completionLabel(t.clicked, t.advanced_by) : t.content,
+      );
+
+      const inline = pictures?.get(at);
+      if (inline) attachInlineFrame(rowId, inline);
+      // Fetched in the background, one row at a time: a session with twenty frames would
+      // otherwise hold the transcript back behind a few megabytes of pictures.
+      else if (t.frame && framesFrom) loadStoredThumb(rowId, framesFrom, t.frame);
     }
+  }
+
+  async function resumeStoredSession(id: string) {
+    sessionPickerOpen = false;
+    let resumed: StoredSessionDetail | null;
+    try {
+      resumed = await invoke<StoredSessionDetail | null>("load_session", { sessionId: id });
+    } catch (e) {
+      await addToHistory("error", `That session could not be reopened: ${e}`);
+      return;
+    }
+    // Null, not an error: the file was retired between the list being drawn and the row
+    // being clicked. Session retention is a moving target by design.
+    if (!resumed) {
+      await addToHistory("error", "That session is no longer on disk \u2014 it was retired when newer tasks arrived.");
+      return;
+    }
+
+    await renderSession(resumed, resumed.id);
     // The old notice said screenshots were never kept. That is true of a session recorded
     // with the setting off and false of one recorded with it on, and it is the kind of
     // sentence that has to change when the feature does.
     await addToHistory(
       "system",
       resumed.conversation.some((t) => t.frame)
-        ? "Reopened. The pictures are the ones this session was guided from — guidance follows the app you click into next."
-        : "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen — and guidance follows the app you click into next.",
+        ? "Reopened. The pictures are the ones this session was guided from \u2014 guidance follows the app you click into next."
+        : "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen \u2014 and guidance follows the app you click into next.",
     );
   }
 
@@ -4234,7 +4253,7 @@ See the LICENSE file in the root of this repository for complete details.
             <button
               class="h-thumb-btn"
               class:h-thumb-fading={entry.thumbFading}
-              onclick={() => openLightbox(entry.storedFrame)}
+              onclick={() => openLightbox(entry)}
               title="Click to view full screenshot"
             >
               <img class="h-thumb" src="data:image/jpeg;base64,{entry.thumb}" alt="screenshot" />
@@ -4394,7 +4413,7 @@ See the LICENSE file in the root of this repository for complete details.
           <div class="target-pick-head">Recent tasks</div>
           <!-- The list is the whole store, and the store is bounded: saying so here is the
                difference between a limit and a surprise when an old one disappears. -->
-          <p class="session-pick-hint">Only the 20 most recent are saved — export a session to keep it past that.</p>
+          <p class="session-pick-hint">Only the {sessionKeep} most recent are saved — export a session to keep it, and open the file when you want it back.</p>
           <!-- Export and import live at the TOP, where they can be found without scrolling
                past twenty rows -- the plan's own §6 actions, and rule 18's lesson about
                controls that get buried. -->
@@ -4408,10 +4427,10 @@ See the LICENSE file in the root of this repository for complete details.
                   ? `Export ${selectedSessions.length} selected…`
                   : `Export all ${storedSessions.length}…`}
             </button>
-            <button class="session-pick-action" onclick={importStoredSessions}
+            <button class="session-pick-action" onclick={openSessionFile}
               disabled={sessionImportBusy}
-              title="Read exported session files back in">
-              {sessionImportBusy ? "Importing…" : "Import…"}
+              title="Open an exported session file — it shows in the panel, and joins this list only if you carry on working in it">
+              {sessionImportBusy ? "Opening…" : "Open a file…"}
             </button>
           </div>
           {#if sessionPickerLoading}
@@ -4422,17 +4441,18 @@ See the LICENSE file in the root of this repository for complete details.
             {#each storedSessions as sess (sess.id)}
               <!-- The tick sits OUTSIDE the row's button: an input nested in a button is
                    invalid markup, and one click would open the session as well as select it. -->
-              <div class="session-pick-row">
+              <div class="session-pick-row" class:session-pick-current={sess.id === sessionId}>
                 <input class="session-pick-tick" type="checkbox"
                   checked={selectedSessions.includes(sess.id)}
                   onchange={() => toggleSessionSelection(sess.id)}
                   aria-label={`Select ${sess.task_description || "untitled task"}`} />
-                <button class="target-pick-item" class:target-pick-selected={sess.id === sessionId}
-                  onclick={() => resumeStoredSession(sess.id)}>
-                  <span class="target-pick-check">{sess.id === sessionId ? "✓" : ""}</span>
+                <button class="target-pick-item" onclick={() => resumeStoredSession(sess.id)}>
                   <span class="target-pick-name">{sess.task_description || "Untitled task"}</span>
                   <span class="target-pick-sub">
                     {whenAgo(sess.last_active_at)} · {sess.turns} turn{sess.turns === 1 ? "" : "s"}
+                    <!-- The open session is marked by a word and a bar, not by colour alone:
+                         v0.7.21 shipped an accent a colour-weak user could not read. -->
+                    {#if sess.id === sessionId}<span class="session-pick-now">open</span>{/if}
                   </span>
                   {#if sess.summary_text}
                     <span class="session-pick-summary">{sess.summary_text}</span>
@@ -4752,7 +4772,7 @@ See the LICENSE file in the root of this repository for complete details.
                a bare link. -->
           <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
             <li>It captures the window you point it at — or your whole screen, if you pick that — and sends the picture to the AI provider you choose.</li>
-            <li>Screenshots are held in memory. Nothing is written to your disk unless you save it yourself.</li>
+            <li>Any screenshot it saves is saved on your own computer — never on our servers.</li>
             <li><strong>The default free tier uses AI models that may keep your requests — including the screenshot — to train on.</strong> Paid tiers and your own API key don't; Ollama never leaves your machine.</li>
             <li>While guiding, it notes which control you click in that app — the control's name, never its contents. It does not monitor your keyboard.</li>
             <li>Voice input, if you turn it on, sends your audio to Microsoft's speech service.</li>
@@ -5236,8 +5256,8 @@ See the LICENSE file in the root of this repository for complete details.
                 Off by default, and it is the only setting here that would put a picture of your
                 screen on disk. What is kept is the same cropped, masked frame the AI was shown —
                 never the whole monitor — so reopening a session can show what that step looked
-                like. The most recent 20 sessions are kept; older ones are deleted with their
-                screenshots.
+                like. The most recent {sessionKeep} sessions are kept; older ones are deleted
+                with their screenshots.
               </p>
             </div>
 
@@ -6123,25 +6143,37 @@ See the LICENSE file in the root of this repository for complete details.
     bottom: calc(100% + 6px);
     max-height: 62vh;
     overflow-y: auto;
+    overscroll-behavior: contain;
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--r-md);
-    padding: 6px;
+    padding: 8px;
     z-index: 999;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   }
+  /* The default slab is wide enough to crowd a 300px panel and bright enough to read as
+     content. */
+  .session-picker::-webkit-scrollbar { width: 8px; }
+  .session-picker::-webkit-scrollbar-thumb {
+    background: var(--surface-4);
+    border-radius: 999px;
+    border: 2px solid var(--surface-2);
+  }
+  .session-picker::-webkit-scrollbar-thumb:hover { background: var(--border); }
+  .session-picker::-webkit-scrollbar-track { background: transparent; }
   .session-pick-hint {
-    margin: 0 2px 6px;
-    font-size: 11px;
+    margin: 0 2px 8px;
+    font-size: 10px;
+    line-height: 1.45;
     color: var(--text-secondary);
-    opacity: 0.85;
+    opacity: 0.7;
   }
   .session-pick-actions {
     display: flex;
     gap: 6px;
-    padding: 0 2px 6px;
+    padding: 0 2px 10px;
     border-bottom: 1px solid var(--border);
-    margin-bottom: 4px;
+    margin-bottom: 8px;
   }
   .session-pick-action {
     flex: 1;
@@ -6157,9 +6189,87 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .session-pick-action:hover:not(:disabled) { background: var(--surface-4); color: var(--text-primary); }
   .session-pick-action:disabled { opacity: 0.6; cursor: default; }
-  .session-pick-row { display: flex; align-items: center; gap: 2px; }
-  .session-pick-row .target-pick-item { flex: 1 1 auto; min-width: 0; }
-  .session-pick-tick { flex: 0 0 auto; margin: 0 3px; accent-color: var(--accent-500); }
+  /* A row is a card, not a line in a stack. The screenshot that prompted this showed
+     eight tasks running together as one block of text -- same weight, same colour, no
+     edges -- so the work here is separation and hierarchy, not decoration.
+
+     Every rule is scoped under .session-pick-row on purpose: `.target-pick-item` is one
+     snippet shared with the target-window picker (and the collapsed fish's copy of it),
+     and the whole point of sharing it is that those two cannot drift. */
+  .session-pick-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    padding: 2px 4px 2px 0;
+    margin-bottom: 4px;
+    border-radius: var(--r-sm);
+    background: var(--surface-3);
+    /* Transparent, not absent: the current row swaps the colour in without the 3px of
+       reflow that adding a border would cause. */
+    border-left: 3px solid transparent;
+  }
+  .session-pick-row:hover { background: var(--surface-4); }
+  .session-pick-row:last-child { margin-bottom: 0; }
+
+  /* The open session, said three ways: a bar, a tint, and the word "open".
+     The tint is a flat accent layer painted over the row's own background rather than a
+     `color-mix()`, which this codebase has never shipped -- the same blend, in syntax that
+     has worked since long before any WebView2 version we care about. */
+  .session-pick-current {
+    border-left-color: var(--accent-500);
+    background:
+      linear-gradient(rgba(255, 107, 53, 0.1), rgba(255, 107, 53, 0.1)),
+      var(--surface-3);
+  }
+  .session-pick-current:hover {
+    background:
+      linear-gradient(rgba(255, 107, 53, 0.16), rgba(255, 107, 53, 0.16)),
+      var(--surface-3);
+  }
+  .session-pick-current .target-pick-name { color: var(--accent-500); }
+
+  /* One column, not the shared two: the tick gutter that names the chosen window has
+     nothing to say here, and beside the checkbox it read as a second empty rail. */
+  .session-pick-row .target-pick-item {
+    flex: 1 1 auto;
+    min-width: 0;
+    grid-template-columns: 1fr;
+    align-items: start;
+    row-gap: 1px;
+    padding: 7px 8px 8px 4px;
+    background: transparent;
+  }
+  .session-pick-row .target-pick-item:hover { background: transparent; }
+  .session-pick-row .target-pick-name { font-weight: 600; font-size: 12px; }
+  .session-pick-row .target-pick-sub {
+    grid-column: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-secondary);
+    opacity: 0.75;
+  }
+  .session-pick-now {
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--accent-500);
+    color: var(--on-accent, #fff);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    opacity: 1;
+  }
+  /* Top-aligned with the title rather than centred on a three-line row, where it drifted
+     down beside the summary and stopped reading as "this row". */
+  .session-pick-tick {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    margin: 9px 0 0 8px;
+    accent-color: var(--accent-500);
+    cursor: pointer;
+  }
   .session-pick-empty {
     padding: 10px 8px;
     font-size: 12px;
@@ -6169,10 +6279,12 @@ See the LICENSE file in the root of this repository for complete details.
      context, and a summary that pushes the next task off the list costs more than
      it gives. */
   .session-pick-summary {
-    grid-column: 2;
+    grid-column: 1;
+    margin-top: 2px;
     font-size: 11px;
+    line-height: 1.35;
     color: var(--text-secondary);
-    opacity: 0.8;
+    opacity: 0.62;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     line-clamp: 2;

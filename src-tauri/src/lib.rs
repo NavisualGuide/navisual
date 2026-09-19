@@ -2614,9 +2614,9 @@ async fn arm_candidates_if_shown(
 /// L1 app-state block for the prompt, bounded so a wedged script channel can never
 /// stall a capture (the channel's own connect/read timeouts are ~200/700 ms; this is
 /// the outer safety net, mirroring `enumerate_context_snapshot_bounded`'s contract).
-fn app_state_snapshot(hwnd: Option<usize>, word_paragraph_text: bool) -> Option<String> {
+fn app_state_snapshot(hwnd: Option<usize>) -> Option<String> {
     let started = std::time::Instant::now();
-    let block = locator::adapters::app_state_block(hwnd, word_paragraph_text)?;
+    let block = locator::adapters::app_state_block(hwnd)?;
     log::info!(
         "[app_state] block collected in {} ms ({} chars)",
         started.elapsed().as_millis(),
@@ -3286,7 +3286,11 @@ async fn session_frame(
     if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         return Err("not a session id".into());
     }
-    if frame.contains(['/', '\\']) || frame.contains("..") || !frame.ends_with(".png") {
+    // `.png` is the whole set: the only writer is the app's own capture, and a session
+    // opened from a file carries its pictures inline rather than putting them here. One rule
+    // for the name itself, shared with the write (`safe_frame_name`) -- two copies of a
+    // path-safety check is how they come to disagree.
+    if !ai::session::safe_frame_name(&frame) || !frame.ends_with(".png") {
         return Err("not a frame name".into());
     }
 
@@ -3387,63 +3391,91 @@ struct SessionExportSummary {
     count: usize,
 }
 
-/// Read exported session files back into the store (plan §6).
+/// Open one exported session file in the panel (plan §6).
 ///
-/// Multi-select, because an export writes a whole folder and re-importing one at a time is a
-/// chore nobody finishes. The picker is the consent here too, the same shape as the export.
+/// **Nothing is written.** The file is the archive and the store is the recent working set,
+/// so a session read out of a file appears in the panel and joins the store only if the user
+/// carries on working in it -- the same act that keeps any other session alive.
 ///
-/// `None` means the dialog was cancelled. Files that are not sessions -- an `index.html`, or
-/// any other page the user grabbed -- are counted and skipped rather than failing the batch.
+/// This replaced an import that wrote into the store, which could not work: the store keeps
+/// the twenty most recent, so restoring an old session raced the prune it was exported to
+/// escape. The 2026-09-17 log has three sessions imported at 07:10 and pruned at 07:18.
+/// Opening the file removes the conflict instead of arbitrating it, and takes the duplicate
+/// detection, the replace rule and the "older than the kept window" warning with it.
+///
+/// Single-select, unlike the export: you open the one you want to look at, where an export
+/// writes the whole set.
+///
+/// `None` means the dialog was cancelled, or the file was not a session.
 #[tauri::command]
-async fn import_session_html(
+async fn open_session_file(
     state: State<'_, AppState>,
-) -> Result<Option<SessionImportSummary>, String> {
+) -> Result<Option<OpenedSessionPayload>, String> {
     let start = Some(session_export::default_destination().join("sessions"));
-    let files = session_export::pick_files(start, "html");
-    if files.is_empty() {
+    let Some(path) = session_export::pick_file(start, "html") else {
         return Ok(None);
-    }
-
-    // Read outside the lock: a batch of files should not hold up the guidance loop.
-    let texts: Vec<(std::path::PathBuf, String)> = files
-        .into_iter()
-        .filter_map(|path| match std::fs::read_to_string(&path) {
-            Ok(text) => Some((path, text)),
-            Err(e) => {
-                log::warn!("[sessions] could not read {path:?}: {e}");
-                None
-            }
-        })
-        .collect();
-
-    let (imported, skipped) = {
-        let router = state.ai_router.lock().await;
-        let mut imported = Vec::new();
-        let mut skipped = 0usize;
-        for (path, text) in &texts {
-            match session_html::import_artifact(&router.session_manager, text) {
-                Ok(Some(outcome)) => imported.push(outcome),
-                Ok(None) => {
-                    log::info!("[sessions] {path:?} is not a session file, skipped");
-                    skipped += 1;
-                }
-                Err(e) => {
-                    log::warn!("[sessions] could not import {path:?}: {e:#}");
-                    skipped += 1;
-                }
-            }
-        }
-        (imported, skipped)
     };
 
-    Ok(Some(SessionImportSummary { imported, skipped }))
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("could not read the file: {e}"))?;
+    let Some(opened) = session_html::open_artifact(&text) else {
+        log::info!("[sessions] {path:?} is not a session file");
+        return Err("that file is not a Navisual session".into());
+    };
+
+    // Adopted as the live session WITHOUT a save: `save_session` runs on the next turn, which
+    // is exactly the moment the user has carried on and the session has earned its place.
+    {
+        let mut router = state.ai_router.lock().await;
+        router.session_manager.current_session = Some(opened.session.clone());
+    }
+    adopt_session_state(&state, &opened.session);
+
+    Ok(Some(OpenedSessionPayload {
+        session: opened.session,
+        pictures: opened
+            .pictures
+            .into_iter()
+            .map(|(turn, jpeg_base64)| OpenedPicture { turn, jpeg_base64 })
+            .collect(),
+    }))
 }
 
-/// What an import read in, for the panel to report.
+/// A session opened from a file, for the panel.
 #[derive(serde::Serialize)]
-struct SessionImportSummary {
-    imported: Vec<session_html::ImportOutcome>,
-    skipped: usize,
+struct OpenedSessionPayload {
+    session: Session,
+    pictures: Vec<OpenedPicture>,
+}
+
+/// One picture out of an artifact, by the conversation index it belongs to. Base64 JPEG,
+/// the same encoding `session_frame` returns, so the panel renders both the same way.
+#[derive(serde::Serialize)]
+struct OpenedPicture {
+    turn: usize,
+    jpeg_base64: String,
+}
+
+/// Point the volatile state at a session that has just become the live one.
+///
+/// Shared by `load_session` and `open_session_file` because the reasoning is identical and
+/// duplicating it is how the two would come to reset different things: the steps, the located
+/// rect and the target handle all describe a screen that is no longer there, and a click from
+/// the previous task is not "what the user just did" for this one.
+fn adopt_session_state(state: &State<'_, AppState>, session: &Session) {
+    state.export.lock().clear();
+    let mut g = state.guidance.lock();
+    g.session_id = Some(session.id.to_string());
+    g.steps = vec![];
+    g.state_summary = session
+        .current_state_summary
+        .as_ref()
+        .map(|s| s.summary_text.clone())
+        .unwrap_or_default();
+    g.target_hwnd = None;
+    g.context_elements = None;
+    g.needs_input = false;
+    drop(g);
+    last_click::clear();
 }
 
 /// Return the full-resolution chat screenshot as base64 (for the lightbox).
@@ -4010,9 +4042,7 @@ async fn guide(
     // L1 app state from a script channel (Blender bridge today) — facts the screenshot
     // can't convey. Same capture-time atomicity as [Screen Elements]; absent when no
     // channel applies.
-    if let Some(block) =
-        app_state_snapshot(new_hwnd_opt, router.config.word_state_paragraph_text)
-    {
+    if let Some(block) = app_state_snapshot(new_hwnd_opt) {
         window_context.push_str(&block);
     }
     // What the user actually did since the last turn, as a resolved control. Also (re)arms
@@ -5292,7 +5322,7 @@ async fn send_correction(
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
     // L1 app state — same as guide()'s capture path.
-    if let Some(block) = app_state_snapshot(new_hwnd, router.config.word_state_paragraph_text) {
+    if let Some(block) = app_state_snapshot(new_hwnd) {
         window_context.push_str(&block);
     }
 
@@ -6044,6 +6074,16 @@ fn new_session(state: State<'_, AppState>) {
     }
 }
 
+/// How many sessions the store keeps.
+///
+/// Exists so the panel can SAY the number rather than repeat it. The list tells the user the
+/// store is bounded, and a sentence naming a number owned by other code is the drift this
+/// project keeps paying for -- the constant is the one place it lives.
+#[tauri::command]
+fn session_keep_count() -> usize {
+    SESSION_HISTORY_KEEP
+}
+
 /// The stored sessions, newest first, for the history overlay. Read-only: the
 /// manager orders them, the UI renders them.
 #[tauri::command]
@@ -6061,12 +6101,16 @@ async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>
 /// A session is not a document — it is a position in a task on a machine whose
 /// screen has since changed (plan §3.3). What is restored: the conversation,
 /// task description, plan outline and state summary, via `SessionManager`. What is
-/// deliberately NOT restored: the pinned target HWND (a stored handle outlives its
-/// window — the exact failure v0.7.25 spent a release on; auto-detect takes over),
-/// and the step sequence/index (they describe a screen that no longer exists; the
-/// next request re-captures and re-plans). The export ring is cleared like
-/// `new_session` clears it: it holds the PREVIOUS session's frames, and exporting
-/// after a load must not write them under the loaded conversation.
+/// deliberately NOT restored: the auto-detected target HWND (a stored handle outlives
+/// its window — the exact failure v0.7.25 spent a release on), and the step
+/// sequence/index (they describe a screen that no longer exists; the next request
+/// re-captures and re-plans). The export ring is cleared like `new_session` clears it:
+/// it holds the PREVIOUS session's frames, and exporting after a load must not write
+/// them under the loaded conversation.
+///
+/// A target the user PINNED survives, exactly as it survives `new_session`: they chose
+/// that window, and reopening a task is not them un-choosing it. Only `target_hwnd`, the
+/// handle auto-detect happened to be holding, is dropped.
 #[tauri::command]
 async fn load_session(
     state: State<'_, AppState>,
@@ -6085,22 +6129,7 @@ async fn load_session(
         }
     };
 
-    state.export.lock().clear();
-    let mut g = state.guidance.lock();
-    g.session_id = Some(session.id.to_string());
-    g.steps = vec![];
-    g.state_summary = session
-        .current_state_summary
-        .as_ref()
-        .map(|s| s.summary_text.clone())
-        .unwrap_or_default();
-    g.target_hwnd = None;
-    g.context_elements = None;
-    g.needs_input = false;
-    drop(g);
-    // A click from the previous task is not "what the user just did" for the
-    // loaded one — same reasoning as `new_session`.
-    last_click::clear();
+    adopt_session_state(&state, &session);
     log::info!(
         "[sessions] loaded {} ({} turns, {} plan steps)",
         session.id,
@@ -7974,7 +8003,8 @@ pub fn run() {
             get_chat_full_screenshot,
             session_frame,
             export_sessions_html,
-            import_session_html,
+            open_session_file,
+            session_keep_count,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -16,7 +16,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use crate::ai::session::{Session, StoredMark, Turn, SESSION_HISTORY_KEEP};
+use crate::ai::session::{safe_frame_name, Session, StoredMark, Turn, SESSION_HISTORY_KEEP};
 
 /// The id the JSON block carries. Read back by anything that wants to load the artifact
 /// into the app (the id rather than the tag name, so the block can be found without
@@ -342,6 +342,10 @@ fn embedded_frames(html: &str) -> Vec<(String, String, Vec<u8>)> {
             .and_then(|i| chunk.get(i + "data-ext=\"".len()..))
             .and_then(|s| s.find('"').map(|j| s[..j].to_string()))
             .unwrap_or_else(|| "jpeg".to_string());
+        if !safe_frame_name(&name) {
+            log::warn!("[sessions] import: refusing a picture named {name:?}");
+            continue;
+        }
         let Some(b64_start) = chunk.find(";base64,") else { continue };
         let after = &chunk[b64_start + ";base64,".len()..];
         let Some(b64_end) = after.find('"') else { continue };
@@ -352,156 +356,114 @@ fn embedded_frames(html: &str) -> Vec<(String, String, Vec<u8>)> {
     out
 }
 
-/// What one imported file turned into, for the panel to report.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ImportOutcome {
-    pub task: String,
-    pub id: String,
-    /// The same id was here with different content, and the file won.
-    pub replaced: bool,
-    /// The file is already here, identical — the no-op a re-import is supposed to be.
-    pub already: bool,
-    /// How many pictures came back out of the file.
-    pub frames: usize,
-    /// Older than the sessions the app keeps, so the next prune retires it unless it is
-    /// opened -- opening is what marks a session as one you are working on.
-    pub at_risk: bool,
+/// A session read out of a file, ready for the panel — and deliberately NOT written
+/// anywhere.
+///
+/// **The file is the archive; the store is the recent working set.** Importing used to mean
+/// writing into a store that keeps twenty sessions, so restoring an old one raced the very
+/// prune it was meant to escape — the 2026-09-17 log has three sessions imported and pruned
+/// seven minutes later. Opening the file instead removes the conflict rather than arbitrating
+/// it: the session appears in the panel, and it joins the store only if the user carries on
+/// working in it, which is the same act that keeps any other session alive.
+///
+/// Nothing reaches disk here, which is why this carries the pictures inline.
+pub struct OpenedArtifact {
+    pub session: Session,
+    /// Base64 JPEG per conversation index, in the encoding `session_frame` returns for a
+    /// stored frame, so the panel renders both the same way.
+    pub pictures: Vec<(usize, String)>,
 }
 
-/// Import one artifact into the store. `Ok(None)` means the file was not a session.
+/// Read one artifact for the panel. `None` means the file was not a session.
 ///
-/// Three decisions worth stating, because each is a way this could have gone wrong:
+/// Two things are deliberately stripped from the session on the way through:
 ///
-/// * **A session already here is never overwritten.** Re-importing your own export would
-///   otherwise replace a session you have been working in with the copy you took of it weeks
-///   ago. A taken id is imported as a copy under a fresh one.
-/// * **The pictures come back out and their marks do not.** An artifact's pictures have the
-///   pointer drawn into them -- that is what makes them readable without the app -- so the
-///   mark is dropped: keeping it would draw a second pointer on top of the first.
-/// * **The original timestamps are kept**, so an old import can land outside the kept window
-///   and be pruned by the next save. That is reported (`at_risk`), not prevented: the artifact
-///   still exists, and opening the session is the user's own way of saying it matters.
-pub fn import_artifact(
-    manager: &crate::ai::session::SessionManager,
-    html: &str,
-) -> Result<Option<ImportOutcome>> {
-    let Some(mut session) = parse_artifact(html) else {
-        return Ok(None);
-    };
+/// * **`frame`**, because the name refers to a file in the store this session is not in.
+///   Carrying it would leave a dangling reference the moment the session is saved, and the
+///   pictures travel beside it instead.
+/// * **`mark`**, because an artifact's pictures already have the pointer drawn into them —
+///   that is what makes them readable without the app — so re-drawing would put a second
+///   pointer on the first.
+pub fn open_artifact(html: &str) -> Option<OpenedArtifact> {
+    let mut session = parse_artifact(html)?;
 
-    // The id travels inside the file and then into path joins. A hand-edited artifact
-    // could carry anything there; an id that is not uuid-shaped is not trusted, and the
-    // session simply arrives as a new one.
-    if session.id.to_string().len() != 36
-        || !session
-            .id
-            .to_string()
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() || c == '-')
-    {
+    // The id becomes the live session's id, and once the user works in it, it becomes a file
+    // name and a frames directory. A hand-edited artifact could carry anything there, so an
+    // id that is not uuid-shaped is not trusted and the session arrives as a new one.
+    let id = session.id.to_string();
+    if id.len() != 36 || !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         session.id = uuid::Uuid::new_v4();
     }
 
-    let original_id = session.id.to_string();
-    let taken = manager.session_exists(&original_id);
-    let replaced = taken;
-    if taken {
-        // Same id, same content: the same file being imported again. A no-op, said gently
-        // rather than done -- the one case where not writing is the whole point.
-        if let Some(stored) = manager.session_by_id(&original_id) {
-            if serde_json::to_value(&stored).ok() == serde_json::to_value(&session).ok() {
-                log::info!("[sessions] import of {original_id} skipped: already here, identical");
-                return Ok(Some(ImportOutcome {
-                    task: session.task_description,
-                    id: original_id,
-                    replaced: false,
-                    already: true,
-                    frames: 0,
-                    at_risk: false,
-                }));
-            }
-        }
-        // Same id, different content: the file the user chose wins. Replacing is the point
-        // of re-importing (2026-09-17 decision) -- the export they picked is the state they
-        // want, even when it is an older one. The old frames go with the old content: a
-        // frame the new turns do not reference would be an orphan with nothing pointing at
-        // it, the disk-creep shape this store has already paid for once.
-        let _ = std::fs::remove_dir_all(manager.frames_dir(&original_id));
-    }
-    let id = original_id.clone();
-
-    let mut frames = 0usize;
-    for (name, ext, bytes) in embedded_frames(html) {
-        // Named for what the bytes are: an artifact's pictures are JPEG whatever they were
-        // stored as, and calling the file `.png` would be a convention its content denies.
-        let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&name).to_string();
-        let stored = format!("{stem}.{}", if ext == "png" { "png" } else { "jpg" });
-        if manager.save_frame_named(&id, &stored, &bytes).is_some() {
-            if let Some(turn) = session
-                .conversation
-                .iter_mut()
-                .find(|t| t.frame.as_deref() == Some(name.as_str()))
-            {
-                turn.frame = Some(stored);
-                turn.mark = None;
-                frames += 1;
-            }
+    let embedded = embedded_frames(html);
+    let mut pictures = Vec::new();
+    for (index, turn) in session.conversation.iter_mut().enumerate() {
+        let named = turn.frame.take();
+        turn.mark = None;
+        let Some(name) = named else { continue };
+        if let Some((_, _, bytes)) = embedded.iter().find(|(n, _, _)| *n == name) {
+            pictures.push((index, crate::capture::to_base64(bytes)));
         }
     }
 
-    // A reference to a picture that did not survive would have the panel ask for a file that
-    // is not there. The transcript is what the file is really carrying, so the dead reference
-    // goes rather than the turn.
-    let frames_dir = manager.frames_dir(&id);
-    for turn in session.conversation.iter_mut() {
-        let missing = turn
-            .frame
-            .as_deref()
-            .is_some_and(|name| !frames_dir.join(name).exists());
-        if missing {
-            turn.frame = None;
-            turn.mark = None;
-        }
-    }
-
-    manager.save_session(Some(&session));
-    // `save_session` writes and ignores the result -- it is called on every turn, where a
-    // failure is not worth interrupting guidance for. For an import it is the whole point, so
-    // the file is checked rather than assumed: reporting "imported" for a session that is not
-    // on disk is the one answer that helps nobody.
-    if !manager.session_exists(&id) {
-        // The pictures were extracted before this write, and without the session they
-        // point at nothing. Take them back down, then fail loudly rather than report an
-        // import that is not on disk.
-        let _ = std::fs::remove_dir_all(manager.frames_dir(&id));
-        anyhow::bail!("the session could not be written to disk");
-    }
-    let at_risk = manager
-        .list_sessions()
-        .iter()
-        .position(|s| s.id == id)
-        .is_some_and(|rank| rank >= SESSION_HISTORY_KEEP);
     log::info!(
-        "[sessions] imported \"{}\" ({}{} frame(s){})",
+        "[sessions] opened \"{}\" from a file ({} turns, {} picture(s)) -- not stored",
         session.task_description,
-        if replaced { "replaced, " } else { "" },
-        frames,
-        if at_risk { ", older than the kept window" } else { "" }
+        session.conversation.len(),
+        pictures.len()
     );
-    Ok(Some(ImportOutcome {
-        task: session.task_description,
-        id,
-        replaced,
-        already: false,
-        frames,
-        at_risk,
-    }))
+    Some(OpenedArtifact { session, pictures })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ai::session::Session;
+
+    /// The name travels inside the file and then into a path join, so the shapes that
+    /// escape the store are refused rather than sanitised into something plausible.
+    #[test]
+    fn a_frame_name_that_leaves_the_store_is_refused() {
+        assert!(safe_frame_name("0.png"));
+        assert!(safe_frame_name("12.jpg"));
+        assert!(!safe_frame_name("../../../../evil.bat"));
+        assert!(!safe_frame_name("..\\..\\evil.bat"));
+        assert!(!safe_frame_name("sub/dir.png"));
+        assert!(!safe_frame_name("C:/windows/system32/x.dll"));
+        assert!(!safe_frame_name(""));
+        assert!(!safe_frame_name(&"a".repeat(65)));
+    }
+
+    /// Opening a file writes nothing, so a hostile picture name has nowhere to land here.
+    /// The rule is still enforced at the write itself — see
+    /// `ai::session::tests::a_frame_name_cannot_escape_its_directory`, which owns that case
+    /// now that the only writer is the app's own capture.
+    #[test]
+    fn a_hostile_picture_name_opens_without_touching_the_disk() {
+        let (manager, dir) = store("hostile-name");
+        let mut original = Session::new("A task".to_string());
+        original.add_turn_pinned("user", "help".to_string(), None, false);
+        original.set_last_user_turn_facts(None, None, Some("0.png".to_string()));
+        let blank = image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 255, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(blank)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("test frame encodes");
+        manager.save_frame(&original.id.to_string(), 0, &png).unwrap();
+        let html = session_to_html(&original, &manager.frames_dir(&original.id.to_string()), 4);
+
+        // Repoint the picture at something outside the store, as a hand-edited artifact would.
+        let hostile = html.replace(
+            "<figure data-frame=\"0.png\"",
+            "<figure data-frame=\"../../escaped.png\"",
+        );
+        assert!(hostile.contains("escaped.png"), "the test edited the artifact");
+
+        let opened = open_artifact(&hostile).expect("a session");
+        assert!(opened.pictures.is_empty(), "a name like that carries no picture");
+        assert!(!dir.join("escaped.jpg").exists() && !dir.join("escaped.png").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn session_with(conversation: Vec<Turn>) -> Session {
         let mut s = Session::new("Test task".to_string());
@@ -647,17 +609,16 @@ mod tests {
         }
     }
 
-    // ── Import ──────────────────────────────────────────────────────────────
+    // ── Opening a file ─────────────────────────────────────
 
     fn store(tag: &str) -> (crate::ai::session::SessionManager, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("navisual-import-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("navisual-open-{tag}-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
         (crate::ai::session::SessionManager::new(dir.clone()), dir)
     }
 
     #[test]
     fn a_session_survives_the_round_trip_through_a_file() {
-        let (manager, dir) = store("round-trip");
         let mut original = Session::new("Optimize for 3D gaming".to_string());
         original.add_turn_pinned("user", "help me".to_string(), None, false);
         original.add_turn("assistant", "Click Save".to_string(), None);
@@ -665,80 +626,42 @@ mod tests {
         original.plan_completed_count = 1;
 
         let html = session_to_html(&original, Path::new("nowhere"), 4);
-        let outcome = import_artifact(&manager, &html)
-            .expect("imports")
-            .expect("it is a session file");
-        assert!(!outcome.replaced, "a free id keeps its identity");
-        assert_eq!(outcome.frames, 0);
+        let opened = open_artifact(&html).expect("it is a session file");
 
-        let back = manager
-            .all_sessions()
-            .into_iter()
-            .find(|s| s.id.to_string() == outcome.id)
-            .expect("stored");
+        let back = opened.session;
         assert_eq!(back.id, original.id, "the same session, not a lookalike");
         assert_eq!(back.conversation.len(), original.conversation.len());
         assert_eq!(back.task_description, original.task_description);
         assert_eq!(back.plan_outline, original.plan_outline);
         assert_eq!(back.plan_completed_count, 1);
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(opened.pictures.is_empty(), "this one had none");
     }
 
+    /// Opening the same file twice is simply opening it twice. The whole no-op / replace /
+    /// duplicate question this used to test disappeared with the store write: there is no
+    /// second copy to make, because there is no copy.
     #[test]
-    fn importing_the_same_file_twice_is_a_no_op_the_second_time() {
-        let (manager, dir) = store("no-duplicate");
+    fn opening_the_same_file_twice_writes_nothing_either_time() {
+        let (manager, dir) = store("twice");
         let original = Session::new("A task".to_string());
         let html = session_to_html(&original, Path::new("nowhere"), 4);
 
-        let first = import_artifact(&manager, &html).unwrap().unwrap();
-        assert!(!first.replaced && !first.already);
-        let second = import_artifact(&manager, &html).unwrap().unwrap();
-        assert!(
-            second.already,
-            "the same file again is 'already here', not a second session"
-        );
+        let first = open_artifact(&html).expect("a session");
+        let second = open_artifact(&html).expect("a session");
+        assert_eq!(first.session.id, second.session.id, "same file, same session");
         assert_eq!(
             manager.all_sessions().len(),
-            1,
-            "pressing Import twice must not fill the list with photocopies"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// The user's call on 2026-09-17: the same id with different content is replaced by
-    /// the file, because the file is the state they chose. The test pins the price of that
-    /// too -- a turn made after the export is gone afterwards, which is why the report says
-    /// "replaced".
-    #[test]
-    fn an_export_that_fell_behind_replaces_what_is_here() {
-        let (manager, dir) = store("diverged-replace");
-        let mut original = Session::new("A task".to_string());
-        original.add_turn_pinned("user", "help".to_string(), None, false);
-        let html = session_to_html(&original, Path::new("nowhere"), 4);
-        manager.save_session(Some(&original));
-        // The session continues after the export.
-        let mut current = original.clone();
-        current.add_turn("assistant", "Click Save".to_string(), None);
-        manager.save_session(Some(&current));
-
-        let outcome = import_artifact(&manager, &html).unwrap().unwrap();
-        assert!(outcome.replaced, "different content under the same id is replaced");
-        assert!(!outcome.already);
-        assert_eq!(manager.all_sessions().len(), 1, "still one session, one id");
-        let back = manager.session_by_id(&original.id.to_string()).expect("stored");
-        assert_eq!(
-            back.conversation.len(),
-            original.conversation.len(),
-            "the export's content won; the turn made after it is gone"
+            0,
+            "opening a file must not put anything in the store"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn an_imported_picture_comes_back_without_drawing_a_second_pointer() {
+    fn a_picture_comes_back_inline_with_no_second_pointer_and_no_dangling_name() {
         use crate::ai::session::StoredMark;
 
-        let (manager, dir) = store("frame-back");
+        let (manager, dir) = store("picture");
         let mut original = Session::new("With a picture".to_string());
         original.add_turn_pinned("user", "help".to_string(), None, false);
         original.add_turn("assistant", "Click Save".to_string(), None);
@@ -756,46 +679,34 @@ mod tests {
         manager.save_frame(&original.id.to_string(), 0, &png).unwrap();
 
         let html = session_to_html(&original, &manager.frames_dir(&original.id.to_string()), 4);
-        // Into a FRESH store: importing back where the file came from is (correctly) the
-        // identical no-op, and would never exercise the picture extraction.
-        let (imported_into, dir2) = store("frame-back-target");
-        let outcome = import_artifact(&imported_into, &html).unwrap().unwrap();
-        assert_eq!(outcome.frames, 1, "the picture came back out of the file");
+        let opened = open_artifact(&html).expect("a session");
 
-        let back = imported_into
-            .all_sessions()
-            .into_iter()
-            .find(|s| s.id.to_string() == outcome.id)
-            .expect("stored");
-        let with_frame = back
-            .conversation
-            .iter()
-            .find(|t| t.frame.is_some())
-            .expect("a turn kept its picture");
-        assert!(
-            with_frame.frame.as_deref().unwrap().ends_with(".jpg"),
-            "named for what the bytes are, not for the name they had before"
-        );
-        assert!(
-            with_frame.mark.is_none(),
-            "the pointer is already in those pixels; a mark would draw a second one"
-        );
+        assert_eq!(opened.pictures.len(), 1, "the picture came out of the file");
+        let (index, b64) = &opened.pictures[0];
+        assert_eq!(opened.session.conversation[*index].role, "user");
+        assert!(!b64.is_empty() && !b64.starts_with("data:"), "bare base64, as the panel renders it");
+
+        for turn in &opened.session.conversation {
+            assert!(
+                turn.frame.is_none(),
+                "a frame name would point into a store this session is not in -- and would \
+                 dangle the moment the user carries on and it gets saved"
+            );
+            assert!(
+                turn.mark.is_none(),
+                "the pointer is already in those pixels; a mark would draw a second one"
+            );
+        }
         let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_dir_all(dir2);
     }
 
     #[test]
-    fn a_file_that_is_not_a_session_imports_as_nothing() {
-        let (manager, dir) = store("not-a-session");
-        assert!(import_artifact(&manager, "<html><body>just a page</body></html>")
-            .unwrap()
-            .is_none());
-        assert_eq!(manager.all_sessions().len(), 0);
-        let _ = std::fs::remove_dir_all(dir);
+    fn a_file_that_is_not_a_session_opens_as_nothing() {
+        assert!(open_artifact("<html><body>just a page</body></html>").is_none());
     }
 
-    /// Export this machine's own sessions and read them straight back into a second store,
-    /// comparing what survived. `#[ignore]`d because it depends on what is on disk; run with
+    /// Export this machine's own sessions and open every one straight back, comparing what
+    /// survived. `#[ignore]`d because it depends on what is on disk; run with
     ///
     ///     cargo test --lib session_html::tests::round_trip_the_real_sessions -- --ignored --nocapture
     #[test]
@@ -812,17 +723,12 @@ mod tests {
 
         let temp = std::path::PathBuf::from(std::env::var("TEMP").unwrap_or_default());
         let out = temp.join("navisual-round-trip-out");
-        let store_root = temp.join("navisual-round-trip-store");
-        // Cleared BEFORE the manager exists: `SessionManager::new` creates the directory, and
-        // deleting it afterwards makes every later write fail silently.
         let _ = std::fs::remove_dir_all(&out);
-        let _ = std::fs::remove_dir_all(&store_root);
-        let store = SessionManager::new(store_root.join("sessions"));
 
         let written = write_all(&base, &originals, &out, 4).expect("export");
         assert_eq!(written, originals.len());
 
-        let mut imported = 0usize;
+        let mut opened = Vec::new();
         let mut pictures = 0usize;
         for entry in std::fs::read_dir(&out).into_iter().flatten().flatten() {
             let path = entry.path();
@@ -830,47 +736,54 @@ mod tests {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("read");
-            if let Some(outcome) = import_artifact(&store, &text).expect("import") {
-                // The index page is not a session and is counted as skipped, not imported.
-                imported += 1;
-                pictures += outcome.frames;
+            // The index page is not a session, and opens as nothing.
+            if let Some(o) = open_artifact(&text) {
+                pictures += o.pictures.len();
+                opened.push(o);
             }
         }
-        println!("exported {written}, imported {imported}, pictures back out: {pictures}");
+        println!("exported {written}, opened {}, pictures inline: {pictures}", opened.len());
+        assert_eq!(opened.len(), originals.len(), "every session came back");
 
-        let back = store.all_sessions();
-        assert_eq!(back.len(), originals.len(), "every session came back");
-        let mut compared_frames = 0usize;
+        let mut had_frames = 0usize;
         for original in &originals {
-            let copy = back
+            let o = opened
                 .iter()
-                .find(|s| s.id == original.id)
+                .find(|o| o.session.id == original.id)
                 .unwrap_or_else(|| panic!("{} did not come back", original.id));
+            let copy = &o.session;
             assert_eq!(copy.task_description, original.task_description);
             assert_eq!(copy.conversation.len(), original.conversation.len());
             assert_eq!(copy.plan_outline, original.plan_outline);
             assert_eq!(copy.plan_completed_count, original.plan_completed_count);
-            for (a, b) in original.conversation.iter().zip(copy.conversation.iter()) {
+            for (i, (a, b)) in original
+                .conversation
+                .iter()
+                .zip(copy.conversation.iter())
+                .enumerate()
+            {
                 assert_eq!(a.role, b.role);
                 assert_eq!(a.content, b.content);
                 assert_eq!(a.clicked, b.clicked, "what the user clicked survives");
                 assert_eq!(a.advanced_by, b.advanced_by);
-                assert_eq!(
-                    a.frame.is_some(),
-                    b.frame.is_some(),
-                    "a turn keeps a picture if and only if it had one"
-                );
-                if b.frame.is_some() {
-                    compared_frames += 1;
+                assert!(b.frame.is_none(), "names are stripped; pictures travel inline");
+                // A turn that had a picture on disk has one in the artifact, by index.
+                if a.frame.is_some()
+                    && real
+                        .frames_dir(&original.id.to_string())
+                        .join(a.frame.as_deref().unwrap())
+                        .exists()
+                {
+                    had_frames += 1;
                     assert!(
-                        store.frames_dir(&copy.id.to_string()).join(b.frame.as_deref().unwrap()).exists(),
-                        "and the picture itself is on disk"
+                        o.pictures.iter().any(|(idx, _)| *idx == i),
+                        "turn {i} had a picture on disk and none came back"
                     );
                 }
             }
         }
         println!("turns checked: {}", originals.iter().map(|s| s.conversation.len()).sum::<usize>());
-        println!("turns with a picture, before and after: {compared_frames}");
+        println!("turns whose picture came back: {had_frames}");
     }
 
     /// Two sessions about the same thing on the same day slugify to the same name. The

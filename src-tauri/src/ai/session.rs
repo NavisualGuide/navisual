@@ -18,6 +18,26 @@ const EVICTION_BATCH: usize = 6;
 /// first phrasing is the stale one.
 const MAX_PINNED_TURNS: usize = 5;
 
+/// Whether a string may be used as a frame's file name.
+///
+/// Frame names reach this store from two directions: the app makes them (`0.png`), and an
+/// IMPORTED artifact carries them inside the file. The second is attacker-controlled in the
+/// way any shared document is, and the name goes straight into `frames_dir.join(..)` -- so
+/// `../../../../evil.bat` would leave the store entirely. The session's ID is checked for
+/// exactly this reason on the way in; this is the other string in the same sentence.
+///
+/// Lives here, beside `save_frame_named`, rather than in the importer: a check the caller
+/// has to remember is one a future caller forgets. The write refuses the name itself, and
+/// the importer and the viewer share this same rule so they cannot drift apart.
+pub fn safe_frame_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+}
+
 /// How many finished sessions are kept on disk. Twenty is a starting number, not a
 /// derived one: it is about two weeks of the founder's own use, it fits a list the user
 /// can read without searching (§8 of the plan: "20 sessions do not need search"), and it
@@ -364,7 +384,8 @@ impl SessionManager {
     /// task, the plan outline and the state summary.
     ///
     /// The caller is responsible for the parts that live outside the session — the
-    /// stored target HWND and the export ring. See `resume_session` in `lib.rs`.
+    /// stored target HWND and the export ring — `adopt_session_state` in `lib.rs`, which the
+    /// `load_session` command and `open_session_file` both call for exactly that reason.
     pub fn load_session(&mut self, session_id: &str) -> Option<Session> {
         let file_path = self.session_dir.join(format!("{}.json", session_id));
         let content = fs::read_to_string(file_path).ok()?;
@@ -437,22 +458,14 @@ impl SessionManager {
     /// come out of an artifact as JPEG and must not be labelled `.png` for the sake of a
     /// convention they no longer follow.
     pub fn save_frame_named(&self, session_id: &str, name: &str, bytes: &[u8]) -> Option<String> {
+        if !safe_frame_name(name) {
+            log::warn!("[sessions] refusing to write a frame named {name:?}");
+            return None;
+        }
         let dir = self.frames_dir(session_id);
         fs::create_dir_all(&dir).ok()?;
         fs::write(dir.join(name), bytes).ok()?;
         Some(name.to_string())
-    }
-
-    /// Whether a session with this id is already stored.
-    pub fn session_exists(&self, session_id: &str) -> bool {
-        self.session_dir.join(format!("{session_id}.json")).exists()
-    }
-
-    /// One stored session by id, read-only — for comparing against an import without
-    /// making anything current.
-    pub fn session_by_id(&self, session_id: &str) -> Option<Session> {
-        let text = fs::read_to_string(self.session_dir.join(format!("{session_id}.json"))).ok()?;
-        serde_json::from_str(&text).ok()
     }
 
     /// How many session files exist, without parsing any of them.
@@ -639,6 +652,38 @@ mod tests {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
             s.add_turn(role, format!("turn {i}"), None);
         }
+    }
+
+    /// The guard lives at the write, so it holds however the name arrived -- an imported
+    /// artifact carries frame names inside the file, and they reach `frames_dir.join(..)`.
+    ///
+    /// The escape path is stated rather than eyeballed: `<store>/frames/<id>` joined with
+    /// `../../escaped.jpg` resolves to `<store>/escaped.jpg`, which is exactly what an
+    /// unguarded write produced.
+    #[test]
+    fn a_frame_name_cannot_escape_its_directory() {
+        let dir = std::env::temp_dir().join(format!("navisual-frame-escape-{}", Uuid::new_v4()));
+        let mgr = SessionManager::new(dir.clone());
+        let id = Uuid::new_v4().to_string();
+
+        assert!(
+            mgr.save_frame_named(&id, "0.png", b"x").is_some(),
+            "an ordinary name still works"
+        );
+        assert!(mgr.frames_dir(&id).join("0.png").exists());
+
+        for hostile in ["../../escaped.jpg", "../evil.png", "sub/dir.png", "a\\b.png", ""] {
+            assert!(
+                mgr.save_frame_named(&id, hostile, b"x").is_none(),
+                "{hostile:?} was accepted"
+            );
+        }
+        assert!(
+            !dir.join("escaped.jpg").exists(),
+            "../../escaped.jpg resolves to this exact path; nothing may be written there"
+        );
+        assert!(!dir.join("frames").join("evil.png").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

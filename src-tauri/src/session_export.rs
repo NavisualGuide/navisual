@@ -1533,13 +1533,13 @@ pub fn pick_folder(start_in: Option<PathBuf>) -> Option<PathBuf> {
     handle.join().ok().flatten()
 }
 
-/// Native "choose one or more files" dialog, filtered to `extension`.
+/// Native "choose one file" dialog, filtered to `extension`.
 ///
-/// The mirror of `pick_folder`, for the other direction of §6: importing an exported
-/// session back in. Multi-select because an export writes a whole folder of them and
-/// re-importing one at a time would be a chore nobody finishes.
+/// The mirror of `pick_folder`, for the other direction of §6: opening an exported session.
+/// Single-select, because opening one is a one-at-a-time act where an export writes the
+/// whole set.
 #[cfg(windows)]
-pub fn pick_files(start_in: Option<PathBuf>, extension: &str) -> Vec<PathBuf> {
+pub fn pick_file(start_in: Option<PathBuf>, extension: &str) -> Option<PathBuf> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -1547,8 +1547,8 @@ pub fn pick_files(start_in: Option<PathBuf>, extension: &str) -> Vec<PathBuf> {
     };
     use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     use windows::Win32::UI::Shell::{
-        FileOpenDialog, IFileOpenDialog, SHCreateItemFromParsingName, FOS_ALLOWMULTISELECT,
-        FOS_FILEMUSTEXIST, SIGDN_FILESYSPATH,
+        FileOpenDialog, IFileOpenDialog, SHCreateItemFromParsingName, FOS_FILEMUSTEXIST,
+        SIGDN_FILESYSPATH,
     };
 
     let extension = extension.to_string();
@@ -1576,9 +1576,7 @@ pub fn pick_files(start_in: Option<PathBuf>, extension: &str) -> Vec<PathBuf> {
                 let dialog: IFileOpenDialog =
                     CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
                 dialog
-                    .SetOptions(
-                        dialog.GetOptions().ok()? | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST,
-                    )
+                    .SetOptions(dialog.GetOptions().ok()? | FOS_FILEMUSTEXIST)
                     .ok()?;
                 let _ = dialog.SetFileTypes(&filters);
                 if let Some(dir) = start_in.as_ref().filter(|d| d.exists()) {
@@ -1616,7 +1614,7 @@ pub fn pick_files(start_in: Option<PathBuf>, extension: &str) -> Vec<PathBuf> {
         }
         out
     });
-    handle.join().unwrap_or_default()
+    handle.join().unwrap_or_default().into_iter().next()
 }
 
 #[cfg(windows)]
@@ -1628,8 +1626,8 @@ pub fn pick_folder(_start_in: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-pub fn pick_files(_start_in: Option<PathBuf>, _extension: &str) -> Vec<PathBuf> {
-    Vec::new()
+pub fn pick_file(_start_in: Option<PathBuf>, _extension: &str) -> Option<PathBuf> {
+    None
 }
 
 fn about_text(dir: &Path) -> String {
