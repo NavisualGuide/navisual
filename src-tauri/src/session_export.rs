@@ -1212,7 +1212,7 @@ pub(crate) fn mark_arm(pw: f32, ph: f32, scale: f32) -> f32 {
 ///     which is one real frame of the animation rather than an invented one;
 ///   - the sweeping scan line is omitted entirely. It reads as a highlight only
 ///     because it moves; frozen it is just a bar across the element.
-fn draw_pointer(img: &mut image::RgbaImage, rect: [i32; 4], k: f32, mark_scale: f32, hint: bool) {
+pub(crate) fn draw_pointer(img: &mut image::RgbaImage, rect: [i32; 4], k: f32, mark_scale: f32, hint: bool) {
     let [x, y, w, h] = rect;
     const ACCENT: [u8; 3] = [255, 107, 53];
     let (cx, cy) = (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
@@ -1533,11 +1533,100 @@ pub fn pick_folder(start_in: Option<PathBuf>) -> Option<PathBuf> {
     handle.join().ok().flatten()
 }
 
+/// Native "choose one file" dialog, filtered to `extension`.
+///
+/// The mirror of `pick_folder`, for the other direction of §6: opening an exported session.
+/// Single-select, because opening one is a one-at-a-time act where an export writes the
+/// whole set.
+#[cfg(windows)]
+pub fn pick_file(start_in: Option<PathBuf>, extension: &str) -> Option<PathBuf> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, SHCreateItemFromParsingName, FOS_FILEMUSTEXIST,
+        SIGDN_FILESYSPATH,
+    };
+
+    let extension = extension.to_string();
+    // Same STA thread as the folder picker, for the same reason (see above).
+    let handle = std::thread::spawn(move || -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if hr.is_err() {
+                log::warn!("[sessions] CoInitializeEx for the file picker failed: {hr:?}");
+                return out;
+            }
+            let pattern: Vec<u16> =
+                format!("*.{extension}").encode_utf16().chain(std::iter::once(0)).collect();
+            let label: Vec<u16> = format!("Navisual session (.{extension})")
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let filters = [COMDLG_FILTERSPEC {
+                pszName: PCWSTR(label.as_ptr()),
+                pszSpec: PCWSTR(pattern.as_ptr()),
+            }];
+
+            let result = (|| -> Option<()> {
+                let dialog: IFileOpenDialog =
+                    CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                dialog
+                    .SetOptions(dialog.GetOptions().ok()? | FOS_FILEMUSTEXIST)
+                    .ok()?;
+                let _ = dialog.SetFileTypes(&filters);
+                if let Some(dir) = start_in.as_ref().filter(|d| d.exists()) {
+                    let wide: Vec<u16> =
+                        dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+                    if let Ok(item) = SHCreateItemFromParsingName::<
+                        _,
+                        _,
+                        windows::Win32::UI::Shell::IShellItem,
+                    >(PCWSTR(wide.as_ptr()), None)
+                    {
+                        let _ = dialog.SetFolder(&item);
+                    }
+                }
+                // A cancelled dialog is an Err here, which is the normal path, not a
+                // failure worth logging.
+                dialog.Show(None).ok()?;
+                let items = dialog.GetResults().ok()?;
+                for i in 0..items.GetCount().ok()? {
+                    if let Ok(item) = items.GetItemAt(i) {
+                        if let Ok(pw) = item.GetDisplayName(SIGDN_FILESYSPATH) {
+                            if let Ok(path) = pw.to_string() {
+                                out.push(PathBuf::from(path));
+                            }
+                            windows::Win32::System::Com::CoTaskMemFree(Some(pw.0 as *const _));
+                        }
+                    }
+                }
+                Some(())
+            })();
+            if result.is_none() {
+                out.clear();
+            }
+            CoUninitialize();
+        }
+        out
+    });
+    handle.join().unwrap_or_default().into_iter().next()
+}
+
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
 #[cfg(not(windows))]
 pub fn pick_folder(_start_in: Option<PathBuf>) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn pick_file(_start_in: Option<PathBuf>, _extension: &str) -> Option<PathBuf> {
     None
 }
 

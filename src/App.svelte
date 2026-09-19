@@ -59,6 +59,9 @@ See the LICENSE file in the root of this repository for complete details.
     error: string | null;
     debug_screenshot_path: string | null;
     chat_thumb_b64: string | null;
+    /// What the user clicked to produce this turn, resolved to a control by the backend
+    /// (`Button "Insert"`). Null when no click was recorded -- see `completionLabel`.
+    last_click: string | null;
     locate_trace: LocateTrace | null;
     ai_bbox: Rect | null;
     suggested_tasks: string[];
@@ -69,8 +72,14 @@ See the LICENSE file in the root of this repository for complete details.
     candidates: Rect[];
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
-  type HistoryRole = "user" | "ai" | "correction" | "system" | "error";
-  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean };
+  // "completed" is the user's own action -- the machine-built `[User completed: "..."]`
+  // turn -- so it renders on the user side of the transcript, in the user pill. It
+  // is a role rather than a style flag because every other row is told apart by role.
+  type HistoryRole = "user" | "ai" | "correction" | "system" | "error" | "completed";
+  // `storedFrame` points at a picture in the store; `inlineFrame` IS the picture, base64
+  // JPEG, for a session opened from a file -- those never reach disk, so there is nothing
+  // to point at. Both render identically; only the lightbox has to tell them apart.
+  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean; storedFrame?: { sessionId: string; frame: string }; inlineFrame?: string };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
     api_provider: string;
@@ -112,6 +121,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_log_files_enabled: boolean;
     training_capture_enabled: boolean;
     session_export_enabled: boolean;
+    session_screenshots: boolean;
     task_suggestions: boolean;
     developer_mode: boolean;
   };
@@ -526,6 +536,36 @@ See the LICENSE file in the root of this repository for complete details.
 
   // Target-window picker (item 1)
   type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; minimized: boolean; };
+  // One row of the recent-tasks list (`SessionSummary` in ai/session.rs).
+  type StoredSession = {
+    id: string;
+    task_description: string;
+    summary_text: string | null;
+    turns: number;
+    last_active_at: string;
+  };
+  // A reopened session arrives as the stored `Session` itself -- the same shape the
+  // backend writes to disk. Only these fields are read: the rest (token usage, step
+  // sequence, step index) describe a screen that no longer exists.
+  type StoredSessionDetail = {
+    id: string;
+    task_description: string;
+    plan_outline: string[];
+    plan_completed_count: number;
+    current_state_summary: { summary_text: string; turn_index: number } | null;
+    conversation: { role: string; content: string; timestamp: string; clicked?: string | null; advanced_by?: string | null; frame?: string | null }[];
+  };
+  let sessionPickerOpen = $state(false);
+  let storedSessions = $state<StoredSession[]>([]);
+  let sessionPickerLoading = $state(false);
+  let sessionExportBusy = $state(false);
+  let sessionImportBusy = $state(false);   // opening a session file
+  // Read from the backend rather than written here: the number belongs to
+  // SESSION_HISTORY_KEEP, and a sentence naming it must not be able to drift from it.
+  let sessionKeep = $state(20);
+  // Ids ticked in the list. Empty means the export button offers everything, which is the
+  // common case -- "send me all of them" should not need twenty clicks.
+  let selectedSessions = $state<string[]>([]);
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   // "target" = pick what Navisual assists with; "dock" = pick what fills the
@@ -745,6 +785,14 @@ See the LICENSE file in the root of this repository for complete details.
     if (sel && !sel.isCollapsed && sel.toString().trim()) return;
     const t = e.target as HTMLElement | null;
     if (t && t.closest("textarea, input, [contenteditable]")) return;
+    // The picker overlays sit above the panel's own surface; its menu opened under them, at
+    // the click point, listing actions that make no sense for a list row. Suppressed rather
+    // than given a menu of its own: every action a row needs is already on it (open, tick to
+    // export) or at the top of the list (live report 2026-09-17).
+    if (sessionPickerOpen || targetPickerOpen) {
+        e.preventDefault();
+        return;
+    }
     e.preventDefault();
     // Everywhere the browser menu was suppressed, ours takes its place. The
     // escape hatches above are untouched and still win: a live selection or a
@@ -967,6 +1015,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_log_files_enabled: false,
     training_capture_enabled: false,
     session_export_enabled: false,
+    session_screenshots: false,
     task_suggestions: true,
     developer_mode: false,
   };
@@ -1361,11 +1410,24 @@ See the LICENSE file in the root of this repository for complete details.
   let _lightboxPrevSize: { w: number; h: number } | null = null;
   let _lightboxPrevPos: { x: number; y: number } | null = null;
 
-  async function openLightbox() {
+  // `stored` is set on a row that has a picture on disk; without it this is the live
+  // session's own screenshot. Both come back as base64 JPEG and render the same way.
+  async function openLightbox(entry?: HistoryEntry) {
     lightboxLoading = true;
     lightboxSrc = null;
     try {
-      lightboxSrc = await invoke<string | null>("get_chat_full_screenshot");
+      // Three sources, in the order they can be answered: a picture that came out of a file
+      // is already here, one in the store is a read away, and otherwise this is the live
+      // session's own screenshot.
+      if (entry?.inlineFrame) {
+        lightboxSrc = entry.inlineFrame;
+      } else if (entry?.storedFrame) {
+        lightboxSrc = await invoke<string | null>("session_frame", {
+          sessionId: entry.storedFrame.sessionId, frame: entry.storedFrame.frame, thumb: false,
+        });
+      } else {
+        lightboxSrc = await invoke<string | null>("get_chat_full_screenshot");
+      }
     } catch (_) {}
     lightboxLoading = false;
     if (!lightboxSrc) return;
@@ -1416,6 +1478,45 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Attach a new thumbnail to a history entry, fading out all previous thumbnails.
+  // A completion row states what actually moved the step on, strongest evidence first: the
+  // click the hook resolved; failing that, what the frontend knows advanced it -- the Next
+  // control, Autopilot (a screen change the user did not cause) or the user saying the step
+  // was already done. "✓ Completed" survives only as the fallback for turns stored before
+  // any of that was recorded. Saying "Completed" when the user merely pressed Next would
+  // claim they did the step, and Autopilot's advances are not the user's at all.
+  function completionLabel(click?: string | null, advancedBy?: string | null): string {
+    if (click) return `✓ You clicked ${click}`;
+    if (advancedBy === "autopilot") return "✓ Autopilot advanced";
+    if (advancedBy === "already_done") return "✓ You marked it already done";
+    if (advancedBy === "next") return "✓ You pressed Next";
+    return "✓ Completed";
+  }
+
+  // The click arrives with the response, after the row was already created, so this
+  // rewrites the row's label rather than adding a line under it. The backend consumes the
+  // click, so one click decorates exactly one row.
+  function attachClick(entryId: number, click: string, advancedBy?: string | null) {
+    const entry = history.find(h => h.id === entryId);
+    if (entry) entry.text = completionLabel(click, advancedBy);
+  }
+
+  // A reopened session's own pictures, fetched one at a time as the transcript is rebuilt.
+  // Deliberately no fading here, unlike the live thumbnails: there a thumb means "what the
+  // AI is looking at now", and only one thing can be current, while a reopened transcript
+  // is a record in which every step keeps the picture it was guided from.
+  function attachStoredFrame(entryId: number, b64: string, ref: { sessionId: string; frame: string }) {
+    const entry = history.find(h => h.id === entryId);
+    if (!entry) return;
+    entry.thumb = b64;
+    entry.storedFrame = ref;
+  }
+
+  function loadStoredThumb(entryId: number, sessionId: string, frame: string) {
+    invoke<string | null>("session_frame", { sessionId, frame, thumb: true })
+      .then((b64) => { if (b64) attachStoredFrame(entryId, b64, { sessionId, frame }); })
+      .catch(() => {});
+  }
+
   function attachThumb(entryId: number, thumbB64: string) {
     const FADE_MS = 500;
     // Mark existing visible thumbs as fading.
@@ -2323,6 +2424,7 @@ See the LICENSE file in the root of this repository for complete details.
     steps = [];
     stepIndex = 0;
     currentInstruction = "";
+    lastCompletedInstruction = "";
     streamStepsSeen = 0;
     locateResult = null;
     locateTrace = null;
@@ -2336,6 +2438,203 @@ See the LICENSE file in the root of this repository for complete details.
     // Workstream P: fresh session, fresh cold-start prefill.
     clearPrefill();
     coldStartPrefill();
+  }
+
+  // "2 hours ago". Coarse on purpose: the list answers "which one was I in?",
+  // and a precise timestamp is noise against a task description.
+  function whenAgo(iso: string): string {
+    const then = Date.parse(iso);
+    if (Number.isNaN(then)) return "";
+    const mins = Math.round((Date.now() - then) / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+    const days = Math.round(hours / 24);
+    if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+    return new Date(then).toLocaleDateString();
+  }
+
+  // Every stored session as one self-contained HTML file each, into a folder the user
+  // picks — that choice is the consent, the same shape as the live session export. Nothing
+  // is written until it is made, and a cancelled dialog is a normal outcome, not an error.
+  function toggleSessionSelection(id: string) {
+    selectedSessions = selectedSessions.includes(id)
+      ? selectedSessions.filter((s) => s !== id)
+      : [...selectedSessions, id];
+  }
+
+  async function exportStoredSessions() {
+    sessionExportBusy = true;
+    try {
+      // No ticks means everything: the button's own label says which it will be, so the
+      // hand-off cannot surprise anyone.
+      const out = await invoke<{ folder: string; count: number } | null>("export_sessions_html", {
+        ids: selectedSessions,
+      });
+      if (out) {
+        sessionPickerOpen = false;
+        selectedSessions = [];
+        await addToHistory(
+          "system",
+          `Exported ${out.count} session${out.count === 1 ? "" : "s"} to ${out.folder}`,
+        );
+      }
+    } catch (e) {
+      await addToHistory("error", `Could not export the sessions: ${e}`);
+    } finally {
+      sessionExportBusy = false;
+    }
+  }
+
+  // Opening an exported session file. It goes into the PANEL, not into the list: the file
+  // is the archive and the list is the recent working set, so an opened session joins the
+  // list only if you carry on working in it. Importing into the list could not work -- the
+  // list keeps twenty, so restoring an old session raced the very prune it was exported to
+  // escape (three imported and pruned eight minutes later, 2026-09-17).
+  async function openSessionFile() {
+    sessionImportBusy = true;
+    try {
+      const out = await invoke<{
+        session: StoredSessionDetail;
+        pictures: { turn: number; jpeg_base64: string }[];
+      } | null>("open_session_file");
+      if (!out) return;
+      sessionPickerOpen = false;
+      await renderSession(
+        out.session,
+        null,
+        new Map(out.pictures.map((p) => [p.turn, p.jpeg_base64])),
+      );
+      await addToHistory(
+        "system",
+        out.pictures.length > 0
+          ? "Opened from a file. It joins your recent tasks only if you carry on working in it."
+          : "Opened from a file \u2014 this one was exported without pictures. It joins your recent tasks only if you carry on working in it.",
+      );
+    } catch (e) {
+      await addToHistory("error", `${e}`);
+    } finally {
+      sessionImportBusy = false;
+    }
+  }
+
+  async function openSessionPicker() {
+    showQuickMenu = false;
+    sessionPickerOpen = true;
+    sessionPickerLoading = true;
+    try {
+      storedSessions = await invoke<StoredSession[]>("list_sessions");
+      sessionKeep = await invoke<number>("session_keep_count");
+      // Also fetched at startup (see onMount): Settings names the same number, and it can be
+      // opened without ever opening this list.
+    } catch (_) {
+      storedSessions = [];
+    }
+    sessionPickerLoading = false;
+  }
+
+  // A row's picture that arrived with the session rather than sitting in the store.
+  function attachInlineFrame(entryId: number, b64: string) {
+    const entry = history.find(h => h.id === entryId);
+    if (!entry) return;
+    entry.thumb = b64;
+    entry.inlineFrame = b64;
+  }
+
+  // Putting a session on screen, shared by reopening a stored one and opening a file. Both
+  // put the panel where `newSession` puts it and then fill the conversation back in;
+  // everything volatile is cleared the same way for the same reason -- the steps, the
+  // located rect and the overlay all describe a screen that is no longer there.
+  //
+  // `framesFrom` is the session id whose stored pictures the rows may ask for, or null for
+  // a file, whose pictures came inline in `pictures` because they are not in the store.
+  async function renderSession(
+    detail: StoredSessionDetail,
+    framesFrom: string | null,
+    pictures?: Map<number, string>,
+  ) {
+    cancelRequest();
+    planExpanded = false;
+    isOverlayCleared = false;
+
+    task = "";
+    steps = [];
+    stepIndex = 0;
+    currentInstruction = "";
+    // The previous session's last completed step must not ride along: the first Next here
+    // would report it as complete and the model would skip that step of the new task.
+    lastCompletedInstruction = "";
+    streamStepsSeen = 0;
+    locateResult = null;
+    locateTrace = null;
+    staleResponse = false;
+    clearPrefill();
+
+    sessionId = detail.id;
+    sessionGoal = detail.task_description;
+    sessionPlanOutline = detail.plan_outline;
+    sessionPlanCompletedCount = detail.plan_completed_count;
+
+    history = [];
+    let index = 0;
+    for (const t of detail.conversation) {
+      const at = index;
+      index += 1;
+      // A "Next" completion is stored as a machine-built `[User completed: "..."]` user
+      // turn -- the app's words, not the person's. Show it as the clean system note the
+      // live session uses, not as a user bubble with brackets.
+      const completed = t.content.startsWith('[User completed: "') && t.content.endsWith('"]');
+      // The instruction itself is deliberately NOT repeated on a completion row. It is what
+      // we asked for, and it is already on screen as the step above; restating it made every
+      // completion a wall of the same sentence twice.
+      const role: HistoryRole = completed
+        ? "completed"
+        : t.role === "assistant" ? "ai"
+        : t.role === "user" ? "user"
+        : t.role === "correction" ? "correction"
+        // Anything unrecognised is shown as a system note rather than dropped -- a turn the
+        // user can see is a turn they can judge.
+        : "system";
+      const rowId = await addToHistory(
+        role,
+        completed ? completionLabel(t.clicked, t.advanced_by) : t.content,
+      );
+
+      const inline = pictures?.get(at);
+      if (inline) attachInlineFrame(rowId, inline);
+      // Fetched in the background, one row at a time: a session with twenty frames would
+      // otherwise hold the transcript back behind a few megabytes of pictures.
+      else if (t.frame && framesFrom) loadStoredThumb(rowId, framesFrom, t.frame);
+    }
+  }
+
+  async function resumeStoredSession(id: string) {
+    sessionPickerOpen = false;
+    let resumed: StoredSessionDetail | null;
+    try {
+      resumed = await invoke<StoredSessionDetail | null>("load_session", { sessionId: id });
+    } catch (e) {
+      await addToHistory("error", `That session could not be reopened: ${e}`);
+      return;
+    }
+    // Null, not an error: the file was retired between the list being drawn and the row
+    // being clicked. Session retention is a moving target by design.
+    if (!resumed) {
+      await addToHistory("error", "That session is no longer on disk \u2014 it was retired when newer tasks arrived.");
+      return;
+    }
+
+    await renderSession(resumed, resumed.id);
+    // The old notice said screenshots were never kept. That is true of a session recorded
+    // with the setting off and false of one recorded with it on, and it is the kind of
+    // sentence that has to change when the feature does.
+    await addToHistory(
+      "system",
+      resumed.conversation.some((t) => t.frame)
+        ? "Reopened. The pictures are the ones this session was guided from \u2014 guidance follows the app you click into next."
+        : "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen \u2014 and guidance follows the app you click into next.",
+    );
   }
 
   function applyResponse(res: GuideResponse, idx: number, token: number) {
@@ -2464,7 +2763,11 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  async function nextStep(viaAutopilot = false, skipFeedback = false) {
+  // `advance` names what moved the step on for the completion row and the stored turn: the
+  // Next control unless a caller says otherwise. Autopilot is derived from its own argument,
+  // because a screen change advancing the session is not a user action at all.
+  async function nextStep(viaAutopilot = false, skipFeedback = false, advance = "next") {
+    const advanceKind = viaAutopilot ? "autopilot" : advance;
     // Don't allow next while an AI call is in flight — the hotkey can fire
     // even when the Next button is disabled (Svelte derived state edge case).
     if (phase === "thinking") return;
@@ -2531,9 +2834,11 @@ See the LICENSE file in the root of this repository for complete details.
       startTimer();
       const token = ++requestToken;
       // Create a history entry so the screenshot thumbnail has somewhere to live.
-      const reQueryId = await addToHistory("system",
+      // Only the completion branch is the user's own action; a skipped question and a
+      // plain re-analysis stay quiet system notes.
+      const reQueryId = await addToHistory(completed ? "completed" : "system",
         unanswered ? "↷ Skipped the question — re-analysing…"
-        : completed ? `✓ Completed — re-analysing…` : "Re-analysing…");
+        : completed ? completionLabel(null, advanceKind) : "Re-analysing…");
       try {
         const res = await invoke<GuideResponse>("guide", {
           task: unanswered
@@ -2545,10 +2850,12 @@ See the LICENSE file in the root of this repository for complete details.
               + `continue without an answer, ask again in a shorter, simpler form.]`
             : completed ? `[User completed: "${completed}"]` : "",
           isReply: false,
+          advance: completed ? advanceKind : null,
         });
         stopTimer();
         if (token !== requestToken) return;
         if (res.chat_thumb_b64) attachThumb(reQueryId, res.chat_thumb_b64);
+        if (res.last_click) attachClick(reQueryId, res.last_click, advanceKind);
         if (!res.ok) {
           phase = prevPhase;
           lastRequestFailed = true;
@@ -2776,7 +3083,7 @@ See the LICENSE file in the root of this repository for complete details.
     // step) the AI genuinely must re-plan → normal correction below.
     if (category === "already_done" && !note && stepIndex + 1 < steps.length) {
       addToHistory("system", "Skipping the already-done step — moving on (no AI request used).");
-      await nextStep(false, true);
+      await nextStep(false, true, "already_done");
       return;
     }
     if (category === "wrong_spot" && locateResult) {
@@ -2858,8 +3165,16 @@ See the LICENSE file in the root of this repository for complete details.
     : "error"
   );
 
-  // Next/Wrong enabled whenever there's a live session (guiding, needs_input, or idle with steps).
-  let actionDisabled = $derived(phase === "thinking" || phase === "error" || (phase === "idle" && steps.length === 0));
+  // Next/Wrong enabled whenever there is a task to carry on: guiding, needs_input, or idle
+  // with either steps left to advance or a session that came back WITHOUT them. `sessionId`
+  // is what separates those two idles -- a reopened session deliberately restores no steps
+  // (they describe a screen that is gone), and greying Next out there left the user holding a
+  // restored task with no way to continue it. Pressed with nothing to advance, Next re-reads
+  // the screen and re-plans against the restored task, which is the whole point of reopening.
+  let actionDisabled = $derived(
+    phase === "thinking" || phase === "error" ||
+    (phase === "idle" && steps.length === 0 && sessionId === "")
+  );
   let isThinking = $derived(phase === "thinking");
   let activeModel = $derived(
     settingsForm.api_provider === "anthropic" ? settingsForm.anthropic_model
@@ -3922,7 +4237,7 @@ See the LICENSE file in the root of this repository for complete details.
                    flex children to ~2px. -->
               <img src="/goldfish.svg" class="h-label-fish" alt="Navisual" title="Navisual" draggable="false" />
             {:else}
-              {entry.role === "user" ? "You"
+              {entry.role === "user" || entry.role === "completed" ? "You"
               : entry.role === "correction" ? "Wrong"
               : entry.role === "error" ? "Error"
               : "·"}
@@ -3938,7 +4253,7 @@ See the LICENSE file in the root of this repository for complete details.
             <button
               class="h-thumb-btn"
               class:h-thumb-fading={entry.thumbFading}
-              onclick={openLightbox}
+              onclick={() => openLightbox(entry)}
               title="Click to view full screenshot"
             >
               <img class="h-thumb" src="data:image/jpeg;base64,{entry.thumb}" alt="screenshot" />
@@ -4091,8 +4406,63 @@ See the LICENSE file in the root of this repository for complete details.
       </div>
     {/if}
 
-    <!-- Action row: Next · Autopilot · New Task · 🎤 · ··· -->
+    <!-- Action row: Next · Autopilot · New Task · 🕓 · 🎤 · ··· -->
     <div class="action-row">
+      {#if sessionPickerOpen}
+        <div class="session-picker" role="listbox" aria-label="Recent tasks">
+          <div class="target-pick-head">Recent tasks</div>
+          <!-- The list is the whole store, and the store is bounded: saying so here is the
+               difference between a limit and a surprise when an old one disappears. -->
+          <p class="session-pick-hint">Only the {sessionKeep} most recent are saved — export a session to keep it, and open the file when you want it back.</p>
+          <!-- Export and import live at the TOP, where they can be found without scrolling
+               past twenty rows -- the plan's own §6 actions, and rule 18's lesson about
+               controls that get buried. -->
+          <div class="session-pick-actions">
+            <button class="session-pick-action" onclick={exportStoredSessions}
+              disabled={sessionExportBusy || storedSessions.length === 0}
+              title="One self-contained HTML file per session, readable in any browser">
+              {sessionExportBusy
+                ? "Exporting…"
+                : selectedSessions.length > 0
+                  ? `Export ${selectedSessions.length} selected…`
+                  : `Export all ${storedSessions.length}…`}
+            </button>
+            <button class="session-pick-action" onclick={openSessionFile}
+              disabled={sessionImportBusy}
+              title="Open an exported session file — it shows in the panel, and joins this list only if you carry on working in it">
+              {sessionImportBusy ? "Opening…" : "Open a file…"}
+            </button>
+          </div>
+          {#if sessionPickerLoading}
+            <div class="session-pick-empty">Loading…</div>
+          {:else if storedSessions.length === 0}
+            <div class="session-pick-empty">No earlier tasks yet. They're saved here as you go.</div>
+          {:else}
+            {#each storedSessions as sess (sess.id)}
+              <!-- The tick sits OUTSIDE the row's button: an input nested in a button is
+                   invalid markup, and one click would open the session as well as select it. -->
+              <div class="session-pick-row" class:session-pick-current={sess.id === sessionId}>
+                <input class="session-pick-tick" type="checkbox"
+                  checked={selectedSessions.includes(sess.id)}
+                  onchange={() => toggleSessionSelection(sess.id)}
+                  aria-label={`Select ${sess.task_description || "untitled task"}`} />
+                <button class="target-pick-item" onclick={() => resumeStoredSession(sess.id)}>
+                  <span class="target-pick-name">{sess.task_description || "Untitled task"}</span>
+                  <span class="target-pick-sub">
+                    {whenAgo(sess.last_active_at)} · {sess.turns} turn{sess.turns === 1 ? "" : "s"}
+                    <!-- The open session is marked by a word and a bar, not by colour alone:
+                         v0.7.21 shipped an accent a colour-weak user could not read. -->
+                    {#if sess.id === sessionId}<span class="session-pick-now">open</span>{/if}
+                  </span>
+                  {#if sess.summary_text}
+                    <span class="session-pick-summary">{sess.summary_text}</span>
+                  {/if}
+                </button>
+              </div>
+            {/each}
+          {/if}
+        </div>
+      {/if}
       <button class="btn-action btn-next" onclick={() => nextStep()} disabled={actionDisabled} title="Next step (Ctrl+`)">
         → Next
       </button>
@@ -4108,6 +4478,11 @@ See the LICENSE file in the root of this repository for complete details.
       </button>
       <button class="btn-action btn-new" onclick={newSession} title="Clear session and start fresh">
         ＋ New task
+      </button>
+      <button class="btn-action btn-history" class:btn-history-open={sessionPickerOpen}
+        onclick={() => { if (sessionPickerOpen) sessionPickerOpen = false; else openSessionPicker(); }}
+        title="Recent tasks — reopen one to carry on">
+        🕓
       </button>
       <button class="btn-action btn-mic" class:btn-mic-active={isRecording}
         onclick={toggleVoiceInput}
@@ -4151,7 +4526,15 @@ See the LICENSE file in the root of this repository for complete details.
     </footer>
   </main>
 
-  <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden -->
+  <!-- Target-window picker dropdown (item 1) — fixed so it escapes main's overflow:hidden.
+       The recent-tasks list is not here: it is a child of .action-row so it opens from
+       just above its own button (session-history-plan.md §3.2). -->
+  {#if sessionPickerOpen}
+    <!-- Clicking anywhere outside the list dismisses it -- the list itself sits above this
+         (999 vs 998), so a click on a row still lands on the row. -->
+    <div class="session-picker-backdrop" role="presentation"
+      onclick={() => { sessionPickerOpen = false; }}></div>
+  {/if}
   {#if targetPickerOpen}
     <div class="target-picker-backdrop" role="presentation" onclick={() => { targetPickerOpen = false; targetPickerMode = "target"; }}></div>
     <div class="target-picker" role="listbox" aria-label={targetPickerMode === "dock" ? "Choose the app to fill the rest of the screen" : "Choose target app"}>
@@ -4389,7 +4772,7 @@ See the LICENSE file in the root of this repository for complete details.
                a bare link. -->
           <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
             <li>It captures the window you point it at — or your whole screen, if you pick that — and sends the picture to the AI provider you choose.</li>
-            <li>Screenshots are held in memory. Nothing is written to your disk unless you save it yourself.</li>
+            <li>Any screenshot it saves is saved on your own computer — never on our servers.</li>
             <li><strong>The default free tier uses AI models that may keep your requests — including the screenshot — to train on.</strong> Paid tiers and your own API key don't; Ollama never leaves your machine.</li>
             <li>While guiding, it notes which control you click in that app — the control's name, never its contents. It does not monitor your keyboard.</li>
             <li>Voice input, if you turn it on, sends your audio to Microsoft's speech service.</li>
@@ -4861,6 +5244,20 @@ See the LICENSE file in the root of this repository for complete details.
                 auto-advance. <strong>Less</strong> ignores small changes (typing, minor updates);
                 <strong>More</strong> reacts to smaller ones like a dialog opening. The default is a
                 good balance.
+              </p>
+            </div>
+            <div class="setting-group">
+              <p class="setting-label">Saved sessions</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.session_screenshots} />
+                <span>Keep each step's screenshot with the saved session</span>
+              </label>
+              <p class="setting-hint" style="margin-top:4px">
+                Off by default, and it is the only setting here that would put a picture of your
+                screen on disk. What is kept is the same cropped, masked frame the AI was shown —
+                never the whole monitor — so reopening a session can show what that step looked
+                like. The most recent {sessionKeep} sessions are kept; older ones are deleted
+                with their screenshots.
               </p>
             </div>
 
@@ -5733,7 +6130,169 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   /* Target-window picker (item 1) */
-  .target-picker-backdrop {
+  /* Same surface as .target-picker so the two cannot drift visually; only the
+     anchor differs. The target picker hangs off the app chip in the titlebar,
+     this one off its button in the action row, so it opens upward from the
+     bottom. Its edges sit 8px in from the window -- the same inset as the target
+     picker -- which, anchored to .action-row (itself 5px in from the window:
+     main's 4px margin + 1px border), is 3px left/right here. */
+  .session-picker {
+    position: absolute;
+    left: 3px;
+    right: 3px;
+    bottom: calc(100% + 6px);
+    max-height: 62vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 8px;
+    z-index: 999;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  }
+  /* The default slab is wide enough to crowd a 300px panel and bright enough to read as
+     content. */
+  .session-picker::-webkit-scrollbar { width: 8px; }
+  .session-picker::-webkit-scrollbar-thumb {
+    background: var(--surface-4);
+    border-radius: 999px;
+    border: 2px solid var(--surface-2);
+  }
+  .session-picker::-webkit-scrollbar-thumb:hover { background: var(--border); }
+  .session-picker::-webkit-scrollbar-track { background: transparent; }
+  .session-pick-hint {
+    margin: 0 2px 8px;
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    opacity: 0.7;
+  }
+  .session-pick-actions {
+    display: flex;
+    gap: 6px;
+    padding: 0 2px 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+  .session-pick-action {
+    flex: 1;
+    padding: 7px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: var(--surface-3);
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .session-pick-action:hover:not(:disabled) { background: var(--surface-4); color: var(--text-primary); }
+  .session-pick-action:disabled { opacity: 0.6; cursor: default; }
+  /* A row is a card, not a line in a stack. The screenshot that prompted this showed
+     eight tasks running together as one block of text -- same weight, same colour, no
+     edges -- so the work here is separation and hierarchy, not decoration.
+
+     Every rule is scoped under .session-pick-row on purpose: `.target-pick-item` is one
+     snippet shared with the target-window picker (and the collapsed fish's copy of it),
+     and the whole point of sharing it is that those two cannot drift. */
+  .session-pick-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    padding: 2px 4px 2px 0;
+    margin-bottom: 4px;
+    border-radius: var(--r-sm);
+    background: var(--surface-3);
+    /* Transparent, not absent: the current row swaps the colour in without the 3px of
+       reflow that adding a border would cause. */
+    border-left: 3px solid transparent;
+  }
+  .session-pick-row:hover { background: var(--surface-4); }
+  .session-pick-row:last-child { margin-bottom: 0; }
+
+  /* The open session, said three ways: a bar, a tint, and the word "open".
+     The tint is a flat accent layer painted over the row's own background rather than a
+     `color-mix()`, which this codebase has never shipped -- the same blend, in syntax that
+     has worked since long before any WebView2 version we care about. */
+  .session-pick-current {
+    border-left-color: var(--accent-500);
+    background:
+      linear-gradient(rgba(255, 107, 53, 0.1), rgba(255, 107, 53, 0.1)),
+      var(--surface-3);
+  }
+  .session-pick-current:hover {
+    background:
+      linear-gradient(rgba(255, 107, 53, 0.16), rgba(255, 107, 53, 0.16)),
+      var(--surface-3);
+  }
+  .session-pick-current .target-pick-name { color: var(--accent-500); }
+
+  /* One column, not the shared two: the tick gutter that names the chosen window has
+     nothing to say here, and beside the checkbox it read as a second empty rail. */
+  .session-pick-row .target-pick-item {
+    flex: 1 1 auto;
+    min-width: 0;
+    grid-template-columns: 1fr;
+    align-items: start;
+    row-gap: 1px;
+    padding: 7px 8px 8px 4px;
+    background: transparent;
+  }
+  .session-pick-row .target-pick-item:hover { background: transparent; }
+  .session-pick-row .target-pick-name { font-weight: 600; font-size: 12px; }
+  .session-pick-row .target-pick-sub {
+    grid-column: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-secondary);
+    opacity: 0.75;
+  }
+  .session-pick-now {
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--accent-500);
+    color: var(--on-accent, #fff);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    opacity: 1;
+  }
+  /* Top-aligned with the title rather than centred on a three-line row, where it drifted
+     down beside the summary and stopped reading as "this row". */
+  .session-pick-tick {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    margin: 9px 0 0 8px;
+    accent-color: var(--accent-500);
+    cursor: pointer;
+  }
+  .session-pick-empty {
+    padding: 10px 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  /* The model's running summary, as a third line. Two lines then ellipsis: it is
+     context, and a summary that pushes the next task off the list costs more than
+     it gives. */
+  .session-pick-summary {
+    grid-column: 1;
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--text-secondary);
+    opacity: 0.62;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .target-picker-backdrop,
+  .session-picker-backdrop {
     position: fixed;
     inset: 0;
     z-index: 998;
@@ -6547,9 +7106,19 @@ See the LICENSE file in the root of this repository for complete details.
      shows it: YOU are a filled bubble on the right, NAVISUAL is plain text on
      the left beside its mark, and system notes sit centred and quiet between.
      Position and fill are the marker, so the text label becomes screen-reader
-     only rather than a caps tag in a gutter. (Redesign 2026-09-07.) */
-  .h-user { flex-direction: row-reverse; }
+     only rather than a caps tag in a gutter. (Redesign 2026-09-07.)
+
+     `completed` rides the user side because that is what it records: the step
+     the USER just performed, and its words are the app's, not the user's -- so it is a
+     role of its own and not simply `user`. It reads "✓ You clicked Button \"Save\"" -- the
+     fact and nothing else: the instruction it completed is already the step above it, and
+     restating it made every completion the same sentence twice. Without a click it falls
+     back to plain "✓ Completed". Leaving it a centred system note made the one row the
+     user actually caused the quietest thing on screen. */
+  .h-user,
+  .h-completed { flex-direction: row-reverse; }
   .h-user .h-label,
+  .h-completed .h-label,
   .h-correction .h-label {
     position: absolute;
     width: 1px;
@@ -6558,12 +7127,15 @@ See the LICENSE file in the root of this repository for complete details.
     clip: rect(0 0 0 0);
     white-space: nowrap;
   }
-  .h-user .h-body {
+  .h-user .h-body,
+  .h-completed .h-body {
     background: var(--accent-500);
     padding: 8px 12px;
     border-radius: 16px 16px 4px 16px;
   }
-  .h-user .h-text { color: var(--on-accent); }
+  .h-user .h-text,
+  .h-completed .h-text { color: var(--on-accent); }
+
   .h-user .h-meta { color: var(--on-accent-dim); }
 
   .h-ai .h-text  { color: var(--text-primary); }
@@ -6717,6 +7289,10 @@ See the LICENSE file in the root of this repository for complete details.
     gap: 6px;
     padding: 0 12px 10px;
     flex-shrink: 0;
+    /* The recent-tasks list anchors to this, opening upward just above the
+       buttons -- so it stays clear of its button regardless of how tall the
+       footer below happens to be (its shortcut legend wraps in a narrow panel). */
+    position: relative;
   }
 
   .btn-action {
@@ -6763,6 +7339,21 @@ See the LICENSE file in the root of this repository for complete details.
     background: rgba(239, 68, 68, 0.18) !important;
     border-color: rgba(239, 68, 68, 0.35) !important;
     animation: pulse 0.9s ease-in-out infinite;
+  }
+
+  /* Here, not up in the picker section: `.btn-action` sets `flex: 1` and wins on
+     source order, so a rule placed above it never applied -- the button measured
+     200x37, the width of the three primary actions, instead of the 34px every
+     other icon button is. */
+  .btn-history {
+    flex: 0 0 34px;
+    padding: 8px 0;
+    font-size: 13px;
+  }
+  .btn-history:hover { background: var(--surface-4); color: var(--text-primary); }
+  .btn-history-open {
+    background: var(--surface-4);
+    color: var(--text-primary);
   }
 
   /* Autopilot ON lights up in the accent; OFF is the same quiet pill as its

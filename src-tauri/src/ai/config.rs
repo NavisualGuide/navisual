@@ -154,17 +154,19 @@ pub struct Config {
     /// find the session already recorded, not start from empty.
     pub session_export_enabled: bool,
 
-    /// Include the *text* of the paragraph the cursor is in, in the `[App State — Word]`
-    /// block. Default on — it is what lets the AI say "you're in the Outlook heading"
-    /// rather than "you're on line 1".
+    /// Keep the frame each step was guided from, beside its stored session, so reopening a
+    /// session can show what the screen looked like when that step was given (plan §4).
     ///
-    /// Separated from the rest of the block because it is the only field that transmits
-    /// document **content** rather than **position**. Page/section/line/style are metadata
-    /// the AI cannot get any other way; the paragraph text is prose the user may not want
-    /// leaving the machine in structured, greppable form — the screenshot already carries
-    /// it, but as pixels, not as a loggable string. Turning this off keeps every positional
-    /// field, so the feature still works; it just stops quoting the document.
-    pub word_state_paragraph_text: bool,
+    /// **Off by default, and that is the point.** "Frames never touch disk unless you turn
+    /// this on" is the simplest sentence in the privacy story and the first one a sceptical
+    /// user checks. Optional rather than never, because the capability already exists three
+    /// times over — debug captures, training capture, session export — so the only honest
+    /// question was ever whether it becomes the default.
+    ///
+    /// What gets stored is the **OCR frame**: the same masked region as the AI's own picture,
+    /// at native resolution, and it is what the locator read (§4.2). Never the export frame,
+    /// which is the whole unmasked monitor.
+    pub session_screenshots: bool,
 
     /// Gemini reasoning budget, in tokens. `None` (default) omits `thinkingConfig` so the
     /// provider applies its own dynamic policy — measured at 447 thinking tokens against
@@ -231,7 +233,7 @@ impl Default for Config {
             debug_screenshot_enabled: false,
             training_capture_enabled: false,
             session_export_enabled: false,
-            word_state_paragraph_text: true,
+            session_screenshots: false,
             gemini_thinking_budget: None,
         }
     }
@@ -464,6 +466,9 @@ impl Config {
         if let Ok(v) = env::var("SESSION_EXPORT_ENABLED") {
             config.session_export_enabled = truthy(&v);
         }
+        if let Ok(v) = env::var("SESSION_SCREENSHOTS") {
+            config.session_screenshots = truthy(&v);
+        }
 
         // Merged-switch migration (see `merged_switch`).
         let flag = |k: &str| env::var(k).ok().map(|v| truthy(&v));
@@ -489,9 +494,6 @@ impl Config {
         // Defaults ON, so this one reads as an opt-OUT (unlike the toggles above).
         if let Ok(v) = env::var("GEMINI_THINKING_BUDGET") {
             config.gemini_thinking_budget = v.trim().parse::<i32>().ok();
-        }
-        if let Ok(v) = env::var("WORD_STATE_PARAGRAPH_TEXT") {
-            config.word_state_paragraph_text = !(v == "false" || v == "0");
         }
 
         // BYOK keys stored in the Windows Credential Manager are referenced from

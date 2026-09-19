@@ -40,8 +40,30 @@ use windows::Win32::System::Com::IDispatch;
 ///
 /// Every field is best-effort: Word's object model is remoted COM and any property can fail
 /// on a busy instance, so a missing field is omitted rather than failing the whole block.
+///
+/// How much of the cursor's paragraph to quote. This field IDENTIFIES a paragraph, it does
+/// not transmit one — the AI has the paragraph in front of it in the screenshot, and all
+/// this has to do is say *which* of the visible ones the caret sits in. The opening words
+/// are unique among a screenful of paragraphs essentially always, so the budget is set for
+/// recognition, not for completeness. 90 chars is ~15 words.
+///
+/// Measured over 185 real paragraphs in two archived prompt logs (2026-09-18): median 17,
+/// p95 78, max 171 — so 90 also happens to quote ~96% of them whole. That is a side effect,
+/// not the reason; a longer budget would buy completeness nobody asked for.
+///
+/// The cap also has to exist at all because Word puts no upper bound on a paragraph: text
+/// pasted from a PDF or a web page arrives as a single ¶, and an unbounded quote would drop
+/// a whole document into every request.
+///
+/// Not a privacy control, despite replacing one. The identical 90 used to mean "past this,
+/// send no text at all", which was shaped like a privacy rule and had no recorded rationale;
+/// the screenshot carries the same words as pixels either way, and this block never reaches
+/// disk (the stored turn is the user's own text, not the composed prompt).
 #[cfg(windows)]
-pub fn app_state_block(hwnd: usize, include_paragraph_text: bool) -> Option<String> {
+const PARAGRAPH_PROMPT_BUDGET: usize = 90;
+
+#[cfg(windows)]
+pub fn app_state_block(hwnd: usize) -> Option<String> {
     let app = get_active_object("Word.Application").ok()?;
     // Word is SDI — resolve OUR window, so a pinned-but-inactive document never reports
     // another window's cursor (same care as `locate`).
@@ -103,9 +125,10 @@ pub fn app_state_block(hwnd: usize, include_paragraph_text: bool) -> Option<Stri
         }
     }
 
-    // Document content entering the prompt. The screenshot already carries it, so this is
-    // not a new category — but it IS newly structured and greppable, so it is capped hard
-    // and reported as a length beyond that rather than dumping a paragraph.
+    // Document content entering the prompt. The screenshot already carries the same words,
+    // so this is not a new category — it is those words made quotable, which is what lets an
+    // instruction name the user's own text ("after \"Annual review...\", insert a break")
+    // instead of asking them to count lines.
     if let Some(text) = get_indexed(&sel, "Paragraphs", vec![v_i32(1)])
         .ok()
         .and_then(|p| as_dispatch(&p).ok())
@@ -117,10 +140,15 @@ pub fn app_state_block(hwnd: usize, include_paragraph_text: bool) -> Option<Stri
         let flat = flat.trim();
         if flat.is_empty() {
             lines.push("Paragraph: (empty)".into());
-        } else if !include_paragraph_text || flat.chars().count() > 90 {
-            // Opted out, or too long to quote: report the shape, not the prose. The AI still
-            // learns "you are in a substantial paragraph" without the document leaving as text.
-            lines.push(format!("Paragraph: {} characters", flat.chars().count()));
+        } else if flat.chars().count() > PARAGRAPH_PROMPT_BUDGET {
+            // Still quoted, just truncated — the head of a long paragraph identifies it as
+            // well as the whole thing does, and the full length tells the AI what it is
+            // looking at.
+            let head: String = flat.chars().take(PARAGRAPH_PROMPT_BUDGET).collect();
+            lines.push(format!(
+                "Paragraph: \"{head}…\" ({} characters in full)",
+                flat.chars().count()
+            ));
         } else {
             lines.push(format!("Paragraph: \"{flat}\""));
         }

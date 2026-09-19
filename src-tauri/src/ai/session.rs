@@ -1,8 +1,9 @@
 use crate::ai::types::{GuidanceStep, Message, Role};
+use crate::session_export::PointerState;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// How many turns are dropped at once when the window overflows. Larger = the retained slice
@@ -16,6 +17,32 @@ const EVICTION_BATCH: usize = 6;
 /// bound in a chatty session. Oldest-first eviction: if the goal has been restated since, the
 /// first phrasing is the stale one.
 const MAX_PINNED_TURNS: usize = 5;
+
+/// Whether a string may be used as a frame's file name.
+///
+/// Frame names reach this store from two directions: the app makes them (`0.png`), and an
+/// IMPORTED artifact carries them inside the file. The second is attacker-controlled in the
+/// way any shared document is, and the name goes straight into `frames_dir.join(..)` -- so
+/// `../../../../evil.bat` would leave the store entirely. The session's ID is checked for
+/// exactly this reason on the way in; this is the other string in the same sentence.
+///
+/// Lives here, beside `save_frame_named`, rather than in the importer: a check the caller
+/// has to remember is one a future caller forgets. The write refuses the name itself, and
+/// the importer and the viewer share this same rule so they cannot drift apart.
+pub fn safe_frame_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+}
+
+/// How many finished sessions are kept on disk. Twenty is a starting number, not a
+/// derived one: it is about two weeks of the founder's own use, it fits a list the user
+/// can read without searching (§8 of the plan: "20 sessions do not need search"), and it
+/// is small enough that `list_sessions` parsing all of them stays free.
+pub const SESSION_HISTORY_KEEP: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSummary {
@@ -37,6 +64,52 @@ pub struct Turn {
     /// `#[serde(default)]` so sessions saved before this field load as unpinned.
     #[serde(default)]
     pub pinned: bool,
+    /// What the user actually clicked to produce this turn, as a resolved control
+    /// (`Button "Insert"`) from `last_click`. Stored so a reopened session shows the same
+    /// thing the live one did -- the row records an action, and the action is the click,
+    /// not the sentence we asked for. `#[serde(default)]` so older turns load without it.
+    ///
+    /// Not serialized when absent, so the key's presence in a file is itself the fact:
+    /// `grep clicked` finds the turns where the user actually did something, instead of
+    /// matching a `null` on every assistant turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clicked: Option<String>,
+    /// What moved the session on when the user did not click in the guided app:
+    /// `next` (the button, hotkey or menu), `autopilot` (a screen change advanced it) or
+    /// `already_done` (the user said the step was already satisfied). Stored for the same
+    /// reason `clicked` is -- so a reopened row does not claim an action the user never
+    /// took, and Autopilot does not get credited to them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced_by: Option<String>,
+    /// File name of this turn's frame inside the session's own frame directory, when the
+    /// user asked for screenshots to be kept (plan §4). A name rather than a path: the
+    /// directory is the manager's business, and moving a session to the archive must not
+    /// have to rewrite every turn. `None` for every turn captured while the setting was off,
+    /// which is every turn of every session stored before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
+    /// Where the pointer landed on that frame, and what it takes to redraw it (§4.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<StoredMark>,
+}
+
+/// What was drawn on a stored frame, kept so the picture can be redrawn WITH its pointer
+/// rather than having one burned into it.
+///
+/// The rect is in the pixels of the frame stored on the same turn, never the export ring's
+/// frame: the two cover different regions, and a rect read against the wrong one points at
+/// the wrong place. `PointerState` is reused wholesale from the exporter so the two cannot
+/// describe one step's outcome differently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredMark {
+    pub pointer: PointerState,
+    /// Frame pixels per logical pixel, for the fixed-size parts of the mark (§4.4).
+    ///
+    /// Never assume 1.0. The overlay draws in logical px while the frame is physical, so on
+    /// a 200% display this is 2.0 even at native resolution — and assuming 1.0 draws a
+    /// half-size mark, which is invisible on a 100% display and was expensive the first time
+    /// it happened to an exported session.
+    pub mark_scale: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +180,12 @@ impl Session {
             screenshot_hash,
             timestamp: Local::now().to_rfc3339(),
             pinned,
+            // Filled in right after by `set_last_user_turn_facts`, which has the hook's
+            // answer and the frontend's; a turn is built by its caller, those facts are not.
+            clicked: None,
+            advanced_by: None,
+            frame: None,
+            mark: None,
         });
         self.last_active_at = Local::now().to_rfc3339();
         if pinned {
@@ -170,6 +249,39 @@ impl Session {
             pinned.len(),
             MAX_PINNED_TURNS
         );
+    }
+
+    /// Record the observable facts about the user turn already in the conversation: what
+    /// they clicked, if anything, and what advanced the step when they did not.
+    ///
+    /// Set after the fact rather than passed to `add_turn` for two reasons: only USER turns
+    /// carry these (the assistant turn that follows must not inherit them), and the click
+    /// comes from the click hook rather than from the caller building the turn. Searches
+    /// backwards for the user turn, so the order of pushes here cannot silently attach them
+    /// to the wrong side.
+    pub fn set_last_user_turn_facts(
+        &mut self,
+        clicked: Option<String>,
+        advanced_by: Option<String>,
+        frame: Option<String>,
+    ) {
+        if let Some(turn) = self.conversation.iter_mut().rev().find(|t| t.role == "user") {
+            turn.clicked = clicked;
+            turn.advanced_by = advanced_by;
+            turn.frame = frame;
+        }
+    }
+
+    /// Record what was drawn for this turn's step, once the locator has decided it.
+    ///
+    /// Separate from `set_last_user_turn_facts` because of WHEN it is known: the facts come
+    /// from the capture and the click hook, both settled before the turn is written, while
+    /// the pointer's outcome only exists after `execute_step` has run — which is after the
+    /// session was saved, so the caller saves again.
+    pub fn set_last_user_turn_mark(&mut self, mark: Option<StoredMark>) {
+        if let Some(turn) = self.conversation.iter_mut().rev().find(|t| t.role == "user") {
+            turn.mark = mark;
+        }
     }
 
     pub fn update_state(&mut self, summary_text: String) {
@@ -261,17 +373,274 @@ impl SessionManager {
         }
     }
 
-    #[allow(dead_code)]
+    /// Read a stored session and make it the live one.
+    ///
+    /// **The in-flight step state is dropped on the way in.** A session is not a
+    /// document — it is a position in a task, on a machine whose screen has since
+    /// changed. `current_step_sequence` and `current_step_index` describe a screen that
+    /// no longer exists, and restoring them would have the app advance through steps
+    /// against windows that may not be open. The next request re-captures and re-plans.
+    /// What is kept is what gives the model context to carry on: the conversation, the
+    /// task, the plan outline and the state summary.
+    ///
+    /// The caller is responsible for the parts that live outside the session — the
+    /// stored target HWND and the export ring — `adopt_session_state` in `lib.rs`, which the
+    /// `load_session` command and `open_session_file` both call for exactly that reason.
     pub fn load_session(&mut self, session_id: &str) -> Option<Session> {
         let file_path = self.session_dir.join(format!("{}.json", session_id));
-        if let Ok(content) = fs::read_to_string(file_path) {
-            if let Ok(session) = serde_json::from_str::<Session>(&content) {
-                self.current_session = Some(session.clone());
-                return Some(session);
+        let content = fs::read_to_string(file_path).ok()?;
+        let mut session = serde_json::from_str::<Session>(&content).ok()?;
+        session.current_step_sequence.clear();
+        session.current_step_index = 0;
+        // Resuming is the user saying "I am working on this now", so it moves to the top
+        // of the list and out of the prune's reach. Without this a session you reopened
+        // and then left for an hour could be retired while it was on screen, because
+        // only `add_turn` moves the stamp and reading one adds no turn.
+        session.last_active_at = Local::now().to_rfc3339();
+        self.current_session = Some(session.clone());
+        self.save_session(Some(&session));
+        Some(session)
+    }
+
+    /// Where one session's frames live: `sessions/frames/<id>/`.
+    ///
+    /// A directory beside the session files rather than inside a per-session folder, because
+    /// the JSON layout stays flat (every reader and writer here assumes it) and because this
+    /// gives `prune` exactly one extra thing to move or delete when a session is retired.
+    pub fn frames_dir(&self, session_id: &str) -> PathBuf {
+        Self::frames_dir_in(&self.session_dir, session_id)
+    }
+
+    /// The same directory, worked out from a sessions directory alone — so a caller that
+    /// only has the path (the HTML export, which runs after the router lock is released)
+    /// does not re-derive the layout and cannot get it subtly wrong.
+    pub fn frames_dir_in(session_dir: &Path, session_id: &str) -> PathBuf {
+        session_dir.join("frames").join(session_id)
+    }
+
+    /// Every stored session, newest first and loaded in full — for the HTML export, which
+    /// needs the conversations rather than the list's summaries.
+    ///
+    /// Read-only like `frame_mark`: exporting a session must not make it the live one.
+    pub fn all_sessions(&self) -> Vec<Session> {
+        self.list_sessions()
+            .into_iter()
+            .filter_map(|summary| {
+                let path = self.session_dir.join(format!("{}.json", summary.id));
+                let text = fs::read_to_string(path).ok()?;
+                serde_json::from_str::<Session>(&text).ok()
+            })
+            .collect()
+    }
+
+    /// The mark recorded with a stored frame, without making that session current.
+    ///
+    /// Read-only on purpose: showing a picture must not change which session is live, which
+    /// is why this parses the file rather than going through `load_session`.
+    pub fn frame_mark(&self, session_id: &str, frame: &str) -> Option<StoredMark> {
+        let text = fs::read_to_string(self.session_dir.join(format!("{session_id}.json"))).ok()?;
+        let session: Session = serde_json::from_str(&text).ok()?;
+        session
+            .conversation
+            .iter()
+            .find(|t| t.frame.as_deref() == Some(frame))
+            .and_then(|t| t.mark.clone())
+    }
+
+    /// Write one frame, named for the turn it belongs to. Returns the file name to record on
+    /// that turn; `None` when it could not be written — a frame that fails to save must never
+    /// cost the session it belongs to, and the caller has nothing better to do than carry on.
+    pub fn save_frame(&self, session_id: &str, turn_index: usize, png: &[u8]) -> Option<String> {
+        self.save_frame_named(session_id, &format!("{turn_index}.png"), png)
+    }
+
+    /// The same write under a name the caller chooses — used by the importer, whose pictures
+    /// come out of an artifact as JPEG and must not be labelled `.png` for the sake of a
+    /// convention they no longer follow.
+    pub fn save_frame_named(&self, session_id: &str, name: &str, bytes: &[u8]) -> Option<String> {
+        if !safe_frame_name(name) {
+            log::warn!("[sessions] refusing to write a frame named {name:?}");
+            return None;
+        }
+        let dir = self.frames_dir(session_id);
+        fs::create_dir_all(&dir).ok()?;
+        fs::write(dir.join(name), bytes).ok()?;
+        Some(name.to_string())
+    }
+
+    /// How many session files exist, without parsing any of them.
+    fn count_sessions(&self) -> usize {
+        fs::read_dir(&self.session_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Every stored session, newest first, as the summaries a list needs.
+    ///
+    /// Ordered by `last_active_at` read from INSIDE each file rather than by the file's
+    /// mtime: a backup or sync client rewrites mtime, which would silently reorder
+    /// "recent" and — once `prune` uses the same order — retire the wrong ones. mtime is
+    /// only the fallback for a file whose stamp will not parse.
+    pub fn list_sessions(&self) -> Vec<SessionSummary> {
+        let mut out: Vec<SessionSummary> = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.session_dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            // A half-written or hand-edited file is skipped, not fatal: one bad file
+            // must not cost the user the whole list.
+            let Ok(session) = serde_json::from_str::<Session>(&text) else {
+                continue;
+            };
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let sort_key = chrono::DateTime::parse_from_rfc3339(&session.last_active_at)
+                .map(|t| t.timestamp())
+                .unwrap_or(mtime);
+            out.push(SessionSummary {
+                sort_key,
+                id: session.id.to_string(),
+                task_description: session.task_description.clone(),
+                summary_text: session
+                    .current_state_summary
+                    .as_ref()
+                    .map(|s| s.summary_text.clone()),
+                turns: session.conversation.len(),
+                last_active_at: session.last_active_at.clone(),
+            });
+        }
+        out.sort_by(|a, b| b.sort_key.cmp(&a.sort_key).then_with(|| b.id.cmp(&a.id)));
+        out
+    }
+
+    /// Keep the `keep` most recent sessions; retire the rest.
+    ///
+    /// **The first run archives instead of deleting.** Going from an unbounded store to a
+    /// bounded one destroys whatever was already there, and export does not exist yet, so
+    /// there would be no way to get any of it back. Surplus moves to `archive-<date>/`
+    /// once, guarded by a marker file; every later prune deletes normally. That way the
+    /// irreversible step is taken by a person emptying that folder, not by an app update.
+    ///
+    /// Returns (deleted, archived).
+    pub fn prune(&self, keep: usize) -> (usize, usize) {
+        // Cheap gate first. This is called after every save, and the answer is almost
+        // always "nothing to do" — counting directory entries costs one syscall walk,
+        // where `list_sessions` reads and parses every file, on the guidance hot path
+        // while the router lock is held.
+        if self.count_sessions() <= keep {
+            return (0, 0);
+        }
+        let all = self.list_sessions();
+        if all.len() <= keep {
+            return (0, 0);
+        }
+        // Never retire the live session. Prune runs on the same timeline as the thing
+        // writing these files, and deleting the one in use is a self-inflicted bug.
+        let active = self.current_session.as_ref().map(|s| s.id.to_string());
+
+        let marker = self.session_dir.join(".pruned");
+        let archive_dir = (!marker.exists()).then(|| {
+            self.session_dir
+                .join(format!("archive-{}", Local::now().format("%Y-%m-%d")))
+        });
+        if let Some(dir) = &archive_dir {
+            if let Err(e) = fs::create_dir_all(dir) {
+                // Cannot archive => do not delete. Losing the sessions is the worse
+                // outcome; carrying too many for one more launch is the better one.
+                log::warn!("[sessions] first prune skipped, cannot create {dir:?}: {e}");
+                return (0, 0);
             }
         }
-        None
+
+        let (mut deleted, mut archived) = (0usize, 0usize);
+        for s in all.iter().skip(keep) {
+            if active.as_deref() == Some(s.id.as_str()) {
+                continue;
+            }
+            let path = self.session_dir.join(format!("{}.json", s.id));
+            let frames = self.frames_dir(&s.id);
+            match &archive_dir {
+                Some(dir) => match fs::rename(&path, dir.join(format!("{}.json", s.id))) {
+                    Ok(()) => {
+                        archived += 1;
+                        // The pictures belong to the session, so they move with it: an archive
+                        // holding transcripts whose frames were deleted is not an archive.
+                        if frames.is_dir() {
+                            let dest = dir.join("frames");
+                            let _ = fs::create_dir_all(&dest);
+                            if let Err(e) = fs::rename(&frames, dest.join(&s.id)) {
+                                log::warn!(
+                                    "[sessions] archived {} but not its frames: {e}",
+                                    s.id
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => log::warn!("[sessions] could not archive {path:?}: {e}"),
+                },
+                None => match fs::remove_file(&path) {
+                    Ok(()) => {
+                        deleted += 1;
+                        // Orphaned frames would outlive the transcript with nothing pointing
+                        // at them -- invisible disk creep, and the reason prune knows about
+                        // this directory at all.
+                        if frames.is_dir() {
+                            let _ = fs::remove_dir_all(&frames);
+                        }
+                    }
+                    Err(e) => log::warn!("[sessions] could not remove {path:?}: {e}"),
+                },
+            }
+        }
+        if let Some(dir) = &archive_dir {
+            let _ = fs::write(&marker, "sessions pruned at least once\n");
+            log::info!(
+                "[sessions] first prune: {} of {} moved to {} rather than deleted",
+                archived,
+                all.len(),
+                dir.display()
+            );
+        } else if deleted > 0 {
+            log::info!(
+                "[sessions] pruned {deleted} of {}, keeping the most recent {keep}",
+                all.len()
+            );
+        }
+        (deleted, archived)
     }
+}
+
+/// One row of the history list. Deliberately not the whole `Session`: the list renders
+/// twenty of these and never needs the conversation bodies.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub task_description: String,
+    /// The model's own running summary — the obvious second line for a row.
+    pub summary_text: Option<String>,
+    pub turns: usize,
+    pub last_active_at: String,
+    /// Epoch seconds parsed from `last_active_at`, or mtime if that failed. Internal:
+    /// the UI sorts by nothing, it renders the order it is given.
+    #[serde(skip)]
+    sort_key: i64,
 }
 
 #[cfg(test)]
@@ -283,6 +652,38 @@ mod tests {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
             s.add_turn(role, format!("turn {i}"), None);
         }
+    }
+
+    /// The guard lives at the write, so it holds however the name arrived -- an imported
+    /// artifact carries frame names inside the file, and they reach `frames_dir.join(..)`.
+    ///
+    /// The escape path is stated rather than eyeballed: `<store>/frames/<id>` joined with
+    /// `../../escaped.jpg` resolves to `<store>/escaped.jpg`, which is exactly what an
+    /// unguarded write produced.
+    #[test]
+    fn a_frame_name_cannot_escape_its_directory() {
+        let dir = std::env::temp_dir().join(format!("navisual-frame-escape-{}", Uuid::new_v4()));
+        let mgr = SessionManager::new(dir.clone());
+        let id = Uuid::new_v4().to_string();
+
+        assert!(
+            mgr.save_frame_named(&id, "0.png", b"x").is_some(),
+            "an ordinary name still works"
+        );
+        assert!(mgr.frames_dir(&id).join("0.png").exists());
+
+        for hostile in ["../../escaped.jpg", "../evil.png", "sub/dir.png", "a\\b.png", ""] {
+            assert!(
+                mgr.save_frame_named(&id, hostile, b"x").is_none(),
+                "{hostile:?} was accepted"
+            );
+        }
+        assert!(
+            !dir.join("escaped.jpg").exists(),
+            "../../escaped.jpg resolves to this exact path; nothing may be written there"
+        );
+        assert!(!dir.join("frames").join("evil.png").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -410,5 +811,334 @@ mod tests {
         let back: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(back.conversation[0].content, "step 1\nstep 2");
         assert_eq!(back.conversation[0].screenshot_hash.as_deref(), Some("..."));
+    }
+
+    /// A `SessionManager` over a fresh temp dir, plus that dir's path.
+    fn temp_manager(tag: &str) -> (SessionManager, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "navisual-session-test-{}-{}",
+            tag,
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        (SessionManager::new(dir.clone()), dir)
+    }
+
+    /// Write a session whose `last_active_at` is `minutes_ago`, and whose file mtime is
+    /// therefore NOT in the same order (every file is written now, newest-mtime-last).
+    fn write_session(mgr: &SessionManager, task: &str, minutes_ago: i64) -> Uuid {
+        let mut session = Session::new(task.to_string());
+        session.last_active_at = (Local::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339();
+        mgr.save_session(Some(&session));
+        session.id
+    }
+
+    #[test]
+    fn click_attaches_to_the_user_turn_not_the_assistant_one() {
+        let mut session = Session::new("task".to_string());
+        session.add_turn_pinned("user", "[User completed: \"Click Save\"]".to_string(), None, false);
+        session.add_turn("assistant", "next step".to_string(), None);
+        session.set_last_user_turn_facts(
+            Some("Button \"Save\"".to_string()),
+            Some("next".to_string()),
+            Some("4.png".to_string()),
+        );
+
+        assert_eq!(
+            session.conversation[0].clicked.as_deref(),
+            Some("Button \"Save\""),
+            "the click belongs to what the user did"
+        );
+        assert_eq!(
+            session.conversation[1].clicked, None,
+            "the assistant turn the app wrote must not inherit it"
+        );
+        assert_eq!(
+            session.conversation[1].advanced_by, None,
+            "and must not inherit what advanced the step either"
+        );
+        assert_eq!(session.conversation[0].advanced_by.as_deref(), Some("next"));
+        assert_eq!(session.conversation[0].frame.as_deref(), Some("4.png"));
+        assert_eq!(
+            session.conversation[1].frame, None,
+            "and the assistant turn gets no frame either"
+        );
+    }
+
+    #[test]
+    fn a_turn_without_a_click_does_not_write_the_key() {
+        // The key's presence has to mean "the user clicked something" -- otherwise every
+        // assistant turn in every file carries `"clicked":null` and grepping for the real
+        // ones is useless.
+        let mut session = Session::new("task".to_string());
+        session.add_turn("assistant", "next step".to_string(), None);
+        let json = serde_json::to_string(&session).expect("serialises");
+        assert!(
+            !json.contains("clicked"),
+            "an absent click must not be written at all"
+        );
+    }
+
+    #[test]
+    fn turns_written_before_the_click_field_still_load() {
+        // A stored turn without `clicked` — the shape every session on disk has today.
+        let json = r#"{"role":"user","content":"hi","screenshot_hash":null,"timestamp":"2026-09-16T00:00:00-07:00","pinned":false}"#;
+        let turn: Turn = serde_json::from_str(json).expect("older turns must still load");
+        assert_eq!(turn.clicked, None);
+    }
+
+    #[test]
+    fn a_stored_frame_carries_its_mark_and_reads_back() {
+        use crate::session_export::PointerState;
+        let (mgr, dir) = temp_manager("frame-mark");
+        let mut session = Session::new("task".to_string());
+        session.add_turn_pinned("user", "hi".to_string(), None, false);
+        session.set_last_user_turn_facts(None, None, Some("0.png".to_string()));
+        session.set_last_user_turn_mark(Some(StoredMark {
+            pointer: PointerState::Hit { rect: [10, 20, 30, 40] },
+            mark_scale: 2.0,
+        }));
+        mgr.save_session(Some(&session));
+
+        let id = session.id.to_string();
+        let mark = mgr.frame_mark(&id, "0.png").expect("the mark comes back");
+        assert!(matches!(mark.pointer, PointerState::Hit { rect: [10, 20, 30, 40] }));
+        assert_eq!(mark.mark_scale, 2.0);
+        assert!(mgr.frame_mark(&id, "1.png").is_none(), "no frame, no mark");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reading_a_frame_mark_leaves_the_live_session_alone() {
+        use crate::session_export::PointerState;
+        let (mut mgr, dir) = temp_manager("frame-mark-readonly");
+        // A session on disk with a frame...
+        let mut stored = Session::new("stored".to_string());
+        stored.add_turn_pinned("user", "hi".to_string(), None, false);
+        stored.set_last_user_turn_facts(None, None, Some("0.png".to_string()));
+        stored.set_last_user_turn_mark(Some(StoredMark {
+            pointer: PointerState::Miss,
+            mark_scale: 1.0,
+        }));
+        mgr.save_session(Some(&stored));
+        // ...and a DIFFERENT one that is live.
+        let live = Session::new("live".to_string());
+        mgr.current_session = Some(live.clone());
+
+        assert!(mgr.frame_mark(&stored.id.to_string(), "0.png").is_some());
+        assert_eq!(
+            mgr.current_session.as_ref().map(|s| s.task_description.clone()),
+            Some("live".to_string()),
+            "looking at a picture must not make its session the live one"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_frame_is_written_under_the_session_that_owns_it() {
+        let (mgr, dir) = temp_manager("frame-write");
+        let id = write_session(&mgr, "task", 10).to_string();
+        let name = mgr.save_frame(&id, 3, b"png-bytes").expect("frame is written");
+
+        assert_eq!(name, "3.png", "named for the turn it belongs to");
+        assert_eq!(fs::read(mgr.frames_dir(&id).join(&name)).unwrap(), b"png-bytes");
+        // Beside the session files, never among them: every reader here walks `*.json`.
+        assert_eq!(mgr.list_sessions().len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_retired_session_takes_its_frames_with_it() {
+        let (mgr, dir) = temp_manager("frame-prune");
+        for i in 0..5 {
+            let id = write_session(&mgr, &format!("task {i}"), 500 - i).to_string();
+            mgr.save_frame(&id, 0, b"x").expect("frame");
+        }
+        // Marker present => the delete path, not the one-time archive.
+        fs::write(dir.join(".pruned"), "already").unwrap();
+        mgr.prune(2);
+
+        let kept = fs::read_dir(dir.join("frames")).unwrap().count();
+        assert_eq!(
+            kept, 2,
+            "an orphaned frame would outlive its transcript with nothing pointing at it"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_first_prune_archives_frames_with_their_session() {
+        let (mgr, dir) = temp_manager("frame-archive");
+        for i in 0..5 {
+            let id = write_session(&mgr, &format!("task {i}"), 500 - i).to_string();
+            mgr.save_frame(&id, 0, b"x").expect("frame");
+        }
+        let (deleted, archived) = mgr.prune(2);
+        assert_eq!((deleted, archived), (0, 3));
+
+        let archive = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with("archive-"))
+            .expect("an archive directory");
+        assert_eq!(
+            fs::read_dir(archive.join("frames")).unwrap().count(),
+            3,
+            "the pictures move with their sessions -- an archive without them is not one"
+        );
+        assert_eq!(fs::read_dir(dir.join("frames")).unwrap().count(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_sessions_orders_by_stamp_not_mtime() {
+        let (mgr, dir) = temp_manager("order");
+        // Written oldest-stamp-first, so mtime order is the REVERSE of the right answer.
+        write_session(&mgr, "oldest", 300);
+        write_session(&mgr, "middle", 200);
+        write_session(&mgr, "newest", 100);
+
+        let listed = mgr.list_sessions();
+        let tasks: Vec<&str> = listed.iter().map(|s| s.task_description.as_str()).collect();
+        assert_eq!(tasks, vec!["newest", "middle", "oldest"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_sessions_skips_unparseable_files_without_losing_the_rest() {
+        let (mgr, dir) = temp_manager("garbage");
+        write_session(&mgr, "good", 10);
+        fs::write(dir.join("not-a-session.json"), "{ half-written").unwrap();
+
+        let listed = mgr.list_sessions();
+        assert_eq!(listed.len(), 1, "one bad file must not cost the whole list");
+        assert_eq!(listed[0].task_description, "good");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn first_prune_archives_and_later_prunes_delete() {
+        let (mgr, dir) = temp_manager("archive");
+        for i in 0..5 {
+            write_session(&mgr, &format!("task {i}"), 500 - i);
+        }
+
+        // First run: nothing is destroyed, the surplus is moved.
+        let (deleted, archived) = mgr.prune(2);
+        assert_eq!((deleted, archived), (0, 3));
+        assert_eq!(mgr.list_sessions().len(), 2);
+        let archive: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(archive.len(), 1, "exactly one archive dir");
+        assert_eq!(fs::read_dir(archive[0].path()).unwrap().count(), 3);
+
+        // Second run, now over the limit again: the marker means these really go.
+        for i in 0..3 {
+            write_session(&mgr, &format!("later {i}"), 100 - i);
+        }
+        let (deleted, archived) = mgr.prune(2);
+        assert_eq!((deleted, archived), (3, 0));
+        assert_eq!(mgr.list_sessions().len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_never_retires_the_active_session() {
+        let (mut mgr, dir) = temp_manager("active");
+        // The active session is the OLDEST, so ordering alone would retire it first.
+        let mut active = Session::new("the live one".to_string());
+        active.last_active_at = (Local::now() - chrono::Duration::minutes(900)).to_rfc3339();
+        mgr.save_session(Some(&active));
+        let active_id = active.id;
+        mgr.current_session = Some(active);
+        for i in 0..4 {
+            write_session(&mgr, &format!("task {i}"), 100 - i);
+        }
+        fs::write(dir.join(".pruned"), "already").unwrap();
+
+        mgr.prune(2);
+        let ids: Vec<String> = mgr.list_sessions().into_iter().map(|s| s.id).collect();
+        assert!(
+            ids.contains(&active_id.to_string()),
+            "the session being written to must survive its own prune"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn loading_a_session_keeps_the_context_and_drops_the_screen_position() {
+        let (mut mgr, dir) = temp_manager("load");
+        let mut session = Session::new("rename a layer".to_string());
+        session.add_turn("user", "rename a layer".to_string(), None);
+        session.add_turn("assistant", "Click the Layers tab".to_string(), None);
+        session.set_plan_outline(vec!["open Layers".to_string(), "rename".to_string()]);
+        session.set_plan_completed_count(1);
+        session.current_state_summary = Some(StateSummary {
+            summary_text: "Layers panel open".to_string(),
+            turn_index: 2,
+        });
+        session.current_step_sequence =
+            vec![serde_json::from_str::<GuidanceStep>(r#"{"instruction":"Click Layers"}"#).unwrap()];
+        session.current_step_index = 1;
+        let id = session.id;
+        mgr.save_session(Some(&session));
+        mgr.current_session = None;
+
+        let loaded = mgr.load_session(&id.to_string()).expect("stored session");
+
+        // Kept: what lets the model carry on.
+        assert_eq!(loaded.conversation.len(), 2);
+        assert_eq!(loaded.task_description, "rename a layer");
+        assert_eq!(loaded.plan_outline.len(), 2);
+        assert_eq!(loaded.plan_completed_count, 1);
+        assert_eq!(
+            loaded.current_state_summary.as_ref().map(|s| s.summary_text.as_str()),
+            Some("Layers panel open")
+        );
+        // Dropped: what describes a screen that no longer exists.
+        assert!(loaded.current_step_sequence.is_empty());
+        assert_eq!(loaded.current_step_index, 0);
+        // And it is the live session now, with the drop persisted rather than in-memory
+        // only — a reload must not resurrect the stale position.
+        assert_eq!(mgr.current_session.as_ref().map(|s| s.id), Some(id));
+        let again = mgr.load_session(&id.to_string()).expect("still there");
+        assert!(again.current_step_sequence.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resuming_moves_a_session_out_of_the_prune_s_reach() {
+        let (mut mgr, dir) = temp_manager("resume-order");
+        let stale = write_session(&mgr, "the old one", 5000);
+        for i in 0..3 {
+            write_session(&mgr, &format!("task {i}"), 100 - i);
+        }
+        assert_eq!(mgr.list_sessions().last().unwrap().id, stale.to_string());
+
+        mgr.load_session(&stale.to_string()).expect("stored session");
+
+        assert_eq!(
+            mgr.list_sessions().first().unwrap().id,
+            stale.to_string(),
+            "reopening a session is the user saying they are working on it now"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_under_the_limit_does_nothing() {
+        let (mgr, dir) = temp_manager("noop");
+        write_session(&mgr, "only", 10);
+        assert_eq!(mgr.prune(20), (0, 0));
+        assert!(
+            !dir.join(".pruned").exists(),
+            "a no-op prune must not burn the one-time archive grace"
+        );
+        assert_eq!(mgr.list_sessions().len(), 1);
+        let _ = fs::remove_dir_all(dir);
     }
 }

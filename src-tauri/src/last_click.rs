@@ -195,6 +195,30 @@ mod imp {
         ))
     }
 
+    /// The same click as a bare display string -- `Button "Insert"` -- for the panel, and
+    /// **consumed in the process**: one click decorates exactly one turn.
+    ///
+    /// Consumption is the point. The slot holds a click until the next one replaces it, so
+    /// without taking it here a second *Next* with no click in between would show the earlier
+    /// step's control beside a step the user reached some other way. `describe` still does not
+    /// consume, because the prompt is built first in the same request and must keep seeing it.
+    pub fn take(max_age: Duration) -> Option<String> {
+        let mut guard = slot().lock();
+        let out = guard.as_ref().and_then(|c| {
+            if c.at.elapsed() > max_age {
+                return None;
+            }
+            c.resolved
+                .as_ref()
+                .map(|(role, name)| format!("{role} \"{name}\""))
+
+        });
+        if out.is_some() {
+            *guard = None;
+        }
+        out
+    }
+
     fn is_password(el: &UIElement) -> bool {
         el.is_password().unwrap_or(false)
     }
@@ -229,7 +253,7 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{clear, describe, install, set_target_pid};
+pub use imp::{clear, describe, install, set_target_pid, take};
 
 #[cfg(not(windows))]
 pub fn install() {}
@@ -239,5 +263,9 @@ pub fn set_target_pid(_pid: u32) {}
 pub fn clear() {}
 #[cfg(not(windows))]
 pub fn describe(_max_age: std::time::Duration) -> Option<String> {
+    None
+}
+#[cfg(not(windows))]
+pub fn take(_max_age: std::time::Duration) -> Option<String> {
     None
 }

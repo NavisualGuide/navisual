@@ -14,6 +14,7 @@ mod overlay;
 mod packs;
 mod prompt_log;
 mod server;
+mod session_html;
 mod session_export;
 mod track;
 mod tts;
@@ -21,7 +22,7 @@ mod tts;
 use ai::config::Config;
 use ai::cost_tracker::CostTracker;
 use ai::router::AiRouter;
-use ai::session::SessionManager;
+use ai::session::{Session, SessionManager, SessionSummary, SESSION_HISTORY_KEEP};
 use ai::types::{GuidanceStep};
 
 use std::path::PathBuf;
@@ -941,15 +942,21 @@ fn locate_for_step(
 
 /// What `execute_step` produced, in order: the verified locate result (None on a
 /// miss), the trace, whether the diffuse AI-bbox hint ring was drawn (the frontend's
-/// third ✗ Wrong picker state — a visible hint IS rejectable), and the candidate boxes
+/// third ✗ Wrong picker state — a visible hint IS rejectable), the candidate boxes
 /// actually drawn (Flow A collection, or a Flow B ambiguity set on a miss — callers
 /// populate `GuideResponse.candidates` and arm the state-readback from it; empty when
-/// a single pointer was drawn).
+/// a single pointer was drawn), and the rect that was drawn, if any.
+///
+/// The last one is what the overlay ACTUALLY drew — the located rect, the first candidate,
+/// or the hint ring — which `located` alone cannot distinguish (a hint beside a miss looks
+/// the same from outside). A stored session needs it to redraw the same mark; nothing else
+/// should read it.
 type StepOutcome = (
     Option<locator::LocateResult>,
     Option<locator::trace::LocateTrace>,
     bool,
     Vec<capture::Rect>,
+    Option<capture::Rect>,
 );
 
 /// Do two screen-space rects overlap at all? (Used to tell when the AI's target region sits under
@@ -1289,7 +1296,10 @@ fn execute_step(
         );
     }
 
-    Ok((located, trace, hint_shown, shown_candidates))
+    // `bbox` is what the overlay actually DREW (located rect, first candidate, or the
+    // hint ring) — returned so a stored session can redraw the same mark against its own
+    // frame instead of guessing from `located`, which cannot tell a hit from a hint.
+    Ok((located, trace, hint_shown, shown_candidates, bbox))
 }
 
 /// Classify what the user actually did, for the export conversation model (§0.7).
@@ -1372,6 +1382,50 @@ fn push_export_turn(
     buf.push(user, assistant);
 }
 
+/// Where the pointer ended up for one step, in THIS frame's pixels, plus the factor its
+/// fixed-size parts need.
+///
+/// Split out of `record_export_step` when stored sessions began keeping frames of their
+/// own: the export ring's frame and a session's frame describe the same pointer, and
+/// deriving it twice is exactly how the exporter and a replay would come to disagree about
+/// a step. Both callers pass their own frame rect and pixel size; the arithmetic is shared.
+fn pointer_for_frame(
+    drawn: Option<capture::Rect>,
+    hint_shown: bool,
+    frame_rect: capture::Rect,
+    width: u32,
+    height: u32,
+) -> (session_export::PointerState, f32) {
+    // Frame-relative pixels, never virtual-desktop coordinates — §4.3's portability
+    // rule. A rect that converts to None sat outside this frame (another monitor),
+    // and drawing it clamped would put a confident marker on the wrong control.
+    //
+    // The None case splits in two, and conflating them corrupts the record: if
+    // there was no rect at all the locator genuinely missed, but if there WAS one
+    // and it simply fell outside this frame, the locator succeeded and the
+    // screenshot just cannot show it. Live 2026-09-04 produced exactly the second
+    // case — `pointer: miss` beside `locator: HitA11y`, a flat contradiction.
+    let pointer = match drawn {
+        Some(r) => match session_export::to_frame_coords(r, frame_rect, width, height) {
+            Some(rect) if hint_shown => session_export::PointerState::Hint { rect },
+            Some(rect) => session_export::PointerState::Hit { rect },
+            None => session_export::PointerState::OffFrame,
+        },
+        None => session_export::PointerState::Miss,
+    };
+
+    // Frame pixels per logical pixel, so a redraw can size the mark as it was on screen.
+    // Two factors, and both are needed: the monitor's scale (the overlay draws in logical
+    // px, the frame is physical) and any downscale on the way to disk. The located rect
+    // needs neither — `to_frame_coords` already carried it. For a stored session's frame
+    // the downscale factor is exactly 1.0 (native resolution, §4.2), which leaves the
+    // monitor scale — the factor that must never be assumed away (§4.4).
+    let mark_scale = capture::monitor_scale_for_rect(&frame_rect)
+        * (width as f32 / frame_rect.width.max(1) as f32);
+
+    (pointer, mark_scale)
+}
+
 /// Attach one step's clean frame and pointer state to the export ring buffer.
 ///
 /// Split out of `execute_step` because it is the only part that reaches for
@@ -1409,33 +1463,9 @@ fn record_export_step(
         app_rect: app_rect.and_then(|r| session_export::to_frame_coords(r, frame_rect, w, h)),
     };
 
-    // Frame-relative pixels, never virtual-desktop coordinates — §4.3's portability
-    // rule. A rect that converts to None sat outside this frame (another monitor),
-    // and drawing it clamped would put a confident marker on the wrong control.
-    //
-    // The None case splits in two, and conflating them corrupts the record: if
-    // there was no rect at all the locator genuinely missed, but if there WAS one
-    // and it simply fell outside this frame, the locator succeeded and the
-    // screenshot just cannot show it. Live 2026-09-04 produced exactly the second
-    // case — `pointer: miss` beside `locator: HitA11y`, a flat contradiction.
-    let pointer = match drawn {
-        Some(r) => match session_export::to_frame_coords(r, frame_rect, w, h) {
-            Some(rect) if hint_shown => session_export::PointerState::Hint { rect },
-            Some(rect) => session_export::PointerState::Hit { rect },
-            None => session_export::PointerState::OffFrame,
-        },
-        None => session_export::PointerState::Miss,
-    };
-
     let decision = trace.map(|t| format!("{:?}", t.final_decision));
     let ms = trace.map(|t| t.elapsed_ms as u64);
-
-    // Frame pixels per logical pixel, so the exporter can draw the mark at the size it
-    // had on screen. Two factors, and both are needed: the monitor's scale (the overlay
-    // draws in logical px, this frame is physical) and any downscale applied on the way
-    // to disk. The located rect needs neither -- `to_frame_coords` already carried it.
-    let mark_scale = capture::monitor_scale_for_rect(&frame_rect)
-        * (w as f32 / frame_rect.width.max(1) as f32);
+    let (pointer, mark_scale) = pointer_for_frame(drawn, hint_shown, frame_rect, w, h);
 
     // How much of the bottom of this frame is taskbar. The overlay anchors the
     // caption to the monitor's WORK AREA so it sits above the taskbar rather than
@@ -2153,6 +2183,118 @@ mod dock_tests {
 }
 
 #[cfg(test)]
+mod pointer_mark_tests {
+    use super::*;
+    use crate::session_export::PointerState;
+
+    fn rect(x: i32, y: i32, w: u32, h: u32) -> capture::Rect {
+        capture::Rect { x, y, width: w, height: h }
+    }
+
+    /// The pointer's outcome and the mark's scale, derived the same way for a stored
+    /// session's frame as for the export ring's.
+    #[test]
+    fn the_mark_is_relative_to_the_frame_it_is_stored_with() {
+        let frame = rect(100, 50, 1000, 800);
+        let (mark, scale) = pointer_for_frame(Some(rect(300, 250, 40, 30)), false, frame, 1000, 800);
+
+        assert!(
+            matches!(mark, PointerState::Hit { rect: [200, 200, 40, 30] }),
+            "the drawn rect must come back in the frame's own pixels, offset by its origin"
+        );
+        // Native resolution, so the downscale term is 1 and what is left is the monitor
+        // scale -- 1.0 only because this test machine is at 100%.
+        assert!((scale - capture::monitor_scale_for_rect(&frame)).abs() < f32::EPSILON);
+    }
+
+    /// §4.4's rule, pinned by a case that fails if anyone hardcodes 1.0: a frame that was
+    /// downscaled on the way to disk must scale the mark's fixed-size parts with it.
+    #[test]
+    fn a_downscaled_frame_scales_the_mark_never_assumes_one() {
+        let frame = rect(0, 0, 1000, 800);
+        let (_, scale) = pointer_for_frame(None, false, frame, 500, 400);
+        assert!(
+            (scale - capture::monitor_scale_for_rect(&frame) * 0.5).abs() < 1e-6,
+            "half the pixels means half the scale, whatever the monitor is set to"
+        );
+    }
+
+    #[test]
+    fn a_rect_outside_the_frame_is_recorded_as_such_not_as_a_miss() {
+        let frame = rect(0, 0, 100, 100);
+        let (out, _) = pointer_for_frame(Some(rect(5000, 5000, 10, 10)), false, frame, 100, 100);
+        assert!(
+            matches!(out, PointerState::OffFrame),
+            "the locator succeeded; the screenshot just cannot show it"
+        );
+
+        let (miss, _) = pointer_for_frame(None, false, frame, 100, 100);
+        assert!(matches!(miss, PointerState::Miss), "nothing was drawn at all");
+    }
+
+    /// §4.3's drawing half: the mark lands on the picture, near the rect it was recorded
+    /// against, and the rest of the frame is untouched.
+    #[test]
+    fn a_stored_frame_is_redrawn_with_its_pointer_at_the_recorded_place() {
+        use crate::ai::session::StoredMark;
+
+        // A plain white 160x160 frame, stored as PNG exactly as the app stores one.
+        let blank = image::RgbaImage::from_pixel(160, 160, image::Rgba([255, 255, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(blank)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("test frame encodes");
+
+        let mark = StoredMark {
+            pointer: PointerState::Hit { rect: [60, 60, 40, 30] },
+            mark_scale: 1.0,
+        };
+        let out = compose_stored_frame(&png, Some(&mark), 4).expect("composes");
+
+        let changed: Vec<(u32, u32)> = out
+            .enumerate_pixels()
+            .filter(|(_, _, p)| p.0[0] != 255 || p.0[1] != 255 || p.0[2] != 255)
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        assert!(!changed.is_empty(), "the pointer has to be drawn somewhere");
+
+        // Not a bounding-box test: the mark includes the ripples, which legitimately spread
+        // well past the rect (the exporter draws the same ones). What must hold is that the
+        // mark is CENTRED on the rect it was recorded against -- a wrong origin or a wrong
+        // scale moves that centre, which is the failure §4.4 is about.
+        let (x0, y0) = changed.iter().fold((u32::MAX, u32::MAX), |a, b| (a.0.min(b.0), a.1.min(b.1)));
+        let (x1, y1) = changed.iter().fold((0, 0), |a, b| (a.0.max(b.0), a.1.max(b.1)));
+        let (cx, cy) = ((x0 + x1) as f32 / 2.0, (y0 + y1) as f32 / 2.0);
+        // Recorded rect [60, 60, 40, 30] centres at (80, 75).
+        assert!(
+            (cx - 80.0).abs() <= 4.0 && (cy - 75.0).abs() <= 4.0,
+            "mark centred at {cx},{cy}; the rect it was recorded against centres at 80,75"
+        );
+    }
+
+    #[test]
+    fn a_frame_without_a_mark_comes_back_untouched() {
+        let blank = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(blank)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("test frame encodes");
+
+        // A miss is recorded, but nothing was drawn — the picture must stay clean.
+        let miss = crate::ai::session::StoredMark { pointer: PointerState::Miss, mark_scale: 1.0 };
+        let out = compose_stored_frame(&png, Some(&miss), 4).expect("composes");
+        assert!(out.pixels().all(|p| p.0 == [255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn the_hint_ring_is_kept_distinct_from_a_hit() {
+        let frame = rect(0, 0, 100, 100);
+        let (hint, _) = pointer_for_frame(Some(rect(10, 10, 5, 5)), true, frame, 100, 100);
+        assert!(matches!(hint, PointerState::Hint { .. }));
+    }
+}
+
+#[cfg(test)]
 mod autopilot_change_tests {
     use super::*;
 
@@ -2472,9 +2614,9 @@ async fn arm_candidates_if_shown(
 /// L1 app-state block for the prompt, bounded so a wedged script channel can never
 /// stall a capture (the channel's own connect/read timeouts are ~200/700 ms; this is
 /// the outer safety net, mirroring `enumerate_context_snapshot_bounded`'s contract).
-fn app_state_snapshot(hwnd: Option<usize>, word_paragraph_text: bool) -> Option<String> {
+fn app_state_snapshot(hwnd: Option<usize>) -> Option<String> {
     let started = std::time::Instant::now();
-    let block = locator::adapters::app_state_block(hwnd, word_paragraph_text)?;
+    let block = locator::adapters::app_state_block(hwnd)?;
     log::info!(
         "[app_state] block collected in {} ms ({} chars)",
         started.elapsed().as_millis(),
@@ -2902,6 +3044,12 @@ struct GuideResponse {
     /// one). Always `<= plan_outline.len()` — see `Session::set_plan_completed_count`.
     plan_completed_count: usize,
     provider: String,
+    /// What the user clicked to produce this turn, as a resolved control from `last_click`
+    /// (`Button "Insert"`). Carried on the response so the panel can show it against the
+    /// step it completed -- the click is the fact, the instruction is only what we asked
+    /// for, and the two disagreeing is the case worth seeing. `None` when no click was
+    /// recorded, which is also what gets stored on the turn.
+    last_click: Option<String>,
     /// The model that actually handled this request. For managed this is the concrete
     /// model OpenRouter routed to (the relay sends the `openrouter/free` router); for
     /// other providers it's the configured model. Surfaced in the debug drawer + logged.
@@ -3023,6 +3171,11 @@ struct SettingsPayload {
     /// itself runs regardless, so enabling this mid-session finds it already full.
     #[serde(default)]
     session_export_enabled: bool,
+    /// Keep each step's frame beside its stored session (plan §4). User-facing, off by
+    /// default, and applied from the call site rather than the config flag -- the same
+    /// lesson v0.7.19 learned when a feature meant to be opt-in charged everyone.
+    #[serde(default)]
+    session_screenshots: bool,
     /// Read-only — true when the process was launched with NAVISUAL_DEV=true.
     /// Frontend uses this to show/hide the Developer settings tab. Never
     /// written by save_settings (it's deserialized but ignored on the way in).
@@ -3081,6 +3234,248 @@ fn make_chat_thumbnail(jpeg_bytes: &[u8]) -> Option<String> {
         enc.encode_image(&thumb).ok()?;
     }
     Some(capture::to_base64(&buf))
+}
+
+/// One stored frame, with its pointer redrawn on it -- the row thumbnail or the lightbox.
+///
+/// Composed here rather than in the panel for §4.3's reason: the compositor is the
+/// exporter's, and a second drawing implementation is exactly how a replay would come to
+/// disagree with the record about the same step. Nothing is burned into the file -- the
+/// stored PNG is clean and the mark is applied per request, so a pointer that landed wrong
+/// stays that way in the record and can be re-read, re-drawn or ignored later.
+/// Decode a stored frame, draw the mark it was recorded with, and hand back the pixels.
+///
+/// `pub(crate)` because §6's HTML export embeds the same picture: one compositor for the
+/// panel, the artifact and the exporter, or the three drift.
+///
+/// Split from the command so the drawing can be tested without an `AppState` -- the half
+/// of §4.3 that no unit test could otherwise reach, since it only happens in the panel.
+pub(crate) fn compose_stored_frame(
+    png: &[u8],
+    mark: Option<&crate::ai::session::StoredMark>,
+    thickness: u32,
+) -> anyhow::Result<image::RgbaImage> {
+    let mut img = image::load_from_memory(png)?.to_rgba8();
+    if let Some(mark) = mark {
+        if let Some([x, y, w, h]) = mark.pointer.draw_rect() {
+            // The exporter's own compositor and the same scale it uses, from the pixels of
+            // THIS frame (§4.3). Never a second drawing implementation: a replay that drew
+            // differently from the export would be the two-renderer problem again.
+            session_export::draw_pointer(
+                &mut img,
+                [x, y, w, h],
+                session_export::stroke_scale(thickness),
+                mark.mark_scale,
+                matches!(mark.pointer, session_export::PointerState::Hint { .. }),
+            );
+        }
+    }
+    Ok(img)
+}
+
+#[tauri::command]
+async fn session_frame(
+    state: State<'_, AppState>,
+    session_id: String,
+    frame: String,
+    thumb: bool,
+) -> Result<Option<String>, String> {
+    // Both strings come from the page and are joined into a path, so both are checked
+    // rather than trusted: a bare UUID, and a plain file name inside that session's own
+    // frame directory.
+    if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err("not a session id".into());
+    }
+    // `.png` is the whole set: the only writer is the app's own capture, and a session
+    // opened from a file carries its pictures inline rather than putting them here. One rule
+    // for the name itself, shared with the write (`safe_frame_name`) -- two copies of a
+    // path-safety check is how they come to disagree.
+    if !ai::session::safe_frame_name(&frame) || !frame.ends_with(".png") {
+        return Err("not a frame name".into());
+    }
+
+    let (path, mark, thickness) = {
+        let router = state.ai_router.lock().await;
+        (
+            router.session_manager.frames_dir(&session_id).join(&frame),
+            router.session_manager.frame_mark(&session_id, &frame),
+            router.config.overlay_thickness,
+        )
+    };
+
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            // Pruned since the list was drawn, or the archive moved it. Not an error the
+            // panel has to say anything about -- it simply has no picture for that row.
+            log::warn!("[sessions] frame not readable {path:?}: {e}");
+            return Ok(None);
+        }
+    };
+    let img = compose_stored_frame(&bytes, mark.as_ref(), thickness).map_err(|e| e.to_string())?;
+
+    let mut buf = Vec::new();
+    {
+        use image::codecs::jpeg::JpegEncoder;
+        // JPEG both ways, matching the live path's formats: a thumbnail at 160x90 q40 for
+        // the row, q75 at full size for the lightbox. The mark is drawn BEFORE the
+        // downscale, so it keeps the proportions it had on screen.
+        let out = if thumb {
+            image::DynamicImage::ImageRgba8(img).resize(160, 90, image::imageops::FilterType::Nearest)
+        } else {
+            image::DynamicImage::ImageRgba8(img)
+        };
+        let mut enc = JpegEncoder::new_with_quality(&mut buf, if thumb { 40 } else { 75 });
+        enc.encode_image(&out).map_err(|e| e.to_string())?;
+    }
+    Ok(Some(capture::to_base64(&buf)))
+}
+
+/// Every stored session, one self-contained HTML file each, plus an index — plan §6.
+///
+/// Deliberately not `export_session`: that one writes an annotated folder from the live
+/// frame ring for the session in progress, while this writes stored sessions read from disk,
+/// including ones from weeks ago whose pictures exist only if the user asked for them. The
+/// folder dialog is the consent — one choice per export, rather than a path configured once
+/// and forgotten.
+///
+/// `None` means the dialog was cancelled, which is the normal path rather than an error.
+#[tauri::command]
+async fn export_sessions_html(
+    state: State<'_, AppState>,
+    // The sessions ticked in the picker, or empty for everything it was showing. The
+    // button's own label says which of the two it is offering, so nothing here guesses.
+    ids: Vec<String>,
+) -> Result<Option<SessionExportSummary>, String> {
+    let start = Some(session_export::default_destination().join("sessions"));
+    let Some(dest) = session_export::pick_folder(start) else {
+        return Ok(None);
+    };
+
+    // Collected under the lock, written outside it: a few megabytes of HTML should not hold
+    // up the guidance loop.
+    let (sessions, session_dir, thickness) = {
+        let router = state.ai_router.lock().await;
+        (
+            router.session_manager.all_sessions(),
+            router.session_manager.session_dir.clone(),
+            router.config.overlay_thickness,
+        )
+    };
+
+    let chosen: Vec<_> = if ids.is_empty() {
+        sessions
+    } else {
+        sessions
+            .into_iter()
+            .filter(|s| ids.contains(&s.id.to_string()))
+            .collect()
+    };
+
+    let count = session_html::write_all(&session_dir, &chosen, &dest, thickness)
+        .map_err(|e| format!("{e:#}"))?;
+    log::info!(
+        "[sessions] exported {count} session(s) to {}",
+        dest.display()
+    );
+    Ok(Some(SessionExportSummary {
+        folder: dest.display().to_string(),
+        count,
+    }))
+}
+
+/// What an HTML session export wrote, for the panel to report.
+#[derive(serde::Serialize)]
+struct SessionExportSummary {
+    folder: String,
+    count: usize,
+}
+
+/// Open one exported session file in the panel (plan §6).
+///
+/// **Nothing is written.** The file is the archive and the store is the recent working set,
+/// so a session read out of a file appears in the panel and joins the store only if the user
+/// carries on working in it -- the same act that keeps any other session alive.
+///
+/// This replaced an import that wrote into the store, which could not work: the store keeps
+/// the twenty most recent, so restoring an old session raced the prune it was exported to
+/// escape. The 2026-09-17 log has three sessions imported at 07:10 and pruned at 07:18.
+/// Opening the file removes the conflict instead of arbitrating it, and takes the duplicate
+/// detection, the replace rule and the "older than the kept window" warning with it.
+///
+/// Single-select, unlike the export: you open the one you want to look at, where an export
+/// writes the whole set.
+///
+/// `None` means the dialog was cancelled, or the file was not a session.
+#[tauri::command]
+async fn open_session_file(
+    state: State<'_, AppState>,
+) -> Result<Option<OpenedSessionPayload>, String> {
+    let start = Some(session_export::default_destination().join("sessions"));
+    let Some(path) = session_export::pick_file(start, "html") else {
+        return Ok(None);
+    };
+
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("could not read the file: {e}"))?;
+    let Some(opened) = session_html::open_artifact(&text) else {
+        log::info!("[sessions] {path:?} is not a session file");
+        return Err("that file is not a Navisual session".into());
+    };
+
+    // Adopted as the live session WITHOUT a save: `save_session` runs on the next turn, which
+    // is exactly the moment the user has carried on and the session has earned its place.
+    {
+        let mut router = state.ai_router.lock().await;
+        router.session_manager.current_session = Some(opened.session.clone());
+    }
+    adopt_session_state(&state, &opened.session);
+
+    Ok(Some(OpenedSessionPayload {
+        session: opened.session,
+        pictures: opened
+            .pictures
+            .into_iter()
+            .map(|(turn, jpeg_base64)| OpenedPicture { turn, jpeg_base64 })
+            .collect(),
+    }))
+}
+
+/// A session opened from a file, for the panel.
+#[derive(serde::Serialize)]
+struct OpenedSessionPayload {
+    session: Session,
+    pictures: Vec<OpenedPicture>,
+}
+
+/// One picture out of an artifact, by the conversation index it belongs to. Base64 JPEG,
+/// the same encoding `session_frame` returns, so the panel renders both the same way.
+#[derive(serde::Serialize)]
+struct OpenedPicture {
+    turn: usize,
+    jpeg_base64: String,
+}
+
+/// Point the volatile state at a session that has just become the live one.
+///
+/// Shared by `load_session` and `open_session_file` because the reasoning is identical and
+/// duplicating it is how the two would come to reset different things: the steps, the located
+/// rect and the target handle all describe a screen that is no longer there, and a click from
+/// the previous task is not "what the user just did" for this one.
+fn adopt_session_state(state: &State<'_, AppState>, session: &Session) {
+    state.export.lock().clear();
+    let mut g = state.guidance.lock();
+    g.session_id = Some(session.id.to_string());
+    g.steps = vec![];
+    g.state_summary = session
+        .current_state_summary
+        .as_ref()
+        .map(|s| s.summary_text.clone())
+        .unwrap_or_default();
+    g.target_hwnd = None;
+    g.context_elements = None;
+    g.needs_input = false;
+    drop(g);
+    last_click::clear();
 }
 
 /// Return the full-resolution chat screenshot as base64 (for the lightbox).
@@ -3228,6 +3623,11 @@ async fn guide(
     state: State<'_, AppState>,
     task: String,
     is_reply: bool,
+    // What moved the session on, when the frontend knows it did not come from a click in the
+    // guided app: the Next control, Autopilot (a screen change), or the user saying the step
+    // was already done. Stored on the turn purely so a reopened row says what actually
+    // happened instead of crediting the user with an action they never took.
+    advance: Option<String>,
 ) -> Result<GuideResponse, String> {
     // Flow A: any candidate boxes on screen are resolved by the state the user's
     // click left behind — read it before this request changes anything.
@@ -3352,6 +3752,7 @@ async fn guide(
                         if is_pinned { "The pinned app" } else { "The target app" }.to_string()
                     });
                 return Ok(GuideResponse {
+        last_click: None,
                     goal: session_goal(&state),
                     plan_outline: session_plan_outline(&state),
                     plan_completed_count: session_plan_completed_count(&state),
@@ -3560,6 +3961,7 @@ async fn guide(
         }
         Err(()) => {
             return Ok(GuideResponse {
+        last_click: None,
                 goal: session_goal(&state),
                 plan_outline: session_plan_outline(&state),
                 plan_completed_count: session_plan_completed_count(&state),
@@ -3640,9 +4042,7 @@ async fn guide(
     // L1 app state from a script channel (Blender bridge today) — facts the screenshot
     // can't convey. Same capture-time atomicity as [Screen Elements]; absent when no
     // channel applies.
-    if let Some(block) =
-        app_state_snapshot(new_hwnd_opt, router.config.word_state_paragraph_text)
-    {
+    if let Some(block) = app_state_snapshot(new_hwnd_opt) {
         window_context.push_str(&block);
     }
     // What the user actually did since the last turn, as a resolved control. Also (re)arms
@@ -3951,6 +4351,7 @@ async fn guide(
                 let _ = app.emit("insufficient_coins", ());
             }
             return Ok(GuideResponse {
+        last_click: None,
                 goal: session_goal(&state),
                 plan_outline: session_plan_outline(&state),
                 plan_completed_count: session_plan_completed_count(&state),
@@ -4006,6 +4407,34 @@ async fn guide(
     let provider = router.config.api_provider.clone();
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
+    // What the user clicked, consumed once so it decorates exactly one row -- this request's.
+    // `describe` read the same click for the prompt above and deliberately does not consume it:
+    // the prompt is built first and must keep seeing it. At function scope, because the
+    // response is built outside the session block below.
+    let clicked = last_click::take(LAST_CLICK_MAX_AGE);
+
+    // §4: the frame this step was guided from, written beside the session when the user has
+    // asked for that. Written before the block below borrows the manager mutably, and a
+    // failed write is deliberately not an error the session pays for: no frame is a smaller
+    // loss than no session. `pre_ocr` is the OCR PNG -- the masked, native-resolution frame
+    // the locator read, never the unmasked whole-monitor export frame.
+    let keep_frames = router.config.session_screenshots;
+    // The OCR frame's region, kept because the bytes themselves are moved into
+    // `execute_step` below and the mark needs the geometry afterwards.
+    let ocr_frame_rect = pre_ocr.as_ref().map(|(_, rect)| *rect);
+    let frame = if keep_frames {
+        match (&router.session_manager.current_session, pre_ocr.as_ref()) {
+            (Some(session), Some((png, _))) => router.session_manager.save_frame(
+                &session.id.to_string(),
+                session.conversation.len(),
+                png,
+            ),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     if let Some(session) = &mut router.session_manager.current_session {
         // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
         // the field leaves the stored goal alone rather than wiping it — the failure mode here
@@ -4048,6 +4477,7 @@ async fn guide(
         // exactly `task.starts_with("[User completed:")`, set at the top of this fn).
         let pinned = !task.is_empty() && !is_next_requery;
         session.add_turn_pinned("user", user_turn_text, None, pinned);
+        session.set_last_user_turn_facts(clicked.clone(), advance.clone(), frame.clone());
         let content = steps
             .iter()
             .map(|s| s.instruction.clone())
@@ -4055,6 +4485,9 @@ async fn guide(
             .join("\n");
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
+        // Bound the store as it grows, not only at launch — a machine that stays
+        // on for days must not drift past the limit between restarts.
+        router.session_manager.prune(SESSION_HISTORY_KEEP);
     }
 
     // Release the ai_router Mutex before execute_step so that concurrent
@@ -4086,6 +4519,7 @@ async fn guide(
         anchor_autopilot_baseline(&state).await;
         emit_stale_if_drifted(&app, pre_hash, *stale_post.lock(), ai_elapsed_ms);
         return Ok(GuideResponse {
+        last_click: None,
             goal: session_goal(&state),
             plan_outline: session_plan_outline(&state),
             plan_completed_count: session_plan_completed_count(&state),
@@ -4156,7 +4590,7 @@ async fn guide(
         );
     }
 
-    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates, drawn_rect) = execute_step(
         &app,
         &steps[0],
         new_hwnd_opt,
@@ -4183,7 +4617,7 @@ async fn guide(
             None => None,
         },
     )
-    .unwrap_or((None, None, false, Vec::new()));
+    .unwrap_or((None, None, false, Vec::new(), None));
     // Flow B: a first-locate ambiguity set was drawn — arm the state readback.
     arm_candidates_if_shown(
         &state,
@@ -4205,11 +4639,38 @@ async fn guide(
         maybe_log_trace(&app, t, log_trace, training_enabled);
     }
 
+    // §4.3: what the overlay ACTUALLY drew, recorded against the frame stored for this
+    // round. The router lock was released before `execute_step` (it runs the locator), so
+    // this takes it again briefly; if it is contended the mark is dropped rather than the
+    // response stalled -- a frame that came back without its pointer is the smaller loss.
+    if let (Some(_), Some(ocr_rect)) = (frame.as_ref(), ocr_frame_rect) {
+        // Native resolution, so the downscale term is exactly 1.0 and the factor left is
+        // the monitor scale -- computed by the same helper the export ring uses, never
+        // assumed to be 1.0 (§4.4).
+        let (pointer, mark_scale) =
+            pointer_for_frame(drawn_rect, hint_shown, ocr_rect, ocr_rect.width, ocr_rect.height);
+        match state.ai_router.try_lock() {
+            Ok(mut router) => {
+                if let Some(session) = &mut router.session_manager.current_session {
+                    session.set_last_user_turn_mark(Some(crate::ai::session::StoredMark {
+                        pointer,
+                        mark_scale,
+                    }));
+                }
+                // Saved again on purpose: the turn was written before the locate ran, so
+                // the mark had nowhere to live until now.
+                router.session_manager.save_session(None);
+            }
+            Err(_) => log::warn!("[sessions] frame stored without its pointer: router busy"),
+        }
+    }
+
     // Anchor the autopilot baseline AFTER the pointer is drawn so that
     // check_screen_changed (which also sees the pointer) compares like-for-like.
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        last_click: clicked,
         goal: session_goal(&state),
         plan_outline: session_plan_outline(&state),
         plan_completed_count: session_plan_completed_count(&state),
@@ -4312,7 +4773,7 @@ async fn next_step(
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
-    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates, _drawn_rect) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -4332,7 +4793,7 @@ async fn next_step(
         Some(step_index),
         None, // no AI capture on this path — see execute_step's pre_export
     )
-    .unwrap_or((None, None, false, Vec::new()));
+    .unwrap_or((None, None, false, Vec::new(), None));
     arm_candidates_if_shown(
         &state,
         request_id.clone(),
@@ -4357,6 +4818,7 @@ async fn next_step(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        last_click: None,
         goal: session_goal(&state),
         plan_outline: session_plan_outline(&state),
         plan_completed_count: session_plan_completed_count(&state),
@@ -4517,7 +4979,7 @@ async fn retry_locate(
         candidate_boxes = locator::candidates::dedupe_candidates(candidate_boxes);
     }
 
-    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates, _drawn_rect) = execute_step(
         &app,
         &steps[step_index],
         stored_hwnd,
@@ -4537,7 +4999,7 @@ async fn retry_locate(
         Some(step_index),
         None, // no AI capture on this path — see execute_step's pre_export
     )
-    .unwrap_or((None, None, false, Vec::new()));
+    .unwrap_or((None, None, false, Vec::new(), None));
 
     // Arm the state-readback on whatever was actually drawn — the Flow A collection,
     // or (when the collection came up short and the retry's own locate missed on a
@@ -4562,6 +5024,7 @@ async fn retry_locate(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        last_click: None,
         goal: session_goal(&state),
         plan_outline: session_plan_outline(&state),
         plan_completed_count: session_plan_completed_count(&state),
@@ -4859,7 +5322,7 @@ async fn send_correction(
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
     // L1 app state — same as guide()'s capture path.
-    if let Some(block) = app_state_snapshot(new_hwnd, router.config.word_state_paragraph_text) {
+    if let Some(block) = app_state_snapshot(new_hwnd) {
         window_context.push_str(&block);
     }
 
@@ -5077,6 +5540,7 @@ async fn send_correction(
             .join("\n");
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
+        router.session_manager.prune(SESSION_HISTORY_KEEP);
     }
 
     // Release the Mutex before execute_step — same pattern as guide().
@@ -5104,6 +5568,7 @@ async fn send_correction(
         anchor_autopilot_baseline(&state).await;
         emit_stale_if_drifted(&app, pre_hash, *stale_post.lock(), ai_elapsed_ms);
         return Ok(GuideResponse {
+        last_click: None,
             goal: session_goal(&state),
             plan_outline: session_plan_outline(&state),
             plan_completed_count: session_plan_completed_count(&state),
@@ -5171,7 +5636,7 @@ async fn send_correction(
         avoid_bboxes.as_deref().unwrap_or(&[]),
         steps[0].target_text.as_deref(),
     );
-    let (located, mut locate_trace, hint_shown, shown_candidates) = execute_step(
+    let (located, mut locate_trace, hint_shown, shown_candidates, _drawn_rect) = execute_step(
         &app,
         &steps[0],
         new_hwnd,
@@ -5194,7 +5659,7 @@ async fn send_correction(
             None => None,
         },
     )
-    .unwrap_or((None, None, false, Vec::new()));
+    .unwrap_or((None, None, false, Vec::new(), None));
     arm_candidates_if_shown(
         &state,
         Some(request_id.clone()),
@@ -5219,6 +5684,7 @@ async fn send_correction(
     let _ = anchor_autopilot_baseline(&state).await;
 
     Ok(GuideResponse {
+        last_click: None,
         goal: session_goal(&state),
         plan_outline: session_plan_outline(&state),
         plan_completed_count: session_plan_completed_count(&state),
@@ -5606,6 +6072,71 @@ fn new_session(state: State<'_, AppState>) {
     if let Ok(mut router) = state.ai_router.try_lock() {
         router.session_manager.current_session = None;
     }
+}
+
+/// How many sessions the store keeps.
+///
+/// Exists so the panel can SAY the number rather than repeat it. The list tells the user the
+/// store is bounded, and a sentence naming a number owned by other code is the drift this
+/// project keeps paying for -- the constant is the one place it lives.
+#[tauri::command]
+fn session_keep_count() -> usize {
+    SESSION_HISTORY_KEEP
+}
+
+/// The stored sessions, newest first, for the history overlay. Read-only: the
+/// manager orders them, the UI renders them.
+#[tauri::command]
+async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
+    Ok(state
+        .ai_router
+        .lock()
+        .await
+        .session_manager
+        .list_sessions())
+}
+
+/// Load a stored session back as the current one.
+///
+/// A session is not a document — it is a position in a task on a machine whose
+/// screen has since changed (plan §3.3). What is restored: the conversation,
+/// task description, plan outline and state summary, via `SessionManager`. What is
+/// deliberately NOT restored: the auto-detected target HWND (a stored handle outlives
+/// its window — the exact failure v0.7.25 spent a release on), and the step
+/// sequence/index (they describe a screen that no longer exists; the next request
+/// re-captures and re-plans). The export ring is cleared like `new_session` clears it:
+/// it holds the PREVIOUS session's frames, and exporting after a load must not write
+/// them under the loaded conversation.
+///
+/// A target the user PINNED survives, exactly as it survives `new_session`: they chose
+/// that window, and reopening a task is not them un-choosing it. Only `target_hwnd`, the
+/// handle auto-detect happened to be holding, is dropped.
+#[tauri::command]
+async fn load_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<Session>, String> {
+    let session = {
+        let mut router = state.ai_router.lock().await;
+        match router.session_manager.load_session(&session_id) {
+            Some(s) => s,
+            // Not an error: the file may have been pruned or archived since the
+            // list was drawn, and the UI's answer to either is the same message.
+            None => {
+                log::warn!("[sessions] load {session_id}: no longer on disk");
+                return Ok(None);
+            }
+        }
+    };
+
+    adopt_session_state(&state, &session);
+    log::info!(
+        "[sessions] loaded {} ({} turns, {} plan steps)",
+        session.id,
+        session.conversation.len(),
+        session.plan_outline.len()
+    );
+    Ok(Some(session))
 }
 
 /// One row in the export preview.
@@ -6172,6 +6703,7 @@ fn payload_from_config(c: &Config) -> SettingsPayload {
         training_capture_enabled: c.training_capture_enabled,
         task_suggestions: c.task_suggestions,
         session_export_enabled: c.session_export_enabled,
+        session_screenshots: c.session_screenshots,
         developer_mode: developer_mode_enabled(),
     }
 }
@@ -6286,6 +6818,10 @@ async fn save_settings(
         (
             "SESSION_EXPORT_ENABLED".into(),
             payload.session_export_enabled.to_string(),
+        ),
+        (
+            "SESSION_SCREENSHOTS".into(),
+            payload.session_screenshots.to_string(),
         ),
     ];
 
@@ -7328,6 +7864,9 @@ pub fn run() {
             }
             let cost_tracker = CostTracker::new(Some(app_data_dir.join("usage.json")));
             let session_manager = SessionManager::new(app_data_dir.join("sessions"));
+            // History is bounded from launch one: the corpus accumulated unbounded
+            // before this existed, and the first prune archives rather than deletes.
+            session_manager.prune(SESSION_HISTORY_KEEP);
             let supabase_session_path = app_data_dir.join("supabase_session.json");
 
             // A session written before the tokens moved into the Credential Manager is
@@ -7455,11 +7994,17 @@ pub fn run() {
             dock_fill,
             dock_is_intact,
             new_session,
+            list_sessions,
+            load_session,
             export_status,
             pick_export_folder,
             export_session,
             list_tts_voices,
             get_chat_full_screenshot,
+            session_frame,
+            export_sessions_html,
+            open_session_file,
+            session_keep_count,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
