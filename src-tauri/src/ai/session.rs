@@ -6,10 +6,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-/// How many turns are dropped at once when the window overflows. Larger = the retained slice
-/// (and therefore the prompt prefix) stays byte-identical across more consecutive requests,
-/// which is what makes provider prefix caching reachable; smaller = less history carried past
-/// the nominal budget. 6 ≈ three exchanges of slack.
+/// Slack above the budget before anything is dropped. 6 ≈ three exchanges.
+///
+/// **Read `get_conversation_for_api_exchanges` for what this actually does — it is not a
+/// sawtooth.** The name, and the comment that used to sit here, described dropping a chunk
+/// and then holding still, re-arming each time. It does not re-arm. Two regimes:
+///
+/// * **up to `budget + EVICTION_BATCH` turns** — the whole conversation is sent and the front
+///   stays at turn 0, so the prefix only ever grows by appending. This is where the slack
+///   earns its place, and it covers most sessions: of 20 real ones measured 2026-09-18, 16
+///   never exceeded 16 turns (lengths 2–70, median 8).
+/// * **past that** — exactly `budget` turns, every request, with the front advancing by one
+///   each time. The prefix changes on every request from then on.
+///
+/// The second regime is the one the old comment denied. Left in place deliberately on
+/// 2026-09-18 rather than fixed: quantising the start to whole batches restores the sawtooth,
+/// but also raises average history from 10 to ~13 turns, and prompt caching on the managed
+/// path is returning ~0% anyway (111 requests at `cached=0` against 3 hits). Paying tokens
+/// for a cache that is not paying out is the wrong trade. Revisit together with that, not
+/// before — `memory-management-plan.md` §8.
 const EVICTION_BATCH: usize = 6;
 
 /// Ceiling on pinned turns. Pins are a backstop against the model's summary drifting, not an
@@ -349,11 +364,15 @@ impl Session {
     /// Two behaviours beyond a plain tail:
     ///
     /// * **Pinned turns always survive** (`Turn::pinned`) — retention by kind, not recency.
-    /// * **Eviction happens in BATCHES.** A window that slides by two turns per request changes
-    ///   the prompt prefix on *every* request, which independently defeats provider prefix
-    ///   caching (Gemini/OpenAI/Anthropic all key on an exact prefix). Holding the window still
-    ///   and dropping a chunk only on overflow keeps the prefix byte-stable in between — the
-    ///   same reasoning behind Anthropic's `clear_at_least`. Memory and caching are one fix.
+    /// * **Overflow is allowed before anything is dropped** (`EVICTION_BATCH`). A window that
+    ///   slides every request changes the prompt prefix every request, which independently
+    ///   defeats provider prefix caching (Gemini/OpenAI/Anthropic all key on an exact prefix),
+    ///   so the front is held at turn 0 for as long as the conversation fits in
+    ///   `budget + EVICTION_BATCH`. **Past that it does slide, one turn per request** — `keep`
+    ///   pins to `budget`, so `start` becomes `len - budget` and moves with every added turn.
+    ///   The batch is spent once and never re-arms. A known defect, measured and deliberately
+    ///   not fixed; see `EVICTION_BATCH` for why, and do not re-describe this as a sawtooth
+    ///   without changing the code first.
     pub fn get_conversation_for_api_exchanges(&self, max_exchanges: usize) -> Vec<Message> {
         let budget = max_exchanges.saturating_mul(2).max(2);
         // Overflow is allowed to run to `budget + EVICTION_BATCH` before anything is dropped, so

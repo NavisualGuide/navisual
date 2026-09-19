@@ -4277,7 +4277,7 @@ async fn guide(
                  src-tauri/src/ai/prompts.rs; screenshot is screenshot_<ts>.jpg).\n\n\
                  === CONVERSATION HISTORY ({} turn(s)) ===\n{}\n\n\
                  === USER MESSAGE ===\n{sent_user_prompt}\n",
-                if history.is_empty() { 0 } else { history.lines().count() },
+                router.get_last_conversation_turns(),
                 if history.is_empty() {
                     "(none — first request of this session)"
                 } else {
@@ -4293,7 +4293,7 @@ async fn guide(
         // nobody can check. One line per request, naming the size of the window that was
         // actually sent -- the full text is in the payload dump when debug captures are on.
         let history = router.get_last_conversation();
-        let turns = if history.is_empty() { 0 } else { history.lines().count() };
+        let turns = router.get_last_conversation_turns();
         let with_actions = history.matches("[What the user did:").count();
         log::info!(
             "[memory] sent {turns} turn(s) of history, {with_actions} carrying a user action"
@@ -5477,7 +5477,7 @@ async fn send_correction(
         // nobody can check. One line per request, naming the size of the window that was
         // actually sent -- the full text is in the payload dump when debug captures are on.
         let history = router.get_last_conversation();
-        let turns = if history.is_empty() { 0 } else { history.lines().count() };
+        let turns = router.get_last_conversation_turns();
         let with_actions = history.matches("[What the user did:").count();
         log::info!(
             "[memory] sent {turns} turn(s) of history, {with_actions} carrying a user action"

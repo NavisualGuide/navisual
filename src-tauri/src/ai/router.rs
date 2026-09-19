@@ -48,6 +48,10 @@ pub struct AiRouter {
     /// second call to `get_conversation_for_api_exchanges` would be a re-derivation that can
     /// drift from it (and, after a turn is added, demonstrably would).
     last_conversation: String,
+    /// How many MESSAGES that was. Counted here rather than by the reader: an assistant turn
+    /// is several instructions joined with `\n` (`steps.join("\n")` in `guide`), so counting
+    /// lines overstates the window -- which the first version of the [memory] log line did.
+    last_conversation_turns: usize,
 }
 
 impl AiRouter {
@@ -65,6 +69,7 @@ impl AiRouter {
             managed_session_path,
             last_usage: (0, 0),
             last_conversation: String::new(),
+            last_conversation_turns: 0,
         };
         router.init_client();
         router
@@ -183,6 +188,11 @@ impl AiRouter {
     /// Empty before the first request of a session, which is correct: turn 1 has no history.
     pub fn get_last_conversation(&self) -> &str {
         &self.last_conversation
+    }
+
+    /// How many messages went with the last request. Not derivable from the rendered text.
+    pub fn get_last_conversation_turns(&self) -> usize {
+        self.last_conversation_turns
     }
 
     pub fn get_last_usage(&self) -> (u64, u64) {
@@ -377,6 +387,7 @@ impl AiRouter {
         // the debug payload dump nor prompt_log.jsonl carried a single turn of it -- so the
         // window, the pinning and the replayed user actions were all unobservable, and a
         // change to any of them could only be checked by reading the code that made it.
+        self.last_conversation_turns = conversation.len();
         self.last_conversation = conversation
             .iter()
             .map(|m| {
