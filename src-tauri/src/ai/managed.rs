@@ -392,14 +392,29 @@ impl ManagedClient {
         // caching; this only reveals whether we are already getting it for free, which is
         // the question that decides whether explicit caching is worth wiring. Input
         // dominates this workload (measured 6203 in / 167 out), so the answer matters.
+        //
+        // ABSENT AND ZERO ARE DIFFERENT ANSWERS, and this used to print both as `cached=0`.
+        // The raw dumps below (2026-09-08 through 09-11) show this upstream returning only
+        // {completion_tokens, prompt_tokens, total_tokens} -- no `prompt_tokens_details` at
+        // all -- so every `cached=0` was really "not reported". Reading 111 of those as "the
+        // cache is dead" is what sent a 2026-09-19 investigation after the conversation
+        // window, which turned out to be innocent.
+        let reported = body["usage"].get("prompt_tokens_details").is_some();
         if let Some(pct) = (cached * 100).checked_div(in_tokens) {
-            log::info!("[tokens] in={in_tokens} out={out_tokens} cached={cached} ({pct}% of input)");
+            log::info!(
+                "[tokens] in={in_tokens} out={out_tokens} cached={} ({pct}% of input)",
+                if reported {
+                    cached.to_string()
+                } else {
+                    "not reported".to_string()
+                },
+            );
         }
         // `cached == 0` is ambiguous: the upstream may not be caching, OR it may be caching and
         // simply not reporting it under the field name this shape uses. Dump the raw usage
         // object once per process so the real field names are on record; the answer decides
         // whether a real chunk of request cost is already being discounted invisibly.
-        if cached == 0 {
+        if !reported {
             static DUMPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 log::info!("[tokens] raw usage object (once): {}", body["usage"]);
