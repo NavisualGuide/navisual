@@ -4267,10 +4267,22 @@ async fn guide(
             let dir = base.join("debug");
             let _ = std::fs::create_dir_all(&dir);
             let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+            // The conversation goes in too. This file's whole job is "verify nothing
+            // unintended is sent", and it was showing one message out of up to sixteen --
+            // the history is sent on every request and was the one part of the payload
+            // nobody could audit.
+            let history = router.get_last_conversation();
             let dump = format!(
                 "Dynamic text sent to the AI (system prompt is static — see \
                  src-tauri/src/ai/prompts.rs; screenshot is screenshot_<ts>.jpg).\n\n\
-                 === USER MESSAGE ===\n{sent_user_prompt}\n"
+                 === CONVERSATION HISTORY ({} turn(s)) ===\n{}\n\n\
+                 === USER MESSAGE ===\n{sent_user_prompt}\n",
+                if history.is_empty() { 0 } else { history.lines().count() },
+                if history.is_empty() {
+                    "(none — first request of this session)"
+                } else {
+                    history
+                },
             );
             let _ = std::fs::write(dir.join(format!("prompt_{ts}.txt")), dump);
         }
