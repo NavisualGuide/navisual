@@ -112,6 +112,37 @@ pub struct StoredMark {
     pub mark_scale: f32,
 }
 
+impl Turn {
+    /// This turn as the model should re-read it: what was said, plus what the user actually
+    /// DID to produce it.
+    ///
+    /// The facts were being stored and never replayed. `[Last user action] The user clicked
+    /// Button "Save"` reaches the model in the window context of the turn it happened on and
+    /// is gone by the next one, so a conversation replayed at turn twenty read as a column of
+    /// `Next` and `[User completed: "..."]` with no record of which control was ever pressed.
+    /// **That is the shape that produces a loop**: the model cannot tell a step it proposed
+    /// from a step the user carried out, so it proposes it again.
+    ///
+    /// Appended rather than rewritten, so the stored content stays exactly what was sent, and
+    /// deliberately short -- this rides on every user turn in the window. A turn advanced by
+    /// plain Next adds nothing, because its content already says `[User completed: "..."]`
+    /// and a second sentence saying so is tokens for no signal.
+    ///
+    /// Safe for prefix caching: a turn's facts are written once, immediately after it is
+    /// added, and never change again, so the replayed text is byte-stable from then on.
+    fn replayed_content(&self) -> String {
+        let did = match (self.clicked.as_deref(), self.advanced_by.as_deref()) {
+            (Some(control), _) => format!("clicked {control}"),
+            (None, Some("autopilot")) => {
+                "did not click; the screen changed on its own".to_string()
+            }
+            (None, Some("already_done")) => "said this step was already done".to_string(),
+            _ => return self.content.clone(),
+        };
+        format!("{} [What the user did: {did}]", self.content)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
@@ -265,7 +296,7 @@ impl Session {
         advanced_by: Option<String>,
         frame: Option<String>,
     ) {
-        if let Some(turn) = self.conversation.iter_mut().rev().find(|t| t.role == "user") {
+        if let Some(turn) = self.last_user_side_turn() {
             turn.clicked = clicked;
             turn.advanced_by = advanced_by;
             turn.frame = frame;
@@ -279,9 +310,22 @@ impl Session {
     /// the pointer's outcome only exists after `execute_step` has run — which is after the
     /// session was saved, so the caller saves again.
     pub fn set_last_user_turn_mark(&mut self, mark: Option<StoredMark>) {
-        if let Some(turn) = self.conversation.iter_mut().rev().find(|t| t.role == "user") {
+        if let Some(turn) = self.last_user_side_turn() {
             turn.mark = mark;
         }
+    }
+
+    /// The most recent turn the USER produced, which is `user` or `correction`.
+    ///
+    /// Matching on the pair rather than on `!= "assistant"` on purpose: an unknown role is
+    /// not automatically the user's, and the two writers of these facts both mean this exact
+    /// pair. A correction that did not count here would put the frame just captured on an
+    /// earlier turn, describing a screen it never showed.
+    fn last_user_side_turn(&mut self) -> Option<&mut Turn> {
+        self.conversation
+            .iter_mut()
+            .rev()
+            .find(|t| matches!(t.role.as_str(), "user" | "correction"))
     }
 
     pub fn update_state(&mut self, summary_text: String) {
@@ -331,7 +375,7 @@ impl Session {
             match turn.role.as_str() {
                 "correction" | "user" => messages.push(Message {
                     role: Role::User,
-                    content: turn.content.clone(),
+                    content: turn.replayed_content(),
                 }),
                 "assistant" => messages.push(Message {
                     role: Role::Assistant,
@@ -660,6 +704,96 @@ mod tests {
     /// The escape path is stated rather than eyeballed: `<store>/frames/<id>` joined with
     /// `../../escaped.jpg` resolves to `<store>/escaped.jpg`, which is exactly what an
     /// unguarded write produced.
+    /// A correction is a user-side turn, and the frame captured for it belongs to IT.
+    ///
+    /// Before corrections were stored as `correction`, this searched for `role == "user"`,
+    /// which still found the right turn only because corrections were stored as `user` too.
+    /// Changing the role so the panel could tell them apart would have quietly moved every
+    /// correction's frame onto the previous user turn \u2014 a picture filed against a screen it
+    /// never showed.
+    /// The loop this exists to break: at turn twenty the model could not tell a step it had
+    /// PROPOSED from one the user had CARRIED OUT, because the click reached it only in the
+    /// window context of the turn it happened on and was gone by the next request.
+    #[test]
+    fn the_replayed_window_says_what_the_user_did() {
+        let mut s = Session::new("Turn on dark mode".into());
+        s.add_turn("user", "[User completed: \"Click Settings\"]".into(), None);
+        s.set_last_user_turn_facts(Some("Button \"Settings\"".into()), Some("next".into()), None);
+        s.add_turn("assistant", "Now click Appearance".into(), None);
+        s.add_turn("user", "[User completed: \"Click Appearance\"]".into(), None);
+        s.set_last_user_turn_facts(None, Some("autopilot".into()), None);
+        s.add_turn("assistant", "Now choose Dark".into(), None);
+        s.add_turn("user", "[User completed: \"Choose Dark\"]".into(), None);
+        s.set_last_user_turn_facts(None, Some("already_done".into()), None);
+
+        let msgs = s.get_conversation_for_api_exchanges(10);
+        let user: Vec<&str> = msgs
+            .iter()
+            .filter(|m| matches!(m.role, Role::User))
+            .map(|m| m.content.as_str())
+            .collect();
+
+        assert!(
+            user[0].contains("[What the user did: clicked Button \"Settings\"]"),
+            "the control is named: {}",
+            user[0]
+        );
+        assert!(
+            user[1].contains("the screen changed on its own"),
+            "autopilot is not credited to the user: {}",
+            user[1]
+        );
+        assert!(
+            user[2].contains("said this step was already done"),
+            "already-done is its own fact: {}",
+            user[2]
+        );
+        // The stored turn is untouched -- what was SENT stays what was sent.
+        assert_eq!(s.conversation[0].content, "[User completed: \"Click Settings\"]");
+    }
+
+    /// A plain Next adds nothing: the content already says what was completed, and a second
+    /// sentence saying so rides on every user turn in the window for no signal.
+    #[test]
+    fn a_plain_next_adds_no_second_sentence() {
+        let mut s = Session::new("task".into());
+        s.add_turn("user", "[User completed: \"Click Save\"]".into(), None);
+        s.set_last_user_turn_facts(None, Some("next".into()), None);
+        let msgs = s.get_conversation_for_api_exchanges(10);
+        assert_eq!(msgs[0].content, "[User completed: \"Click Save\"]");
+
+        // And a turn with no facts at all is untouched, which is every turn stored before
+        // any of this existed.
+        let mut plain = Session::new("task".into());
+        plain.add_turn("user", "help me".into(), None);
+        assert_eq!(plain.get_conversation_for_api_exchanges(10)[0].content, "help me");
+    }
+
+    #[test]
+    fn a_corrections_frame_lands_on_the_correction() {
+        let mut s = Session::new("task".into());
+        s.add_turn("user", "help".into(), None);
+        s.set_last_user_turn_facts(None, None, Some("0.png".into()));
+        s.add_turn("assistant", "Click Save".into(), None);
+        s.add_turn("correction", "wrong, try again".into(), None);
+        s.set_last_user_turn_facts(None, None, Some("2.png".into()));
+
+        assert_eq!(
+            s.conversation[0].frame.as_deref(),
+            Some("0.png"),
+            "the earlier user turn keeps its own picture"
+        );
+        assert_eq!(
+            s.conversation[2].frame.as_deref(),
+            Some("2.png"),
+            "and the correction gets the one captured for it"
+        );
+        assert!(
+            s.conversation[1].frame.is_none(),
+            "the assistant turn between them must never inherit either"
+        );
+    }
+
     #[test]
     fn a_frame_name_cannot_escape_its_directory() {
         let dir = std::env::temp_dir().join(format!("navisual-frame-escape-{}", Uuid::new_v4()));

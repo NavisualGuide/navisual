@@ -2585,6 +2585,18 @@ See the LICENSE file in the root of this repository for complete details.
       // turn -- the app's words, not the person's. Show it as the clean system note the
       // live session uses, not as a user bubble with brackets.
       const completed = t.content.startsWith('[User completed: "') && t.content.endsWith('"]');
+      // A correction turn's CONTENT is the prompt the model was sent -- the "you pressed
+      // wrong, re-examine the screen" briefing, with the user's own words appended after
+      // `User note: `. Only that tail is theirs, and it is the only part worth showing; the
+      // live row says `Wrong -- <note>`, so this says the same thing.
+      //
+      // The marker is written in src-tauri/src/lib.rs, where `user_text_owned` is built from
+      // prompts::CORRECTION_CONTEXT. Change it there and change it here.
+      const NOTE_MARKER = "User note: ";
+      const noteAt = t.role === "correction" ? t.content.indexOf(NOTE_MARKER) : -1;
+      const correctionText = noteAt >= 0
+        ? `Wrong \u2014 ${t.content.slice(noteAt + NOTE_MARKER.length).trim()}`
+        : "Wrong \u2014 re-analysing\u2026";
       // The instruction itself is deliberately NOT repeated on a completion row. It is what
       // we asked for, and it is already on screen as the step above; restating it made every
       // completion a wall of the same sentence twice.
@@ -2598,7 +2610,9 @@ See the LICENSE file in the root of this repository for complete details.
         : "system";
       const rowId = await addToHistory(
         role,
-        completed ? completionLabel(t.clicked, t.advanced_by) : t.content,
+        completed ? completionLabel(t.clicked, t.advanced_by)
+        : role === "correction" ? correctionText
+        : t.content,
       );
 
       const inline = pictures?.get(at);

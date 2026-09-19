@@ -5552,7 +5552,12 @@ async fn send_correction(
             session.set_plan_completed_count(count);
         }
         session.update_state(state_summary.clone());
-        session.add_turn("user", user_text.to_string(), None);
+        // Stored as `correction`, not `user`. It maps to the same `Role::User` with the same
+        // content for the model (see `get_conversation_for_api_exchanges`), so nothing about
+        // the prompt changes -- but the panel can then tell a correction from something the
+        // user typed. Without it, reopening rendered this turn's content, which is the
+        // model's own instruction text, inside a user bubble as if they had written it.
+        session.add_turn("correction", user_text.to_string(), None);
         // No `clicked` / `advanced_by`: a correction is the user saying the last step was
         // wrong, which is neither a click in the guided app nor something that advanced the
         // step. The frame is the part worth keeping.
