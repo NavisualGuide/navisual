@@ -5298,6 +5298,26 @@ async fn send_correction(
         };
 
     let mut router = state.ai_router.lock().await;
+
+    // A correction is a step like any other, and it re-captures: without this the frame was
+    // read for OCR and dropped, so a session advanced by ✗ Wrong reopened with holes in it
+    // that its own transcript did not explain. Same shape as guide() -- written before the
+    // session below is borrowed mutably, and a failed write costs the frame, never the
+    // session. `pre_ocr` is the masked, native-resolution frame the locator read.
+    let keep_frames = router.config.session_screenshots;
+    let correction_frame = if keep_frames {
+        match (&router.session_manager.current_session, pre_ocr.as_ref()) {
+            (Some(session), Some((png, _))) => router.session_manager.save_frame(
+                &session.id.to_string(),
+                session.conversation.len(),
+                png,
+            ),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     let summary = {
         let g = state.guidance.lock();
         g.state_summary.clone()
@@ -5533,6 +5553,10 @@ async fn send_correction(
         }
         session.update_state(state_summary.clone());
         session.add_turn("user", user_text.to_string(), None);
+        // No `clicked` / `advanced_by`: a correction is the user saying the last step was
+        // wrong, which is neither a click in the guided app nor something that advanced the
+        // step. The frame is the part worth keeping.
+        session.set_last_user_turn_facts(None, None, correction_frame.clone());
         let content = steps
             .iter()
             .map(|s| s.instruction.clone())

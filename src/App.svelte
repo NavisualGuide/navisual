@@ -79,7 +79,7 @@ See the LICENSE file in the root of this repository for complete details.
   // `storedFrame` points at a picture in the store; `inlineFrame` IS the picture, base64
   // JPEG, for a session opened from a file -- those never reach disk, so there is nothing
   // to point at. Both render identically; only the lightbox has to tell them apart.
-  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; thumbFading?: boolean; storedFrame?: { sessionId: string; frame: string }; inlineFrame?: string };
+  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; storedFrame?: { sessionId: string; frame: string }; inlineFrame?: string };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
     api_provider: string;
@@ -1517,18 +1517,18 @@ See the LICENSE file in the root of this repository for complete details.
       .catch(() => {});
   }
 
+  // Every step keeps its screenshot. This used to fade the previous thumbnails out and
+  // then erase them, so a live session showed a picture on its newest row only -- while a
+  // REOPENED session showed one on every row that had a stored frame, because those come
+  // back from disk one at a time. Same conversation, two different answers to "what did
+  // this step look like?".
+  //
+  // The erasing was there to hold as little of the user's screen as possible, which was
+  // the right instinct under the old privacy wording and is not what the promise says any
+  // more: what matters is that the picture stays on their computer, not that it stops
+  // existing. These never leave the page — 160x90 at JPEG q40, a couple of KB each, so a
+  // seventy-turn session costs a few hundred KB of memory and nothing on disk.
   function attachThumb(entryId: number, thumbB64: string) {
-    const FADE_MS = 500;
-    // Mark existing visible thumbs as fading.
-    const toFade = history.filter(h => h.thumb && !h.thumbFading);
-    for (const e of toFade) e.thumbFading = true;
-    // After the animation, erase their data.
-    if (toFade.length > 0) {
-      setTimeout(() => {
-        for (const e of toFade) { e.thumb = undefined; e.thumbFading = false; }
-      }, FADE_MS);
-    }
-    // Set new thumb.
     const entry = history.find(h => h.id === entryId);
     if (entry) entry.thumb = thumbB64;
   }
@@ -4252,7 +4252,6 @@ See the LICENSE file in the root of this repository for complete details.
           {#if entry.thumb}
             <button
               class="h-thumb-btn"
-              class:h-thumb-fading={entry.thumbFading}
               onclick={() => openLightbox(entry)}
               title="Click to view full screenshot"
             >
@@ -5707,14 +5706,23 @@ See the LICENSE file in the root of this repository for complete details.
 
   /* Above the modal backdrop's z-index 100 so a right-click still reaches it,
      and above the titlebar's 200 for the same reason. */
+  /* Panel overlay z-order, one place so it can be read as an order:
+       997  coach marks (target hint, collapse hint)
+       998  picker backdrops        999  the pickers themselves
+       1000 .titlebar               — above the pickers so the window stays DRAGGABLE
+       1100 menu backdrop           1101 the right-click menu
+       2000 .lightbox-backdrop
+     The titlebar sits above the pickers and below the menu on purpose. Dragging the
+     panel while the recent-tasks list is open is a thing people do; clicking with a
+     context menu open means "dismiss the menu", and its backdrop answers that. */
   .panel-menu-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 300;
+    z-index: 1100;
   }
   .panel-menu {
     position: fixed;
-    z-index: 301;
+    z-index: 1101;
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--r-md);
@@ -5980,11 +5988,22 @@ See the LICENSE file in the root of this repository for complete details.
     cursor: default;
     user-select: none;
     outline: none;
-    /* Above .modal-backdrop (z-index 100) so the window stays draggable and the
-       titlebar controls (pin, collapse, close) stay clickable even with a modal
-       open. Opaque bg + z-index keeps it bright/live while the body dims. */
+    /* Above EVERY full-window overlay, so the window stays draggable and the titlebar
+       controls (pin, collapse, close) stay clickable whatever is open. Dragging is the
+       case that bites: `handleHeaderMousedown` never fires if something else is taking
+       the mousedown, and an overlay with `inset: 0` takes all of them.
+
+       The number has to clear the tallest of them, which is now the picker backdrops at
+       998 and the pickers themselves at 999 -- not the 200 that only cleared
+       .modal-backdrop (100). Reported 2026-09-18 against the recent-tasks list; the
+       target-window picker had it too and nobody had said so.
+
+       A picker tall enough to reach up here slides UNDER the titlebar, which is the same
+       thing a modal does and the right way round: the titlebar stays bright and live
+       while the body dims. Titlebar clicks deliberately do NOT dismiss an open picker --
+       moving the panel to see the list better is a reason to drag it, not to close it. */
     position: relative;
-    z-index: 200;
+    z-index: 1000;
     background: var(--surface-1);
   }
 
@@ -7032,7 +7051,6 @@ See the LICENSE file in the root of this repository for complete details.
     transition: opacity 0.5s ease-out;
   }
   .h-thumb-btn:hover .h-thumb { opacity: 1; }
-  .h-thumb-fading { opacity: 0; pointer-events: none; }
   .h-thumb {
     display: block;
     width: 80px;
