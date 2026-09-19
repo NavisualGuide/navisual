@@ -2589,3 +2589,83 @@ pub fn capture_desktop_region(rect: &Rect) -> Result<ImageBuffer<Rgba<u8>, Vec<u
     }
     Ok(canvas)
 }
+
+/// The Windows version, as a person would name it: `Windows 11 (build 26200)`.
+///
+/// The release name (24H2 and friends) is deliberately absent: it lives in the registry, not
+/// in the version struct, and the build number already separates every release the guidance
+/// could care about.
+///
+/// Read with **`RtlGetVersion`**, not `GetVersionExW`. The documented one lies: since Windows
+/// 8.1 it reports 6.2 unless the executable's manifest declares compatibility with each later
+/// release, so a shimmed answer would silently tell the AI this is Windows 8 forever.
+/// `RtlGetVersion` is the kernel's own accessor and is never shimmed.
+///
+/// **Major version 10 covers both Windows 10 and 11** — the build number is the only thing
+/// that separates them, at 22000. Getting this backwards is exactly the error worth avoiding,
+/// since the two have substantially different Settings UIs.
+#[cfg(windows)]
+pub fn os_version() -> Option<String> {
+    use windows::core::s;
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+
+    #[repr(C)]
+    struct OsVersionInfoW {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform_id: u32,
+        csd_version: [u16; 128],
+    }
+
+    unsafe {
+        let ntdll = GetModuleHandleA(s!("ntdll.dll")).ok()?;
+        let proc = GetProcAddress(ntdll, s!("RtlGetVersion"))?;
+        let rtl_get_version: extern "system" fn(*mut OsVersionInfoW) -> i32 =
+            std::mem::transmute(proc);
+
+        let mut info = OsVersionInfoW {
+            size: std::mem::size_of::<OsVersionInfoW>() as u32,
+            major: 0,
+            minor: 0,
+            build: 0,
+            platform_id: 0,
+            csd_version: [0; 128],
+        };
+        // STATUS_SUCCESS is 0; anything else leaves the struct untrustworthy.
+        if rtl_get_version(&mut info) != 0 {
+            return None;
+        }
+
+        let name = match (info.major, info.build) {
+            (10, b) if b >= 22000 => "Windows 11",
+            (10, _) => "Windows 10",
+            (6, _) => "Windows 8 or earlier",
+            _ => "Windows",
+        };
+        Some(format!("{name} (build {})", info.build))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn os_version() -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+mod os_version_tests {
+    /// Not a mock: this asserts the real machine's version parses and names the right release.
+    /// `GetVersionExW` would report 6.2 here, which is the whole reason RtlGetVersion is used.
+    #[test]
+    fn os_version_names_this_machine() {
+        let v = super::os_version().expect("readable on a Windows test host");
+        println!("os_version() = {v}");
+        assert!(v.starts_with("Windows "), "{v}");
+        assert!(v.contains("build "), "{v}");
+        assert!(
+            !v.contains("Windows 8 or earlier"),
+            "{v} -- that is the shimmed answer GetVersionExW gives; RtlGetVersion must not"
+        );
+    }
+}

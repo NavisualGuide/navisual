@@ -66,6 +66,19 @@ pub fn monitor_rect(index: usize) -> Option<Rect> {
 }
 
 /// Physical DPI scale (1.0 = 100 %, 2.0 = 200 %) of the monitor the `rect`'s centre sits on —
+/// The Windows version for the prompt, e.g. `Windows 11 (build 26200)`. See
+/// `win::os_version` for why it is read the way it is. Non-Windows → None.
+pub fn os_version() -> Option<String> {
+    #[cfg(windows)]
+    {
+        win::os_version()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// the template-matching DPI prior (see `win::monitor_scale_for_rect`). Non-Windows → 1.0.
 pub fn monitor_scale_for_rect(rect: &Rect) -> f32 {
     #[cfg(windows)]

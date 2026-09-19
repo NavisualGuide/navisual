@@ -299,6 +299,26 @@ pub fn elements_context_block(
 /// the prompt) is unaffected. Deliberately placed at the TAIL for the same reason the language
 /// directive is: a short goal near the top gets out-shouted by a full screenshot and a
 /// `[Screen Elements]` list in between.
+/// One line naming the OS, for the prompt.
+///
+/// **Why this is worth tokens:** Windows 10 and 11 ship substantially different Settings and
+/// Explorer UIs, and until now the model had to infer which one from pixels alone — the
+/// window title carries no version and `[Current Window Info]` sends only title and rect. When
+/// it infers wrong it does not fail visibly; it produces a confident, plausible path through a
+/// UI that is not on screen, which is the v0.7.25 failure mode and the dangerous one.
+///
+/// **The framing is copied deliberately** from the `[App State]` blocks: the screenshot stays
+/// authoritative for layout. Without that sentence a version line invites the model to trust a
+/// remembered layout over the pixels in front of it, which would make this worse than sending
+/// nothing.
+pub fn os_context(os: &str) -> String {
+    format!(
+        "
+[System] {os}. Authoritative for the OS version only; the screenshot remains          authoritative for layout and for anything not stated here. Do not assume a UI from          the version — use it to choose wording and to rule out steps that cannot exist on          this release.
+"
+    )
+}
+
 pub fn goal_anchor(task_description: &str) -> String {
     let t = task_description.trim();
     if t.is_empty() {

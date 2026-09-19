@@ -2611,6 +2611,24 @@ async fn arm_candidates_if_shown(
     });
 }
 
+/// The `[System]` line, resolved once. The OS cannot change under a running process, and this
+/// rides on every request -- so the Win32 call happens on the first one and never again.
+fn os_context_line() -> &'static str {
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| match capture::os_version() {
+        Some(os) => {
+            log::info!("[system] reported to AI: {os}");
+            crate::ai::prompts::os_context(&os)
+        }
+        // Unreadable is not worth a guess: saying nothing leaves the model where it was
+        // before this existed, while a wrong version is worse than none.
+        None => {
+            log::warn!("[system] OS version unreadable; the AI gets no [System] line");
+            String::new()
+        }
+    })
+}
+
 /// L1 app-state block for the prompt, bounded so a wedged script channel can never
 /// stall a capture (the channel's own connect/read timeouts are ~200/700 ms; this is
 /// the outer safety net, mirroring `enumerate_context_snapshot_bounded`'s contract).
@@ -4039,6 +4057,7 @@ async fn guide(
     if let (Some(els), Some(rect)) = (context_elements.as_deref(), capture_rect_opt) {
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
+    window_context.push_str(os_context_line());
     // L1 app state from a script channel (Blender bridge today) — facts the screenshot
     // can't convey. Same capture-time atomicity as [Screen Elements]; absent when no
     // channel applies.
@@ -5365,6 +5384,7 @@ async fn send_correction(
     if let (Some(els), Some(rect)) = (context_elements.as_deref(), new_capture_rect) {
         window_context.push_str(&ai::prompts::elements_context_block(els, rect));
     }
+    window_context.push_str(os_context_line());
     // L1 app state — same as guide()'s capture path.
     if let Some(block) = app_state_snapshot(new_hwnd) {
         window_context.push_str(&block);
