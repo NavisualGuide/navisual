@@ -6,6 +6,7 @@
   // is simply wrong for them (audit F6).
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { billing } from "./lib/billing.svelte";
+  import PromoOffer from "./PromoOffer.svelte";
 
   let {
     open = $bindable(false),
@@ -70,6 +71,10 @@
           </p>
           <button class="btn-primary btn-full" onclick={onRefreshBalance}>Refresh balance</button>
         {:else}
+          <!-- The one surface a signed-out user cannot avoid: they are here because the
+               free requests ran out, which is exactly the moment the offer answers. Shown
+               ABOVE the top-up copy so "free coins" precedes "buy coins". -->
+          <div style="text-align: left;"><PromoOffer /></div>
           <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 16px;">
             Top up with coins to continue on the Navisual managed relay.
           </p>

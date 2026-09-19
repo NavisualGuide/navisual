@@ -20,6 +20,10 @@ export interface BalanceInfo {
   tier: string;
   free_remaining: number;
   coin_balance_microdollars: number;
+  /** Coins the signup promo just granted; non-zero on the one response that granted. */
+  promo_coins_granted?: number;
+  /** The live signup offer, or null when no campaign is running. */
+  promo_offer?: { coins: number; ends_at: string | null } | null;
 }
 
 /** 1 coin = $0.005 = 5,000 µ$ — fixed forever (S.2 coin model). */
@@ -37,6 +41,21 @@ class Billing {
    * live-reported bug). Free-remaining is displayed separately regardless.
    */
   tier = $state<"free" | "paid">("free");
+  /**
+   * The live signup offer, as the relay reports it; null when none is running.
+   *
+   * Never hardcoded here. `grant_coins` is tunable with an UPDATE so the promotion can
+   * be retuned or closed without a release, and a number baked into the UI would start
+   * lying the moment it was -- in front of exactly the people being asked to sign up.
+   */
+  promoOffer = $state<{ coins: number; ends_at: string | null } | null>(null);
+  /**
+   * Coins a promo grant just added, for a one-time confirmation. The relay reports this
+   * on the single response that granted, so it is latched here rather than mirrored:
+   * the next balance refresh reports 0 and must not erase a message the user has not
+   * read. Cleared by `clearPromoGranted()` once shown.
+   */
+  promoJustGranted = $state(0);
 
   /** Whole coins for display; null while the balance is unknown. */
   readonly coins = $derived(
@@ -66,6 +85,18 @@ class Billing {
     this.freeRemaining = bal.free_remaining;
     this.coinBalanceMicro = bal.coin_balance_microdollars;
     this.tier = bal.tier === "paid" ? "paid" : "free";
+    // Offer is replaced every time (it can be retuned or closed server-side); the GRANT
+    // is latched, because it is reported once and losing it loses the only moment the
+    // user is told the coins arrived.
+    this.promoOffer = bal.promo_offer ?? null;
+    if ((bal.promo_coins_granted ?? 0) > 0) {
+      this.promoJustGranted = bal.promo_coins_granted!;
+    }
+  }
+
+  /** The confirmation has been shown; stop showing it. */
+  clearPromoGranted() {
+    this.promoJustGranted = 0;
   }
 
   /** Relay per-request header X-Free-Remaining (backend `balance_update` event). */

@@ -5,6 +5,7 @@
   // it manipulates the panel window and Settings visibility.
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { billing } from "./lib/billing.svelte";
+  import PromoOffer from "./PromoOffer.svelte";
 
   let {
     provider,
@@ -22,6 +23,10 @@
   let effectiveAmount = $derived(buyAmount === "custom" ? customAmount : buyAmount);
   let amountValid = $derived(effectiveAmount >= 5 && effectiveAmount <= 500);
 </script>
+
+<!-- First thing in the tab: someone reading about buying coins should know they can
+     get some for free first. -->
+<PromoOffer />
 
 {#if provider !== "managed"}
   <!-- Promoted from the last grey line on the page to the first thing in the

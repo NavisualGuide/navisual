@@ -27,6 +27,28 @@ pub struct BalanceResponse {
     pub tier: String,
     pub free_remaining: u32,
     pub coin_balance_microdollars: u64,
+    /// Coins the signup promotion just granted, non-zero on the ONE response that
+    /// granted them. `#[serde(default)]` because a relay deployed before the promotion
+    /// does not send the field, and an app update can reach a user before a relay
+    /// deploy does -- the older pairing must degrade to "no promo", not to a parse
+    /// error that costs them their balance.
+    #[serde(default)]
+    pub promo_coins_granted: u32,
+    /// The offer to advertise to someone who has not signed up, or `None` when no
+    /// campaign is live. Deliberately server-supplied: the amount is tunable with a
+    /// single UPDATE, so a number compiled into the app would start lying the first
+    /// time it changed.
+    #[serde(default)]
+    pub promo_offer: Option<PromoOffer>,
+}
+
+/// A live signup promotion, exactly as the relay reports it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PromoOffer {
+    pub coins: u32,
+    /// RFC3339, or `None` for an open-ended campaign.
+    #[serde(default)]
+    pub ends_at: Option<String>,
 }
 
 pub async fn sign_in_anonymously(supabase_url: &str, anon_key: &str) -> Result<SupabaseSession> {

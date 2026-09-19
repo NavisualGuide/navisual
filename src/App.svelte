@@ -2220,9 +2220,26 @@ See the LICENSE file in the root of this repository for complete details.
   // Always clears the pending flags — by the time we refresh, the checkout/OAuth
   // round-trip is over (whether the user paid or cancelled), so the UI shouldn't
   // stay stuck on "Checkout open in browser…".
+  // Said once, in the conversation, because the grant lands on a balance fetch the user
+  // did not ask for and might never look at. Called from every place a balance arrives
+  // rather than from an $effect: the store latches the number precisely so nothing races
+  // it, and a row appended by a reactive side effect is harder to reason about than one
+  // appended where the data landed.
+  async function announcePromoGrant() {
+    const coins = billing.promoJustGranted;
+    if (coins <= 0) return;
+    billing.clearPromoGranted();
+    await addToHistory(
+      "system",
+      `\u{1F381} ${coins.toLocaleString()} coins added to your account \u2014 thanks for signing up. ` +
+        `They work on the faster quality tiers; Navisual stays free either way.`,
+    );
+  }
+
   async function refreshBalance() {
     if (await billing.refresh()) {
       if (billing.tier === "paid") showTrialExhausted = false;
+      await announcePromoGrant();
     }
     // These two are cleared by things arriving from OUTSIDE (an oauth_complete
     // event, a return from the browser), so they need this defensive reset.
@@ -3473,6 +3490,7 @@ See the LICENSE file in the root of this repository for complete details.
       // Cold-start balance fetch — invokeReady retries while Rust setup() is
       // still registering state on a fresh install.
       await billing.refresh(invokeReady);
+      await announcePromoGrant();
     }
 
     listen<number>("balance_update", (event) => {

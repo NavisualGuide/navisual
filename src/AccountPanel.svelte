@@ -8,6 +8,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { account } from "./lib/account.svelte";
   import { billing } from "./lib/billing.svelte";
+  import PromoOffer from "./PromoOffer.svelte";
   import BillingPanel from "./BillingPanel.svelte";
 
   let {
@@ -301,6 +302,10 @@
   {/if}
 
 {:else if account.view === "signin"}
+  <!-- Above the form on purpose: it is the reason to fill the form in. PromoOffer
+       renders nothing when no campaign is live or the user is already signed in, so
+       there is no condition to keep in sync here. -->
+  <PromoOffer />
   <p class="setting-hint">Sign in to keep your coins and purchases across devices.</p>
   <div class="setting-group">
     <label class="setting-label" for="acct-email">Email</label>
@@ -334,6 +339,7 @@
   </button>
 
 {:else if account.view === "signup"}
+  <PromoOffer />
   <p class="setting-hint">Create an account — your current free requests and any coins carry over.</p>
   <div class="setting-group">
     <label class="setting-label" for="acct-email-up">Email</label>
