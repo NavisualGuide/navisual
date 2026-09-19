@@ -168,18 +168,6 @@ pub struct Config {
     /// which is the whole unmasked monitor.
     pub session_screenshots: bool,
 
-    /// Include the *text* of the paragraph the cursor is in, in the `[App State — Word]`
-    /// block. Default on — it is what lets the AI say "you're in the Outlook heading"
-    /// rather than "you're on line 1".
-    ///
-    /// Separated from the rest of the block because it is the only field that transmits
-    /// document **content** rather than **position**. Page/section/line/style are metadata
-    /// the AI cannot get any other way; the paragraph text is prose the user may not want
-    /// leaving the machine in structured, greppable form — the screenshot already carries
-    /// it, but as pixels, not as a loggable string. Turning this off keeps every positional
-    /// field, so the feature still works; it just stops quoting the document.
-    pub word_state_paragraph_text: bool,
-
     /// Gemini reasoning budget, in tokens. `None` (default) omits `thinkingConfig` so the
     /// provider applies its own dynamic policy — measured at 447 thinking tokens against
     /// 156 tokens of visible output. `Some(0)` disables thinking (Flash only); `Some(n)`
@@ -246,7 +234,6 @@ impl Default for Config {
             training_capture_enabled: false,
             session_export_enabled: false,
             session_screenshots: false,
-            word_state_paragraph_text: true,
             gemini_thinking_budget: None,
         }
     }
@@ -507,9 +494,6 @@ impl Config {
         // Defaults ON, so this one reads as an opt-OUT (unlike the toggles above).
         if let Ok(v) = env::var("GEMINI_THINKING_BUDGET") {
             config.gemini_thinking_budget = v.trim().parse::<i32>().ok();
-        }
-        if let Ok(v) = env::var("WORD_STATE_PARAGRAPH_TEXT") {
-            config.word_state_paragraph_text = !(v == "false" || v == "0");
         }
 
         // BYOK keys stored in the Windows Credential Manager are referenced from

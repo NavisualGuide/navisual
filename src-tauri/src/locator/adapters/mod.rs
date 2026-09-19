@@ -40,7 +40,7 @@ pub(crate) use powerpoint::convert_rect_to_pixels as ppt_points_to_pixels;
 /// (script-adapters-plan.md §2: state grounding, consumed by the AI — distinct from the
 /// L2 geometry the adapters feed the locator). Snapshotted at AI-capture time alongside
 /// the screenshot. `None` when no channel applies — the prompt is then unchanged.
-pub fn app_state_block(hwnd: Option<usize>, word_paragraph_text: bool) -> Option<String> {
+pub fn app_state_block(hwnd: Option<usize>) -> Option<String> {
     #[cfg(windows)]
     {
         let h = hwnd.filter(|h| *h != 0)?;
@@ -55,13 +55,13 @@ pub fn app_state_block(hwnd: Option<usize>, word_paragraph_text: bool) -> Option
         // same COM instance the Word adapter already uses. Gated on the Word window exactly
         // like `WordAdapter::matches`.
         if window_class_lower(h) == "opusapp" || window_exe_stem_lower(h) == "winword" {
-            return word::app_state_block(h, word_paragraph_text);
+            return word::app_state_block(h);
         }
         blender::app_state_block(h)
     }
     #[cfg(not(windows))]
     {
-        let _ = (hwnd, word_paragraph_text);
+        let _ = hwnd;
         None
     }
 }
