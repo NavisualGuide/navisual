@@ -11,7 +11,7 @@ use crate::ai::gemini::{build_messages as build_gemini, GeminiClient};
 use crate::ai::managed::{build_messages as build_managed, ManagedClient};
 use crate::ai::ollama::{build_messages as build_ollama, OllamaClient};
 use crate::ai::session::SessionManager;
-use crate::ai::types::NavigateStepResponse;
+use crate::ai::types::{NavigateStepResponse, Role};
 
 /// How many user+assistant exchanges of raw history to send. Deliberately expressed in
 /// exchanges rather than turns: the old constant was `10` turns, which is five exchanges, and
@@ -42,6 +42,12 @@ pub struct AiRouter {
     /// (input, output) token counts from the most recent guidance/correction call,
     /// surfaced to the debug Response-info drawer. (0, 0) before the first call.
     last_usage: (u64, u64),
+    /// The conversation actually handed to the provider on the last request, rendered.
+    ///
+    /// Recorded rather than re-derived: the payload audit must show what WAS sent, and a
+    /// second call to `get_conversation_for_api_exchanges` would be a re-derivation that can
+    /// drift from it (and, after a turn is added, demonstrably would).
+    last_conversation: String,
 }
 
 impl AiRouter {
@@ -58,6 +64,7 @@ impl AiRouter {
             client: None,
             managed_session_path,
             last_usage: (0, 0),
+            last_conversation: String::new(),
         };
         router.init_client();
         router
@@ -171,6 +178,13 @@ impl AiRouter {
     }
 
     /// (input, output) token counts from the most recent guidance/correction call.
+    /// The conversation sent on the last request, for the payload audit and the prompt log.
+    ///
+    /// Empty before the first request of a session, which is correct: turn 1 has no history.
+    pub fn get_last_conversation(&self) -> &str {
+        &self.last_conversation
+    }
+
     pub fn get_last_usage(&self) -> (u64, u64) {
         self.last_usage
     }
@@ -357,6 +371,24 @@ impl AiRouter {
         } else {
             Vec::new()
         };
+
+        // Kept so the request can be audited from outside. The conversation is the largest
+        // thing that leaves the machine after the screenshot, and until 2026-09-18 neither
+        // the debug payload dump nor prompt_log.jsonl carried a single turn of it -- so the
+        // window, the pinning and the replayed user actions were all unobservable, and a
+        // change to any of them could only be checked by reading the code that made it.
+        self.last_conversation = conversation
+            .iter()
+            .map(|m| {
+                let who = match m.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::System => "system",
+                };
+                format!("[{who}] {}", m.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let result = match &mut self.client {
             Some(ApiClient::Anthropic(c)) => {

@@ -4276,6 +4276,18 @@ async fn guide(
         }
     }
 
+    {
+        // Rule 1: a memory change that cannot be observed from outside is a memory change
+        // nobody can check. One line per request, naming the size of the window that was
+        // actually sent -- the full text is in the payload dump when debug captures are on.
+        let history = router.get_last_conversation();
+        let turns = if history.is_empty() { 0 } else { history.lines().count() };
+        let with_actions = history.matches("[What the user did:").count();
+        log::info!(
+            "[memory] sent {turns} turn(s) of history, {with_actions} carrying a user action"
+        );
+    }
+
     let (timing_ok, timing_steps) = match &resp {
         Ok(r) => (true, r.steps.len()),
         Err(_) => (false, 0),
@@ -5448,6 +5460,18 @@ async fn send_correction(
             .map(|v| v.to_string())
             .unwrap_or_else(|| "n/a".into())
     );
+    {
+        // Rule 1: a memory change that cannot be observed from outside is a memory change
+        // nobody can check. One line per request, naming the size of the window that was
+        // actually sent -- the full text is in the payload dump when debug captures are on.
+        let history = router.get_last_conversation();
+        let turns = if history.is_empty() { 0 } else { history.lines().count() };
+        let with_actions = history.matches("[What the user did:").count();
+        log::info!(
+            "[memory] sent {turns} turn(s) of history, {with_actions} carrying a user action"
+        );
+    }
+
     let (timing_ok, timing_steps) = match &resp {
         Ok(r) => (true, r.steps.len()),
         Err(_) => (false, 0),
