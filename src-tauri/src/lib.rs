@@ -7041,6 +7041,25 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
         .lock()
         .await
         .set_managed_billing_tier(&balance.tier);
+
+    // Rule 1, on a path where the two outcomes are indistinguishable from outside. A
+    // signed-in user on a machine that has already claimed sees nothing -- correctly --
+    // and a promotion that is silently broken also shows nothing. Live-reported on the
+    // first real test (2026-09-19): a second account signed in, no message appeared, and
+    // the only way to tell which had happened was to query the database.
+    //
+    // The decision itself is the relay's, so this reports what came back rather than why:
+    // the offer that was advertised, and the grant if there was one.
+    log::info!(
+        "[promo] balance: tier={} offer={} granted={}",
+        balance.tier,
+        balance
+            .promo_offer
+            .as_ref()
+            .map(|o| format!("{} coins", o.coins))
+            .unwrap_or_else(|| "none live".to_string()),
+        balance.promo_coins_granted,
+    );
     Ok(balance)
 }
 
