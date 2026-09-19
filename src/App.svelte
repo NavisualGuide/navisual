@@ -2611,8 +2611,13 @@ See the LICENSE file in the root of this repository for complete details.
       // prompts::CORRECTION_CONTEXT. Change it there and change it here.
       const NOTE_MARKER = "User note: ";
       const noteAt = t.role === "correction" ? t.content.indexOf(NOTE_MARKER) : -1;
-      const correctionText = noteAt >= 0
-        ? `Wrong \u2014 ${t.content.slice(noteAt + NOTE_MARKER.length).trim()}`
+      // Sessions stored before 2026-09-19 carry the whole composed prompt here, so the
+      // note is followed by [Current Window Info] / [Screen Elements] and everything else.
+      // Cut at the first context block: those all begin a line with `[`, and a note the
+      // user typed does not.
+      const rawNote = noteAt >= 0 ? t.content.slice(noteAt + NOTE_MARKER.length) : "";
+      const correctionText = rawNote.trim()
+        ? `Wrong \u2014 ${rawNote.split(/\n\[/)[0].trim()}`
         : "Wrong \u2014 re-analysing\u2026";
       // The instruction itself is deliberately NOT repeated on a completion row. It is what
       // we asked for, and it is already on screen as the step above; restating it made every

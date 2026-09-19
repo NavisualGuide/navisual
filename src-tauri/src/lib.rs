@@ -5613,7 +5613,18 @@ async fn send_correction(
         // the prompt changes -- but the panel can then tell a correction from something the
         // user typed. Without it, reopening rendered this turn's content, which is the
         // model's own instruction text, inside a user bubble as if they had written it.
-        session.add_turn("correction", user_text.to_string(), None);
+        // `user_text_owned`, NOT `user_text`. The latter is `final_user_text`: the whole
+        // composed prompt, with [Current Window Info], [App Guide], [Screen Elements] and
+        // the language anchor glued on. Storing that meant every correction turn carried a
+        // full element dump into the conversation window and replayed it to the model
+        // verbatim on every later request -- and rendered as a wall of machine text when
+        // the session was reopened, which is how it was spotted (2026-09-19, pre-release
+        // live check).
+        //
+        // `guide()` has always stored the user's own words (`task` / "Next"); this is the
+        // same rule, finally applied on this path. The context blocks describe the screen
+        // at the moment of THAT correction and are stale by the next turn anyway.
+        session.add_turn("correction", user_text_owned.clone(), None);
         // No `clicked` / `advanced_by`: a correction is the user saying the last step was
         // wrong, which is neither a click in the guided app nor something that advanced the
         // step. The frame is the part worth keeping.
