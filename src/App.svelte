@@ -5282,10 +5282,9 @@ See the LICENSE file in the root of this repository for complete details.
                 <span class="sensitivity-end">More</span>
               </div>
               <p class="setting-hint" style="margin-top:4px">
-                Sensitivity of screen-change detection — how much of the screen must change to
-                auto-advance. <strong>Less</strong> ignores small changes (typing, minor updates);
-                <strong>More</strong> reacts to smaller ones like a dialog opening. The default is a
-                good balance.
+                How much of the screen must change to auto-advance. <strong>Less</strong> ignores
+                typing and minor updates; <strong>More</strong> reacts to smaller changes like a
+                dialog opening.
               </p>
             </div>
             <div class="setting-group">
@@ -5295,11 +5294,9 @@ See the LICENSE file in the root of this repository for complete details.
                 <span>Keep each step's screenshot with the saved session</span>
               </label>
               <p class="setting-hint" style="margin-top:4px">
-                Off by default, and it is the only setting here that would put a picture of your
-                screen on disk. What is kept is the same cropped, masked frame the AI was shown —
-                never the whole monitor — so reopening a session can show what that step looked
-                like. The most recent {sessionKeep} sessions are kept; older ones are deleted
-                with their screenshots.
+                The only setting here that puts a picture of your screen on disk. It keeps the
+                same cropped, masked frame the AI was shown — never the whole monitor. The most
+                recent {sessionKeep} sessions are kept; older ones go with their screenshots.
               </p>
             </div>
             <div class="setting-group">
@@ -5309,16 +5306,13 @@ See the LICENSE file in the root of this repository for complete details.
                 <span>Send the task I type along with step outcomes</span>
               </label>
               <p class="setting-hint" style="margin-top:4px">
-                On by default. Each time a step works or you report a wrong one, the task you
-                typed is sent with it, so we can see what people actually use Navisual for and
-                which kinds of task it handles badly. Screenshots are never sent or stored.
+                Sent with each step outcome, so we can see what people use Navisual for and
+                which tasks it handles badly. Screenshots are never sent.
                 <br><br>
-                <strong>If the AI runs on your own machine or network, this is never sent</strong>
-                — whatever this setting says. Navisual checks the address it is calling: a
-                model on localhost, or on a box at 192.168.x, answered without your words ever
-                leaving your network, so nothing is logged. Your own API key to a provider like
-                Anthropic or OpenAI already sends the request over the internet, so that one
-                does get logged unless you turn this off.
+                <strong>If the AI runs on your own machine or network — localhost, or a box at
+                192.168.x — nothing is sent, whatever this says.</strong> Your own API key to a
+                provider like Anthropic or OpenAI does send it, unless you turn this off.
+                <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy policy</button>
               </p>
             </div>
 
