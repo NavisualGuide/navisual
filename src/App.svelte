@@ -5312,9 +5312,13 @@ See the LICENSE file in the root of this repository for complete details.
                 On by default. Each time a step works or you report a wrong one, the task you
                 typed is sent with it, so we can see what people actually use Navisual for and
                 which kinds of task it handles badly. Screenshots are never sent or stored.
-                This applies to <strong>every</strong> provider, including Ollama and a custom
-                endpoint — if you chose a local model so that nothing leaves your machine, turn
-                this off.
+                <br><br>
+                <strong>If the AI runs on your own machine or network, this is never sent</strong>
+                — whatever this setting says. Navisual checks the address it is calling: a
+                model on localhost, or on a box at 192.168.x, answered without your words ever
+                leaving your network, so nothing is logged. Your own API key to a provider like
+                Anthropic or OpenAI already sends the request over the internet, so that one
+                does get logged unless you turn this off.
               </p>
             </div>
 

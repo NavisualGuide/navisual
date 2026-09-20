@@ -150,9 +150,9 @@ pub struct Config {
     /// while claiming not to log the request reads as a dodge, and being plain is
     /// better. Screenshots are still never stored.
     ///
-    /// It applies to EVERY provider, including Ollama and Custom. That is a
-    /// deliberate choice and the reason this toggle exists: a local-model user
-    /// who assumed nothing leaves the machine needs somewhere to say no.
+    /// It is further gated by WHERE the AI runs -- see `request_text_loggable`.
+    /// A request answered on the user's own machine or private network never
+    /// leaves it, so the row is not sent at all regardless of this flag.
     pub log_request_text: bool,
     /// Session export — the ✗/💾 "Save this session" flow (`session_export.rs`).
     ///
@@ -615,5 +615,206 @@ mod tests {
         );
         env::remove_var(KEY);
         assert!(env::var(KEY).is_err(), "removed var must read as absent");
+    }
+}
+
+/// Is this endpoint on the user's own machine or private network?
+///
+/// The distinction that matters for logging the typed request is **not** BYOK vs
+/// local -- it is whether the text already left the machine. A BYOK request to
+/// Anthropic crosses the internet to a third party, so a copy reaching our own
+/// database is not a new category. A request answered by Ollama on localhost, or
+/// by LM Studio on a LAN box, never left at all, and "I run it locally" carries a
+/// promise that shipping the prompt to Supabase would break.
+///
+/// Keyed on the configured URL rather than the provider NAME, per CLAUDE.md rule
+/// 16: hardcoding "ollama means local" is an identity assumption, and both
+/// `OLLAMA_BASE_URL` and `CUSTOM_BASE_URL` are user-settable. Point Custom at
+/// LM Studio and it is local; point Ollama at a rented GPU box and it is not.
+/// The mechanism adapts by measurement and needs no edit if a vendor changes.
+///
+/// **Fails closed.** Empty, unparseable or hostless returns `true` (treated as
+/// local, so nothing is logged). Losing a row is cheaper than breaking a promise.
+pub fn endpoint_is_local(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return true;
+    }
+    let parsed = match url::Url::parse(raw) {
+        Ok(u) => u,
+        Err(_) => return true,
+    };
+    match parsed.host() {
+        None => true,
+        Some(url::Host::Ipv4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            let seg = ip.segments();
+            // fc00::/7 unique-local, fe80::/10 link-local.
+            let ula = (seg[0] & 0xfe00) == 0xfc00;
+            let link_local = (seg[0] & 0xffc0) == 0xfe80;
+            ip.is_loopback() || ip.is_unspecified() || ula || link_local
+        }
+        Some(url::Host::Domain(d)) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            d == "localhost"
+                || d.ends_with(".localhost")
+                || d.ends_with(".local")
+                || d.ends_with(".internal")
+                || d.ends_with(".lan")
+                || d.ends_with(".intranet")
+                || d.ends_with(".home.arpa")
+        }
+    }
+}
+
+impl Config {
+    /// May the typed request be stored on a feedback row for the ACTIVE provider?
+    ///
+    /// Two gates, both of which must pass: the user has not opted out, and the AI
+    /// answering them is not running on their own machine or private network.
+    pub fn request_text_loggable(&self) -> bool {
+        if !self.log_request_text {
+            return false;
+        }
+        match self.api_provider.as_str() {
+            // The three endpoints a user can repoint. Checked by URL, not by name.
+            "ollama" => !endpoint_is_local(&self.ollama_base_url),
+            "custom" => !endpoint_is_local(&self.custom_base_url),
+            "qwen" => !endpoint_is_local(&self.qwen_base_url),
+            // managed, anthropic, gemini, openai, deepseek: fixed public vendor
+            // endpoints. The request has already crossed the internet.
+            _ => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod endpoint_locality_tests {
+    use super::*;
+
+    fn cfg(provider: &str) -> Config {
+        let mut c = Config {
+            api_provider: provider.to_string(),
+            ..Config::default()
+        };
+        c.log_request_text = true;
+        c
+    }
+
+    #[test]
+    fn loopback_and_localhost_are_local() {
+        for u in [
+            "http://localhost:11434",
+            "http://LOCALHOST:1234/v1",
+            "http://127.0.0.1:11434",
+            "http://127.1.2.3:8080",
+            "http://[::1]:11434/v1",
+            "http://0.0.0.0:8080",
+        ] {
+            assert!(endpoint_is_local(u), "{u} should be local");
+        }
+    }
+
+    #[test]
+    fn private_and_link_local_ranges_are_local() {
+        for u in [
+            "http://192.168.0.88:4408",
+            "http://10.0.0.5:11434",
+            "http://172.16.4.4:1234",
+            "http://172.31.255.1:1234",
+            "http://169.254.1.1:8080",
+            "http://[fd00::1]:11434",
+            "http://[fe80::1]:11434",
+        ] {
+            assert!(endpoint_is_local(u), "{u} should be local");
+        }
+    }
+
+    /// 172.32 is OUTSIDE the 172.16/12 private block -- the classic off-by-one
+    /// in hand-written range checks, which is why this uses a real parser.
+    #[test]
+    fn near_misses_on_the_private_ranges_are_remote() {
+        for u in [
+            "http://172.32.0.1:1234",
+            "http://11.0.0.1:1234",
+            "http://193.168.0.1:1234",
+        ] {
+            assert!(!endpoint_is_local(u), "{u} should be remote");
+        }
+    }
+
+    #[test]
+    fn private_suffixes_are_local() {
+        for u in [
+            "http://ollama.local:11434",
+            "http://box.lan:1234",
+            "http://llm.internal/v1",
+            "http://host.home.arpa:8080",
+            "http://SERVER.LOCAL:11434/",
+        ] {
+            assert!(endpoint_is_local(u), "{u} should be local");
+        }
+    }
+
+    #[test]
+    fn public_endpoints_are_remote() {
+        for u in [
+            "https://openrouter.ai/api/v1",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "https://api.openai.com/v1",
+            "https://my-company-llm.example.com/v1",
+        ] {
+            assert!(!endpoint_is_local(u), "{u} should be remote");
+        }
+    }
+
+    /// Fail closed: if we cannot tell, assume local and log nothing. Losing a
+    /// row is cheaper than breaking the promise.
+    #[test]
+    fn unparseable_or_empty_fails_closed_to_local() {
+        for u in ["", "   ", "not a url", "localhost:11434", "/v1/chat"] {
+            assert!(endpoint_is_local(u), "{u:?} should fail closed to local");
+        }
+    }
+
+    #[test]
+    fn a_hostname_that_merely_contains_local_is_not_local() {
+        assert!(!endpoint_is_local("https://localhost.evil.com/v1"));
+        assert!(!endpoint_is_local("https://mylocal.ai/v1"));
+    }
+
+    #[test]
+    fn remote_providers_may_log_and_default_ollama_may_not() {
+        for p in ["managed", "anthropic", "gemini", "openai", "deepseek"] {
+            assert!(cfg(p).request_text_loggable(), "{p} should log");
+        }
+        // Default OLLAMA_BASE_URL is http://localhost:11434.
+        assert!(!cfg("ollama").request_text_loggable());
+        // Default qwen base URL is a public vendor endpoint.
+        assert!(cfg("qwen").request_text_loggable());
+        // Custom ships empty -> unparseable -> fails closed.
+        assert!(!cfg("custom").request_text_loggable());
+    }
+
+    /// The point of keying on the URL rather than the provider name: both of
+    /// these flip, and neither needs a code change to do it.
+    #[test]
+    fn repointing_an_endpoint_flips_the_decision() {
+        let mut remote_ollama = cfg("ollama");
+        remote_ollama.ollama_base_url = "https://ollama.example.com".into();
+        assert!(remote_ollama.request_text_loggable());
+
+        let mut local_custom = cfg("custom");
+        local_custom.custom_base_url = "http://localhost:1234/v1".into();
+        assert!(!local_custom.request_text_loggable());
+    }
+
+    #[test]
+    fn opting_out_beats_a_remote_endpoint() {
+        let mut c = cfg("anthropic");
+        c.log_request_text = false;
+        assert!(!c.request_text_loggable());
     }
 }

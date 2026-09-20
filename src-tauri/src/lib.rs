@@ -7925,6 +7925,11 @@ async fn submit_feedback(
 ) -> Result<(), String> {
     // Cap and gate the typed request BEFORE anything writes it anywhere.
     //
+    // `request_text_loggable()` is two gates: the user has not opted out, AND the
+    // AI answering them is not running on their own machine or private network
+    // (Ollama on localhost, LM Studio on a LAN box). Keyed on the configured URL,
+    // not the provider name -- see the note on `endpoint_is_local`.
+    //
     // Both checks live here rather than in App.svelte because the UI is not a
     // security boundary -- every Tauri command is callable from the page, which
     // is the same reasoning that moved the change_password check server-side in
@@ -7932,7 +7937,7 @@ async fn submit_feedback(
     // command directly, still cannot send more than the user allowed.
     let (training_enabled, log_request_text) = {
         let r = state.ai_router.lock().await;
-        (r.config.training_capture_enabled, r.config.log_request_text)
+        (r.config.training_capture_enabled, r.config.request_text_loggable())
     };
     let mut payload = payload;
     payload.task_prompt = clamp_logged_request(payload.task_prompt.take(), log_request_text);

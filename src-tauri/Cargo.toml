@@ -30,6 +30,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt-multi-thread", "time"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
+# Already in the tree via reqwest; promoted to a direct dep so the "is this
+# endpoint on the user's own machine?" check uses a real parser rather than
+# hand-rolled string slicing. Getting that wrong means logging a local-model
+# user's text, so it is not a place for a clever substring.
+url = "2"
 dotenvy = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
