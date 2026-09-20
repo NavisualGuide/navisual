@@ -122,6 +122,7 @@ See the LICENSE file in the root of this repository for complete details.
     training_capture_enabled: boolean;
     session_export_enabled: boolean;
     session_screenshots: boolean;
+    log_request_text: boolean;
     task_suggestions: boolean;
     developer_mode: boolean;
   };
@@ -1016,6 +1017,7 @@ See the LICENSE file in the root of this repository for complete details.
     training_capture_enabled: false,
     session_export_enabled: false,
     session_screenshots: false,
+    log_request_text: true,
     task_suggestions: true,
     developer_mode: false,
   };
@@ -3014,6 +3016,10 @@ See the LICENSE file in the root of this repository for complete details.
           locate_role: locateResult?.role ?? null,
           locate_conf: locateResult?.confidence ?? null,
           app_window: sharedApp ? (friendlyName(sharedApp.exe_name) || sharedApp.app_name) : null,
+          // The task the user typed, kept across steps so a `worked` row fired on
+          // Next still carries the request that started it. Gated and capped in
+          // submit_feedback (Rust) -- sending it here is not the decision point.
+          task_prompt: lastRequestHint || null,
           session_id: sessionId || null,
           request_id: lastRequestId || null,
         },
@@ -5294,6 +5300,21 @@ See the LICENSE file in the root of this repository for complete details.
                 never the whole monitor — so reopening a session can show what that step looked
                 like. The most recent {sessionKeep} sessions are kept; older ones are deleted
                 with their screenshots.
+              </p>
+            </div>
+            <div class="setting-group">
+              <p class="setting-label">What you type</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.log_request_text} />
+                <span>Send the task I type along with step outcomes</span>
+              </label>
+              <p class="setting-hint" style="margin-top:4px">
+                On by default. Each time a step works or you report a wrong one, the task you
+                typed is sent with it, so we can see what people actually use Navisual for and
+                which kinds of task it handles badly. Screenshots are never sent or stored.
+                This applies to <strong>every</strong> provider, including Ollama and a custom
+                endpoint — if you chose a local model so that nothing leaves your machine, turn
+                this off.
               </p>
             </div>
 

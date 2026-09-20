@@ -2295,6 +2295,64 @@ mod pointer_mark_tests {
 }
 
 #[cfg(test)]
+mod logged_request_tests {
+    use super::*;
+
+    #[test]
+    fn opting_out_stores_nothing() {
+        assert_eq!(clamp_logged_request(Some("where is cell G2?".into()), false), None);
+    }
+
+    #[test]
+    fn opting_in_stores_the_request_verbatim() {
+        assert_eq!(
+            clamp_logged_request(Some("why the connected experiences unavailable?".into()), true),
+            Some("why the connected experiences unavailable?".to_string())
+        );
+    }
+
+    #[test]
+    fn blank_and_whitespace_only_store_nothing() {
+        assert_eq!(clamp_logged_request(None, true), None);
+        assert_eq!(clamp_logged_request(Some("".into()), true), None);
+        assert_eq!(clamp_logged_request(Some("   \n\t ".into()), true), None);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        assert_eq!(
+            clamp_logged_request(Some("  make pivot table  ".into()), true),
+            Some("make pivot table".to_string())
+        );
+    }
+
+    #[test]
+    fn a_pasted_wall_of_text_is_capped() {
+        let long = "a".repeat(MAX_LOGGED_REQUEST_CHARS + 500);
+        let got = clamp_logged_request(Some(long), true).unwrap();
+        assert_eq!(got.chars().count(), MAX_LOGGED_REQUEST_CHARS);
+    }
+
+    /// The cap counts characters, not bytes. Slicing a byte range would split a
+    /// multi-byte character and panic -- and real task text in prompt_log.jsonl
+    /// is full of Chinese, e.g. the Gemini/Claude Code setup questions.
+    #[test]
+    fn capping_multibyte_text_does_not_panic_and_counts_chars() {
+        let cn = "在 Claude Code 中配置并使用 Gemini API".repeat(40);
+        assert!(cn.chars().count() > MAX_LOGGED_REQUEST_CHARS);
+        let got = clamp_logged_request(Some(cn), true).unwrap();
+        assert_eq!(got.chars().count(), MAX_LOGGED_REQUEST_CHARS);
+    }
+
+    /// A request exactly at the cap is kept whole -- the boundary is inclusive.
+    #[test]
+    fn a_request_exactly_at_the_cap_is_untouched() {
+        let exact = "b".repeat(MAX_LOGGED_REQUEST_CHARS);
+        assert_eq!(clamp_logged_request(Some(exact.clone()), true), Some(exact));
+    }
+}
+
+#[cfg(test)]
 mod autopilot_change_tests {
     use super::*;
 
@@ -3189,6 +3247,11 @@ struct SettingsPayload {
     /// itself runs regardless, so enabling this mid-session finds it already full.
     #[serde(default)]
     session_export_enabled: bool,
+    /// Send the task you typed with each feedback row. Defaults ON (opt-OUT), and
+    /// applies to every provider including Ollama/Custom -- which is why the
+    /// toggle exists at all. Enforced in `submit_feedback`, not here.
+    #[serde(default = "default_true_setting")]
+    log_request_text: bool,
     /// Keep each step's frame beside its stored session (plan §4). User-facing, off by
     /// default, and applied from the call site rather than the config flag -- the same
     /// lesson v0.7.19 learned when a feature meant to be opt-in charged everyone.
@@ -6799,6 +6862,7 @@ fn payload_from_config(c: &Config) -> SettingsPayload {
         training_capture_enabled: c.training_capture_enabled,
         task_suggestions: c.task_suggestions,
         session_export_enabled: c.session_export_enabled,
+        log_request_text: c.log_request_text,
         session_screenshots: c.session_screenshots,
         developer_mode: developer_mode_enabled(),
     }
@@ -6918,6 +6982,10 @@ async fn save_settings(
         (
             "SESSION_SCREENSHOTS".into(),
             payload.session_screenshots.to_string(),
+        ),
+        (
+            "LOG_REQUEST_TEXT".into(),
+            payload.log_request_text.to_string(),
         ),
     ];
 
@@ -7787,6 +7855,34 @@ async fn get_session_status(state: State<'_, AppState>) -> Result<SessionStatus,
     })
 }
 
+/// Apply the opt-out and the length cap to a typed request.
+///
+/// Split out of `submit_feedback` so it can be tested: this is the whole of what
+/// the privacy policy promises about `task_prompt`, and "gated by construction
+/// and not verified" has been wrong every time it was said on this project.
+/// Returns `None` whenever nothing should be stored.
+fn clamp_logged_request(text: Option<String>, enabled: bool) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let t = text?;
+    let trimmed = t.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Count CHARS, not bytes: truncating a byte range would split a multi-byte
+    // character and panic, and the real logs are full of Chinese task text.
+    if trimmed.chars().count() > MAX_LOGGED_REQUEST_CHARS {
+        Some(trimmed.chars().take(MAX_LOGGED_REQUEST_CHARS).collect())
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Longest typed request stored on a feedback row. A task is a sentence; this is
+/// generous on purpose, so the cap only ever catches a pasted wall of text.
+const MAX_LOGGED_REQUEST_CHARS: usize = 500;
+
 /// One test-user feedback row: a "worked" success ping (sent on → Next) or a
 /// categorized "wrong" report. Mirrors the Supabase `feedback` table columns.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -7796,6 +7892,9 @@ struct FeedbackPayload {
     app_version: Option<String>,
     provider: Option<String>,
     model: Option<String>,
+    /// The task the user typed. Filled since 2026-09-19; before that the field
+    /// existed and was deliberately always null, which the privacy policy
+    /// promised. Gated by `log_request_text` and capped in `submit_feedback`.
     task_prompt: Option<String>,
     instruction: Option<String>,
     target_text: Option<String>,
@@ -7824,12 +7923,21 @@ async fn submit_feedback(
     state: State<'_, AppState>,
     payload: FeedbackPayload,
 ) -> Result<(), String> {
-    let training_enabled = state
-        .ai_router
-        .lock()
-        .await
-        .config
-        .training_capture_enabled;
+    // Cap and gate the typed request BEFORE anything writes it anywhere.
+    //
+    // Both checks live here rather than in App.svelte because the UI is not a
+    // security boundary -- every Tauri command is callable from the page, which
+    // is the same reasoning that moved the change_password check server-side in
+    // v0.7.26. A frontend that forgets the toggle, or a page that calls this
+    // command directly, still cannot send more than the user allowed.
+    let (training_enabled, log_request_text) = {
+        let r = state.ai_router.lock().await;
+        (r.config.training_capture_enabled, r.config.log_request_text)
+    };
+    let mut payload = payload;
+    payload.task_prompt = clamp_logged_request(payload.task_prompt.take(), log_request_text);
+    let payload = payload;
+
     if training_enabled {
         if let Ok(dir) = app.path().app_local_data_dir() {
             let mut local = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);

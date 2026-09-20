@@ -141,6 +141,19 @@ pub struct Config {
     /// The training/ dir is exempt from the 7-day debug cleanup — it exists only when
     /// this is deliberately on, and its whole point is accumulation.
     pub training_capture_enabled: bool,
+    /// Send the task the user typed with each feedback row (the `task_prompt`
+    /// column). Defaults ON, so this reads as an opt-OUT.
+    ///
+    /// Until 2026-09-19 the field existed and was deliberately never filled, and
+    /// the privacy policy promised exactly that. The promise was removed rather
+    /// than worked around: the founder's call was that logging a *derived* intent
+    /// while claiming not to log the request reads as a dodge, and being plain is
+    /// better. Screenshots are still never stored.
+    ///
+    /// It applies to EVERY provider, including Ollama and Custom. That is a
+    /// deliberate choice and the reason this toggle exists: a local-model user
+    /// who assumed nothing leaves the machine needs somewhere to say no.
+    pub log_request_text: bool,
     /// Session export — the ✗/💾 "Save this session" flow (`session_export.rs`).
     ///
     /// Developer-gated for now at the founder's request: they are the only user of
@@ -232,6 +245,7 @@ impl Default for Config {
             debug_log_files_enabled: false,
             debug_screenshot_enabled: false,
             training_capture_enabled: false,
+            log_request_text: true,
             session_export_enabled: false,
             session_screenshots: false,
             gemini_thinking_budget: None,
@@ -490,6 +504,10 @@ impl Config {
 
         if let Ok(v) = env::var("TRAINING_CAPTURE_ENABLED") {
             config.training_capture_enabled = v == "true" || v == "1";
+        }
+        // Defaults ON, so this one reads as an opt-OUT.
+        if let Ok(v) = env::var("LOG_REQUEST_TEXT") {
+            config.log_request_text = v == "true" || v == "1";
         }
         // Defaults ON, so this one reads as an opt-OUT (unlike the toggles above).
         if let Ok(v) = env::var("GEMINI_THINKING_BUDGET") {
