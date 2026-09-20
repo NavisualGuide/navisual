@@ -187,6 +187,27 @@ pub struct Config {
     /// caps it. Exists to measure the latency/quality trade before deciding whether the
     /// Speed/Regular/Smart tiers should drive it.
     pub gemini_thinking_budget: Option<i32>,
+
+    /// How hard the model should think: `none` | `minimal` | `low` | `medium` | `high` |
+    /// `xhigh` | `max`. `None` (default) leaves the provider's own default in place.
+    ///
+    /// **This is the control for Gemini 3.x; `gemini_thinking_budget` above is the 2.5-era
+    /// one.** A 3.x model takes `thinkingConfig.thinkingLevel` and named levels, not a token
+    /// count, so the budget key cannot move reasoning on the models this app actually ships
+    /// with -- which is why the 45%-faster measurement in SDD 2.41 does not transfer as-is.
+    ///
+    /// **One key for every provider**, because they finally share a vocabulary: these are
+    /// OpenAI's `reasoning_effort` words, and Google's own compatibility layer maps them
+    /// one-to-one onto Gemini 3.x's `thinkingLevel`. A per-provider key would have been two
+    /// names for one idea, and only one provider is active at a time anyway.
+    ///
+    /// Providers differ in what they accept and each client clamps to its own range:
+    /// OpenAI takes all seven, Gemini 3.x takes `minimal`..`high` and **cannot turn
+    /// reasoning off at all** (`minimal` is the floor on Flash-Lite, `low` on the rest).
+    ///
+    /// BYOK only. The managed tiers do not read this -- wiring Speed/Regular/Smart to it is
+    /// the open proposal this key exists to let us measure first.
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for Config {
@@ -249,6 +270,7 @@ impl Default for Config {
             session_export_enabled: false,
             session_screenshots: false,
             gemini_thinking_budget: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -512,6 +534,20 @@ impl Config {
         // Defaults ON, so this one reads as an opt-OUT (unlike the toggles above).
         if let Ok(v) = env::var("GEMINI_THINKING_BUDGET") {
             config.gemini_thinking_budget = v.trim().parse::<i32>().ok();
+        }
+        if let Ok(v) = env::var("REASONING_EFFORT") {
+            let v = v.trim().to_ascii_lowercase();
+            // Validated here rather than passed through. An unknown value is a 400 from the
+            // provider at request time -- the worst place to find a typo, because it fails
+            // every request until someone reads a log. Per-MODEL support is deliberately not
+            // checked: that would be a model table, and model tables go stale (rule 16).
+            const LEVELS: [&str; 7] =
+                ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+            if LEVELS.contains(&v.as_str()) {
+                config.reasoning_effort = Some(v);
+            } else if !v.is_empty() {
+                log::warn!("[config] REASONING_EFFORT={v:?} is not one of {LEVELS:?}; ignored");
+            }
         }
 
         // BYOK keys stored in the Windows Credential Manager are referenced from

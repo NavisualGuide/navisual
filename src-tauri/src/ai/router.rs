@@ -251,6 +251,7 @@ impl AiRouter {
                         self.config.gemini_model.clone(),
                         self.config.api_timeout_sec,
                         self.config.gemini_thinking_budget,
+                        self.config.reasoning_effort.clone(),
                     ) {
                         Ok(client) => self.client = Some(ApiClient::Gemini(client)),
                         Err(e) => log::error!("GeminiClient init failed: {e}"),
@@ -276,6 +277,7 @@ impl AiRouter {
                         self.config.api_timeout_sec,
                         None,
                         Some("DeepSeek".to_string()),
+                        self.config.reasoning_effort.clone(),
                     ) {
                         Ok(client) => self.client = Some(ApiClient::DeepSeek(client)),
                         Err(e) => log::error!("DeepSeekClient init failed: {e}"),
@@ -290,6 +292,7 @@ impl AiRouter {
                         self.config.api_timeout_sec,
                         Some("https://api.openai.com/v1/chat/completions".to_string()),
                         Some("OpenAI".to_string()),
+                        self.config.reasoning_effort.clone(),
                     ) {
                         Ok(client) => self.client = Some(ApiClient::OpenAI(client)),
                         Err(e) => log::error!("OpenAI client init failed: {e}"),
@@ -308,6 +311,7 @@ impl AiRouter {
                         self.config.api_timeout_sec,
                         Some(chat_url),
                         Some("Qwen".to_string()),
+                        self.config.reasoning_effort.clone(),
                     ) {
                         Ok(client) => self.client = Some(ApiClient::Qwen(client)),
                         Err(e) => log::error!("Qwen client init failed: {e}"),
@@ -329,6 +333,7 @@ impl AiRouter {
                     self.config.api_timeout_sec,
                     Some(chat_url),
                     Some("Custom".to_string()),
+                    self.config.reasoning_effort.clone(),
                 ) {
                     Ok(client) => self.client = Some(ApiClient::Custom(client)),
                     Err(e) => log::error!("Custom client init failed: {e}"),

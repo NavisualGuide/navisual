@@ -13,8 +13,12 @@ pub struct GeminiClient {
     api_key: String,
     pub model: String,
     /// `None` = omit thinkingConfig entirely (provider default: dynamic).
-    /// `Some(0)` = thinking off. `Some(n)` = cap at ~n tokens. See the payload site.
+    /// `Some(0)` = thinking off. `Some(n)` = cap at ~n tokens. **Gemini 2.5-era only.**
     thinking_budget: Option<i32>,
+    /// Shared `reasoning_effort` word, clamped to what Gemini accepts. Takes precedence
+    /// over `thinking_budget`: a 3.x model ignores the budget, and every model this app
+    /// ships with is 3.x.
+    thinking_level: Option<String>,
 }
 
 impl GeminiClient {
@@ -23,6 +27,7 @@ impl GeminiClient {
         model: String,
         timeout_sec: u64,
         thinking_budget: Option<i32>,
+        thinking_level: Option<String>,
     ) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(
@@ -40,6 +45,7 @@ impl GeminiClient {
             api_key,
             model,
             thinking_budget,
+            thinking_level,
         })
     }
 
@@ -142,7 +148,24 @@ impl GeminiClient {
         // where the budget earns its latency. The right home for this is the existing
         // Speed/Regular/Smart dial rather than a global switch — this field exists so the
         // trade can be measured before it is wired to a tier.
-        if let Some(budget) = self.thinking_budget {
+        // Level first: Gemini 3.x takes `thinkingLevel` and ignores `thinkingBudget`, so on
+        // every model this app ships with the budget is the dead branch. It is kept for a
+        // BYOK user pointing at an older 2.5 model, where the reverse is true.
+        //
+        // Clamped to Gemini's range rather than passed through, because the shared key also
+        // serves OpenAI, which has three levels Gemini does not. `none` becomes `minimal`:
+        // Gemini 3.x cannot turn reasoning off, so honouring it literally would 400 every
+        // request for someone whose only mistake was using a word another provider accepts.
+        let level = self.thinking_level.as_deref().map(|l| match l {
+            "none" | "minimal" => "minimal",
+            "xhigh" | "max" => "high",
+            other => other,
+        });
+        if let Some(level) = level {
+            payload["generationConfig"] = json!({
+                "thinkingConfig": { "thinkingLevel": level }
+            });
+        } else if let Some(budget) = self.thinking_budget {
             payload["generationConfig"] = json!({
                 "thinkingConfig": { "thinkingBudget": budget }
             });

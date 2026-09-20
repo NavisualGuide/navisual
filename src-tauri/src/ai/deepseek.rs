@@ -54,6 +54,10 @@ pub struct DeepSeekClient {
     pub model: String,
     pub base_url: String,
     name: String,
+    /// Shared `reasoning_effort` word. Only reaches the wire on the OpenAI `/v1/responses`
+    /// path -- every other model on this client uses prompted JSON, where there is no
+    /// reasoning parameter to set.
+    reasoning_effort: Option<String>,
 }
 
 impl DeepSeekClient {
@@ -63,6 +67,7 @@ impl DeepSeekClient {
         timeout_sec: u64,
         base_url: Option<String>,
         name: Option<String>,
+        reasoning_effort: Option<String>,
     ) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(
@@ -82,6 +87,7 @@ impl DeepSeekClient {
             model,
             base_url,
             name,
+            reasoning_effort,
         })
     }
 
@@ -151,7 +157,7 @@ impl DeepSeekClient {
     /// tool-calling (`tools`+`tool_choice`, flattened per this endpoint's shape —
     /// no nested `function` wrapper, unlike Chat Completions) instead of the
     /// prompted-JSON approach every other BYOK model on this client uses, so the
-    /// model gets to reason (no `reasoning_effort` sent — provider default)
+    /// model gets to reason (`reasoning_effort` when set, else the provider default)
     /// without the function-tools/reasoning_effort conflict Chat Completions
     /// raises for the gpt-5.6 family specifically. Streamed — see
     /// `stream_once_responses_api` for the event-accumulation logic. See
@@ -172,7 +178,7 @@ impl DeepSeekClient {
             "parameters": tool["function"]["parameters"],
         });
 
-        let payload = json!({
+        let mut payload = json!({
             "model": effective_model,
             "instructions": instructions,
             "input": input,
@@ -180,6 +186,14 @@ impl DeepSeekClient {
             "tool_choice": {"type": "function", "name": "navigate_step"},
             "stream": true,
         });
+        // Passed through unclamped: the Responses API accepts all seven words, and this is
+        // the endpoint on which reasoning and forced function tools can coexist at all --
+        // /v1/chat/completions rejects the combination outright, which is why every OpenAI
+        // BYOK model moved here on 2026-08-19. Omitted when unset, leaving OpenAI's own
+        // default (`medium` on gpt-5.6).
+        if let Some(effort) = self.reasoning_effort.as_deref() {
+            payload["reasoning"] = json!({ "effort": effort });
+        }
 
         self.stream_once_responses_api(&payload, on_chunk).await
     }
