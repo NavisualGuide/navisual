@@ -83,6 +83,8 @@ See the LICENSE file in the root of this repository for complete details.
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
     api_provider: string;
+    /** "" = leave the provider's own default; else none|minimal|low|medium|high|xhigh|max. */
+    reasoning_effort: string;
     anthropic_api_key: string;
     anthropic_model: string;
     anthropic_fast_model: string;
@@ -997,6 +999,9 @@ See the LICENSE file in the root of this repository for complete details.
   // Settings form state
   const SETTINGS_DEFAULTS: SettingsPayload = {
     api_provider: "managed",
+    // "" = the provider's own default. These are only a first paint anyway -- the real
+    // values arrive from get_default_settings, which reads Config::default().
+    reasoning_effort: "",
     anthropic_api_key: "", anthropic_model: "claude-sonnet-4-6", anthropic_fast_model: "claude-haiku-4-5-20251001",
     gemini_api_key: "", gemini_model: "gemini-2.5-flash", gemini_fast_model: "gemini-2.5-flash-lite",
     ollama_base_url: "http://localhost:11434", ollama_model: "llama3.2-vision",
@@ -5229,6 +5234,33 @@ See the LICENSE file in the root of this repository for complete details.
                     {showKeyCustom ? "Hide" : "Show"}
                   </button>
                 </div>
+              </div>
+            {/if}
+
+            <!-- Shown for the two providers that actually honour it. DeepSeek, Qwen, Ollama
+                 and Custom go through the prompted-JSON path, where there is no reasoning
+                 parameter to set, and a control that silently does nothing is worse than no
+                 control. One block rather than a copy inside each branch -- two copies of a
+                 settings row is how the two come to disagree. -->
+            {#if settingsForm.api_provider === "openai" || settingsForm.api_provider === "gemini"}
+              <div class="setting-group">
+                <label class="setting-label" for="reasoning-effort">Thinking effort</label>
+                <select id="reasoning-effort" class="setting-input"
+                  bind:value={settingsForm.reasoning_effort}>
+                  <option value="">Provider default</option>
+                  <option value="minimal">Minimal — fastest</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High — slowest, most thorough</option>
+                </select>
+                <p class="setting-hint" style="margin-top:4px">
+                  How long the model may think before answering. More thinking costs more
+                  tokens and adds latency; whether it points more accurately is worth
+                  testing on your own tasks.
+                  {#if settingsForm.api_provider === "gemini"}
+                    Gemini cannot switch thinking off entirely — Minimal is its floor.
+                  {/if}
+                </p>
               </div>
             {/if}
 

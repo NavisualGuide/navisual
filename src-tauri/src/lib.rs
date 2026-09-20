@@ -3193,6 +3193,10 @@ fn default_autopilot_min_cells() -> u32 {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct SettingsPayload {
     api_provider: String,
+    /// `""` = leave the provider's own default alone. Otherwise one of
+    /// none|minimal|low|medium|high|xhigh|max -- see `Config::reasoning_effort`.
+    #[serde(default)]
+    reasoning_effort: String,
     anthropic_api_key: String,
     anthropic_model: String,
     anthropic_fast_model: String,
@@ -6821,12 +6825,16 @@ async fn reset_usage(state: State<'_, AppState>) -> Result<(), String> {
 /// claude-sonnet-4-6, gemini-2.5-flash, gpt-5.5 and qwen3.6-plus over the
 /// current defaults -- gemini-2.5-flash is not even in its own dropdown.
 fn payload_from_config(c: &Config) -> SettingsPayload {
+    // `None` travels as "" so the frontend has one falsy value to mean "provider default",
+    // rather than distinguishing null from empty in a <select>.
+    let reasoning_effort = c.reasoning_effort.clone().unwrap_or_default();
     SettingsPayload {
         api_provider: c.api_provider.clone(),
         anthropic_api_key: c.anthropic_api_key.clone().unwrap_or_default(),
         anthropic_model: c.anthropic_model.clone(),
         anthropic_fast_model: c.anthropic_fast_model.clone(),
         gemini_api_key: c.gemini_api_key.clone().unwrap_or_default(),
+        reasoning_effort,
         gemini_model: c.gemini_model.clone(),
         gemini_fast_model: c.gemini_fast_model.clone(),
         ollama_base_url: c.ollama_base_url.clone(),
@@ -6915,6 +6923,7 @@ async fn save_settings(
             "ANTHROPIC_FAST_MODEL".into(),
             payload.anthropic_fast_model.clone(),
         ),
+        ("REASONING_EFFORT".into(), payload.reasoning_effort.clone()),
         ("GEMINI_MODEL".into(), payload.gemini_model.clone()),
         (
             "GEMINI_FAST_MODEL".into(),
