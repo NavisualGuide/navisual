@@ -127,6 +127,20 @@ impl DeepSeekClient {
             "stream_options": { "include_usage": true },
         });
 
+        // Qwen is hybrid-thinking, and DashScope wants `enable_thinking` stated explicitly on
+        // reasoning-capable models. The shared effort word maps onto its boolean: `none` and
+        // `minimal` mean off, anything else means on. Unset leaves it absent, which is the
+        // provider's own default -- deliberately, because every Qwen number in
+        // model-comparison.md was measured with thinking FORCED off by the relay (which must
+        // do that: DashScope rejects tool_choice object while thinking is on), so whether
+        // Qwen's 0/8 grounding is partly self-inflicted is an open question this makes
+        // askable rather than answering by assumption.
+        if self.name == "Qwen" {
+            if let Some(effort) = self.reasoning_effort.as_deref() {
+                payload["enable_thinking"] = json!(!matches!(effort, "none" | "minimal"));
+            }
+        }
+
         // `response_format: json_object` improves reliability on the hosted
         // OpenAI-compat providers (DeepSeek / OpenAI / Qwen), but the Custom
         // provider points at arbitrary local servers whose support varies —
