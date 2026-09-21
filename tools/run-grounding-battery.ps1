@@ -17,6 +17,8 @@ public class EvWin32 {
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
     [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
 "@ -ErrorAction SilentlyContinue
@@ -31,6 +33,76 @@ function Click-At($x, $y) {
     Start-Sleep -Milliseconds 70
     [EvWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 300
+}
+
+# ---------------------------------------------------------------------------------
+# Preflight. Every one of these was a real wasted run, not a hypothetical.
+#
+# 2026-09-20: Excel sat MINIMIZED through a whole config. Every cell came back
+# NEEDS_INPUT -- the model cannot point at a spreadsheet that is not on screen, and
+# nothing in the pipeline said so. Ten configs of confident-looking garbage was the
+# failure mode. Then it was maximized onto the monitor the panel lives on, where
+# Navisual blanks its own panel out of every capture and punches a hole through the
+# columns under test.
+#
+# The blank-cells rule is older: the skill has always said hits may carry OCR-assist
+# and inflate the number if a target cell has content. It was a sentence in a doc,
+# which is not a check.
+#
+# Fails loudly and early. A battery that refuses to start is cheap; one that produces
+# plausible wrong numbers is not.
+function Assert-BatteryPreconditions($focusX, $focusY, $cells) {
+    $xl = Get-Process EXCEL -ErrorAction SilentlyContinue
+    if (-not $xl) { throw "PREFLIGHT: Excel is not running." }
+
+    $rect = $null
+    $cb = {
+        param($h, $l)
+        if ([EvWin32]::IsWindowVisible($h)) {
+            $sb = New-Object System.Text.StringBuilder 256
+            [EvWin32]::GetWindowText($h, $sb, 256) | Out-Null
+            if ($sb.ToString() -like "*- Excel") {
+                $r = New-Object EvWin32+RECT
+                if ([EvWin32]::GetWindowRect($h, [ref]$r)) { $script:__xlRect = $r }
+                return $false
+            }
+        }
+        return $true
+    }
+    $script:__xlRect = $null
+    [EvWin32]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+    $rect = $script:__xlRect
+    if (-not $rect) { throw "PREFLIGHT: no visible Excel window (minimized?)." }
+
+    # A minimized window is parked at -32000 by Windows.
+    if ($rect.L -le -30000 -or $rect.T -le -30000) {
+        throw "PREFLIGHT: Excel is minimized. Restore it before running."
+    }
+
+    # The focus click must land inside Excel, or it focuses the desktop and every
+    # capture is of whatever was foreground instead.
+    if ($focusX -lt $rect.L -or $focusX -gt $rect.R -or $focusY -lt $rect.T -or $focusY -gt $rect.B) {
+        throw ("PREFLIGHT: focus point ({0},{1}) is outside Excel ({2},{3})-({4},{5}). " -f
+               $focusX, $focusY, $rect.L, $rect.T, $rect.R, $rect.B) +
+              "Move Excel to the monitor FocusX points at, or pass -FocusX/-FocusY."
+    }
+
+    # Target cells must be empty, or a hit may be OCR-assisted rather than grounded.
+    try {
+        $app = [System.Runtime.InteropServices.Marshal]::GetActiveObject("Excel.Application")
+        $occupied = @()
+        foreach ($c in $cells) {
+            if ($null -ne $app.ActiveSheet.Range($c).Value2) { $occupied += $c }
+        }
+        if ($occupied.Count -gt 0) {
+            throw "PREFLIGHT: target cells are not blank: $($occupied -join ', '). Clear them or pass a different -Cells set."
+        }
+    } catch [System.Management.Automation.MethodInvocationException] {
+        Write-Output "PREFLIGHT WARNING: could not read cells over COM; blankness unverified."
+    }
+
+    Write-Output ("PREFLIGHT ok: Excel at ({0},{1})-({2},{3}), focus ({4},{5}) inside it, {6} target cells blank." -f
+                  $rect.L, $rect.T, $rect.R, $rect.B, $focusX, $focusY, $cells.Count)
 }
 
 function Get-NavisualPanelHwnd {
@@ -63,14 +135,41 @@ function Get-NavisualRoot {
     return [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
 }
 
+# WebView2 does not build its accessibility tree until the webview gets REAL input
+# focus. A FindAll alone does not do it -- measured 2026-09-20 on a healthy panel:
+# 16 enabled descendants, 3 of them named, all Panes, no buttons at all. One real
+# SetCursorPos + mouse_event click into the panel took it to 43 descendants with all
+# 10 buttons present, "+ New task" among them.
+#
+# That is why this function existed and did not work. Every battery cell was failing
+# with "New task button not found" against an app that was perfectly healthy -- the
+# button was not renamed or disabled, it did not exist in UIA yet.
+#
+# Same root cause as the Chromium-webview entry in CLAUDE.md's Known Issues, and the
+# same rule as reference_navisual_taskbox_real_click.md: SetFocus/SetForegroundWindow
+# do not grant real OS focus, only synthesized input does.
+#
+# The click is gated on the tree actually being dormant, so a warm tree is never
+# poked, and it lands in the conversation area (40% down, horizontally centred) which
+# holds no control on an empty session.
 function Warm-NavisualTree($root) {
-    $all = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::IsEnabledProperty), $true
-    $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $all) | Out-Null
+    $cond = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::IsEnabledProperty), $true
+    $found = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    if ($found.Count -lt 20) {
+        $r = $root.Current.BoundingRectangle
+        if ($r.Width -gt 0 -and $r.Height -gt 0) {
+            $x = [int]($r.X + $r.Width * 0.5)
+            $y = [int]($r.Y + $r.Height * 0.4)
+            Click-At $x $y
+            Start-Sleep -Milliseconds 900
+            $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond) | Out-Null
+        }
+    }
     Start-Sleep -Milliseconds 400
 }
 
 # Several of Navisual's own button names carry a non-ASCII glyph prefix (fullwidth plus,
-# arrows, etc. -- e.g. "＋ New task"). Windows PowerShell 5.1 reading a BOM-less UTF-8
+# arrows, etc. -- a fullwidth plus before "New task"). Windows PowerShell 5.1 reads a BOM-less UTF-8
 # .ps1 file does not reliably parse those bytes back into the right codepoint. Match on
 # the plain-ASCII substring instead of the exact glyph-prefixed name.
 function Find-ByContains($root, $substring) {
@@ -124,6 +223,8 @@ if ($Append) {
         foreach ($item in $loaded) { $results += $item }
     }
 }
+
+Assert-BatteryPreconditions $FocusX $FocusY $Cells
 
 foreach ($cell in $Cells) {
   $cellSucceeded = $false

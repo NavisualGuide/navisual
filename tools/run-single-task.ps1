@@ -63,9 +63,25 @@ function Get-NavisualRoot {
     return [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
 }
 
+# Same fix as run-grounding-battery.ps1, 2026-09-20. WebView2 does not build its
+# accessibility tree until the webview takes REAL input focus; a FindAll does not do
+# it. Measured on a healthy panel: 16 enabled descendants, 3 named, all Panes, zero
+# buttons -- so every lookup failed with "not found" against an app that was fine. One
+# synthesized click took it to 43 descendants with all 10 buttons present.
+#
+# Gated on the tree actually being dormant, so a warm tree is never poked. The click
+# lands in the conversation area (40% down, centred), which holds no control.
 function Warm-NavisualTree($root) {
-    $all = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::IsEnabledProperty), $true
-    $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $all) | Out-Null
+    $cond = New-Object System.Windows.Automation.PropertyCondition ([System.Windows.Automation.AutomationElement]::IsEnabledProperty), $true
+    $found = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    if ($found.Count -lt 20) {
+        $r = $root.Current.BoundingRectangle
+        if ($r.Width -gt 0 -and $r.Height -gt 0) {
+            Click-At ([int]($r.X + $r.Width * 0.5)) ([int]($r.Y + $r.Height * 0.4))
+            Start-Sleep -Milliseconds 900
+            $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond) | Out-Null
+        }
+    }
     Start-Sleep -Milliseconds 400
 }
 
@@ -111,6 +127,42 @@ function Find-EditControlRetry([int]$TimeoutSecInner = 6) {
     return $null
 }
 
+# Navisual prefills a suggested task ("Show me around <App>") when it detects a NEW
+# target app, and it arrives asynchronously. Measured 2026-09-20 on V5: the paste landed
+# first, the suggestion overwrote it, and the readback returned the suggestion. The old
+# recovery re-pasted immediately and lost the same race three times, which reads like a
+# broken task box and is not one. Wait for the value to stop changing, THEN paste.
+function Wait-TaskBoxSettled($edit, [int]$TimeoutMs = 4000) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $prev = $null
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $cur = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+        if ($null -ne $prev -and $cur -eq $prev) { return $cur }
+        $prev = $cur
+        Start-Sleep -Milliseconds 400
+    }
+    return $prev
+}
+
+function Set-TaskText($edit, $rect, $text, $label) {
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Wait-TaskBoxSettled $edit | Out-Null
+        Click-At ([int]($rect.X + $rect.Width / 2)) ([int]($rect.Y + $rect.Height / 2))
+        Start-Sleep -Milliseconds 300
+        [System.Windows.Forms.SendKeys]::SendWait("^a")
+        Start-Sleep -Milliseconds 200
+        [System.Windows.Forms.Clipboard]::SetText($text)
+        Start-Sleep -Milliseconds 150
+        [System.Windows.Forms.SendKeys]::SendWait("^v")
+        Start-Sleep -Milliseconds 700
+        $readback = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+        if ($readback -eq $text) { return $true }
+        Write-Output "[$label] WARN readback mismatch on attempt ${attempt}: '$readback'"
+    }
+    return $false
+}
+
+
 $LogPath = "$env:LOCALAPPDATA\com.navisual.app\locate_log.jsonl"
 $PromptLogPath = "$env:LOCALAPPDATA\com.navisual.app\prompt_log.jsonl"
 
@@ -134,31 +186,9 @@ for ($attempt = 1; $attempt -le 3; $attempt++) {
     if (-not $edit) { Write-Output "[$ModelLabel/$ScenarioLabel] ERROR (no edit control found)"; continue }
 
     $rect = $edit.Current.BoundingRectangle
-    Click-At ([int]($rect.X + $rect.Width / 2)) ([int]($rect.Y + $rect.Height / 2))
-    Start-Sleep -Milliseconds 300
-    [System.Windows.Forms.SendKeys]::SendWait("^a")
-    Start-Sleep -Milliseconds 200
-    [System.Windows.Forms.Clipboard]::SetText($TaskText)
-    Start-Sleep -Milliseconds 150
-    [System.Windows.Forms.SendKeys]::SendWait("^v")
-    Start-Sleep -Milliseconds 600
-
-    $readback = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
-    if ($readback -ne $TaskText) {
-        Write-Output "[$ModelLabel/$ScenarioLabel] WARN readback mismatch ('$readback' != '$TaskText'), re-pasting"
-        Click-At ([int]($rect.X + $rect.Width / 2)) ([int]($rect.Y + $rect.Height / 2))
-        Start-Sleep -Milliseconds 200
-        [System.Windows.Forms.SendKeys]::SendWait("^a")
-        Start-Sleep -Milliseconds 200
-        [System.Windows.Forms.Clipboard]::SetText($TaskText)
-        Start-Sleep -Milliseconds 150
-        [System.Windows.Forms.SendKeys]::SendWait("^v")
-        Start-Sleep -Milliseconds 600
-        $readback = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
-        if ($readback -ne $TaskText) {
-            Write-Output "[$ModelLabel/$ScenarioLabel] ERROR (readback still wrong after re-paste: '$readback')"
-            continue
-        }
+    if (-not (Set-TaskText $edit $rect $TaskText "$ModelLabel/$ScenarioLabel")) {
+        Write-Output "[$ModelLabel/$ScenarioLabel] ERROR (task text would not stick after 3 attempts)"
+        continue
     }
 
     [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")

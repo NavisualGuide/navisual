@@ -207,6 +207,9 @@ impl DeepSeekClient {
         // default (`medium` on gpt-5.6).
         if let Some(effort) = self.reasoning_effort.as_deref() {
             payload["reasoning"] = json!({ "effort": effort });
+            log_effort_once(&format!("reasoning.effort={effort}"));
+        } else {
+            log_effort_once("provider default (no reasoning field sent)");
         }
 
         self.stream_once_responses_api(&payload, on_chunk).await
@@ -764,4 +767,20 @@ pub fn build_openai_messages(
     }
 
     messages
+}
+
+/// One log line per CHANGE of the reasoning effort actually put on the wire.
+///
+/// Rule 1: when a fix cannot be observed from outside, ship the log line with it.
+/// Edge-triggered, so a long session cannot flood the log. The Gemini path carries the
+/// same helper for the same reason.
+fn log_effort_once(what: &str) {
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<String>> = Mutex::new(None);
+    if let Ok(mut last) = LAST.lock() {
+        if last.as_deref() != Some(what) {
+            log::info!("[reasoning] openai {what}");
+            *last = Some(what.to_string());
+        }
+    }
 }

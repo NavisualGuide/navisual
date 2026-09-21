@@ -165,10 +165,14 @@ impl GeminiClient {
             payload["generationConfig"] = json!({
                 "thinkingConfig": { "thinkingLevel": level }
             });
+            log_thinking_once(&format!("thinkingLevel={level}"));
         } else if let Some(budget) = self.thinking_budget {
             payload["generationConfig"] = json!({
                 "thinkingConfig": { "thinkingBudget": budget }
             });
+            log_thinking_once(&format!("thinkingBudget={budget}"));
+        } else {
+            log_thinking_once("provider default (no thinkingConfig sent)");
         }
 
         // Use streamGenerateContent with SSE (alt=sse)
@@ -455,4 +459,21 @@ pub fn build_messages(
     }));
 
     contents
+}
+
+/// One log line per CHANGE of the reasoning setting actually put on the wire.
+///
+/// Rule 1: when a fix cannot be observed from outside, ship the log line with it.
+/// `REASONING_EFFORT` reached the request through three hops (env -> Config ->
+/// per-provider clamp) with nothing printing what survived, so a value that failed to
+/// load looked exactly like a value that made no difference.
+fn log_thinking_once(what: &str) {
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<String>> = Mutex::new(None);
+    if let Ok(mut last) = LAST.lock() {
+        if last.as_deref() != Some(what) {
+            log::info!("[reasoning] gemini {what}");
+            *last = Some(what.to_string());
+        }
+    }
 }
