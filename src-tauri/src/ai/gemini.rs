@@ -156,8 +156,17 @@ impl GeminiClient {
         // serves OpenAI, which has three levels Gemini does not. `none` becomes `minimal`:
         // Gemini 3.x cannot turn reasoning off, so honouring it literally would 400 every
         // request for someone whose only mistake was using a word another provider accepts.
+        //
+        // `minimal` is NOT a universal Gemini floor. Measured live 2026-09-21 against
+        // gemini-3.7-flash, the shipped default: 400 INVALID_ARGUMENT, "Thinking level
+        // MINIMAL is not supported for this model." Only the Flash-Lite line accepts it;
+        // on Flash and Pro the floor is `low`. So the clamp goes UP, not down -- giving a
+        // model more thinking than asked costs a little latency, while asking for a level
+        // it does not have breaks every request the user makes.
+        let minimal_supported = self.model.contains("flash-lite");
         let level = self.thinking_level.as_deref().map(|l| match l {
-            "none" | "minimal" => "minimal",
+            "none" | "minimal" if minimal_supported => "minimal",
+            "none" | "minimal" => "low",
             "xhigh" | "max" => "high",
             other => other,
         });

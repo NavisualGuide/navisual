@@ -5248,7 +5248,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="reasoning-effort" class="setting-input"
                   bind:value={settingsForm.reasoning_effort}>
                   <option value="">Provider default</option>
-                  <option value="minimal">Minimal — fastest</option>
+                  <option value="minimal">Minimal — fastest (Flash-Lite only)</option>
                   <option value="low">Low</option>
                   <option value="medium">Medium</option>
                   <option value="high">High — slowest, most thorough</option>
@@ -5258,7 +5258,9 @@ See the LICENSE file in the root of this repository for complete details.
                   tokens and adds latency; whether it points more accurately is worth
                   testing on your own tasks.
                   {#if settingsForm.api_provider === "gemini"}
-                    Gemini cannot switch thinking off entirely — Minimal is its floor.
+                    Gemini cannot switch thinking off entirely. Minimal works only on the
+                    Flash-Lite models; everywhere else Gemini's floor is Low, and asking
+                    for Minimal is raised to Low rather than failing.
                   {/if}
                 </p>
               </div>
