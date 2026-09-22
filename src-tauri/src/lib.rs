@@ -2978,8 +2978,11 @@ fn install_blender_addon(
 
 /// Must match Overlay.svelte's `APP_BOUNDARY_DURATION_MS` — no constant is
 /// shared across the Rust/Svelte boundary, so keep the two in sync by hand.
+/// Lowered 3_000 -> 2_200 on 2026-09-22 when the box was softened; this side only
+/// bounds `track::watch_boundary`'s lifetime, so drift shows up as a watcher that
+/// outlives the animation rather than as anything that fails loudly.
 #[cfg(windows)]
-const APP_BOUNDARY_DURATION_MS: u64 = 3_000;
+const APP_BOUNDARY_DURATION_MS: u64 = 2_200;
 
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
 /// `app_changed` event so the panel chip stays in sync with what's captured.
@@ -3043,7 +3046,7 @@ pub fn refresh_active_window(app: &AppHandle) {
         return;
     };
     let active_info = capture::get_active_window_info();
-    let (announce_hwnd, changed) = {
+    let (announce_hwnd, changed, full_screen) = {
         let mut g = state.guidance.lock();
         if g.pinned_hwnd.is_none() {
             g.target_hwnd = active_info.as_ref().map(|info| info.hwnd);
@@ -3051,7 +3054,7 @@ pub fn refresh_active_window(app: &AppHandle) {
         let hwnd = g.pinned_hwnd.or(g.target_hwnd);
         let changed = hwnd != g.last_announced_hwnd;
         g.last_announced_hwnd = hwnd;
-        (hwnd, changed)
+        (hwnd, changed, g.full_screen_mode)
     };
     // A stale AI-bbox hint ring (drawn on a miss) is NOT tracked — it sits at fixed screen
     // coordinates and would otherwise linger over the newly-focused app (live 2026-07-24:
@@ -3082,7 +3085,12 @@ pub fn refresh_active_window(app: &AppHandle) {
     // not on every passive refresh (z-order shuffle, object update, same app
     // re-settling) — see commit 1601f40 for why a blanket flash-on-every-refresh
     // was reverted.
-    announce_shared_app(app, announce_hwnd, changed);
+    // ...but NOT when the user is sharing a whole screen. Picking "Screen 2" chooses a
+    // capture SCOPE, not an app, so outlining whichever window happens to take focus
+    // points at something that is not what we capture. The event still fires — the
+    // header chip renders the screen label ahead of `sharedApp`, and the prefill and
+    // pack checks downstream still want to know which app the user is in.
+    announce_shared_app(app, announce_hwnd, changed && !full_screen);
 }
 
 #[cfg(not(windows))]

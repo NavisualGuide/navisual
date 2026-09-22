@@ -37,7 +37,7 @@
   let appBoundaryStart = 0;
   // Must match lib.rs's APP_BOUNDARY_DURATION_MS (no shared constant across
   // the Rust/Svelte boundary — keep both in sync by hand if this changes).
-  const APP_BOUNDARY_DURATION_MS = 3_000; // 250ms flash + 1.75s solid + 1s ease-out fade
+  const APP_BOUNDARY_DURATION_MS = 2_200; // 200ms flash + 1.3s calm hold + 700ms fade
   // Plain object — NOT $state. drawBox/drawHint read this in rAF callbacks where
   // Svelte's reactive getters don't fire; mutating fields in-place ensures every
   // frame sees the latest values without any signal overhead.
@@ -404,10 +404,14 @@
 
   /**
    * Phase 0.2: draw the "shared app" boundary overlay.
-   * Three-stage animation over APP_BOUNDARY_DURATION_MS (3 s):
-   *   0..250ms  — flash in at full opacity with inner glow
-   *   250..2000ms — hold at full opacity (solid outline)
-   *   2000..3000ms — ease-out cubic fade to 0
+   * Three-stage animation over APP_BOUNDARY_DURATION_MS (2.2 s):
+   *   0..200ms    — flash in at FLASH_OPACITY, easing down to the hold
+   *   200..1500ms — hold at HOLD_OPACITY (calm, not solid)
+   *   1500..2200ms — ease-out cubic fade to 0
+   *
+   * The box says "this is the window I can see", which is ambient information, not a
+   * warning — so it is deliberately quieter than the pointer, which IS asking for an
+   * action. Tune it with the three constants below.
    * A new capture replaces appBoundary immediately, resetting the timer.
    * Also cleared early (bbox goes null) if the backend detects the window
    * was minimized mid-flash — see track.rs's `watch_boundary`.
@@ -420,14 +424,19 @@
   ): boolean {
     if (age >= APP_BOUNDARY_DURATION_MS) return false;
 
-    const flashEnd = 250;
-    const fadeStart = APP_BOUNDARY_DURATION_MS - 1_000; // 2000ms
-    let opacity = 1.0;
-    if (age > fadeStart) {
-      const fadeProgress = (age - fadeStart) / 1_000;
-      // ease-out cubic
-      const eased = 1 - Math.pow(1 - fadeProgress, 3);
-      opacity = 1 - eased;
+    const flashEnd = 200;
+    const FADE_MS = 700;
+    const HOLD_OPACITY = 0.6;   // what it sits at for most of its life
+    const FLASH_OPACITY = 0.85; // brief lift so the eye catches the change
+    const fadeStart = APP_BOUNDARY_DURATION_MS - FADE_MS;
+    let opacity;
+    if (age < flashEnd) {
+      opacity = FLASH_OPACITY - (FLASH_OPACITY - HOLD_OPACITY) * (age / flashEnd);
+    } else if (age > fadeStart) {
+      const fadeProgress = (age - fadeStart) / FADE_MS;
+      opacity = HOLD_OPACITY * Math.pow(1 - fadeProgress, 3); // ease-out cubic
+    } else {
+      opacity = HOLD_OPACITY;
     }
 
     const [r, g, b] = hexToRgb(theme.color);
@@ -446,21 +455,21 @@
 
     // Subtle inset accent fill during the flash phase only
     if (age < flashEnd) {
-      const flashFill = (1 - age / flashEnd) * 0.10;
+      const flashFill = (1 - age / flashEnd) * 0.05;
       ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${flashFill})`;
       ctx.fillRect(bx, by, bw, bh);
     }
 
     // Outer dark shadow for contrast against any background
     ctx.shadowBlur = 0;
-    ctx.strokeStyle = `rgba(0, 0, 0, ${0.55 * opacity})`;
-    ctx.lineWidth = lw * 2.2;
+    ctx.strokeStyle = `rgba(0, 0, 0, ${0.40 * opacity})`;
+    ctx.lineWidth = lw * 1.9;
     ctx.lineJoin = "round";
     ctx.strokeRect(bx, by, bw, bh);
 
     // Accent outline with glow
     ctx.shadowColor = theme.color;
-    ctx.shadowBlur = 12 * opacity + (age < flashEnd ? 14 : 0);
+    ctx.shadowBlur = 6 * opacity + (age < flashEnd ? 6 : 0);
     ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${opacity})`;
     ctx.lineWidth = lw;
     ctx.strokeRect(bx, by, bw, bh);
