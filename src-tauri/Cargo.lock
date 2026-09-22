@@ -2671,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "navisual-backend"
-version = "0.7.28"
+version = "0.7.29"
 dependencies = [
  "ab_glyph",
  "anyhow",
