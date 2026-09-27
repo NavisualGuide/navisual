@@ -537,6 +537,34 @@ See the LICENSE file in the root of this repository for complete details.
     applyPrefill(list);
   }
 
+  // Everything that opens BELOW the titlebar anchors to this, measured rather than
+  // typed. The titlebar is z-index 1000 and the pickers are 999 (raised 2026-09-18 so
+  // the window stays draggable with one open), so anything whose `top` lands inside the
+  // titlebar's box is drawn UNDER it and simply lost.
+  //
+  // It was lost. Measured live 2026-09-27: the titlebar's bottom edge is at y=53 (3px
+  // root offset + 12px padding + a 30px icon button + 8px padding) while .target-picker
+  // sat at top:34px -- so the first row, the CHECKED one, was buried 19px deep. The two
+  // coach marks at 38px were clipped the same way and nobody had said so.
+  //
+  // Three hand-typed numbers for one anchor is the shape rule 19 names, and they had
+  // already drifted apart (34 vs 38) before any of them was wrong. One measurement, one
+  // variable, three consumers -- and it re-measures, so a taller titlebar can never put
+  // them back underneath.
+  let titlebarEl: HTMLElement | undefined = $state();
+  $effect(() => {
+    const el = titlebarEl;
+    if (!el) return; // collapsed icon mode has no titlebar, and no pickers either
+    const apply = () => {
+      const bottom = Math.round(el.getBoundingClientRect().bottom);
+      document.documentElement.style.setProperty("--below-titlebar", `${bottom + 4}px`);
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
   // Target-window picker (item 1)
   type TargetWindowInfo = { hwnd: number; title: string; exe_stem: string; display_name: string; minimized: boolean; };
   // One row of the recent-tasks list (`SessionSummary` in ai/session.rs).
@@ -3838,7 +3866,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   <main>
     <!-- Title bar: onmousedown → startDragging() (more reliable than data-tauri-drag-region on WebView2) -->
-    <div class="titlebar" role="toolbar" tabindex="-1" onmousedown={handleHeaderMousedown}>
+    <div class="titlebar" role="toolbar" tabindex="-1" bind:this={titlebarEl} onmousedown={handleHeaderMousedown}>
       <!-- The mark, not a dot. This was a 9px orange circle that carried no state
            (the real status light is .status-dot, in the status bar) and said
            nothing -- which became the problem the moment a narrow panel hid the
@@ -6410,7 +6438,7 @@ See the LICENSE file in the root of this repository for complete details.
      picker opens at). It's a button: clicking it opens the picker. */
   .target-hint {
     position: fixed;
-    top: 38px;
+    top: var(--below-titlebar, 57px);
     left: 8px;
     max-width: 250px;
     text-align: left;
@@ -6445,7 +6473,7 @@ See the LICENSE file in the root of this repository for complete details.
      icon from the right, before Close). Same treatment as .target-hint. */
   .collapse-hint {
     position: fixed;
-    top: 38px;
+    top: var(--below-titlebar, 57px);
     right: 8px;
     max-width: 220px;
     text-align: left;
@@ -6478,7 +6506,9 @@ See the LICENSE file in the root of this repository for complete details.
   }
   .target-picker {
     position: fixed;
-    top: 34px;
+    /* Measured from the live titlebar -- see --below-titlebar. Was a typed 34px, which
+       put the first row 19px under a titlebar that outranks it in z-order. */
+    top: var(--below-titlebar, 57px);
     left: 8px;
     min-width: 220px;
     max-width: 320px;
