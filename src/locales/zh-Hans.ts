@@ -182,6 +182,21 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "menu.collapse": "\u229f 收起",
   "menu.quit": "\u2715 退出",
 
+  // ── 首次运行隐私须知（同意门）─────────────────────────────────────────────
+  "privacy.aria": "隐私须知",
+  "privacy.title": "开始第一个任务之前",
+  "privacy.lead": "Navisual 会截取你当前的窗口，并发送给你选择的 AI 服务商。",
+  "privacy.b1": "它截取你指定的那个窗口 —— 如果你选的是整个屏幕，就是整个屏幕 —— 并把画面发送给你选择的 AI 服务商。",
+  "privacy.b2": "它保存的任何截图都只存在你自己的电脑上 —— 绝不会存到我们的服务器。",
+  "privacy.b3strong": "默认的免费档所用的 AI 模型，可能会保留你的请求 —— 包括截图 —— 用于训练。",
+  "privacy.b3rest": "付费档和你自己的 API Key 不会；Ollama 则完全不离开你的电脑。",
+  "privacy.b4": "指引过程中，它会记录你在那个应用里点了哪个控件 —— 只记控件的名称，绝不记它的内容。它不监控你的键盘。",
+  "privacy.b5": "语音输入若你开启，会把你的音频发送给微软的语音服务。",
+  "privacy.policyBefore": "",
+  "privacy.policyLink": "完整隐私政策",
+  "privacy.policyAfter": "是完整版本，内容以它为准 —— 捕获什么、发往哪里、保存什么、以及如何停止。你随时可以从「关于」里重新打开它。",
+  "privacy.accept": "我已了解，继续",
+
   // ── 注册促销 ──────────────────────────────────────────────────────────────
   "promo.headline": "注册免费账户，送 {coins} 金币。",
   "promo.sub": "足够你试试 Navisual 中继上更快、更聪明的模型。Navisual 本身一直免费",

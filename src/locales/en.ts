@@ -181,6 +181,23 @@ export const en = {
   "menu.collapse": "\u229f Collapse",
   "menu.quit": "\u2715 Quit",
 
+  // ── First-run privacy notice (consent gate) ───────────────────────────────
+  // The policy page is the single source of truth; this list carries only facts
+  // that describe what Navisual IS, never counts, key names or mechanisms.
+  "privacy.aria": "Privacy notice",
+  "privacy.title": "Before your first task",
+  "privacy.lead": "Navisual captures your active window and sends it to the AI provider you've selected.",
+  "privacy.b1": "It captures the window you point it at \u2014 or your whole screen, if you pick that \u2014 and sends the picture to the AI provider you choose.",
+  "privacy.b2": "Any screenshot it saves is saved on your own computer \u2014 never on our servers.",
+  "privacy.b3strong": "The default free tier uses AI models that may keep your requests \u2014 including the screenshot \u2014 to train on.",
+  "privacy.b3rest": "Paid tiers and your own API key don't; Ollama never leaves your machine.",
+  "privacy.b4": "While guiding, it notes which control you click in that app \u2014 the control's name, never its contents. It does not monitor your keyboard.",
+  "privacy.b5": "Voice input, if you turn it on, sends your audio to Microsoft's speech service.",
+  "privacy.policyBefore": "The",
+  "privacy.policyLink": "full privacy policy",
+  "privacy.policyAfter": "is the complete and authoritative version \u2014 what is captured, where it goes, what is stored, and how to stop it. You can reopen it any time from About.",
+  "privacy.accept": "I understand \u2014 continue",
+
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",
   "promo.sub": "Enough to try the faster, smarter models on the Navisual relay. Navisual stays free to use",

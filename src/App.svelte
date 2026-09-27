@@ -4837,15 +4837,15 @@ See the LICENSE file in the root of this repository for complete details.
         role="dialog"
         tabindex="-1"
         aria-modal="true"
-        aria-label="Privacy notice"
+        aria-label={t("privacy.aria")}
         style="max-width: 360px;"
       >
         <div class="modal-header">
-          <span class="modal-title">Before your first task</span>
+          <span class="modal-title">{t("privacy.title")}</span>
         </div>
         <div class="modal-body" style="padding: 18px 20px; line-height: 1.5;">
           <p style="margin: 0 0 10px 0;">
-            Navisual captures your active window and sends it to the AI provider you've selected.
+            {t("privacy.lead")}
           </p>
           <!-- SINGLE SOURCE OF TRUTH: navisualguide.com/privacy.html
                (repo NavisualGuide.github.io, file privacy.html — its §1 carries a
@@ -4864,16 +4864,20 @@ See the LICENSE file in the root of this repository for complete details.
                this is a consent gate shown before the first capture, so it cannot be
                a bare link. -->
           <ul style="margin: 0 0 14px 0; padding-left: 18px; color: var(--text-secondary); font-size: 0.92em;">
-            <li>It captures the window you point it at — or your whole screen, if you pick that — and sends the picture to the AI provider you choose.</li>
-            <li>Any screenshot it saves is saved on your own computer — never on our servers.</li>
-            <li><strong>The default free tier uses AI models that may keep your requests — including the screenshot — to train on.</strong> Paid tiers and your own API key don't; Ollama never leaves your machine.</li>
-            <li>While guiding, it notes which control you click in that app — the control's name, never its contents. It does not monitor your keyboard.</li>
-            <li>Voice input, if you turn it on, sends your audio to Microsoft's speech service.</li>
+            <li>{t("privacy.b1")}</li>
+            <li>{t("privacy.b2")}</li>
+            <li><strong>{t("privacy.b3strong")}</strong> {t("privacy.b3rest")}</li>
+            <li>{t("privacy.b4")}</li>
+            <li>{t("privacy.b5")}</li>
           </ul>
           <p style="margin: 0 0 14px 0; font-size: 0.85em; color: var(--text-tertiary);">
-            The <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>full privacy policy</button>
-            is the complete and authoritative version — what is captured, where it goes, what is
-            stored, and how to stop it. You can reopen it any time from About.
+            <!-- Split into before/link/after rather than one string with markup: Chinese
+                 puts the subject first, so zh sets `policyBefore` to "" and carries the
+                 whole sentence in `policyAfter`. A single interpolated string would have
+                 forced English word order onto every locale. -->
+            {t("privacy.policyBefore")}
+            <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("privacy.policyLink")}</button>
+            {t("privacy.policyAfter")}
           </p>
           <button
             class="btn-primary btn-full"
@@ -4882,7 +4886,7 @@ See the LICENSE file in the root of this repository for complete details.
               showPrivacyDisclosure = false;
             }}
           >
-            I understand — continue
+            {t("privacy.accept")}
           </button>
         </div>
       </div>

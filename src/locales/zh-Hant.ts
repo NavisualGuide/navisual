@@ -183,6 +183,21 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "menu.collapse": "\u229f 收合",
   "menu.quit": "\u2715 結束",
 
+  // ── 首次執行隱私須知（同意關卡）───────────────────────────────────────────
+  "privacy.aria": "隱私須知",
+  "privacy.title": "開始第一個工作之前",
+  "privacy.lead": "Navisual 會擷取你目前的視窗，並傳送給你選擇的 AI 服務商。",
+  "privacy.b1": "它擷取你指定的那個視窗 —— 如果你選的是整個螢幕，就是整個螢幕 —— 並把畫面傳送給你選擇的 AI 服務商。",
+  "privacy.b2": "它儲存的任何螢幕截圖都只存在你自己的電腦上 —— 絕不會存到我們的伺服器。",
+  "privacy.b3strong": "預設的免費方案所用的 AI 模型，可能會保留你的請求 —— 包括螢幕截圖 —— 用於訓練。",
+  "privacy.b3rest": "付費方案和你自己的 API Key 不會；Ollama 則完全不離開你的電腦。",
+  "privacy.b4": "指引過程中，它會記錄你在那個應用程式裡點了哪個控制項 —— 只記控制項的名稱，絕不記它的內容。它不監控你的鍵盤。",
+  "privacy.b5": "語音輸入若你開啟，會把你的音訊傳送給微軟的語音服務。",
+  "privacy.policyBefore": "",
+  "privacy.policyLink": "完整隱私權政策",
+  "privacy.policyAfter": "是完整版本，內容以它為準 —— 擷取什麼、傳往哪裡、儲存什麼、以及如何停止。你隨時可以從「關於」重新開啟它。",
+  "privacy.accept": "我已瞭解，繼續",
+
   // ── 註冊優惠 ──────────────────────────────────────────────────────────────
   "promo.headline": "註冊免費帳戶，送 {coins} 金幣。",
   "promo.sub": "足夠你試試 Navisual 中繼上更快、更聰明的模型。Navisual 本身一直免費",
