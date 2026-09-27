@@ -323,7 +323,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "about.blenderNotice": "內建的 Blender Nav-Pack 引用了 Blender 自己的圖示設計（© Blender Foundation），僅用於畫面上的指引。Blender 是 Blender Foundation 的註冊商標。Navisual 與 Blender Foundation 無關聯，也未獲其背書。",
 
   "usage.navisualAccount": "Navisual 帳戶",
-  "usage.coinsLine": "\U0001fa99 還剩 {coins} 金幣 \u00b7 {tier} 等級 \u00b7 每次 {perReq} 金幣",
+  "usage.coinsLine": "🪙 還剩 {coins} 金幣 \u00b7 {tier} 等級 \u00b7 每次 {perReq} 金幣",
   "usage.freeLine": "免費方案 —— 還剩 {left} / {total} 次",
   "usage.ownKeys": "你自己的 Key —— token 用量",
   "usage.today": "今天",
@@ -410,7 +410,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "au.voicesLoading": "正在載入語音\u2026",
   "au.voiceHint": "「自動」會用每則回覆自己的語言朗讀（使用系統已安裝的對應語音）。指定某個語音後，它只用於該語音語言的回覆；其他語言的回覆仍會自動挑一個相符的語音。",
   "au.input": "語音輸入",
-  "au.inputToggle": "啟用 \U0001f3a4 按住說話",
+  "au.inputToggle": "啟用 🎤 按住說話",
   "au.inputHint": "使用 WebView2 的 Web Speech API —— 音訊會傳送給微軟的線上語音服務；需要連網和麥克風權限。",
   "au.voiceLanguage": "語音語言",
   "au.autoDetect": "自動偵測",

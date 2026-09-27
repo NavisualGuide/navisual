@@ -6,9 +6,18 @@
 //
 // Keys are `surface.thing`. Interpolation slots are `{name}` and are filled by `t()`.
 //
-// SCOPE: phase 1 is the consent and money surfaces -- nobody should agree to terms or pay
-// for something in a language they cannot read. The main panel chrome and the Settings tabs
-// are phases 2 and 3; their strings are still inline in the components.
+// SCOPE: the consent and money surfaces, the panel chrome and the Settings tabs. The
+// Developer tab is a non-goal (china-strategy.md, section 6), as are locator/debug strings.
+//
+// !! EMOJI GO IN AS LITERAL CHARACTERS, NEVER AS AN ESCAPE. !!
+//
+// JavaScript has no eight-digit backslash-U escape. It understands the four-digit \u form
+// and, since ES6, the braced \u{...} form; a bare backslash-U is an IDENTITY escape, so
+// what looks like a speech balloon is really the seven characters U0001f4ac. That is valid
+// TypeScript, so svelte-check and vite build both pass and the ONLY thing that reveals it
+// is a rendered screenshot. It has shipped into these files twice now.
+//
+// These files are UTF-8. Write the character.
 
 export const en = {
   // ── Shared ────────────────────────────────────────────────────────────────
@@ -330,7 +339,7 @@ export const en = {
   "about.blenderNotice": "The bundled Blender Nav-Pack references Blender's own icon designs (\u00a9 Blender Foundation) for on-screen guidance only. Blender is a registered trademark of the Blender Foundation. Navisual is not affiliated with or endorsed by the Blender Foundation.",
 
   "usage.navisualAccount": "Navisual account",
-  "usage.coinsLine": "\U0001fa99 {coins} coins left \u00b7 {tier} tier \u00b7 {perReq} coins/request",
+  "usage.coinsLine": "🪙 {coins} coins left \u00b7 {tier} tier \u00b7 {perReq} coins/request",
   "usage.freeLine": "Free tier \u2014 {left} / {total} requests left",
   "usage.ownKeys": "Your own keys \u2014 token usage",
   "usage.today": "Today",
@@ -417,7 +426,7 @@ export const en = {
   "au.voicesLoading": "Loading voices\u2026",
   "au.voiceHint": "Auto speaks each reply in its own language (using an installed voice for it). A picked voice is used for replies in its language; replies in other languages still auto-pick a matching voice.",
   "au.input": "Voice input",
-  "au.inputToggle": "Enable \U0001f3a4 push-to-talk",
+  "au.inputToggle": "Enable 🎤 push-to-talk",
   "au.inputHint": "Uses the WebView2 Web Speech API \u2014 audio is sent to Microsoft's online speech service; requires internet and microphone permission.",
   "au.voiceLanguage": "Voice language",
   "au.autoDetect": "Auto-detect",

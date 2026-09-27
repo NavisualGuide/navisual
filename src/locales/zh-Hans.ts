@@ -322,7 +322,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "about.blenderNotice": "内置的 Blender Nav-Pack 引用了 Blender 自己的图标设计（© Blender Foundation），仅用于屏幕上的指引。Blender 是 Blender Foundation 的注册商标。Navisual 与 Blender Foundation 无关联，也未获其认可。",
 
   "usage.navisualAccount": "Navisual 账户",
-  "usage.coinsLine": "\U0001fa99 还剩 {coins} 金币 \u00b7 {tier} 档 \u00b7 每次 {perReq} 金币",
+  "usage.coinsLine": "🪙 还剩 {coins} 金币 \u00b7 {tier} 档 \u00b7 每次 {perReq} 金币",
   "usage.freeLine": "免费档 —— 还剩 {left} / {total} 次",
   "usage.ownKeys": "你自己的 Key —— token 用量",
   "usage.today": "今天",
@@ -409,7 +409,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "au.voicesLoading": "正在加载语音\u2026",
   "au.voiceHint": "「自动」会用每条回复自己的语言朗读（使用系统已安装的对应语音）。指定某个语音后，它只用于该语音语言的回复；其他语言的回复仍会自动挑一个匹配的语音。",
   "au.input": "语音输入",
-  "au.inputToggle": "启用 \U0001f3a4 按住说话",
+  "au.inputToggle": "启用 🎤 按住说话",
   "au.inputHint": "使用 WebView2 的 Web Speech API —— 音频会发送给微软的在线语音服务；需要联网和麦克风权限。",
   "au.voiceLanguage": "语音语言",
   "au.autoDetect": "自动识别",
