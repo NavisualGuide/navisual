@@ -4981,12 +4981,12 @@ See the LICENSE file in the root of this repository for complete details.
           {:else if settingsTab === "provider"}
             <!-- Provider selector — grouped so it scales as providers + paid tiers grow -->
             <div class="setting-group">
-              <label class="setting-label" for="provider-select">Provider</label>
+              <label class="setting-label" for="provider-select">{t("pv.provider")}</label>
               <select id="provider-select" class="setting-select"
                 bind:value={settingsForm.api_provider}
                 onchange={handleProviderChange}>
                 <optgroup label="Navisual (hosted)">
-                  <option value="managed">Managed — free + paid</option>
+                  <option value="managed">{t("pv.optManaged")}</option>
                 </optgroup>
                 <optgroup label="Bring your own key">
                   <option value="anthropic">Anthropic</option>
@@ -4997,7 +4997,7 @@ See the LICENSE file in the root of this repository for complete details.
                 </optgroup>
                 <optgroup label="Local &amp; custom">
                   <option value="ollama">Ollama</option>
-                  <option value="custom">Custom (OpenAI-compatible)</option>
+                  <option value="custom">{t("pv.optCustom")}</option>
                 </optgroup>
               </select>
             </div>
@@ -5005,19 +5005,19 @@ See the LICENSE file in the root of this repository for complete details.
             <!-- Per-provider contextual hint -->
             <p class="setting-hint provider-hint">
               {#if settingsForm.api_provider === "managed"}
-                Free · 30 requests included. Routed via the Navisual relay to a free-tier AI provider (the specific provider may change over time as we optimize for reliability and speed). May be slower than BYOK providers — ideal for getting started. <strong>Note:</strong> free-tier AI providers commonly retain and may train on your requests (including screenshots) as part of offering the service at no cost; paid tiers (per their providers' current policies) and Ollama do not.
+                {t("pv.hintManaged")} <strong>{t("pv.hintManagedNote")}</strong> {t("pv.hintManagedRetain")}
               {:else if settingsForm.api_provider === "gemini"}
-                Recommended for most users outside mainland China. Free API key available at aistudio.google.com.
+                {t("pv.hintGemini")}
               {:else if settingsForm.api_provider === "anthropic"}
-                Pay per use · highest quality. API key at console.anthropic.com.
+                {t("pv.hintAnthropic")}
               {:else if settingsForm.api_provider === "openai"}
-                Pay per use. API key at platform.openai.com.
+                {t("pv.hintOpenai")}
               {:else if settingsForm.api_provider === "deepseek"}
-                ⚠ Text-only — DeepSeek cannot see your screen (its API rejects images). Guidance is inferred from your description, so it may be wrong on unfamiliar or custom apps. For mainland China <em>with</em> screen analysis, use Qwen instead.
+                {t("pv.hintDeepseek")}
               {:else if settingsForm.api_provider === "qwen"}
-                Qwen (DashScope) — pick your region below and the endpoint fills in automatically. Supports image analysis, and is the recommended cloud option for mainland China where US AI services are geoblocked.
+                {t("pv.hintQwen")}
               {:else if settingsForm.api_provider === "ollama"}
-                Free · runs locally · no data leaves your machine. Requires Ollama installed with a vision model (e.g. llama3.2-vision).
+                {t("pv.hintOllama")}
               {:else if settingsForm.api_provider === "custom"}
                 Any OpenAI-compatible <code>/v1</code> endpoint — a local server (LM Studio, llama.cpp, vLLM) to run fully offline, a DashScope workspace URL, or another cloud. Use a <em>vision</em> model so it can see the screen; the API key is optional for local servers.
               {/if}
@@ -5037,27 +5037,27 @@ See the LICENSE file in the root of this repository for complete details.
                    a recognized paid-tier key on the relay and degrades safely to
                    Regular pricing with no server-side handling needed. -->
               <div class="setting-group">
-                <label class="setting-label" for="tier-select">Quality tier</label>
+                <label class="setting-label" for="tier-select">{t("pv.tier")}</label>
                 <select id="tier-select" class="setting-select" bind:value={settingsForm.managed_tier}>
-                  <option value="free">Free — uses your free requests</option>
-                  <option value="speed" disabled={!canAffordTier("speed")}>Speed — fastest · 6 coins/request{canAffordTier("speed") ? "" : " (not enough coins)"}</option>
-                  <option value="regular" disabled={!canAffordTier("regular")}>Regular — balanced · 12 coins/request{canAffordTier("regular") ? "" : " (not enough coins)"}</option>
-                  <option value="smart" disabled={!canAffordTier("smart")}>Smart — best grounding · 18 coins/request{canAffordTier("smart") ? "" : " (not enough coins)"}</option>
+                  <option value="free">{t("pv.tierFree")}</option>
+                  <option value="speed" disabled={!canAffordTier("speed")}>{t("pv.tierSpeed")}{canAffordTier("speed") ? "" : t("pv.tierNoCoins")}</option>
+                  <option value="regular" disabled={!canAffordTier("regular")}>{t("pv.tierRegular")}{canAffordTier("regular") ? "" : t("pv.tierNoCoins")}</option>
+                  <option value="smart" disabled={!canAffordTier("smart")}>{t("pv.tierSmart")}{canAffordTier("smart") ? "" : t("pv.tierNoCoins")}</option>
                 </select>
                 <p class="setting-hint">
                   {#if settingsForm.managed_tier === "free"}
-                    Free requests are used automatically until they run out, no matter which tier is selected here — this only decides what happens afterward, or once you buy coins.
+                    {t("pv.tierHintFree")}
                   <!-- Model names must match the relay's TIER_ROUTES (relay/index.ts).
                        All six were stale: the v0.7.12 roster change (2026-08-19) moved
                        every tier onto the GPT-5.6 / Gemini 3.7 generation and this text
                        was never updated, so a paying customer read superseded names for
                        three weeks while deciding what their coins buy. -->
                   {:else if settingsForm.managed_tier === "speed"}
-                    GPT-5.6 Luna, falls back to Gemini 3.5 Flash-Lite. Cheapest; good for simple, text-heavy UIs. Coins are bought on the Account tab.
+                    {t("pv.tierHintSpeed")}
                   {:else if settingsForm.managed_tier === "smart"}
-                    GPT-5.6 Terra, falls back to Gemini 3.7 Flash. Reasoning-enabled; the strongest on ambiguous or visually dense screens. Coins are bought on the Account tab.
+                    {t("pv.tierHintSmart")}
                   {:else}
-                    Gemini 3.7 Flash, falls back to GPT-5.6 Terra. The best all-round default — measured on real sessions at 92% on-target pointing. Coins are bought on the Account tab.
+                    {t("pv.tierHintRegular")}
                   {/if}
                 </p>
               </div>
@@ -5065,7 +5065,7 @@ See the LICENSE file in the root of this repository for complete details.
 
             {#if settingsForm.api_provider === "anthropic"}
               <div class="setting-group">
-                <label class="setting-label" for="anthropic-key">API Key</label>
+                <label class="setting-label" for="anthropic-key">{t("pv.apiKey")}</label>
                 <div class="key-row">
                   {#if showKeyAnthropic}
                     <input id="anthropic-key" class="setting-input" type="text"
@@ -5082,14 +5082,14 @@ See the LICENSE file in the root of this repository for complete details.
                 </div>
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="anthropic-model">Model</label>
+                <label class="setting-label" for="anthropic-model">{t("pv.model")}</label>
                 <select id="anthropic-model" class="setting-select"
                   value={customAnthropic ? "__custom__" : settingsForm.anthropic_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customAnthropic = false; settingsForm.anthropic_model = v; } else { customAnthropic = true; settingsForm.anthropic_model = ""; } }}>
-                  <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fast)</option>
-                  <option value="claude-sonnet-5">claude-sonnet-5 (recommended)</option>
-                  <option value="claude-opus-5">claude-opus-5 (best quality)</option>
-                  <option value="__custom__">Custom model…</option>
+                  <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 {t("pv.qFast")}</option>
+                  <option value="claude-sonnet-5">claude-sonnet-5 {t("pv.qRecommended")}</option>
+                  <option value="claude-opus-5">claude-opus-5 {t("pv.qBest")}</option>
+                  <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customAnthropic}
                   <input class="setting-input" type="text" bind:value={settingsForm.anthropic_model}
@@ -5099,7 +5099,7 @@ See the LICENSE file in the root of this repository for complete details.
 
             {:else if settingsForm.api_provider === "gemini"}
               <div class="setting-group">
-                <label class="setting-label" for="gemini-key">API Key</label>
+                <label class="setting-label" for="gemini-key">{t("pv.apiKey")}</label>
                 <div class="key-row">
                   {#if showKeyGemini}
                     <input id="gemini-key" class="setting-input" type="text"
@@ -5116,22 +5116,22 @@ See the LICENSE file in the root of this repository for complete details.
                 </div>
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="gemini-model">Model</label>
+                <label class="setting-label" for="gemini-model">{t("pv.model")}</label>
                 <select id="gemini-model" class="setting-select"
                   value={customGemini ? "__custom__" : settingsForm.gemini_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customGemini = false; settingsForm.gemini_model = v; } else { customGemini = true; settingsForm.gemini_model = ""; } }}>
-                  <option value="gemini-3.7-flash">gemini-3.7-flash (recommended)</option>
+                  <option value="gemini-3.7-flash">gemini-3.7-flash {t("pv.qRecommended")}</option>
                   <!-- 3.8 is listed but NOT the default. It is newer and the family
                        prior is strong, but 3.7 is the one with measured grounding
                        here (100% bbox, 92% hit, median 1px — model-comparison.md),
                        and 3.8's model card says thinking cannot be set below "low",
                        which is the shape that broke forced tool calls on OpenAI's
                        reasoning models. Promote it once it has its own numbers. -->
-                  <option value="gemini-3.8-flash">gemini-3.8-flash (newest — untested here)</option>
-                  <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (fast)</option>
-                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (best quality)</option>
+                  <option value="gemini-3.8-flash">gemini-3.8-flash {t("pv.qNewest")}</option>
+                  <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite {t("pv.qFast")}</option>
+                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview {t("pv.qBest")}</option>
                   <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                  <option value="__custom__">Custom model…</option>
+                  <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customGemini}
                   <input class="setting-input" type="text" bind:value={settingsForm.gemini_model}
@@ -5141,27 +5141,27 @@ See the LICENSE file in the root of this repository for complete details.
 
             {:else if settingsForm.api_provider === "ollama"}
               <div class="setting-group">
-                <label class="setting-label" for="ollama-url">Base URL</label>
+                <label class="setting-label" for="ollama-url">{t("pv.baseUrl")}</label>
                 <input id="ollama-url" class="setting-input" type="text"
                   bind:value={settingsForm.ollama_base_url}
                   placeholder="http://localhost:11434" />
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="ollama-model">Model</label>
+                <label class="setting-label" for="ollama-model">{t("pv.model")}</label>
                 <select id="ollama-model" class="setting-select"
                   value={customOllama ? "__custom__" : settingsForm.ollama_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customOllama = false; settingsForm.ollama_model = v; } else { customOllama = true; settingsForm.ollama_model = ""; } }}>
                   {#each ollamaModels as m}
                     <option value={m}>{m}</option>
                   {/each}
-                  <option value="__custom__">Custom / not listed…</option>
+                  <option value="__custom__">{t("pv.customNotListed")}</option>
                 </select>
                 {#if customOllama}
                   <input class="setting-input" type="text" bind:value={settingsForm.ollama_model}
                     placeholder="e.g. gemma4:e4b" spellcheck="false" style="margin-top:6px" />
                 {/if}
                 <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
-                  <button class="key-toggle" type="button" onclick={refreshOllamaModels}>↻ Refresh</button>
+                  <button class="key-toggle" type="button" onclick={refreshOllamaModels}>{t("pv.refresh")}</button>
                   <span class="setting-hint" style="margin:0">
                     {ollamaModelsMsg || `${ollamaModels.length} model${ollamaModels.length === 1 ? "" : "s"} on the server · must be vision-capable`}
                   </span>
@@ -5170,7 +5170,7 @@ See the LICENSE file in the root of this repository for complete details.
 
             {:else if settingsForm.api_provider === "openai"}
               <div class="setting-group">
-                <label class="setting-label" for="openai-key">API Key</label>
+                <label class="setting-label" for="openai-key">{t("pv.apiKey")}</label>
                 <div class="key-row">
                   {#if showKeyOpenAI}
                     <input id="openai-key" class="setting-input" type="text"
@@ -5187,14 +5187,14 @@ See the LICENSE file in the root of this repository for complete details.
                 </div>
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="openai-model">Model</label>
+                <label class="setting-label" for="openai-model">{t("pv.model")}</label>
                 <select id="openai-model" class="setting-select"
                   value={customOpenAI ? "__custom__" : settingsForm.openai_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customOpenAI = false; settingsForm.openai_model = v; } else { customOpenAI = true; settingsForm.openai_model = ""; } }}>
-                  <option value="gpt-5.6-terra">gpt-5.6-terra (recommended)</option>
-                  <option value="gpt-5.6-luna">gpt-5.6-luna (fast)</option>
-                  <option value="gpt-5.6-sol">gpt-5.6-sol (best quality)</option>
-                  <option value="__custom__">Custom model…</option>
+                  <option value="gpt-5.6-terra">gpt-5.6-terra {t("pv.qRecommended")}</option>
+                  <option value="gpt-5.6-luna">gpt-5.6-luna {t("pv.qFast")}</option>
+                  <option value="gpt-5.6-sol">gpt-5.6-sol {t("pv.qBest")}</option>
+                  <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customOpenAI}
                   <input class="setting-input" type="text" bind:value={settingsForm.openai_model}
@@ -5204,7 +5204,7 @@ See the LICENSE file in the root of this repository for complete details.
 
             {:else if settingsForm.api_provider === "deepseek"}
               <div class="setting-group">
-                <label class="setting-label" for="deepseek-key">API Key</label>
+                <label class="setting-label" for="deepseek-key">{t("pv.apiKey")}</label>
                 <div class="key-row">
                   {#if showKeyDeepSeek}
                     <input id="deepseek-key" class="setting-input" type="text"
@@ -5221,14 +5221,14 @@ See the LICENSE file in the root of this repository for complete details.
                 </div>
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="deepseek-model">Model</label>
+                <label class="setting-label" for="deepseek-model">{t("pv.model")}</label>
                 <select id="deepseek-model" class="setting-select"
                   value={customDeepSeek ? "__custom__" : settingsForm.deepseek_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customDeepSeek = false; settingsForm.deepseek_model = v; } else { customDeepSeek = true; settingsForm.deepseek_model = ""; } }}>
-                  <option value="deepseek-v4-flash">deepseek-v4-flash (recommended, text-only)</option>
-                  <option value="deepseek-v4-pro">deepseek-v4-pro (best quality, text-only)</option>
-                  <option value="deepseek-v4-flash-vision-exp">deepseek-v4-flash-vision-exp (experimental, sees the screen)</option>
-                  <option value="__custom__">Custom model…</option>
+                  <option value="deepseek-v4-flash">deepseek-v4-flash {t("pv.qRecommendedTextOnly")}</option>
+                  <option value="deepseek-v4-pro">deepseek-v4-pro {t("pv.qBestTextOnly")}</option>
+                  <option value="deepseek-v4-flash-vision-exp">deepseek-v4-flash-vision-exp {t("pv.qVisionExp")}</option>
+                  <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customDeepSeek}
                   <input class="setting-input" type="text" bind:value={settingsForm.deepseek_model}
@@ -5238,7 +5238,7 @@ See the LICENSE file in the root of this repository for complete details.
 
             {:else if settingsForm.api_provider === "qwen"}
               <div class="setting-group">
-                <label class="setting-label" for="qwen-key">API Key</label>
+                <label class="setting-label" for="qwen-key">{t("pv.apiKey")}</label>
                 <div class="key-row">
                   {#if showKeyQwen}
                     <input id="qwen-key" class="setting-input" type="text"
@@ -5255,14 +5255,14 @@ See the LICENSE file in the root of this repository for complete details.
                 </div>
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="qwen-model">Model</label>
+                <label class="setting-label" for="qwen-model">{t("pv.model")}</label>
                 <select id="qwen-model" class="setting-select"
                   value={customQwen ? "__custom__" : settingsForm.qwen_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customQwen = false; settingsForm.qwen_model = v; } else { customQwen = true; settingsForm.qwen_model = ""; } }}>
-                  <option value="qwen3.8-max">qwen3.8-max (recommended)</option>
-                  <option value="qwen3.7-flash">qwen3.7-flash (fast, cheapest vision pick)</option>
-                  <option value="qwen3.5-omni-plus">qwen3.5-omni-plus (multimodal)</option>
-                  <option value="__custom__">Custom model…</option>
+                  <option value="qwen3.8-max">qwen3.8-max {t("pv.qRecommended")}</option>
+                  <option value="qwen3.7-flash">qwen3.7-flash {t("pv.qCheapVision")}</option>
+                  <option value="qwen3.5-omni-plus">qwen3.5-omni-plus {t("pv.qMultimodal")}</option>
+                  <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customQwen}
                   <input class="setting-input" type="text" bind:value={settingsForm.qwen_model}
@@ -5270,20 +5270,20 @@ See the LICENSE file in the root of this repository for complete details.
                 {/if}
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="qwen-endpoint">Region</label>
+                <label class="setting-label" for="qwen-endpoint">{t("pv.region")}</label>
                 <select id="qwen-endpoint" class="setting-select"
                   value={qwenEndpointChoice}
                   onchange={(e) => {
                     settingsForm.qwen_base_url = e.currentTarget.value === "intl" ? QWEN_ENDPOINTS.intl : QWEN_ENDPOINTS.beijing;
                   }}>
-                  <option value="intl">International — Singapore</option>
-                  <option value="beijing">China — Beijing</option>
+                  <option value="intl">{t("pv.regionSingapore")}</option>
+                  <option value="beijing">{t("pv.regionBeijing")}</option>
                 </select>
                 <p class="setting-hint">DashScope endpoint, filled in automatically. For a local server, a DashScope workspace URL, or another cloud, use the <strong>Custom (OpenAI-compatible)</strong> provider instead.</p>
               </div>
             {:else if settingsForm.api_provider === "custom"}
               <div class="setting-group">
-                <label class="setting-label" for="custom-url">Base URL</label>
+                <label class="setting-label" for="custom-url">{t("pv.baseUrl")}</label>
                 <input id="custom-url" class="setting-input" type="text"
                   bind:value={settingsForm.custom_base_url}
                   placeholder="http://localhost:1234/v1" spellcheck="false" />
@@ -5293,14 +5293,14 @@ See the LICENSE file in the root of this repository for complete details.
                 </p>
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="custom-model">Model</label>
+                <label class="setting-label" for="custom-model">{t("pv.model")}</label>
                 <input id="custom-model" class="setting-input" type="text"
                   bind:value={settingsForm.custom_model}
                   placeholder="e.g. qwen2.5-vl-7b-instruct" spellcheck="false" />
                 <p class="setting-hint">Use a <em>vision</em> model so it can see the screen.</p>
               </div>
               <div class="setting-group">
-                <label class="setting-label" for="custom-key">API Key <span style="opacity:.55">· optional for local servers</span></label>
+                <label class="setting-label" for="custom-key">{t("pv.apiKey")} <span style="opacity:.55">{t("pv.keyOptional")}</span></label>
                 <div class="key-row">
                   {#if showKeyCustom}
                     <input id="custom-key" class="setting-input" type="text"
@@ -5325,14 +5325,14 @@ See the LICENSE file in the root of this repository for complete details.
                  settings row is how the two come to disagree. -->
             {#if settingsForm.api_provider === "openai" || settingsForm.api_provider === "gemini"}
               <div class="setting-group">
-                <label class="setting-label" for="reasoning-effort">Thinking effort</label>
+                <label class="setting-label" for="reasoning-effort">{t("pv.thinkingEffort")}</label>
                 <select id="reasoning-effort" class="setting-input"
                   bind:value={settingsForm.reasoning_effort}>
-                  <option value="">Provider default</option>
-                  <option value="minimal">Minimal — fastest (Flash-Lite only)</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High — slowest, most thorough</option>
+                  <option value="">{t("pv.effortDefault")}</option>
+                  <option value="minimal">{t("pv.effortMinimal")}</option>
+                  <option value="low">{t("pv.effortLow")}</option>
+                  <option value="medium">{t("pv.effortMedium")}</option>
+                  <option value="high">{t("pv.effortHigh")}</option>
                 </select>
                 <p class="setting-hint" style="margin-top:4px">
                   How long the model may think before answering. More thinking costs more

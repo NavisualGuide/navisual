@@ -423,6 +423,65 @@ export const en = {
   "au.autoDetect": "Auto-detect",
   "au.voiceLangHint": "Sets both the TTS voice language and the voice-input language. Auto-detect speaks each reply in its own language and uses your OS language for voice input.",
 
+  // ── Provider tab (P3) ─────────────────────────────────────────────────────
+  "pv.provider": "Provider",
+  "pv.apiKey": "API Key",
+  "pv.model": "Model",
+  "pv.baseUrl": "Base URL",
+  "pv.region": "Region",
+  "pv.thinkingEffort": "Thinking effort",
+  "pv.refresh": "\u21bb Refresh",
+  "pv.customModel": "Custom model\u2026",
+  "pv.customNotListed": "Custom / not listed\u2026",
+  "pv.keyOptional": "\u00b7 optional for local servers",
+
+  // Model qualifiers. The model IDs themselves are identifiers and never translated.
+  "pv.qRecommended": "(recommended)",
+  "pv.qFast": "(fast)",
+  "pv.qBest": "(best quality)",
+  "pv.qRecommendedTextOnly": "(recommended, text-only)",
+  "pv.qBestTextOnly": "(best quality, text-only)",
+  "pv.qVisionExp": "(experimental, sees the screen)",
+  "pv.qNewest": "(newest \u2014 untested here)",
+  "pv.qMultimodal": "(multimodal)",
+  "pv.qCheapVision": "(fast, cheapest vision pick)",
+
+  // Provider picker
+  "pv.optManaged": "Managed \u2014 free + paid",
+  "pv.optCustom": "Custom (OpenAI-compatible)",
+
+  // Per-provider hints
+  "pv.hintManaged": "Free \u00b7 30 requests included. Routed via the Navisual relay to a free-tier AI provider (the specific provider may change over time as we optimize for reliability and speed). May be slower than BYOK providers \u2014 ideal for getting started.",
+  "pv.hintManagedNote": "Note:",
+  "pv.hintManagedRetain": "free-tier AI providers commonly retain and may train on your requests (including screenshots) as part of offering the service at no cost; paid tiers (per their providers' current policies) and Ollama do not.",
+  "pv.hintGemini": "Recommended for most users outside mainland China. Free API key available at aistudio.google.com.",
+  "pv.hintAnthropic": "Pay per use \u00b7 highest quality. API key at console.anthropic.com.",
+  "pv.hintOpenai": "Pay per use. API key at platform.openai.com.",
+  "pv.hintDeepseek": "\u26a0 Text-only \u2014 DeepSeek cannot see your screen (its API rejects images). Guidance is inferred from your description, so it may be wrong on unfamiliar or custom apps. For mainland China with screen analysis, use Qwen instead.",
+  "pv.hintQwen": "Qwen (DashScope) \u2014 pick your region below and the endpoint fills in automatically. Supports image analysis, and is the recommended cloud option for mainland China where US AI services are geoblocked.",
+  "pv.hintOllama": "Free \u00b7 runs locally \u00b7 no data leaves your machine. Requires Ollama installed with a vision model (e.g. llama3.2-vision).",
+
+  // Quality tier
+  "pv.tier": "Quality tier",
+  "pv.tierFree": "Free \u2014 uses your free requests",
+  "pv.tierSpeed": "Speed \u2014 fastest \u00b7 6 coins/request",
+  "pv.tierRegular": "Regular \u2014 balanced \u00b7 12 coins/request",
+  "pv.tierSmart": "Smart \u2014 best grounding \u00b7 18 coins/request",
+  "pv.tierNoCoins": " (not enough coins)",
+  "pv.tierHintFree": "Free requests are used automatically until they run out, no matter which tier is selected here \u2014 this only decides what happens afterward, or once you buy coins.",
+  "pv.tierHintSpeed": "GPT-5.6 Luna, falls back to Gemini 3.5 Flash-Lite. Cheapest; good for simple, text-heavy UIs. Coins are bought on the Account tab.",
+  "pv.tierHintSmart": "GPT-5.6 Terra, falls back to Gemini 3.7 Flash. Reasoning-enabled; the strongest on ambiguous or visually dense screens. Coins are bought on the Account tab.",
+  "pv.tierHintRegular": "Gemini 3.7 Flash, falls back to GPT-5.6 Terra. The best all-round default \u2014 measured on real sessions at 92% on-target pointing. Coins are bought on the Account tab.",
+
+  // Region + thinking effort
+  "pv.regionBeijing": "China \u2014 Beijing",
+  "pv.regionSingapore": "International \u2014 Singapore",
+  "pv.effortDefault": "Provider default",
+  "pv.effortMinimal": "Minimal \u2014 fastest (Flash-Lite only)",
+  "pv.effortLow": "Low",
+  "pv.effortMedium": "Medium",
+  "pv.effortHigh": "High \u2014 slowest, most thorough",
+
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",
   "promo.sub": "Enough to try the faster, smarter models on the Navisual relay. Navisual stays free to use",
