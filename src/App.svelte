@@ -4919,26 +4919,6 @@ See the LICENSE file in the root of this repository for complete details.
           <span class="modal-title">Settings</span>
           <button class="hdr-btn hdr-btn-close" onclick={() => (showSettings = false)}>✕</button>
         </div>
-        <!-- ABOVE the tabs, and never inside one. Someone who cannot read the current
-             interface still has to be able to change it, so the one control that gets them
-             out cannot sit behind a tab labelled in the language they are escaping. The
-             option labels are each written in their own language for the same reason:
-             "English / 简体中文 / 繁體中文" identifies itself whatever is active. -->
-        <div class="lang-row">
-          <label class="setting-label lang-label" for="ui-language">{t("lang.label")}</label>
-          <select id="ui-language" class="setting-select lang-select" bind:value={settingsForm.ui_language}>
-            {#each UI_LANGUAGE_CHOICES as choice}
-              <option value={choice}>{UI_LANGUAGE_LABELS[choice]}</option>
-            {/each}
-          </select>
-        </div>
-        {#if settingsForm.ui_language === "system"}
-          <p class="setting-hint lang-hint">
-            {t("lang.systemHint", { locale: UI_LANGUAGE_LABELS[i18n.systemResolved] })} · {t("lang.aiNote")}
-          </p>
-        {:else}
-          <p class="setting-hint lang-hint">{t("lang.aiNote")}</p>
-        {/if}
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
           <!-- Billing merged into Account (2026-09-06). Coins belong to an account,
@@ -5333,6 +5313,35 @@ See the LICENSE file in the root of this repository for complete details.
             {/if}
 
           {:else if settingsTab === "screen-guide"}
+            <!-- First in the tab, and in a tab rather than floating above the tab row.
+                 It sat above the tabs at first, argued as "someone who cannot read the UI
+                 must still be able to escape it" -- but the setting DEFAULTS to `system`,
+                 so a Chinese desktop already gets a Chinese panel and never has to find
+                 this. That left a structural special case (the one setting living nowhere)
+                 paying for a case the default mostly handles. Being first in the tab keeps
+                 what findability was actually worth.
+
+                 It is NOT called "Language": the Audio tab has had a control by that exact
+                 name since TTS shipped, and two settings called Language in one dialog is
+                 the collision, not the placement. This one is the INTERFACE language; that
+                 one is the VOICE language, and both labels now say which. -->
+            <div class="setting-group">
+              <label class="setting-label" for="ui-language">{t("lang.label")}</label>
+              <select id="ui-language" class="setting-input setting-select" bind:value={settingsForm.ui_language}>
+                {#each UI_LANGUAGE_CHOICES as choice}
+                  <!-- Each option is written in its own language, so the list identifies
+                       itself whatever the panel is currently showing. -->
+                  <option value={choice}>{UI_LANGUAGE_LABELS[choice]}</option>
+                {/each}
+              </select>
+              {#if settingsForm.ui_language === "system"}
+                <p class="setting-hint">
+                  {t("lang.systemHint", { locale: UI_LANGUAGE_LABELS[i18n.systemResolved] })} · {t("lang.aiNote")}
+                </p>
+              {:else}
+                <p class="setting-hint">{t("lang.aiNote")}</p>
+              {/if}
+            </div>
             <div class="setting-group">
               <p class="setting-label">Task suggestions</p>
               <label class="toggle-row">
@@ -5528,7 +5537,7 @@ See the LICENSE file in the root of this repository for complete details.
               <p class="stub-hint" style="margin-top:4px">Uses the WebView2 Web Speech API — audio is sent to Microsoft's online speech service; requires internet and microphone permission.</p>
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="voice-lang">Language</label>
+              <label class="setting-label" for="voice-lang">Voice language</label>
               <select id="voice-lang" class="setting-input setting-select"
                 bind:value={settingsForm.voice_language}
                 disabled={!settingsForm.tts_enabled && !settingsForm.voice_input_enabled}>
@@ -7995,30 +8004,6 @@ See the LICENSE file in the root of this repository for complete details.
      many. Content-sized and centred rather than stretched, because six tabs
      cannot fit a 400px modal at any sane size and a lone full-width "Developer"
      bar on the second row is a worse answer than a centred chip. */
-  /* The language row sits above the tabs, so it inherits the tab row's side margin
-     rather than the body's -- the two read as one block and must line up. */
-  .lang-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 6px 12px 4px;
-    flex-shrink: 0;
-  }
-  .lang-label {
-    margin: 0;
-    flex-shrink: 0;
-  }
-  /* The select takes the remaining width instead of sizing to its longest option: the
-     option labels are in three different scripts, so their natural widths differ enough
-     that an auto-sized control would visibly jump on every change. */
-  .lang-select {
-    flex: 1;
-    min-width: 0;
-  }
-  .lang-hint {
-    margin: 0 12px 8px;
-    flex-shrink: 0;
-  }
   .modal-tabs {
     display: flex;
     flex-wrap: wrap;

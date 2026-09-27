@@ -20,7 +20,7 @@ export const en = {
   "common.or": "or",
 
   // ── Language setting ──────────────────────────────────────────────────────
-  "lang.label": "Language",
+  "lang.label": "Interface language",
   "lang.systemHint": "System language: {locale}",
   "lang.aiNote": "The AI still answers in the language you type in.",
 

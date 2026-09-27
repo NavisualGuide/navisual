@@ -28,7 +28,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "common.or": "或",
 
   // ── 語言設定 ──────────────────────────────────────────────────────────────
-  "lang.label": "語言",
+  "lang.label": "介面語言",
   "lang.systemHint": "系統語言：{locale}",
   "lang.aiNote": "AI 仍然會用你輸入的語言回答。",
 

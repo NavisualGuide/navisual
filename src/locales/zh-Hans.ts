@@ -27,7 +27,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "common.or": "或",
 
   // ── 语言设置 ──────────────────────────────────────────────────────────────
-  "lang.label": "语言",
+  "lang.label": "界面语言",
   "lang.systemHint": "系统语言：{locale}",
   "lang.aiNote": "AI 仍然按你输入的语言回答。",
 
