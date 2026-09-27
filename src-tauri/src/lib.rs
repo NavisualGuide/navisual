@@ -7159,6 +7159,30 @@ async fn get_balance(state: State<'_, AppState>) -> Result<server::BalanceRespon
     Ok(balance)
 }
 
+/// Stop waiting for a Google sign-in without sitting out the full budget.
+///
+/// Dropping the armed sender wakes `wait()` at once, so `start_google_oauth` returns
+/// and the panel gets its button back. Without it the button is disabled for the whole
+/// `OAUTH_CALLBACK_TIMEOUT_SECS` — and the case that produces is not rare: a network
+/// that cannot reach `accounts.google.com` at all makes EVERY attempt take the maximum.
+/// Measured live from mainland China 2026-09-27, confirmed to the second in the log
+/// (`opening the Google consent page` 01:11:02 → `no callback within 240 s` 01:15:02).
+///
+/// Leaves exactly the state a timeout leaves: attempt disarmed, port still listening, so
+/// a late redirect still lands on a page rather than a connection error.
+#[tauri::command]
+fn cancel_google_oauth() {
+    // 9876 to match `generate_pkce(9876)` in the two flows that arm this server.
+    match server::oauth_callback_server(9876) {
+        Ok(cb) => {
+            cb.disarm();
+            log::info!("[oauth] sign-in cancelled by the user");
+        }
+        // Never bound means nothing is waiting, so there is nothing to cancel.
+        Err(e) => log::debug!("[oauth] cancel: no callback server ({e})"),
+    }
+}
+
 /// Sign in with Google via PKCE OAuth in the system browser.
 ///
 /// **In-place identity linking (S.2.1 §4).** Opens the Google consent page in the
@@ -8212,6 +8236,7 @@ pub fn run() {
             get_balance,
             get_session_status,
             start_google_oauth,
+            cancel_google_oauth,
             create_checkout,
             sign_up_email,
             resend_email_otp,

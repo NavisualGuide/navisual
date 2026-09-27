@@ -269,9 +269,14 @@
     }
   }
 
+  // Set while the user's own Cancel is in flight. `start_google_oauth` rejects when the
+  // wait is dropped, and a rejection the user asked for is not an error to show them.
+  let oauthCancelled = $state(false);
+
   async function acctGoogle() {
     if (billing.oauthPending) return;
     billing.oauthPending = true;
+    oauthCancelled = false;
     account.error = "";
     // Any second-window notice belongs to the PREVIOUS attempt.
     account.notice = "";
@@ -280,9 +285,20 @@
       await account.load();
       await onRefreshBalance();
     } catch (e) {
-      account.error = String(e);
+      if (!oauthCancelled) account.error = String(e);
     } finally {
       billing.oauthPending = false;
+    }
+  }
+
+  // Without this the button is disabled for the full 240 s budget, and a network that
+  // cannot reach accounts.google.com makes every attempt take exactly that long.
+  async function acctGoogleCancel() {
+    oauthCancelled = true;
+    try {
+      await invoke("cancel_google_oauth");
+    } catch (_) {
+      // Nothing was waiting; the finally in acctGoogle still clears the flag.
     }
   }
 </script>
@@ -337,6 +353,16 @@
          is idle and the user is the one being waited on. -->
     {billing.oauthPending ? "Waiting for Google…" : "Continue with Google"}
   </button>
+  {#if billing.oauthPending}
+    <!-- Names the likely cause rather than just offering an escape. Where the consent
+         page is unreachable this is the ONLY thing on screen for four minutes, and the
+         email form above it is the way out that does work. -->
+    <p class="setting-hint" style="margin-top: 6px;">
+      Nothing happening? The Google sign-in page may be unreachable from your network —
+      the email and password above work either way.
+      <button class="legal-link" onclick={acctGoogleCancel}>Cancel</button>
+    </p>
+  {/if}
 
 {:else if account.view === "signup"}
   <PromoOffer />

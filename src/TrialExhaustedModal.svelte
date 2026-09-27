@@ -4,6 +4,7 @@
   // and button classes — no local styles. The modal copy differs by reason:
   // telling an existing paying customer low on coins "your free trial is used"
   // is simply wrong for them (audit F6).
+  import { invoke } from "@tauri-apps/api/core";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { billing } from "./lib/billing.svelte";
   import PromoOffer from "./PromoOffer.svelte";
@@ -23,6 +24,10 @@
 
   function close() {
     open = false;
+    // Clearing the flag only ever hid the wait; the backend kept listening for the
+    // full budget, so the next sign-in reported "already in progress". Cancel it for
+    // real so the two sides agree.
+    if (billing.oauthPending) invoke("cancel_google_oauth").catch(() => {});
     billing.oauthPending = false;
     billing.checkoutPending = false;
   }
