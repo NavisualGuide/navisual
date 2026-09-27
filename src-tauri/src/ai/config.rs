@@ -74,6 +74,20 @@ pub struct Config {
     // BBOX_DISTRUST_MODELS in .env (no rebuild/release). Empty string = trust all.
     pub bbox_distrust_models: String,
 
+    // Interface
+    /// UI language: "system" | "en" | "zh-Hans" | "zh-Hant". "system" resolves against the
+    /// OS UI locale at startup and falls back to English for anything not in that list.
+    ///
+    /// Resolution reads the FULL BCP-47 tag, never the primary subtag alone. That is not a
+    /// style preference -- `pick_voice` filtered Chinese voices on the bare "zh" and a
+    /// Taiwan voice ended up reading Simplified Mandarin (fixed v0.7.30). zh-Hans and
+    /// zh-Hant collapse into each other under exactly the same shortcut.
+    ///
+    /// Deliberately does NOT influence the AI's reply language: prompts.rs rule 13 pins the
+    /// reply to what the USER typed, because an English UI with Chinese input (and the
+    /// reverse) are both ordinary.
+    pub ui_language: String,
+
     // Overlay appearance
     pub overlay_color: String,
     pub overlay_thickness: u32,
@@ -249,6 +263,7 @@ impl Default for Config {
             tts_voice: String::new(),
             voice_input_enabled: true,
             voice_language: "auto".to_string(),
+            ui_language: "system".to_string(),
             hotkey_next:  "Ctrl+Backquote".to_string(),
             hotkey_wrong: "Ctrl+KeyE".to_string(),
             hotkey_pause: String::new(),
@@ -466,6 +481,11 @@ impl Config {
         if let Ok(v) = env::var("VOICE_LANGUAGE") {
             if !v.is_empty() {
                 config.voice_language = v;
+            }
+        }
+        if let Ok(v) = env::var("UI_LANGUAGE") {
+            if !v.is_empty() {
+                config.ui_language = v;
             }
         }
         // Hotkeys: NO is_empty guard, unlike most string settings above. An empty

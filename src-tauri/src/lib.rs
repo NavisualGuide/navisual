@@ -3198,6 +3198,12 @@ fn default_autopilot_min_cells() -> u32 {
     AUTOPILOT_MIN_CELLS
 }
 
+/// serde default for `ui_language` — a payload from a frontend that predates the setting
+/// deserializes to "system" rather than failing, which would take every other setting with it.
+fn default_ui_language() -> String {
+    "system".to_string()
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct SettingsPayload {
     api_provider: String,
@@ -3235,6 +3241,10 @@ struct SettingsPayload {
     tts_voice: String,
     voice_input_enabled: bool,
     voice_language: String,
+    /// Serde default so a settings payload written by an older frontend -- which has no
+    /// such field -- loads as "system" instead of failing the whole deserialize.
+    #[serde(default = "default_ui_language")]
+    ui_language: String,
     hotkey_next: String,
     hotkey_wrong: String,
     hotkey_pause: String,
@@ -6867,6 +6877,7 @@ fn payload_from_config(c: &Config) -> SettingsPayload {
         tts_voice: c.tts_voice.clone(),
         voice_input_enabled: c.voice_input_enabled,
         voice_language: c.voice_language.clone(),
+        ui_language: c.ui_language.clone(),
         hotkey_next: c.hotkey_next.clone(),
         hotkey_wrong: c.hotkey_wrong.clone(),
         hotkey_pause: c.hotkey_pause.clone(),
@@ -6967,6 +6978,7 @@ async fn save_settings(
             payload.voice_input_enabled.to_string(),
         ),
         ("VOICE_LANGUAGE".into(), payload.voice_language.clone()),
+        ("UI_LANGUAGE".into(), payload.ui_language.clone()),
         ("HOTKEY_NEXT".into(), payload.hotkey_next.clone()),
         ("HOTKEY_WRONG".into(), payload.hotkey_wrong.clone()),
         ("HOTKEY_PAUSE".into(), payload.hotkey_pause.clone()),

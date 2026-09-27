@@ -8,6 +8,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { billing } from "./lib/billing.svelte";
   import PromoOffer from "./PromoOffer.svelte";
+  import { t } from "./lib/i18n.svelte";
 
   let {
     open = $bindable(false),
@@ -45,66 +46,64 @@
       role="dialog"
       tabindex="-1"
       aria-modal="true"
-      aria-label={reason === "coins" ? "Not enough coins" : "Free trial exhausted"}
+      aria-label={reason === "coins" ? t("trial.ariaCoins") : t("trial.ariaFree")}
       onclick={(e) => e.stopPropagation()}
       onkeydown={(e) => e.stopPropagation()}
       style="max-width: 320px;"
     >
       <div class="modal-header">
-        <span class="modal-title">{reason === "coins" ? "Not enough coins" : "Free trial used"}</span>
+        <span class="modal-title">{reason === "coins" ? t("trial.titleCoins") : t("trial.titleFree")}</span>
         <button class="hdr-btn hdr-btn-close" onclick={() => (open = false)}>✕</button>
       </div>
       <div class="modal-body" style="padding: 20px; text-align: center; line-height: 1.6;">
         <p style="font-size: 2em; margin-bottom: 12px;">{reason === "coins" ? "🪙" : "🎯"}</p>
         <p style="margin-bottom: 8px; font-weight: 600;">
-          {reason === "coins" ? "Not enough coins for this quality tier." : "Your free requests have been used."}
+          {reason === "coins" ? t("trial.bodyCoins") : t("trial.bodyFree")}
         </p>
 
         {#if billing.oauthPending}
           <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
-            Signing in with Google in your browser…
+            {t("trial.signingInGoogle")}
           </p>
         {:else if billing.buyPending}
           <!-- Distinct from oauthPending again: a signed-in user topping up was
                being told they were signing in with Google. -->
           <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
-            Opening checkout…
+            {t("trial.openingCheckout")}
           </p>
         {:else if billing.checkoutPending}
           <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 20px;">
-            Checkout opened in your browser. Come back once you've paid — your balance will update automatically.
+            {t("trial.checkoutOpened")}
           </p>
-          <button class="btn-primary btn-full" onclick={onRefreshBalance}>Refresh balance</button>
+          <button class="btn-primary btn-full" onclick={onRefreshBalance}>{t("bill.refreshBalance")}</button>
         {:else}
           <!-- The one surface a signed-out user cannot avoid: they are here because the
                free requests ran out, which is exactly the moment the offer answers. Shown
                ABOVE the top-up copy so "free coins" precedes "buy coins". -->
           <div style="text-align: left;"><PromoOffer /></div>
           <p style="font-size: 0.9em; color: var(--text-secondary); margin-bottom: 16px;">
-            Top up with coins to continue on the Navisual managed relay.
+            {t("trial.topUpBlurb")}
           </p>
           {#if reason === "coins"}
             <!-- audit F8: a paid account low on coins may still have unused free
                  requests — "buy more" alone hides that option. -->
             <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 12px;">
-              Still have free requests left? Switch <strong>Quality tier</strong> to
-              <strong>Free</strong> on Settings → Provider to use them instead.
+              {t("trial.stillFreeLeft")}
             </p>
           {/if}
-          <button class="btn-primary btn-full" style="margin-bottom: 6px;" onclick={() => onBuy(20)}>Buy coins ($20)</button>
+          <button class="btn-primary btn-full" style="margin-bottom: 6px;" onclick={() => onBuy(20)}>{t("bill.buyCoins", { amount: 20 })}</button>
           <p class="legal-agree" style="margin-bottom: 14px;">
-            By buying coins you agree to our
-            <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/terms.html")}>Terms</button>
-            and
-            <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy Policy</button>.
+            {t("bill.agreePrefix")}
+            <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/terms.html")}>{t("bill.terms")}</button>
+            {t("bill.and")}
+            <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("bill.privacy")}</button>.
           </p>
           <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 16px;">
-            Or keep going free with your own key:
-            Settings → Provider → Gemini (Google AI Studio) or Ollama (local).
+            {t("trial.ownKey")}
           </p>
         {/if}
 
-        <button class="btn-ghost btn-full" onclick={close}>Close</button>
+        <button class="btn-ghost btn-full" onclick={close}>{t("common.close")}</button>
       </div>
     </div>
   </div>

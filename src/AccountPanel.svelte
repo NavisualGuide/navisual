@@ -10,6 +10,7 @@
   import { billing } from "./lib/billing.svelte";
   import PromoOffer from "./PromoOffer.svelte";
   import BillingPanel from "./BillingPanel.svelte";
+  import { t } from "./lib/i18n.svelte";
 
   let {
     provider,
@@ -78,20 +79,20 @@
     if (acctBusy) return;
     account.error = ""; account.notice = "";
     if (!acctEmail.trim() || acctPassword.length < MIN_PASSWORD) {
-      account.error = `Enter an email and a password of at least ${MIN_PASSWORD} characters.`;
+      account.error = t("acct.msg.needEmailPassword", { n: MIN_PASSWORD });
       return;
     }
     acctBusy = true;
     try {
       await invoke("sign_up_email", { email: acctEmail.trim(), password: acctPassword });
-      account.notice = `Enter the verification code we emailed to ${acctEmail.trim()}. Already requested one? It's valid for 1 hour.`;
+      account.notice = t("acct.msg.codeSent", { email: acctEmail.trim() });
       account.view = "verify_signup";
     } catch (e) {
       const msg = String(e);
       if (/sign in instead/i.test(msg)) {
         // Email already belongs to a confirmed account — route to sign-in (email stays prefilled).
         account.view = "signin";
-        account.notice = "This email already has an account. Enter your password to sign in.";
+        account.notice = t("acct.msg.alreadyRegistered");
       } else {
         account.error = msg;
       }
@@ -104,11 +105,11 @@
   async function acctResend() {
     if (acctBusy) return;
     account.error = ""; account.notice = "";
-    if (!acctEmail.trim()) { account.error = "Enter your email first."; return; }
+    if (!acctEmail.trim()) { account.error = t("acct.msg.needEmail"); return; }
     acctBusy = true;
     try {
       await invoke("resend_email_otp", { email: acctEmail.trim() });
-      account.notice = `New code sent to ${acctEmail.trim()}. Enter it below.`;
+      account.notice = t("acct.msg.newCodeSent", { email: acctEmail.trim() });
       account.view = "verify_signup";
     } catch (e) {
       account.error = String(e);
@@ -120,7 +121,7 @@
   async function acctVerifySignup() {
     if (acctBusy) return;
     account.error = "";
-    if (acctCode.trim().length < 6) { account.error = "Enter the code from your email."; return; }
+    if (acctCode.trim().length < 6) { account.error = t("acct.msg.needCode"); return; }
     acctBusy = true;
     try {
       await invoke("verify_email_otp", { email: acctEmail.trim(), token: acctCode.trim() });
@@ -137,7 +138,7 @@
   async function acctSignIn() {
     if (acctBusy) return;
     account.error = ""; account.notice = "";
-    if (!acctEmail.trim() || !acctPassword) { account.error = "Enter your email and password."; return; }
+    if (!acctEmail.trim() || !acctPassword) { account.error = t("acct.msg.needBoth"); return; }
     acctBusy = true;
     try {
       await invoke("sign_in_email", { email: acctEmail.trim(), password: acctPassword });
@@ -151,9 +152,9 @@
         account.view = "verify_signup";
         try {
           await invoke("resend_email_otp", { email: acctEmail.trim() });
-          account.notice = `Your email isn't verified yet — we sent a new code to ${acctEmail.trim()}. Enter it below.`;
+          account.notice = t("acct.msg.unverifiedResent", { email: acctEmail.trim() });
         } catch {
-          account.notice = `Your email isn't verified yet. Enter the code we emailed to ${acctEmail.trim()}, or tap Resend code.`;
+          account.notice = t("acct.msg.unverified", { email: acctEmail.trim() });
         }
       } else {
         account.error = msg;
@@ -187,11 +188,11 @@
   async function acctForgot() {
     if (acctBusy) return;
     account.error = ""; account.notice = "";
-    if (!acctEmail.trim()) { account.error = "Enter your account email."; return; }
+    if (!acctEmail.trim()) { account.error = t("acct.msg.needAccountEmail"); return; }
     acctBusy = true;
     try {
       await invoke("request_password_reset", { email: acctEmail.trim() });
-      account.notice = `We sent a reset code to ${acctEmail.trim()}. Enter it with your new password.`;
+      account.notice = t("acct.msg.resetSent", { email: acctEmail.trim() });
       account.view = "verify_reset";
     } catch (e) {
       account.error = String(e);
@@ -204,7 +205,7 @@
     if (acctBusy) return;
     account.error = "";
     if (acctCode.trim().length < 6 || acctNewPassword.length < MIN_PASSWORD) {
-      account.error = "Enter the code from your email and a new password (min 6 characters).";
+      account.error = t("acct.msg.needCodeAndPassword", { n: MIN_PASSWORD });
       return;
     }
     acctBusy = true;
@@ -228,7 +229,7 @@
     if (acctBusy) return;
     account.error = ""; account.notice = "";
     if (acctNewPassword.length < MIN_PASSWORD) {
-      account.error = `New password must be at least ${MIN_PASSWORD} characters.`;
+      account.error = t("acct.msg.passwordTooShort", { n: MIN_PASSWORD });
       return;
     }
     acctBusy = true;
@@ -240,7 +241,7 @@
       acctNewPassword = "";
       acctCurrentPassword = "";
       showChangePw = false;
-      account.notice = "Password changed.";
+      account.notice = t("acct.msg.passwordChanged");
     } catch (e) {
       account.error = String(e);
     } finally {
@@ -308,13 +309,13 @@
 
 {#if account.view === "account"}
   <div class="setting-group">
-    <span class="setting-label">Signed in as</span>
+    <span class="setting-label">{t("acct.signedInAs")}</span>
     <p class="setting-hint"><strong>{account.info?.email}</strong></p>
   </div>
   {#if billing.coins !== null && billing.coins > 0}
     <!-- The number itself is in the Billing section below now; what belongs up
          here beside the identity is which account owns it. -->
-    <p class="setting-hint">Your coins and purchases stay with this account.</p>
+    <p class="setting-hint">{t("acct.coinsStayHere")}</p>
   {/if}
 
 {:else if account.view === "signin"}
@@ -322,103 +323,102 @@
        renders nothing when no campaign is live or the user is already signed in, so
        there is no condition to keep in sync here. -->
   <PromoOffer />
-  <p class="setting-hint">Sign in to keep your coins and purchases across devices.</p>
+  <p class="setting-hint">{t("acct.signInBlurb")}</p>
   <div class="setting-group">
-    <label class="setting-label" for="acct-email">Email</label>
+    <label class="setting-label" for="acct-email">{t("common.email")}</label>
     <input id="acct-email" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
   </div>
   <div class="setting-group">
-    <label class="setting-label" for="acct-pw">Password</label>
-    <input id="acct-pw" class="setting-input" type="password" autocomplete="current-password" bind:value={acctPassword} placeholder="Your password" />
+    <label class="setting-label" for="acct-pw">{t("common.password")}</label>
+    <input id="acct-pw" class="setting-input" type="password" autocomplete="current-password" bind:value={acctPassword} placeholder={t("acct.passwordPlaceholder")} />
   </div>
   <div class="setting-group" style="margin-top: 10px;">
-    <button class="btn-primary" onclick={acctSignIn} disabled={acctBusy}>{acctBusy ? "Signing in…" : "Sign in"}</button>
+    <button class="btn-primary" onclick={acctSignIn} disabled={acctBusy}>{acctBusy ? t("acct.signingIn") : t("acct.signIn")}</button>
   </div>
   <div class="acct-links">
-    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signup"; }}>Create account</button>
-    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "forgot"; }}>Forgot password?</button>
+    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signup"; }}>{t("acct.createAccount")}</button>
+    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "forgot"; }}>{t("acct.forgotPassword")}</button>
   </div>
   <p class="setting-hint" style="margin-top: 8px;">
-    Signed up but never verified?
-    <button class="legal-link" onclick={acctResend} disabled={acctBusy}>Resend verification code</button>
+    {t("acct.neverVerified")}
+    <button class="legal-link" onclick={acctResend} disabled={acctBusy}>{t("acct.resendVerification")}</button>
   </p>
   <!-- An "or", not a bare rule. This button is a second way to do the thing
        above it, but a plain separator detached it from the sign-in block and
        glued it to the Billing heading below — which has its own separator, so
        the button sat orphaned between two rules and read as billing. Reported
        live 2026-09-10: "it is not clear if it is about account or billing". -->
-  <div class="acct-or">or</div>
+  <div class="acct-or">{t("common.or")}</div>
   <button class="btn-ghost" onclick={acctGoogle} disabled={billing.oauthPending}>
     <!-- "Waiting for Google", not "Signing in": through both windows the app
          is idle and the user is the one being waited on. -->
-    {billing.oauthPending ? "Waiting for Google…" : "Continue with Google"}
+    {billing.oauthPending ? t("acct.waitingGoogle") : t("acct.continueGoogle")}
   </button>
   {#if billing.oauthPending}
     <!-- Names the likely cause rather than just offering an escape. Where the consent
          page is unreachable this is the ONLY thing on screen for four minutes, and the
          email form above it is the way out that does work. -->
     <p class="setting-hint" style="margin-top: 6px;">
-      Nothing happening? The Google sign-in page may be unreachable from your network —
-      the email and password above work either way.
-      <button class="legal-link" onclick={acctGoogleCancel}>Cancel</button>
+      {t("acct.googleUnreachable")}
+      <button class="legal-link" onclick={acctGoogleCancel}>{t("common.cancel")}</button>
     </p>
   {/if}
 
 {:else if account.view === "signup"}
   <PromoOffer />
-  <p class="setting-hint">Create an account — your current free requests and any coins carry over.</p>
+  <p class="setting-hint">{t("acct.signUpBlurb")}</p>
   <div class="setting-group">
-    <label class="setting-label" for="acct-email-up">Email</label>
+    <label class="setting-label" for="acct-email-up">{t("common.email")}</label>
     <input id="acct-email-up" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
   </div>
   <div class="setting-group">
-    <label class="setting-label" for="acct-pw-up">Password</label>
-    <input id="acct-pw-up" class="setting-input" type="password" autocomplete="new-password" bind:value={acctPassword} placeholder={`At least ${MIN_PASSWORD} characters`} />
+    <label class="setting-label" for="acct-pw-up">{t("common.password")}</label>
+    <input id="acct-pw-up" class="setting-input" type="password" autocomplete="new-password" bind:value={acctPassword} placeholder={t("acct.minChars", { n: MIN_PASSWORD })} />
   </div>
   <div class="setting-group" style="margin-top: 10px;">
-    <button class="btn-primary" onclick={acctSignUp} disabled={acctBusy}>{acctBusy ? "Sending code…" : "Create account"}</button>
+    <button class="btn-primary" onclick={acctSignUp} disabled={acctBusy}>{acctBusy ? t("acct.sendingCode") : t("acct.createAccount")}</button>
   </div>
   <div class="acct-links">
-    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>Already have an account? Sign in</button>
+    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>{t("acct.haveAccount")}</button>
   </div>
 
 {:else if account.view === "verify_signup"}
   <div class="setting-group">
-    <label class="setting-label" for="acct-code">Verification code</label>
-    <input id="acct-code" class="setting-input" inputmode="numeric" maxlength="10" bind:value={acctCode} placeholder="Code from email" />
+    <label class="setting-label" for="acct-code">{t("acct.verificationCode")}</label>
+    <input id="acct-code" class="setting-input" inputmode="numeric" maxlength="10" bind:value={acctCode} placeholder={t("acct.codeFromEmail")} />
   </div>
   <div class="setting-group" style="margin-top: 10px;">
-    <button class="btn-primary" onclick={acctVerifySignup} disabled={acctBusy}>{acctBusy ? "Verifying…" : "Verify & finish"}</button>
+    <button class="btn-primary" onclick={acctVerifySignup} disabled={acctBusy}>{acctBusy ? t("acct.verifying") : t("acct.verifyFinish")}</button>
   </div>
   <div class="acct-links">
-    <button class="legal-link" onclick={acctResend} disabled={acctBusy}>Resend code</button>
-    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>Cancel</button>
+    <button class="legal-link" onclick={acctResend} disabled={acctBusy}>{t("acct.resendCode")}</button>
+    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>{t("common.cancel")}</button>
   </div>
 
 {:else if account.view === "forgot"}
-  <p class="setting-hint">Enter your account email and we'll send a reset code.</p>
+  <p class="setting-hint">{t("acct.forgotBlurb")}</p>
   <div class="setting-group">
-    <label class="setting-label" for="acct-email-fp">Email</label>
+    <label class="setting-label" for="acct-email-fp">{t("common.email")}</label>
     <input id="acct-email-fp" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
   </div>
   <div class="setting-group" style="margin-top: 10px;">
-    <button class="btn-primary" onclick={acctForgot} disabled={acctBusy}>{acctBusy ? "Sending…" : "Send reset code"}</button>
+    <button class="btn-primary" onclick={acctForgot} disabled={acctBusy}>{acctBusy ? t("acct.sending") : t("acct.sendResetCode")}</button>
   </div>
   <div class="acct-links">
-    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>Back to sign in</button>
+    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>{t("acct.backToSignIn")}</button>
   </div>
 
 {:else if account.view === "verify_reset"}
   <div class="setting-group">
-    <label class="setting-label" for="acct-code-r">Reset code</label>
-    <input id="acct-code-r" class="setting-input" inputmode="numeric" maxlength="10" bind:value={acctCode} placeholder="Code from email" />
+    <label class="setting-label" for="acct-code-r">{t("acct.resetCode")}</label>
+    <input id="acct-code-r" class="setting-input" inputmode="numeric" maxlength="10" bind:value={acctCode} placeholder={t("acct.codeFromEmail")} />
   </div>
   <div class="setting-group">
-    <label class="setting-label" for="acct-newpw-r">New password</label>
-    <input id="acct-newpw-r" class="setting-input" type="password" autocomplete="new-password" bind:value={acctNewPassword} placeholder={`At least ${MIN_PASSWORD} characters`} />
+    <label class="setting-label" for="acct-newpw-r">{t("acct.newPassword")}</label>
+    <input id="acct-newpw-r" class="setting-input" type="password" autocomplete="new-password" bind:value={acctNewPassword} placeholder={t("acct.minChars", { n: MIN_PASSWORD })} />
   </div>
   <div class="setting-group" style="margin-top: 10px;">
-    <button class="btn-primary" onclick={acctVerifyReset} disabled={acctBusy}>{acctBusy ? "Saving…" : "Set new password"}</button>
+    <button class="btn-primary" onclick={acctVerifyReset} disabled={acctBusy}>{acctBusy ? t("acct.saving") : t("acct.setNewPassword")}</button>
   </div>
   <div class="acct-links">
     <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>Cancel</button>
@@ -427,7 +427,7 @@
 
 {#if showBilling}
   <hr class="acct-sep" />
-  <p class="setting-label acct-billing-heading">Billing</p>
+  <p class="setting-label acct-billing-heading">{t("acct.billing")}</p>
   <BillingPanel {provider} {onBuy} {onRefreshBalance} />
 {/if}
 
@@ -439,7 +439,7 @@
   {#if account.showChangePw}
     {#if !showChangePw}
       <div class="setting-group" style="margin-top: 12px;">
-        <button class="btn-ghost" onclick={() => { showChangePw = true; account.error = ""; account.notice = ""; }}>Change password</button>
+        <button class="btn-ghost" onclick={() => { showChangePw = true; account.error = ""; account.notice = ""; }}>{t("acct.changePassword")}</button>
       </div>
     {:else}
       <div class="setting-group" style="margin-top: 12px;">
@@ -448,39 +448,39 @@
              a Google account setting its first Navisual password has none, and
              the backend applies the same rule rather than trusting this form. -->
         {#if account.hasPassword}
-          <label class="setting-label" for="acct-curpw">Current password</label>
+          <label class="setting-label" for="acct-curpw">{t("acct.currentPassword")}</label>
           <input id="acct-curpw" class="setting-input" type="password" autocomplete="current-password"
-            bind:value={acctCurrentPassword} placeholder="Your current password" />
+            bind:value={acctCurrentPassword} placeholder={t("acct.currentPasswordPlaceholder")} />
         {/if}
-        <label class="setting-label" for="acct-newpw" style="margin-top:8px;">New password</label>
+        <label class="setting-label" for="acct-newpw" style="margin-top:8px;">{t("acct.newPassword")}</label>
         <input id="acct-newpw" class="setting-input" type="password" autocomplete="new-password"
-          bind:value={acctNewPassword} placeholder={`At least ${MIN_PASSWORD} characters`} />
+          bind:value={acctNewPassword} placeholder={t("acct.minChars", { n: MIN_PASSWORD })} />
         <div style="display:flex; gap:8px; margin-top:8px;">
-          <button class="btn-primary" onclick={acctChangePassword} disabled={acctBusy}>{acctBusy ? "Saving…" : "Save password"}</button>
-          <button class="btn-ghost" onclick={() => { showChangePw = false; acctNewPassword = ""; acctCurrentPassword = ""; }}>Cancel</button>
+          <button class="btn-primary" onclick={acctChangePassword} disabled={acctBusy}>{acctBusy ? t("acct.saving") : t("acct.savePassword")}</button>
+          <button class="btn-ghost" onclick={() => { showChangePw = false; acctNewPassword = ""; acctCurrentPassword = ""; }}>{t("common.cancel")}</button>
         </div>
       </div>
     {/if}
   {:else if account.isGoogle}
     <p class="setting-hint" style="margin-top: 12px;">
-      Signed in with Google — your password is managed by Google, not Navisual. Change it at
+      {t("acct.googleManaged")}
       <button class="legal-link" onclick={() => openUrl("https://myaccount.google.com/security")}>myaccount.google.com</button>.
     </p>
   {/if}
 
   <div class="setting-group" style="margin-top: 12px;">
-    <button class="btn-ghost" onclick={acctSignOut} disabled={acctBusy}>Sign out</button>
+    <button class="btn-ghost" onclick={acctSignOut} disabled={acctBusy}>{t("acct.signOut")}</button>
   </div>
 
   <hr class="acct-sep" />
   {#if !showDeleteConfirm}
-    <button class="legal-link acct-danger" onclick={() => { showDeleteConfirm = true; account.error = ""; }}>Delete account</button>
+    <button class="legal-link acct-danger" onclick={() => { showDeleteConfirm = true; account.error = ""; }}>{t("acct.deleteAccount")}</button>
   {:else}
     <div class="setting-group">
-      <p class="setting-hint acct-error">This permanently deletes your account. Coins are <strong>not</strong> refunded and cannot be recovered.</p>
+      <p class="setting-hint acct-error">{t("acct.deleteWarning")}</p>
       <div style="display:flex; gap:8px; margin-top:8px;">
-        <button class="btn-danger" onclick={acctDeleteAccount} disabled={acctBusy}>{acctBusy ? "Deleting…" : "Delete permanently"}</button>
-        <button class="btn-ghost" onclick={() => (showDeleteConfirm = false)}>Cancel</button>
+        <button class="btn-danger" onclick={acctDeleteAccount} disabled={acctBusy}>{acctBusy ? t("acct.deleting") : t("acct.deletePermanently")}</button>
+        <button class="btn-ghost" onclick={() => (showDeleteConfirm = false)}>{t("common.cancel")}</button>
       </div>
     </div>
   {/if}

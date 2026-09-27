@@ -18,6 +18,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
+  import { i18n, t, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
   import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
   import AccountPanel from "./AccountPanel.svelte";
 
@@ -113,6 +114,9 @@ See the LICENSE file in the root of this repository for complete details.
     tts_voice: string;
     voice_input_enabled: boolean;
     voice_language: string;
+    /** "system" | "en" | "zh-Hans" | "zh-Hant" — the interface language only. The AI's
+     *  reply language is independent and follows what the user types (prompts.rs rule 13). */
+    ui_language: string;
     hotkey_next: string;
     hotkey_wrong: string;
     hotkey_pause: string;
@@ -1042,6 +1046,7 @@ See the LICENSE file in the root of this repository for complete details.
     overlay_color: "#FF6B35", overlay_thickness: 4,
     subtitle_enabled: true, auto_advance: false, autopilot_min_cells: 16,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
+    ui_language: "system",
     hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
     hotkey_pause: "", hotkey_icon: "Ctrl+Shift+Backquote", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
@@ -1055,6 +1060,14 @@ See the LICENSE file in the root of this repository for complete details.
     developer_mode: false,
   };
   let settingsForm = $state<SettingsPayload>({ ...SETTINGS_DEFAULTS });
+
+  // The UI language follows the form, not the saved config, so the picker previews
+  // immediately -- picking a language you cannot yet read and then having to find
+  // "Apply" in that same unreadable language is the one interaction this setting must
+  // not have. Cancelling the dialog restores settingsForm, which restores the locale.
+  $effect(() => {
+    i18n.apply(settingsForm.ui_language, navigator.language || "en-US");
+  });
   let settingsSaving = $state(false);
   let settingsError = $state<string | null>(null);
   let settingsSaved = $state(false);
@@ -4901,6 +4914,26 @@ See the LICENSE file in the root of this repository for complete details.
           <span class="modal-title">Settings</span>
           <button class="hdr-btn hdr-btn-close" onclick={() => (showSettings = false)}>✕</button>
         </div>
+        <!-- ABOVE the tabs, and never inside one. Someone who cannot read the current
+             interface still has to be able to change it, so the one control that gets them
+             out cannot sit behind a tab labelled in the language they are escaping. The
+             option labels are each written in their own language for the same reason:
+             "English / 简体中文 / 繁體中文" identifies itself whatever is active. -->
+        <div class="lang-row">
+          <label class="setting-label lang-label" for="ui-language">{t("lang.label")}</label>
+          <select id="ui-language" class="setting-select lang-select" bind:value={settingsForm.ui_language}>
+            {#each UI_LANGUAGE_CHOICES as choice}
+              <option value={choice}>{UI_LANGUAGE_LABELS[choice]}</option>
+            {/each}
+          </select>
+        </div>
+        {#if settingsForm.ui_language === "system"}
+          <p class="setting-hint lang-hint">
+            {t("lang.systemHint", { locale: UI_LANGUAGE_LABELS[i18n.systemResolved] })} · {t("lang.aiNote")}
+          </p>
+        {:else}
+          <p class="setting-hint lang-hint">{t("lang.aiNote")}</p>
+        {/if}
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
           <!-- Billing merged into Account (2026-09-06). Coins belong to an account,
@@ -7957,6 +7990,30 @@ See the LICENSE file in the root of this repository for complete details.
      many. Content-sized and centred rather than stretched, because six tabs
      cannot fit a 400px modal at any sane size and a lone full-width "Developer"
      bar on the second row is a worse answer than a centred chip. */
+  /* The language row sits above the tabs, so it inherits the tab row's side margin
+     rather than the body's -- the two read as one block and must line up. */
+  .lang-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 6px 12px 4px;
+    flex-shrink: 0;
+  }
+  .lang-label {
+    margin: 0;
+    flex-shrink: 0;
+  }
+  /* The select takes the remaining width instead of sizing to its longest option: the
+     option labels are in three different scripts, so their natural widths differ enough
+     that an auto-sized control would visibly jump on every change. */
+  .lang-select {
+    flex: 1;
+    min-width: 0;
+  }
+  .lang-hint {
+    margin: 0 12px 8px;
+    flex-shrink: 0;
+  }
   .modal-tabs {
     display: flex;
     flex-wrap: wrap;

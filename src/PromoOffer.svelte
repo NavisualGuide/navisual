@@ -11,6 +11,7 @@
   // app says without a release. When no campaign is live the component renders nothing at
   // all, which is what retires the message everywhere at once.
   import { billing } from "./lib/billing.svelte";
+  import { t } from "./lib/i18n.svelte";
   import { account } from "./lib/account.svelte";
 
   // Signed-in users are not shown the offer. Not because it would be wrong -- a signed-in
@@ -45,10 +46,9 @@
   <div class="promo">
     <span class="promo-gift" aria-hidden="true">🎁</span>
     <div class="promo-text">
-      <strong>Create a free account and get {billing.promoOffer!.coins.toLocaleString()} coins.</strong>
+      <strong>{t("promo.headline", { coins: billing.promoOffer!.coins.toLocaleString() })}</strong>
       <span class="promo-sub">
-        Enough to try the faster, smarter models on the Navisual relay. Navisual stays free
-        to use{deadline ? ` — offer ends ${deadline}` : ""}.
+        {t("promo.sub")}{deadline ? t("promo.ends", { date: deadline }) : ""}.
       </span>
     </div>
   </div>
