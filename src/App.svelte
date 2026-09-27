@@ -18,7 +18,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
-  import { i18n, t, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
+  import { i18n, t, packStarter, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
   import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
   import AccountPanel from "./AccountPanel.svelte";
 
@@ -540,8 +540,15 @@ See the LICENSE file in the root of this repository for complete details.
       } catch (_) {}
     }
     const appName = sharedApp ? (friendlyName(sharedApp.exe_name) || sharedApp.app_name) : "";
-    const generic = appName ? `Show me around ${appName}` : "Explore this app";
-    const list = [...starters];
+    // Follows the INTERFACE language, not the OS and not the last reply. A prefill the
+    // user submits without editing IS their request, so an English prefill in a Chinese
+    // panel made rule 13 answer in English -- the user had done nothing wrong and got a
+    // language they had not chosen. Type over it in any language and the AI follows that
+    // instead, exactly as before.
+    const generic = appName
+      ? t("prefill.showAround", { app: appName })
+      : t("prefill.exploreApp");
+    const list = starters.map(packStarter);
     if (!list.some((s) => s.toLowerCase() === generic.toLowerCase())) list.push(generic);
     applyPrefill(list);
   }
@@ -560,6 +567,15 @@ See the LICENSE file in the root of this repository for complete details.
   // already drifted apart (34 vs 38) before any of them was wrong. One measurement, one
   // variable, three consumers -- and it re-measures, so a taller titlebar can never put
   // them back underneath.
+  // Re-run the prefill when the interface language changes, so an untouched box does
+  // not sit there in the language the user just left. It is the one moment they are
+  // guaranteed to be looking at it. Guarded inside coldStartPrefill by phase and by
+  // whether the box has been typed in, so this cannot clobber real input.
+  $effect(() => {
+    i18n.locale; // dependency only
+    coldStartPrefill();
+  });
+
   let titlebarEl: HTMLElement | undefined = $state();
   $effect(() => {
     const el = titlebarEl;

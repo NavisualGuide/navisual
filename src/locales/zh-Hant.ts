@@ -293,6 +293,17 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "icon.askAnswer": "回答 Navisual…",
   "icon.askFollowUp": "追問一句…",
 
+  // ── 工作預填 (P2) ─────────────────────────────────────────────────────────
+  "prefill.showAround": "帶我熟悉一下 {app}",
+  "prefill.exploreApp": "熟悉一下這個應用程式",
+
+  "pack.blenderAround": "帶我熟悉一下 Blender",
+  "pack.blenderMove": "幫我移動一個物件",
+  "pack.blenderCube": "幫我在場景裡加一個立方體",
+  "pack.browserFind": "幫我在這個頁面上找點東西",
+  "pack.browserOpen": "教我怎麼開啟一個網站",
+  "pack.browserDownload": "幫我從這個頁面下載一個檔案",
+
   // ── 註冊優惠 ──────────────────────────────────────────────────────────────
   "promo.headline": "註冊免費帳戶，送 {coins} 金幣。",
   "promo.sub": "足夠你試試 Navisual 中繼上更快、更聰明的模型。Navisual 本身一直免費",

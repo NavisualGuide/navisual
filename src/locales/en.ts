@@ -295,6 +295,22 @@ export const en = {
   "icon.askAnswer": "Answer Navisual…",
   "icon.askFollowUp": "Ask a follow-up…",
 
+  // ── Task prefill (P2) ─────────────────────────────────────────────────────
+  // Following the INTERFACE language here is what keeps the AI's reply language
+  // consistent for someone who never edits the box: a Chinese prefill submitted
+  // unchanged is a Chinese request, so rule 13 answers in Chinese. An English
+  // prefill in a Chinese panel quietly produced an English answer instead.
+  "prefill.showAround": "Show me around {app}",
+  "prefill.exploreApp": "Explore this app",
+
+  // Starter tasks curated by the two bundled nav-packs.
+  "pack.blenderAround": "Show me around Blender",
+  "pack.blenderMove": "Help me move an object",
+  "pack.blenderCube": "Help me add a cube to the scene",
+  "pack.browserFind": "Help me find something on this page",
+  "pack.browserOpen": "Show me how to open a website",
+  "pack.browserDownload": "Help me download a file from this page",
+
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",
   "promo.sub": "Enough to try the faster, smarter models on the Navisual relay. Navisual stays free to use",

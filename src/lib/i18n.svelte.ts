@@ -114,3 +114,31 @@ export function t(key: MessageKey, vars?: Record<string, string | number>): stri
   }
   return s;
 }
+
+/**
+ * Translate a nav-pack's curated starter task.
+ *
+ * **Stopgap.** The right home for this is `pack.json` itself, as a
+ * `starter_tasks_<locale>` map, so a pack can ship its own languages and a
+ * third-party pack is not stuck with whatever the app happens to know. Until that
+ * exists, the two bundled packs are translated here by their English text.
+ *
+ * Anything not in this table falls through unchanged, which is the correct
+ * behaviour rather than a gap: a pack authored in Japanese should show its
+ * Japanese, and one authored in English is merely untranslated. It also means an
+ * edit to a bundled pack silently stops matching and falls back to English -- safe,
+ * but the reason the real fix belongs in the pack format.
+ */
+const PACK_STARTERS: Record<string, MessageKey> = {
+  "Show me around Blender": "pack.blenderAround",
+  "Help me move an object": "pack.blenderMove",
+  "Help me add a cube to the scene": "pack.blenderCube",
+  "Help me find something on this page": "pack.browserFind",
+  "Show me how to open a website": "pack.browserOpen",
+  "Help me download a file from this page": "pack.browserDownload",
+};
+
+export function packStarter(authored: string): string {
+  const key = PACK_STARTERS[authored];
+  return key ? t(key) : authored;
+}
