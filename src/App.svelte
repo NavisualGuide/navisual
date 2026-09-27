@@ -958,7 +958,7 @@ See the LICENSE file in the root of this repository for complete details.
       const usable = await invoke<boolean>("pin_target_window", { hwnd });
       pinnedHwnd = hwnd;
       if (usable === false) {
-        addToHistory("system", "That window is minimized and wouldn't restore — bring it up yourself, then try again.");
+        addToHistory("system", t("msg.minimizedNoRestore"));
       }
       // While docked, "the app I'm being guided through" and "the app filling the rest
       // of the screen" are the same choice — so the always-visible header chip does
@@ -1562,11 +1562,11 @@ See the LICENSE file in the root of this repository for complete details.
   // any of that was recorded. Saying "Completed" when the user merely pressed Next would
   // claim they did the step, and Autopilot's advances are not the user's at all.
   function completionLabel(click?: string | null, advancedBy?: string | null): string {
-    if (click) return `✓ You clicked ${click}`;
-    if (advancedBy === "autopilot") return "✓ Autopilot advanced";
-    if (advancedBy === "already_done") return "✓ You marked it already done";
-    if (advancedBy === "next") return "✓ You pressed Next";
-    return "✓ Completed";
+    if (click) return t("done.clicked", { what: click });
+    if (advancedBy === "autopilot") return t("done.autopilot");
+    if (advancedBy === "already_done") return t("done.alreadyDone");
+    if (advancedBy === "next") return t("done.pressedNext");
+    return t("done.completed");
   }
 
   // The click arrives with the response, after the row was already created, so this
@@ -1649,7 +1649,7 @@ See the LICENSE file in the root of this repository for complete details.
         const currentStep = steps[stepIndex];
         if (!currentStep) return;
         screenChangeDebounce = Date.now();
-        addToHistory("system", "Screen changed — checking next step…");
+        addToHistory("system", t("msg.screenChanged"));
         // Snapshot progress markers, advance, then judge whether anything actually moved.
         const prevInstr = currentInstruction;
         const prevIdx = stepIndex;
@@ -1668,7 +1668,7 @@ See the LICENSE file in the root of this repository for complete details.
           stopAutopilotPolling();
           addToHistory(
             "system",
-            "Autopilot paused — the screen kept changing without a clear next step. Turn it back on when you're ready.",
+            t("msg.autopilotPaused"),
           );
         }
       } catch (_) {}
@@ -1740,7 +1740,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   function toggleVoiceInput() {
     if (!settingsForm.voice_input_enabled) {
-      addToHistory("error", "Voice input is disabled — enable it in Settings → Audio");
+      addToHistory("error", t("msg.voiceDisabled"));
       showQuickMenu = false;
       return;
     }
@@ -1755,7 +1755,7 @@ See the LICENSE file in the root of this repository for complete details.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const SR = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
     if (!SR) {
-      addToHistory("error", "Speech recognition is not supported in this environment");
+      addToHistory("error", t("msg.speechUnsupported"));
       return;
     }
     speechRecognition = new SR();
@@ -2290,7 +2290,7 @@ See the LICENSE file in the root of this repository for complete details.
       // the history line would land behind the modal. Put the reason in the
       // panel as well, where the click happened.
       account.error = "Checkout failed: " + String(e);
-      addToHistory("system", "⚠️ Checkout failed: " + String(e));
+      addToHistory("system", "⚠️ " + t("msg.checkoutFailed") + " " + String(e));
       await setPanelOnTop(true); // nothing opened — restore always-on-top
     } finally {
       billing.buyPending = false;
@@ -2312,8 +2312,7 @@ See the LICENSE file in the root of this repository for complete details.
     billing.clearPromoGranted();
     await addToHistory(
       "system",
-      `\u{1F381} ${fmtNum(coins)} coins added to your account \u2014 thanks for signing up. ` +
-        `They work on the faster quality tiers; Navisual stays free either way.`,
+      t("msg.coinsGranted", { coins: fmtNum(coins) }),
     );
   }
 
@@ -2489,7 +2488,7 @@ See the LICENSE file in the root of this repository for complete details.
         setTimeout(() => { settingsSaved = false; }, 2000);
       }
       if (providerLabel && providerLabel !== lastAppliedModel) {
-        addToHistory("system", `AI provider switched to ${providerLabel}`);
+        addToHistory("system", t("msg.providerSwitched", { provider: providerLabel }));
         lastAppliedModel = providerLabel;
       }
     } catch (e) {
@@ -2531,7 +2530,7 @@ See the LICENSE file in the root of this repository for complete details.
     history = [];
     await addToHistory(
       "system",
-      "New session started — guidance follows the app you click into next. To lock one app, click its name in the title bar.",
+      t("msg.newSession"),
     );
     // Workstream P: fresh session, fresh cold-start prefill.
     clearPrefill();
@@ -2575,11 +2574,11 @@ See the LICENSE file in the root of this repository for complete details.
         selectedSessions = [];
         await addToHistory(
           "system",
-          `Exported ${out.count} session${out.count === 1 ? "" : "s"} to ${out.folder}`,
+          t("msg.exported", { n: out.count, folder: out.folder }),
         );
       }
     } catch (e) {
-      await addToHistory("error", `Could not export the sessions: ${e}`);
+      await addToHistory("error", t("msg.exportFailed", { error: String(e) }));
     } finally {
       sessionExportBusy = false;
     }
@@ -2607,8 +2606,8 @@ See the LICENSE file in the root of this repository for complete details.
       await addToHistory(
         "system",
         out.pictures.length > 0
-          ? "Opened from a file. It joins your recent tasks only if you carry on working in it."
-          : "Opened from a file \u2014 this one was exported without pictures. It joins your recent tasks only if you carry on working in it.",
+          ? t("msg.openedWithPics")
+          : t("msg.openedNoPics"),
       );
     } catch (e) {
       await addToHistory("error", `${e}`);
@@ -2732,13 +2731,13 @@ See the LICENSE file in the root of this repository for complete details.
     try {
       resumed = await invoke<StoredSessionDetail | null>("load_session", { sessionId: id });
     } catch (e) {
-      await addToHistory("error", `That session could not be reopened: ${e}`);
+      await addToHistory("error", t("msg.reopenFailed", { error: String(e) }));
       return;
     }
     // Null, not an error: the file was retired between the list being drawn and the row
     // being clicked. Session retention is a moving target by design.
     if (!resumed) {
-      await addToHistory("error", "That session is no longer on disk \u2014 it was retired when newer tasks arrived.");
+      await addToHistory("error", t("msg.sessionGone"));
       return;
     }
 
@@ -2749,8 +2748,8 @@ See the LICENSE file in the root of this repository for complete details.
     await addToHistory(
       "system",
       resumed.conversation.some((t) => t.frame)
-        ? "Reopened. The pictures are the ones this session was guided from \u2014 guidance follows the app you click into next."
-        : "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen \u2014 and guidance follows the app you click into next.",
+        ? t("msg.reopenedWithPics")
+        : t("msg.reopenedNoPics"),
     );
   }
 
@@ -2788,7 +2787,7 @@ See the LICENSE file in the root of this repository for complete details.
       ];
       addToHistory(
         "system",
-        `That appears in several places — I've marked the ${cands.length} most likely (① is my best guess). Just click the one you meant. None of them? Press ✗ Wrong.`,
+        t("msg.ambiguous", { n: cands.length }),
       );
     } else {
       candidateCount = 0;
@@ -2865,7 +2864,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (!res.ok) {
         phase = prevPhase;
         lastRequestFailed = true;
-          addToHistory("system", "⚠️ " + (res.error ?? "guide failed"));
+          addToHistory("system", "⚠️ " + (res.error ?? t("msg.guideFailed")));
         if (taskText !== "") task = taskText;
         return;
       }
@@ -2954,8 +2953,8 @@ See the LICENSE file in the root of this repository for complete details.
       // Only the completion branch is the user's own action; a skipped question and a
       // plain re-analysis stay quiet system notes.
       const reQueryId = await addToHistory(completed ? "completed" : "system",
-        unanswered ? "↷ Skipped the question — re-analysing…"
-        : completed ? completionLabel(null, advanceKind) : "Re-analysing…");
+        unanswered ? t("msg.skippedQuestion")
+        : completed ? completionLabel(null, advanceKind) : t("msg.reanalysing"));
       try {
         const res = await invoke<GuideResponse>("guide", {
           task: unanswered
@@ -2976,7 +2975,7 @@ See the LICENSE file in the root of this repository for complete details.
         if (!res.ok) {
           phase = prevPhase;
           lastRequestFailed = true;
-          addToHistory("system", "⚠️ " + (res.error ?? "re-query failed"));
+          addToHistory("system", "⚠️ " + (res.error ?? t("msg.requeryFailed")));
           return;
         }
         applyResponse(res, 0, token);
@@ -3025,7 +3024,10 @@ See the LICENSE file in the root of this repository for complete details.
     const avoidBboxes = wrongSpotAvoid.length ? wrongSpotAvoid : null;
     const label = category ? categoryLabel(category) : t("wrong.generic");
     const prevPhase = phase;
-    const corrEntryId = await addToHistory("correction", rawNote ? `${label} — ${rawNote}` : `${label} — re-analysing…`);
+    const corrEntryId = await addToHistory(
+      "correction",
+      rawNote ? `${label} — ${rawNote}` : `${label} — ${t("msg.reanalysing")}`,
+    );
     currentInstruction = "";
     streamStepsSeen = 0;
     staleResponse = false;
@@ -3041,7 +3043,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64);
       if (!res.ok) {
         phase = prevPhase;
-        addToHistory("system", "⚠️ " + (res.error ?? "correction failed"));
+        addToHistory("system", "⚠️ " + (res.error ?? t("msg.correctionFailed")));
         if (rawNote !== "") task = rawNote;
         return;
       }
@@ -3278,12 +3280,12 @@ See the LICENSE file in the root of this repository for complete details.
   let isPaused = $derived(autoAdvanceEnabled && phase === "idle" && steps.length > 0);
 
   let statusLabel = $derived(
-    isPaused              ? `paused · step ${stepIndex + 1}/${steps.length}`
-    : phase === "idle"    ? "idle"
-    : phase === "thinking"  ? `thinking`
-    : phase === "guiding"   ? `step ${stepIndex + 1}/${steps.length}`
-    : phase === "needs_input" ? "needs input"
-    : "error"
+    isPaused              ? t("st.paused", { n: stepIndex + 1, total: steps.length })
+    : phase === "idle"    ? t("st.idle")
+    : phase === "thinking"  ? t("st.thinking")
+    : phase === "guiding"   ? t("st.step", { n: stepIndex + 1, total: steps.length })
+    : phase === "needs_input" ? t("st.needsInput")
+    : t("st.error")
   );
 
   // Next/Wrong enabled whenever there is a task to carry on: guiding, needs_input, or idle
@@ -3326,14 +3328,17 @@ See the LICENSE file in the root of this repository for complete details.
     // for a logged-out/free user is misleading. Show "Managed (free)" instead; only a
     // paid user sees their selected quality tier.
     settingsForm.api_provider === "managed"
-      ? (billing.tier === "paid" ? `Managed (${TIER_LABELS[settingsForm.managed_tier] ?? "Regular"})` : "Managed (free)")
+      ? (billing.tier === "paid"
+          ? t("prov.managedPaid", { tier: TIER_LABELS[settingsForm.managed_tier] ?? "Regular" })
+          : t("prov.managedFree"))
     : settingsForm.api_provider === "anthropic" ? `Anthropic · ${settingsForm.anthropic_model}`
     : settingsForm.api_provider === "gemini" ? `Google Gemini · ${settingsForm.gemini_model}`
     : settingsForm.api_provider === "openai" ? `OpenAI · ${settingsForm.openai_model}`
     : settingsForm.api_provider === "deepseek" ? `DeepSeek · ${settingsForm.deepseek_model}`
     : settingsForm.api_provider === "qwen" ? `Qwen · ${settingsForm.qwen_model}`
     : settingsForm.api_provider === "ollama" ? `Ollama · ${settingsForm.ollama_model}`
-    : settingsForm.api_provider === "custom" ? `Custom · ${settingsForm.custom_model || "model"}`
+    : settingsForm.api_provider === "custom"
+      ? `${t("prov.custom")} · ${settingsForm.custom_model || t("pv.model")}`
     : activeModel
   );
   let lastAppliedModel = $state<string>("");
@@ -3710,7 +3715,7 @@ See the LICENSE file in the root of this repository for complete details.
     });
 
     lastAppliedModel = providerLabel;
-    await addToHistory("system", `Navisual ready — using ${providerLabel}`);
+    await addToHistory("system", t("msg.ready", { provider: providerLabel }));
   });
 
   onDestroy(async () => {
@@ -4070,7 +4075,7 @@ See the LICENSE file in the root of this repository for complete details.
                  count ("~" because more may follow) instead of discarding it. -->
             <span class="step-counter">{streamStepsSeen > 1 ? `Step 1 of ~${streamStepsSeen}` : "Step 1"}</span>
           {:else}
-            <span class="step-counter">Step {stepIndex + 1} of {steps.length}</span>
+            <span class="step-counter">{t("st.stepCounter", { n: stepIndex + 1, total: steps.length })}</span>
           {/if}
           {#if steps[stepIndex]?.clipboard}
             <span class="badge badge-clip" title={t("status.copiedTitle")}>{t("status.copied")}</span>
@@ -4086,7 +4091,7 @@ See the LICENSE file in the root of this repository for complete details.
               </button>
             {:else}
               <button class="clear-toggle-btn" onclick={quickClearScreen} title="Hide the pointer and caption so you can see the screen clearly">
-                ✕ Clear
+                {t("st.clear")}
               </button>
             {/if}
           {/if}
@@ -4449,7 +4454,7 @@ See the LICENSE file in the root of this repository for complete details.
             // "one keystroke replaces" behaviour arms when the user clicks in.
             if (prefillActive) taskInputEl?.select();
           }}
-          placeholder={phase === "needs_input" ? "Type your answer…" : "What do you need help with?"}
+          placeholder={phase === "needs_input" ? t("task.placeholderAnswer") : t("task.placeholder")}
           rows={2}
         ></textarea>
         {#if prefillActive && suggestAlternatives.length > 0}
@@ -4488,12 +4493,12 @@ See the LICENSE file in the root of this repository for complete details.
     <!-- Quick-action menu (opened by ··· button) -->
     {#if showQuickMenu}
       <div class="quick-menu">
-        <button class="qm-btn" onclick={() => { showQuickMenu = false; openTargetPicker(); }} title="Choose which app Navisual assists with">
-          🎯 Switch app
+        <button class="qm-btn" onclick={() => { showQuickMenu = false; openTargetPicker(); }} title={t("target.chipDefault")}>
+          {t("menu.switchApp")}
         </button>
         {#if dockSide}
           <button class="qm-btn" onclick={() => { showQuickMenu = false; openTargetPicker("dock"); }}
-            title="Give the rest of the screen to an app">
+            title={t("target.chooseDockApp")}>
             {t("dock.fillRest")}
           </button>
           <button class="qm-btn qm-active" onclick={() => undock()}
@@ -4502,19 +4507,19 @@ See the LICENSE file in the root of this repository for complete details.
           </button>
         {:else}
           <button class="qm-btn" onclick={() => dockPanel("left")}
-            title="Put Navisual down the left quarter of the screen, full height, and give the rest to one app">
-            ◧ Dock left
+            title={t("dock.leftTitle")}>
+            {t("menu.dockLeft")}
           </button>
           <button class="qm-btn" onclick={() => dockPanel("right")}
-            title="Put Navisual down the right quarter of the screen, full height, and give the rest to one app">
-            ◨ Dock right
+            title={t("dock.rightTitle")}>
+            {t("menu.dockRight")}
           </button>
         {/if}
         <button class="qm-btn" class:qm-active={isMuted} onclick={toggleMute}>
-          {isMuted ? "🔇 Unmute" : "🔊 Mute"}
+          {isMuted ? t("menu.unmute") : t("menu.mute")}
         </button>
         <button class="qm-btn" class:qm-active={settingsForm.subtitle_enabled} onclick={quickToggleSubtitle}>
-          💬 {settingsForm.subtitle_enabled ? "Caption: on" : "Caption: off"}
+          {settingsForm.subtitle_enabled ? t("menu.captionOn") : t("menu.captionOff")}
         </button>
         {#if settingsForm.session_export_enabled}
           <!-- Developer-gated. The ring buffer behind it runs regardless, so the
@@ -4634,17 +4639,17 @@ See the LICENSE file in the root of this repository for complete details.
       </div>
       <div class="shortcut-legend">
         {#each [
-          { accel: settingsForm.hotkey_next,  label: "Next" },
-          { accel: settingsForm.hotkey_wrong, label: "Wrong" },
-          { accel: settingsForm.hotkey_pause, label: "Pause" },
-          { accel: settingsForm.hotkey_icon,  label: "Icon" },
-        ] as hk (hk.label)}
+          { accel: settingsForm.hotkey_next,  key: "next",  label: t("hk.legendNext") },
+          { accel: settingsForm.hotkey_wrong, key: "wrong", label: t("hk.legendWrong") },
+          { accel: settingsForm.hotkey_pause, key: "pause", label: t("hk.legendPause") },
+          { accel: settingsForm.hotkey_icon,  key: "icon",  label: t("hk.legendIcon") },
+        ] as hk (hk.key)}
           <span class="hk-item" class:hk-unset={!hk.accel}>
             <span class="hk-label">{hk.label}</span>
             {#if hk.accel}
               <kbd class="hk-key">{prettyHotkey(hk.accel)}</kbd>
             {:else}
-              <span class="hk-none">not set</span>
+              <span class="hk-none">{t("hk.notSet")}</span>
             {/if}
           </span>
         {/each}

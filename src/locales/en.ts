@@ -491,6 +491,73 @@ export const en = {
   "pv.effortMedium": "Medium",
   "pv.effortHigh": "High \u2014 slowest, most thorough",
 
+  // ── Status bar, hotkey legend, step counter ───────────────────────────────
+  "st.idle": "idle",
+  "st.thinking": "thinking",
+  "st.step": "step {n}/{total}",
+  "st.paused": "paused \u00b7 step {n}/{total}",
+  "st.needsInput": "needs input",
+  "st.error": "error",
+  "st.stepCounter": "Step {n} of {total}",
+  "st.clear": "\u2715 Clear",
+  "hk.legendNext": "Next",
+  "hk.legendWrong": "Wrong",
+  "hk.legendPause": "Pause",
+  "hk.legendIcon": "Icon",
+  "hk.notSet": "not set",
+
+  "dock.leftTitle": "Put Navisual down the left quarter of the screen, full height, and give the rest to one app",
+  "dock.rightTitle": "Put Navisual down the right quarter of the screen, full height, and give the rest to one app",
+
+  "task.placeholder": "What do you need help with?",
+  "task.placeholderAnswer": "Type your answer\u2026",
+
+  // ── Conversation system messages ──────────────────────────────────────────
+  "msg.ready": "Navisual ready \u2014 using {provider}",
+  "msg.managedFree": "Managed (free)",
+  "msg.screenChanged": "Screen changed \u2014 checking next step\u2026",
+  "msg.skippingDone": "Skipping the already-done step \u2014 moving on (no AI request used).",
+  "msg.wrongReanalysing": "Wrong \u2014 re-analysing\u2026",
+  "msg.userNote": "User note:",
+  "msg.wrongPrompt": "What went wrong / what would you like to see?",
+  "msg.checkoutFailed": "Checkout failed:",
+  "msg.signInToBuy": "Sign in to buy coins \u2014 use Google below, or enter your email.",
+  "msg.voiceDisabled": "Voice input is disabled \u2014 enable it in Settings \u2192 Audio",
+  "msg.speechUnsupported": "Speech recognition is not supported in this environment",
+  "msg.noOllamaModels": "No models found \u2014 pull one with `ollama pull`.",
+
+  // ── Conversation messages, part 2 ─────────────────────────────────────────
+  "msg.newSession": "New session started \u2014 guidance follows the app you click into next. To lock one app, click its name in the title bar.",
+  "msg.minimizedNoRestore": "That window is minimized and wouldn't restore \u2014 bring it up yourself, then try again.",
+  "msg.autopilotPaused": "Autopilot paused \u2014 the screen kept changing without a clear next step. Turn it back on when you're ready.",
+  "msg.providerSwitched": "AI provider switched to {provider}",
+  "msg.coinsGranted": "🎁 {coins} coins added to your account \u2014 thanks for signing up. They work on the faster quality tiers; Navisual stays free either way.",
+  "msg.exported": "Exported {n} session(s) to {folder}",
+  "msg.exportFailed": "Could not export the sessions: {error}",
+  "msg.openedWithPics": "Opened from a file. It joins your recent tasks only if you carry on working in it.",
+  "msg.openedNoPics": "Opened from a file \u2014 this one was exported without pictures. It joins your recent tasks only if you carry on working in it.",
+  "msg.reopenedWithPics": "Reopened. The pictures are the ones this session was guided from \u2014 guidance follows the app you click into next.",
+  "msg.reopenedNoPics": "Reopened. The screenshots from this session weren't kept, so the next step re-reads the screen \u2014 and guidance follows the app you click into next.",
+  "msg.reopenFailed": "That session could not be reopened: {error}",
+  "msg.sessionGone": "That session is no longer on disk \u2014 it was retired when newer tasks arrived.",
+  "msg.ambiguous": "That appears in several places \u2014 I've marked the {n} most likely (\u2460 is my best guess). Just click the one you meant. None of them? Press \u2717 Wrong.",
+  "msg.skippedQuestion": "\u21b7 Skipped the question \u2014 re-analysing\u2026",
+  "msg.reanalysing": "Re-analysing\u2026",
+  "msg.guideFailed": "guide failed",
+  "msg.requeryFailed": "re-query failed",
+  "msg.correctionFailed": "correction failed",
+
+  // Step completions
+  "done.clicked": "\u2713 You clicked {what}",
+  "done.autopilot": "\u2713 Autopilot advanced",
+  "done.alreadyDone": "\u2713 You marked it already done",
+  "done.pressedNext": "\u2713 You pressed Next",
+  "done.completed": "\u2713 Completed",
+
+  "prov.managedPaid": "Managed ({tier})",
+  "prov.managedFree": "Managed (free)",
+  "prov.custom": "Custom",
+
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",
   "promo.sub": "Enough to try the faster, smarter models on the Navisual relay. Navisual stays free to use",
