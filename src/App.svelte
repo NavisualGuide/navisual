@@ -3827,12 +3827,12 @@ See the LICENSE file in the root of this repository for complete details.
   {:else if iconSurface === "hint"}
     <!-- Shown once, unprompted, the first time a step arrives while collapsed. -->
     <div class="icon-hint">
-      <div class="icon-hint-title">Navisual is still driving</div>
+      <div class="icon-hint-title">{t("hint.stillDriving")}</div>
       <div class="icon-hint-body">
-        Press <kbd class="hk-key">{prettyHotkey(settingsForm.hotkey_next)}</kbd> for the next step —
-        no need to open the panel.
+        {t("hint.pressBefore")} <kbd class="hk-key">{prettyHotkey(settingsForm.hotkey_next)}</kbd>
+        {t("hint.pressAfter")}
       </div>
-      <button class="icon-hint-got-it" onclick={closeIconSurface}>Got it</button>
+      <button class="icon-hint-got-it" onclick={closeIconSurface}>{t("hint.gotIt")}</button>
     </div>
   {:else if iconSurface === "chat"}
     <!-- Ask something without leaving collapsed mode. Submitting shrinks straight
@@ -3932,11 +3932,11 @@ See the LICENSE file in the root of this repository for complete details.
              bar reads as a countdown and makes the free experience itself feel
              metered (strategy §4.3); the number earns its place only when it's
              an actual, timely nudge. -->
-        <button class="header-balance" onclick={() => openSettings("account")} title="View billing">🪙</button>
+        <button class="header-balance" onclick={() => openSettings("account")} title={t("balance.viewBilling")}>🪙</button>
       {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null && billing.freeRemaining <= 5}
-        <button class="header-balance header-balance-low" onclick={() => openSettings("account")} title="Get more requests">{billing.freeRemaining} left</button>
+        <button class="header-balance header-balance-low" onclick={() => openSettings("account")} title={t("balance.getMore")}>{t("balance.nLeft", { n: billing.freeRemaining })}</button>
       {:else if settingsForm.api_provider === "managed" && billing.freeRemaining !== null}
-        <button class="header-balance header-balance-free" onclick={() => openSettings("account")} title="You're on the free tier — click for billing">Free tier</button>
+        <button class="header-balance header-balance-free" onclick={() => openSettings("account")} title={t("balance.freeTierTitle")}>{t("balance.freeTier")}</button>
       {/if}
       {#if pendingUpdate}
         <!-- The version sits in its own span so a narrow panel can drop it and
@@ -3988,7 +3988,7 @@ See the LICENSE file in the root of this repository for complete details.
       >
         <span class="goal-card-icon" aria-hidden="true">🗺️</span>
         <span class="goal-card-body">
-          <span class="goal-label">Working on</span>
+          <span class="goal-label">{t("status.workingOn")}</span>
           <span class="goal-text">{sessionGoal}</span>
           <!-- Collapsed: the list itself isn't visible here, so a compact bar stands
                in for it — "how long is the journey" at a glance. Hidden once expanded,
@@ -4014,7 +4014,7 @@ See the LICENSE file in the root of this repository for complete details.
     {#if planExpanded && sessionGoal}
       <div class="plan-inline">
         <div class="plan-inline-header">
-          <span class="plan-inline-title">🗺️ Planned route</span>
+          <span class="plan-inline-title">{t("status.plannedRoute")}</span>
           <button class="plan-inline-close" onclick={() => (planExpanded = false)} title="Close" aria-label="Close">✕</button>
         </div>
         {#if sessionPlanOutline.length > 0}
@@ -4026,9 +4026,9 @@ See the LICENSE file in the root of this repository for complete details.
               </li>
             {/each}
           </ol>
-          <p class="plan-overview-footnote">This adapts as Navisual learns more — not a fixed route.</p>
+          <p class="plan-overview-footnote">{t("status.planFootnote")}</p>
         {:else}
-          <p class="plan-overview-empty">No route mapped out yet — it'll appear here once Navisual has a clearer picture of the steps ahead.</p>
+          <p class="plan-overview-empty">{t("status.planEmpty")}</p>
         {/if}
       </div>
     {/if}
@@ -4045,7 +4045,7 @@ See the LICENSE file in the root of this repository for complete details.
             <span class="step-counter">Step {stepIndex + 1} of {steps.length}</span>
           {/if}
           {#if steps[stepIndex]?.clipboard}
-            <span class="badge badge-clip" title="Text copied to clipboard">📋 copied</span>
+            <span class="badge badge-clip" title={t("status.copiedTitle")}>{t("status.copied")}</span>
           {/if}
           <!-- Promoted out of the ··· quick-menu (2026-08-20): a real test user never
                found "Clear" hidden behind ···, and the pointer/caption covering the
@@ -4088,9 +4088,9 @@ See the LICENSE file in the root of this repository for complete details.
              the pointer's answer; "unavailable" would contradict them). -->
         {#if !locateResult && !pointerOccluded && candidateCount < 2 && steps[stepIndex]?.target_text && phase === "guiding"}
           {#if behindPanel}
-            <p class="miss-note">◎ This looks like it's behind this panel — drag the panel aside to reveal the highlighted spot.</p>
+            <p class="miss-note">{t("status.behindPanel")}</p>
           {:else}
-            <p class="miss-note">⊘ Pointer unavailable — follow the instruction above</p>
+            <p class="miss-note">{t("status.noPointer")}</p>
           {/if}
         {/if}
 
@@ -4398,7 +4398,7 @@ See the LICENSE file in the root of this repository for complete details.
     <!-- Task input — always enabled; Enter submits, isReply detected from phase -->
     <section class="task-section">
       {#if phase === "needs_input"}
-        <div class="input-hint">💬 AI needs your input — type your answer below</div>
+        <div class="input-hint">{t("status.needsInput")}</div>
       {:else if phase === "guiding"}
         <div class="input-hint">{t("panel.inputHint")}</div>
       {/if}
@@ -4492,8 +4492,8 @@ See the LICENSE file in the root of this repository for complete details.
           <!-- Developer-gated. The ring buffer behind it runs regardless, so the
                menu item appearing mid-session reveals a session already recorded. -->
           <button class="qm-btn" onclick={() => { showQuickMenu = false; openExport(); }}
-            title="Save this session — steps, screenshots and the conversation — to a folder">
-            💾 Save this session
+            title={t("sess.saveThisTitle")}>
+            {t("sess.saveThis")}
           </button>
         {/if}
       </div>
@@ -4502,8 +4502,8 @@ See the LICENSE file in the root of this repository for complete details.
     <!-- Action row: Next · Autopilot · New Task · 🕓 · 🎤 · ··· -->
     <div class="action-row">
       {#if sessionPickerOpen}
-        <div class="session-picker" role="listbox" aria-label="Recent tasks">
-          <div class="target-pick-head">Recent tasks</div>
+        <div class="session-picker" role="listbox" aria-label={t("sess.recent")}>
+          <div class="target-pick-head">{t("sess.recent")}</div>
           <!-- The list is the whole store, and the store is bounded: saying so here is the
                difference between a limit and a surprise when an old one disappears. -->
           <p class="session-pick-hint">Only the {sessionKeep} most recent are saved — export a session to keep it, and open the file when you want it back.</p>
@@ -4527,9 +4527,9 @@ See the LICENSE file in the root of this repository for complete details.
             </button>
           </div>
           {#if sessionPickerLoading}
-            <div class="session-pick-empty">Loading…</div>
+            <div class="session-pick-empty">{t("sess.loading")}</div>
           {:else if storedSessions.length === 0}
-            <div class="session-pick-empty">No earlier tasks yet. They're saved here as you go.</div>
+            <div class="session-pick-empty">{t("sess.empty")}</div>
           {:else}
             {#each storedSessions as sess (sess.id)}
               <!-- The tick sits OUTSIDE the row's button: an input nested in a button is
@@ -4545,7 +4545,7 @@ See the LICENSE file in the root of this repository for complete details.
                     {whenAgo(sess.last_active_at)} · {sess.turns} turn{sess.turns === 1 ? "" : "s"}
                     <!-- The open session is marked by a word and a bar, not by colour alone:
                          v0.7.21 shipped an accent a colour-weak user could not read. -->
-                    {#if sess.id === sessionId}<span class="session-pick-now">open</span>{/if}
+                    {#if sess.id === sessionId}<span class="session-pick-now">{t("sess.open")}</span>{/if}
                   </span>
                   {#if sess.summary_text}
                     <span class="session-pick-summary">{sess.summary_text}</span>
@@ -4677,7 +4677,7 @@ See the LICENSE file in the root of this repository for complete details.
   {#if showTargetHint && sharedApp && !showPrivacyDisclosure && !targetPickerOpen}
     <button class="target-hint" onclick={() => openTargetPicker()}>
       <span class="target-hint-arrow"></span>
-      Click here to select the app you want me to assist with.
+      {t("hint.targetChip")}
     </button>
   {/if}
 
@@ -4686,7 +4686,7 @@ See the LICENSE file in the root of this repository for complete details.
   {#if showCollapseHint && !iconMode && !showPrivacyDisclosure}
     <button class="collapse-hint" onclick={collapseToIcon}>
       <span class="collapse-hint-arrow"></span>
-      In your way? Click here to shrink Navisual to a small floating icon.
+      {t("hint.collapse")}
     </button>
   {/if}
 
@@ -4701,11 +4701,11 @@ See the LICENSE file in the root of this repository for complete details.
     <div class="modal-backdrop" role="presentation"
       onclick={(e) => { if (e.target === e.currentTarget) showExport = false; }}>
       <div class="export-panel" role="dialog" aria-modal="true" tabindex="-1"
-        aria-label="Save this session"
+        aria-label={t("exp.aria")}
         onkeydown={(e) => { if (e.key === "Escape") showExport = false; }}>
         <div class="export-head">
-          <strong>Save this session</strong>
-          <button class="export-x" onclick={() => (showExport = false)} title="Close">✕</button>
+          <strong>{t("exp.title")}</strong>
+          <button class="export-x" onclick={() => (showExport = false)} title={t("common.close")}>✕</button>
         </div>
 
         {#if exportError}
@@ -4714,19 +4714,19 @@ See the LICENSE file in the root of this repository for complete details.
 
         {#if exportDone}
           <p class="export-ok">
-            Saved to<br />
+            {t("exp.savedTo")}<br />
             <!-- The path is the whole point of this screen, and it was previously a
                  dead <code> block you had to retype or hand-select. Now: click to open
                  the folder, or copy it for a terminal. -->
             <button
               class="export-path"
-              title="Open this folder"
+              title={t("exp.openFolderTitle")}
               onclick={openExportFolder}>{exportDone}</button>
           </p>
           <div class="export-path-actions">
-            <button class="btn-ghost" onclick={openExportFolder}>📂 Open folder</button>
+            <button class="btn-ghost" onclick={openExportFolder}>{t("exp.openFolder")}</button>
             <button class="btn-ghost" onclick={copyExportPath}>
-              {exportPathCopied ? "✓ Copied" : "⧉ Copy path"}
+              {exportPathCopied ? t("exp.copied") : t("exp.copyPath")}
             </button>
           </div>
           <p class="export-note">
@@ -4737,11 +4737,10 @@ See the LICENSE file in the root of this repository for complete details.
             <code>tools/annotate-session.ps1</code> — nothing needs re-running.
           </p>
           <p class="export-note">
-            Look through the folder before sending it to anyone: the screenshots are
-            pictures of your screen.
+            {t("exp.reviewBeforeSharing")}
           </p>
         {:else if exportStatus && exportStatus.empty}
-          <p class="export-note">Nothing recorded yet. Run a step or two first.</p>
+          <p class="export-note">{t("exp.nothingYet")}</p>
         {:else if exportStatus}
           <p class="export-note">
             {exportStatus.steps} step{exportStatus.steps === 1 ? "" : "s"} across
@@ -4756,34 +4755,34 @@ See the LICENSE file in the root of this repository for complete details.
           {/if}
 
           <label class="export-field">
-            <span>Title</span>
-            <input type="text" bind:value={exportTitle} placeholder="What was this session about?" />
+            <span>{t("exp.fieldTitle")}</span>
+            <input type="text" bind:value={exportTitle} placeholder={t("exp.titlePlaceholder")} />
           </label>
 
           <label class="export-field">
-            <span>Folder</span>
+            <span>{t("exp.fieldFolder")}</span>
             <span class="export-dest">
               <input type="text" bind:value={exportDest} spellcheck="false" />
-              <button onclick={chooseExportFolder} title="Choose a different folder">Browse…</button>
+              <button onclick={chooseExportFolder} title={t("exp.browseTitle")}>{t("exp.browse")}</button>
             </span>
           </label>
 
           <div class="export-opts">
             <label>
               <input type="checkbox" bind:checked={exportSaveClean} />
-              Save the plain screenshots <span class="export-hint">— steps/, untouched</span>
+              {t("exp.optClean")} <span class="export-hint">— steps/</span>
             </label>
             <label>
               <input type="checkbox" bind:checked={exportDrawPointer} />
-              Add the pointer <span class="export-hint">— steps-annotated/</span>
+              {t("exp.optPointer")} <span class="export-hint">— steps-annotated/</span>
             </label>
             <label>
               <input type="checkbox" bind:checked={exportDrawCaption} />
-              Add the instruction as a caption <span class="export-hint">— steps-annotated/</span>
+              {t("exp.optCaption")} <span class="export-hint">— steps-annotated/</span>
             </label>
             <label>
               <input type="checkbox" bind:checked={exportCropToApp} />
-              Crop to the app <span class="export-hint">— hides the Navisual panel</span>
+              {t("exp.optCrop")} <span class="export-hint">{t("exp.hintCropped")}</span>
             </label>
           </div>
           {#if !exportSaveClean}
@@ -4791,8 +4790,7 @@ See the LICENSE file in the root of this repository for complete details.
                  ones are not. Turning this off is the one choice here that cannot
                  be undone later without re-running the session. -->
             <p class="export-thin">
-              Without the plain screenshots you cannot re-do the pointer or caption later —
-              those are rebuilt from the untouched originals.
+              {t("exp.noCleanWarning")}
             </p>
           {/if}
 
@@ -4822,14 +4820,14 @@ See the LICENSE file in the root of this repository for complete details.
   {#if lightboxOpen}
     <div class="lightbox-backdrop" role="presentation" onclick={closeLightbox}>
       {#if lightboxLoading}
-        <span class="lightbox-loading">Loading…</span>
+        <span class="lightbox-loading">{t("lightbox.loading")}</span>
       {:else if lightboxSrc}
         <img
           class="lightbox-img"
           src="data:image/jpeg;base64,{lightboxSrc}"
           alt="Full screenshot"
         />
-        <span class="lightbox-hint">Click anywhere to close</span>
+        <span class="lightbox-hint">{t("lightbox.close")}</span>
       {/if}
     </div>
   {/if}
