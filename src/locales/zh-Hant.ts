@@ -198,6 +198,35 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "privacy.policyAfter": "是完整版本，內容以它為準 —— 擷取什麼、傳往哪裡、儲存什麼、以及如何停止。你隨時可以從「關於」重新開啟它。",
   "privacy.accept": "我已瞭解，繼續",
 
+  // ── 目標選擇、標題列標籤、停靠 (P2b) ──────────────────────────────────────
+  "target.chooseApp": "選擇目標應用程式",
+  "target.chooseDockApp": "選擇要占滿螢幕其餘部分的應用程式",
+  "target.chipFullScreen": "正在分享你的螢幕 —— 點擊切換目標",
+  "target.chipPinned": "目標應用程式已釘選 —— 點擊切換或取消釘選",
+  "target.chipDefault": "目標應用程式 —— 點擊切換或釘選",
+  "target.autoDetect": "自動偵測",
+  "target.autoDetectSub": "跟隨目前最前面的視窗",
+  "target.entireDesktop": "整個桌面",
+  "target.entireDesktopSub": "分享整個螢幕 —— 所有視窗",
+  "target.screenN": "螢幕 {n}",
+  "target.minimized": "已最小化",
+  "target.dockHead": "要讓哪個應用程式占滿其餘部分？",
+  "target.pickAlsoFills": "選了應用程式之後，它會同時占滿螢幕的其餘部分",
+  "dock.fillRest": "\u2b12 其餘部分放\u2026",
+  "dock.undock": "\u2b1c 取消停靠",
+  "dock.undockTitle": "讓面板重新浮動",
+
+  // ── 回報錯誤選單 (P2b) ────────────────────────────────────────────────────
+  "wrong.prompt": "哪裡不對？",
+  "wrong.generic": "不對",
+  "wrong.instruction": "指引不對",
+  "wrong.spot": "位置不對",
+  "wrong.notFound": "找不到",
+  "wrong.alreadyDone": "已經做過了",
+  "wrong.other": "其他",
+  "wrong.hintOther": "都不是？在下面寫清楚哪裡不對，然後點 \u21a9 追問。",
+  "wrong.hintApp": "應用程式選錯了？先點一下正確的視窗，再按 \u2717 這步不對。",
+
   // ── 註冊優惠 ──────────────────────────────────────────────────────────────
   "promo.headline": "註冊免費帳戶，送 {coins} 金幣。",
   "promo.sub": "足夠你試試 Navisual 中繼上更快、更聰明的模型。Navisual 本身一直免費",

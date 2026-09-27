@@ -278,13 +278,18 @@ See the LICENSE file in the root of this repository for complete details.
   // (the ring is an inflated REGION — vetoing it could block the correction's
   // true pointer) and no local retry (the locator already ran everything).
   let hintShown = $state(false);
-  const CATEGORY_LABEL: Record<string, string> = {
-    wrong_instruction: "Wrong instruction",
-    wrong_spot: "Wrong spot",
-    not_found: "Can't find it",
-    already_done: "Already did that",
-    wrong_other: "Other",
-  };
+  // DISPLAY ONLY -- these strings go into the conversation history the user reads.
+  // What reaches the backend is the category KEY (wrong_spot, not_found, ...), so
+  // translating the labels cannot change what gets recorded or sent to the model.
+  // A function, not a const: it has to re-read the dictionary when the locale changes.
+  const categoryLabel = (c: string): string =>
+    ({
+      wrong_instruction: t("wrong.instruction"),
+      wrong_spot: t("wrong.spot"),
+      not_found: t("wrong.notFound"),
+      already_done: t("wrong.alreadyDone"),
+      wrong_other: t("wrong.other"),
+    })[c] ?? t("wrong.generic");
   // Steering hint folded into the AI re-analysis note for each reason (the user's
   // own typed text is appended after, and is what gets logged). wrong_other has
   // no canned hint — the free text is the signal.
@@ -2990,7 +2995,7 @@ See the LICENSE file in the root of this repository for complete details.
     // very spot the user had just rejected (the not_found path dropped the list).
     // Rejections stand for the whole step; the list resets on step advance.
     const avoidBboxes = wrongSpotAvoid.length ? wrongSpotAvoid : null;
-    const label = (category && CATEGORY_LABEL[category]) || "Wrong";
+    const label = category ? categoryLabel(category) : t("wrong.generic");
     const prevPhase = phase;
     const corrEntryId = await addToHistory("correction", rawNote ? `${label} — ${rawNote}` : `${label} — re-analysing…`);
     currentInstruction = "";
@@ -3724,7 +3729,7 @@ See the LICENSE file in the root of this repository for complete details.
               <!-- Say it, rather than have the user's own window reappear
                    unannounced when they pick it — picking a minimized app restores
                    it, see pin_target_window. -->
-              {#if w.minimized}<span class="target-pick-min">Minimized</span>{/if}
+              {#if w.minimized}<span class="target-pick-min">{t("target.minimized")}</span>{/if}
             </span>
           {/if}
         </button>
@@ -3810,12 +3815,12 @@ See the LICENSE file in the root of this repository for complete details.
     <!-- Switch app without expanding. The list is the panel's, rendered in the
          grown icon window; unlike the menu it SCROLLS, so a twenty-window desktop
          is fine in a fixed-height window instead of being cut off. -->
-    <div class="icon-targets" role="listbox" aria-label="Choose target app">
+    <div class="icon-targets" role="listbox" aria-label={t("target.chooseApp")}>
       <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null && !fullScreenTarget}
         onclick={() => selectTarget(null)}>
         <span class="target-pick-check">{pinnedHwnd === null && !fullScreenTarget ? "✓" : ""}</span>
-        <span class="target-pick-name">Auto-detect</span>
-        <span class="target-pick-meta"><span class="target-pick-sub">follow the foreground window</span></span>
+        <span class="target-pick-name">{t("target.autoDetect")}</span>
+        <span class="target-pick-meta"><span class="target-pick-sub">{t("target.autoDetectSub")}</span></span>
       </button>
       {@render targetWindowRows()}
     </div>
@@ -3899,18 +3904,18 @@ See the LICENSE file in the root of this repository for complete details.
       <button
         class="header-shared"
         class:header-shared-pinned={pinnedHwnd !== null || fullScreenTarget}
-        title={fullScreenTarget ? "Sharing your screen — click to switch target" : pinnedHwnd !== null ? "Target app pinned — click to switch or unpin" : "Target app — click to switch or pin"}
+        title={fullScreenTarget ? t("target.chipFullScreen") : pinnedHwnd !== null ? t("target.chipPinned") : t("target.chipDefault")}
         onmousedown={(e) => e.stopPropagation()}
         onclick={() => openTargetPicker()}
       >
         <span class="header-shared-dot"></span>
         {#if fullScreenTarget}
-          🖥️ {fullScreenMonitorIndex !== null ? `Screen ${fullScreenMonitorIndex + 1}` : "Entire desktop"}
+          🖥️ {fullScreenMonitorIndex !== null ? t("target.screenN", { n: fullScreenMonitorIndex + 1 }) : t("target.entireDesktop")}
         {:else if sharedApp}
           {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
           {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
         {:else}
-          Auto-detect
+          {t("target.autoDetect")}
         {/if}
         <span class="header-shared-caret">▾</span>
       </button>
@@ -4096,26 +4101,26 @@ See the LICENSE file in the root of this repository for complete details.
               <button class="wrong-btn" onclick={openWrongPicker} title={t("panel.wrongTitle", { hotkey: prettyHotkey(settingsForm.hotkey_wrong) })}>{t("panel.wrong")}</button>
             {:else}
               <div class="reason-row">
-                <span class="reason-prompt">What went wrong?</span>
+                <span class="reason-prompt">{t("wrong.prompt")}</span>
                 <button class="reason-cancel" onclick={() => (wrongPickerOpen = false)} title="Cancel" aria-label="Cancel">✕</button>
               </div>
               <div class="reason-chips">
-                <button class="reason-chip" onclick={() => submitWrong("wrong_instruction")}>Wrong instruction</button>
+                <button class="reason-chip" onclick={() => submitWrong("wrong_instruction")}>{t("wrong.instruction")}</button>
                 <!-- D2 (three states): a verified pointer → only "Wrong spot" (something
                      to reject). Nothing drawn → only "Can't find it". The HINT RING case
                      (locator missed, trusted AI bbox drawn) shows BOTH — the ring is
                      visibly rejectable ("Wrong spot" on it = a model-grounding-fault
                      label, located=false on the row), and "Can't find it" stays valid. -->
                 {#if locateResult || hintShown || candidateCount >= 2}
-                  <button class="reason-chip" onclick={() => submitWrong("wrong_spot")}>Wrong spot</button>
+                  <button class="reason-chip" onclick={() => submitWrong("wrong_spot")}>{t("wrong.spot")}</button>
                 {/if}
                 {#if !locateResult}
-                  <button class="reason-chip" onclick={() => submitWrong("not_found")}>Can't find it</button>
+                  <button class="reason-chip" onclick={() => submitWrong("not_found")}>{t("wrong.notFound")}</button>
                 {/if}
-                <button class="reason-chip" onclick={() => submitWrong("already_done")}>Already did that</button>
+                <button class="reason-chip" onclick={() => submitWrong("already_done")}>{t("wrong.alreadyDone")}</button>
               </div>
-              <p class="feedback-hint">Not one of these? Type what's wrong below, then ↩ Follow up.</p>
-              <p class="feedback-hint">Wrong app? Click the correct window first, then press ✗ Wrong.</p>
+              <p class="feedback-hint">{t("wrong.hintOther")}</p>
+              <p class="feedback-hint">{t("wrong.hintApp")}</p>
               <p class="feedback-note">Shared with the Navisual team to improve guidance — never your screen or request text.</p>
             {/if}
           </div>
@@ -4461,11 +4466,11 @@ See the LICENSE file in the root of this repository for complete details.
         {#if dockSide}
           <button class="qm-btn" onclick={() => { showQuickMenu = false; openTargetPicker("dock"); }}
             title="Give the rest of the screen to an app">
-            ⬒ Fill the rest with…
+            {t("dock.fillRest")}
           </button>
           <button class="qm-btn qm-active" onclick={() => undock()}
-            title="Float the panel again">
-            ⬜ Undock
+            title={t("dock.undockTitle")}>
+            {t("dock.undock")}
           </button>
         {:else}
           <button class="qm-btn" onclick={() => dockPanel("left")}
@@ -4630,20 +4635,20 @@ See the LICENSE file in the root of this repository for complete details.
   {/if}
   {#if targetPickerOpen}
     <div class="target-picker-backdrop" role="presentation" onclick={() => { targetPickerOpen = false; targetPickerMode = "target"; }}></div>
-    <div class="target-picker" role="listbox" aria-label={targetPickerMode === "dock" ? "Choose the app to fill the rest of the screen" : "Choose target app"}>
+    <div class="target-picker" role="listbox" aria-label={targetPickerMode === "dock" ? t("target.chooseDockApp") : t("target.chooseApp")}>
       {#if targetPickerMode === "dock"}
         <!-- Dock mode reuses the same window list with a different verb. No
              Auto-detect and no whole-screen entries: neither names a window to
              put in the space beside the panel. -->
-        <div class="target-pick-head">Which app should fill the rest?</div>
+        <div class="target-pick-head">{t("target.dockHead")}</div>
       {:else}
         {#if dockSide}
-          <div class="target-pick-head">Picking an app also fills the rest of the screen with it</div>
+          <div class="target-pick-head">{t("target.pickAlsoFills")}</div>
         {/if}
         <button class="target-pick-item" class:target-pick-selected={pinnedHwnd === null && !fullScreenTarget} onclick={() => selectTarget(null)}>
           <span class="target-pick-check">{pinnedHwnd === null && !fullScreenTarget ? "✓" : ""}</span>
-          <span class="target-pick-name">Auto-detect</span>
-          <span class="target-pick-sub">follow the foreground window</span>
+          <span class="target-pick-name">{t("target.autoDetect")}</span>
+          <span class="target-pick-sub">{t("target.autoDetectSub")}</span>
         </button>
       {/if}
       {@render targetWindowRows()}
@@ -4660,8 +4665,8 @@ See the LICENSE file in the root of this repository for complete details.
       {:else}
         <button class="target-pick-item" class:target-pick-selected={fullScreenTarget} onclick={() => selectDesktop(null)}>
           <span class="target-pick-check">{fullScreenTarget ? "✓" : ""}</span>
-          <span class="target-pick-name">🖥️ Entire desktop</span>
-          <span class="target-pick-sub">share the whole screen — all windows</span>
+          <span class="target-pick-name">🖥️ {t("target.entireDesktop")}</span>
+          <span class="target-pick-sub">{t("target.entireDesktopSub")}</span>
         </button>
       {/if}
     </div>

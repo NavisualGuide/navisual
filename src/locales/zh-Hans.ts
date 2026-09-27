@@ -197,6 +197,35 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "privacy.policyAfter": "是完整版本，内容以它为准 —— 捕获什么、发往哪里、保存什么、以及如何停止。你随时可以从「关于」里重新打开它。",
   "privacy.accept": "我已了解，继续",
 
+  // ── 目标选择、标题栏芯片、停靠 (P2b) ──────────────────────────────────────
+  "target.chooseApp": "选择目标应用",
+  "target.chooseDockApp": "选择要占据屏幕其余部分的应用",
+  "target.chipFullScreen": "正在共享你的屏幕 —— 点击切换目标",
+  "target.chipPinned": "目标应用已固定 —— 点击切换或取消固定",
+  "target.chipDefault": "目标应用 —— 点击切换或固定",
+  "target.autoDetect": "自动识别",
+  "target.autoDetectSub": "跟随当前前台窗口",
+  "target.entireDesktop": "整个桌面",
+  "target.entireDesktopSub": "共享整个屏幕 —— 所有窗口",
+  "target.screenN": "屏幕 {n}",
+  "target.minimized": "已最小化",
+  "target.dockHead": "让哪个应用占据其余部分？",
+  "target.pickAlsoFills": "选中一个应用后，它会同时占满屏幕的其余部分",
+  "dock.fillRest": "\u2b12 其余部分放\u2026",
+  "dock.undock": "\u2b1c 取消停靠",
+  "dock.undockTitle": "让面板重新浮动",
+
+  // ── 报错选择器 (P2b) ──────────────────────────────────────────────────────
+  "wrong.prompt": "哪里不对？",
+  "wrong.generic": "不对",
+  "wrong.instruction": "指引不对",
+  "wrong.spot": "位置不对",
+  "wrong.notFound": "找不到",
+  "wrong.alreadyDone": "已经做过了",
+  "wrong.other": "其他",
+  "wrong.hintOther": "都不是？在下面写清楚哪里不对，然后点 \u21a9 追问。",
+  "wrong.hintApp": "应用选错了？先点一下正确的窗口，再按 \u2717 这步不对。",
+
   // ── 注册促销 ──────────────────────────────────────────────────────────────
   "promo.headline": "注册免费账户，送 {coins} 金币。",
   "promo.sub": "足够你试试 Navisual 中继上更快、更聪明的模型。Navisual 本身一直免费",

@@ -198,6 +198,37 @@ export const en = {
   "privacy.policyAfter": "is the complete and authoritative version \u2014 what is captured, where it goes, what is stored, and how to stop it. You can reopen it any time from About.",
   "privacy.accept": "I understand \u2014 continue",
 
+  // ── Target picker, header chip, docking (P2b) ─────────────────────────────
+  "target.chooseApp": "Choose target app",
+  "target.chooseDockApp": "Choose the app to fill the rest of the screen",
+  "target.chipFullScreen": "Sharing your screen \u2014 click to switch target",
+  "target.chipPinned": "Target app pinned \u2014 click to switch or unpin",
+  "target.chipDefault": "Target app \u2014 click to switch or pin",
+  "target.autoDetect": "Auto-detect",
+  "target.autoDetectSub": "follow the foreground window",
+  "target.entireDesktop": "Entire desktop",
+  "target.entireDesktopSub": "share the whole screen \u2014 all windows",
+  "target.screenN": "Screen {n}",
+  "target.minimized": "Minimized",
+  "target.dockHead": "Which app should fill the rest?",
+  "target.pickAlsoFills": "Picking an app also fills the rest of the screen with it",
+  "dock.fillRest": "\u2b12 Fill the rest with\u2026",
+  "dock.undock": "\u2b1c Undock",
+  "dock.undockTitle": "Float the panel again",
+
+  // ── The Wrong picker (P2b) ────────────────────────────────────────────────
+  // These are DISPLAY labels only. The value sent to the backend is the category
+  // key (wrong_spot, not_found, ...), never the label, so translating is safe.
+  "wrong.prompt": "What went wrong?",
+  "wrong.generic": "Wrong",
+  "wrong.instruction": "Wrong instruction",
+  "wrong.spot": "Wrong spot",
+  "wrong.notFound": "Can't find it",
+  "wrong.alreadyDone": "Already did that",
+  "wrong.other": "Other",
+  "wrong.hintOther": "Not one of these? Type what's wrong below, then \u21a9 Follow up.",
+  "wrong.hintApp": "Wrong app? Click the correct window first, then press \u2717 Wrong.",
+
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",
   "promo.sub": "Enough to try the faster, smarter models on the Navisual relay. Navisual stays free to use",
