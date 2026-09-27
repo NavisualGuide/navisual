@@ -2083,14 +2083,18 @@ See the LICENSE file in the root of this repository for complete details.
   // status bar would have said — including the shortcut, which already works while
   // collapsed and was simply never visible there.
   let iconTitle = $derived(
-    lastRequestFailed ? "Last request failed — click to expand and see why"
-    : phase === "thinking" ? "Navisual is thinking…"
-    : phase === "needs_input" ? "Navisual asked you something — click to expand"
+    lastRequestFailed ? t("icon.tipFailed")
+    : phase === "thinking" ? t("icon.tipThinking")
+    : phase === "needs_input" ? t("icon.tipNeedsInput")
     : iconProgress !== null && settingsForm.hotkey_next
-      ? `Step ${stepIndex + 1} of ${steps.length} — ${prettyHotkey(settingsForm.hotkey_next)} for next · click to expand`
+      ? t("icon.tipStepHotkey", {
+          n: stepIndex + 1,
+          total: steps.length,
+          hotkey: prettyHotkey(settingsForm.hotkey_next),
+        })
     : iconProgress !== null
-      ? `Step ${stepIndex + 1} of ${steps.length} — click to expand`
-    : "Expand Navisual"
+      ? t("icon.tipStep", { n: stepIndex + 1, total: steps.length })
+    : t("icon.tipExpand")
   );
 
   async function collapseToIcon() {
@@ -3842,7 +3846,7 @@ See the LICENSE file in the root of this repository for complete details.
         bind:this={iconChatInput}
         bind:value={iconChatText}
         class="icon-chat-input"
-        placeholder={phase === "needs_input" ? "Answer Navisual…" : "Ask a follow-up…"}
+        placeholder={phase === "needs_input" ? t("icon.askAnswer") : t("icon.askFollowUp")}
         onkeydown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitIconChat(); }
           else if (e.key === "Escape") { e.preventDefault(); closeIconSurface(); }

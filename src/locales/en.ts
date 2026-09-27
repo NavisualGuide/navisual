@@ -22,7 +22,7 @@ export const en = {
   // ── Language setting ──────────────────────────────────────────────────────
   "lang.label": "Interface language",
   "lang.systemHint": "System language: {locale}",
-  "lang.aiNote": "The AI still answers in the language you type in.",
+  "lang.aiNote": "The Navisual AI still answers in the language you type in.",
 
   // ── Account ───────────────────────────────────────────────────────────────
   "acct.signedInAs": "Signed in as",
@@ -167,15 +167,15 @@ export const en = {
   "panel.reanalyseTitle": "Re-analyse the current screen",
   "panel.dismiss": "Dismiss",
 
-  "menu.chat": "\U0001f4ac Chat",
-  "menu.switchApp": "\U0001f3af Switch app",
+  "menu.chat": "💬 Chat",
+  "menu.switchApp": "🎯 Switch app",
   "menu.dockLeft": "\u25e7 Dock left",
   "menu.dockRight": "\u25e8 Dock right",
-  "menu.unmute": "\U0001f50a Unmute",
-  "menu.mute": "\U0001f507 Mute",
-  "menu.captionOn": "\U0001f4ac Caption: on",
-  "menu.captionOff": "\U0001f4ac Caption: off",
-  "menu.showPointer": "\U0001f441 Show pointer & caption",
+  "menu.unmute": "🔊 Unmute",
+  "menu.mute": "🔇 Mute",
+  "menu.captionOn": "💬 Caption: on",
+  "menu.captionOff": "💬 Caption: off",
+  "menu.showPointer": "👁 Show pointer & caption",
   "menu.clearPointer": "\u2715 Clear pointer & caption",
   "menu.expand": "\u2197 Expand",
   "menu.collapse": "\u229f Collapse",
@@ -231,14 +231,14 @@ export const en = {
 
   // ── Status, plan, coach marks (P2c) ───────────────────────────────────────
   "status.workingOn": "Working on",
-  "status.plannedRoute": "\U0001f5fa\ufe0f Planned route",
+  "status.plannedRoute": "🗺\ufe0f Planned route",
   "status.planFootnote": "This adapts as Navisual learns more \u2014 not a fixed route.",
   "status.planEmpty": "No route mapped out yet \u2014 it'll appear here once Navisual has a clearer picture of the steps ahead.",
-  "status.copied": "\U0001f4cb copied",
+  "status.copied": "📋 copied",
   "status.copiedTitle": "Text copied to clipboard",
   "status.behindPanel": "\u25ce This looks like it's behind this panel \u2014 drag the panel aside to reveal the highlighted spot.",
   "status.noPointer": "\u2298 Pointer unavailable \u2014 follow the instruction above",
-  "status.needsInput": "\U0001f4ac AI needs your input \u2014 type your answer below",
+  "status.needsInput": "💬 AI needs your input \u2014 type your answer below",
 
   "balance.viewBilling": "View billing",
   "balance.getMore": "Get more requests",
@@ -254,7 +254,7 @@ export const en = {
   "hint.gotIt": "Got it",
 
   // ── Session picker and export (P2c) ───────────────────────────────────────
-  "sess.saveThis": "\U0001f4be Save this session",
+  "sess.saveThis": "💾 Save this session",
   "sess.saveThisTitle": "Save this session \u2014 steps, screenshots and the conversation \u2014 to a folder",
   "sess.recent": "Recent tasks",
   "sess.loading": "Loading\u2026",
@@ -265,7 +265,7 @@ export const en = {
   "exp.title": "Save this session",
   "exp.savedTo": "Saved to",
   "exp.openFolderTitle": "Open this folder",
-  "exp.openFolder": "\U0001f4c2 Open folder",
+  "exp.openFolder": "📂 Open folder",
   "exp.copied": "\u2713 Copied",
   "exp.copyPath": "\u29c9 Copy path",
   "exp.reviewBeforeSharing": "Look through the folder before sending it to anyone: the screenshots are pictures of your screen.",
@@ -284,6 +284,16 @@ export const en = {
 
   "lightbox.loading": "Loading\u2026",
   "lightbox.close": "Click anywhere to close",
+
+  // ── Collapsed-icon tooltip (P2) ───────────────────────────────────────────
+  "icon.tipFailed": "Last request failed \u2014 click to expand and see why",
+  "icon.tipThinking": "Navisual is thinking\u2026",
+  "icon.tipNeedsInput": "Navisual asked you something \u2014 click to expand",
+  "icon.tipStepHotkey": "Step {n} of {total} \u2014 {hotkey} for next \u00b7 click to expand",
+  "icon.tipStep": "Step {n} of {total} \u2014 click to expand",
+  "icon.tipExpand": "Expand Navisual",
+  "icon.askAnswer": "Answer Navisual…",
+  "icon.askFollowUp": "Ask a follow-up…",
 
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",

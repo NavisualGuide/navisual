@@ -29,7 +29,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   // ── 语言设置 ──────────────────────────────────────────────────────────────
   "lang.label": "界面语言",
   "lang.systemHint": "系统语言：{locale}",
-  "lang.aiNote": "AI 仍然按你输入的语言回答。",
+  "lang.aiNote": "Navisual AI 仍然按你输入的语言回答。",
 
   // ── 账户 ──────────────────────────────────────────────────────────────────
   "acct.signedInAs": "当前账户",
@@ -168,15 +168,15 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "panel.reanalyseTitle": "重新分析当前屏幕",
   "panel.dismiss": "关掉",
 
-  "menu.chat": "\U0001f4ac 对话",
-  "menu.switchApp": "\U0001f3af 切换应用",
+  "menu.chat": "💬 对话",
+  "menu.switchApp": "🎯 切换应用",
   "menu.dockLeft": "\u25e7 停靠左侧",
   "menu.dockRight": "\u25e8 停靠右侧",
-  "menu.unmute": "\U0001f50a 取消静音",
-  "menu.mute": "\U0001f507 静音",
-  "menu.captionOn": "\U0001f4ac 字幕：开",
-  "menu.captionOff": "\U0001f4ac 字幕：关",
-  "menu.showPointer": "\U0001f441 显示指针和字幕",
+  "menu.unmute": "🔊 取消静音",
+  "menu.mute": "🔇 静音",
+  "menu.captionOn": "💬 字幕：开",
+  "menu.captionOff": "💬 字幕：关",
+  "menu.showPointer": "👁 显示指针和字幕",
   "menu.clearPointer": "\u2715 清除指针和字幕",
   "menu.expand": "\u2197 展开",
   "menu.collapse": "\u229f 收起",
@@ -228,14 +228,14 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
 
   // ── 状态、路线、引导提示 (P2c) ────────────────────────────────────────────
   "status.workingOn": "正在处理",
-  "status.plannedRoute": "\U0001f5fa\ufe0f 计划路线",
+  "status.plannedRoute": "🗺\ufe0f 计划路线",
   "status.planFootnote": "这条路线会随着 Navisual 了解更多而调整 —— 不是固定的。",
   "status.planEmpty": "还没有规划出路线 —— 等 Navisual 对后面的步骤看得更清楚时，就会出现在这里。",
-  "status.copied": "\U0001f4cb 已复制",
+  "status.copied": "📋 已复制",
   "status.copiedTitle": "文本已复制到剪贴板",
   "status.behindPanel": "\u25ce 这个位置好像被本面板挡住了 —— 把面板拖开就能看到标出的位置。",
   "status.noPointer": "\u2298 无法给出指针 —— 请按上面的说明操作",
-  "status.needsInput": "\U0001f4ac AI 需要你的输入 —— 请在下面写下你的回答",
+  "status.needsInput": "💬 AI 需要你的输入 —— 请在下面写下你的回答",
 
   "balance.viewBilling": "查看账单",
   "balance.getMore": "获取更多次数",
@@ -251,7 +251,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "hint.gotIt": "知道了",
 
   // ── 会话列表与导出 (P2c) ──────────────────────────────────────────────────
-  "sess.saveThis": "\U0001f4be 保存这次会话",
+  "sess.saveThis": "💾 保存这次会话",
   "sess.saveThisTitle": "把这次会话 —— 步骤、截图和对话 —— 保存到一个文件夹",
   "sess.recent": "最近的任务",
   "sess.loading": "加载中\u2026",
@@ -262,7 +262,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "exp.title": "保存这次会话",
   "exp.savedTo": "已保存到",
   "exp.openFolderTitle": "打开这个文件夹",
-  "exp.openFolder": "\U0001f4c2 打开文件夹",
+  "exp.openFolder": "📂 打开文件夹",
   "exp.copied": "\u2713 已复制",
   "exp.copyPath": "\u29c9 复制路径",
   "exp.reviewBeforeSharing": "发给别人之前先把文件夹看一遍：那些截图就是你屏幕的画面。",
@@ -281,6 +281,16 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
 
   "lightbox.loading": "加载中\u2026",
   "lightbox.close": "点击任意位置关闭",
+
+  // ── 收起图标的悬停提示 (P2) ───────────────────────────────────────────────
+  "icon.tipFailed": "上一次请求失败了 —— 点击展开看原因",
+  "icon.tipThinking": "Navisual 正在思考\u2026",
+  "icon.tipNeedsInput": "Navisual 有话问你 —— 点击展开",
+  "icon.tipStepHotkey": "第 {n} 步，共 {total} 步 —— 按 {hotkey} 进入下一步 \u00b7 点击展开",
+  "icon.tipStep": "第 {n} 步，共 {total} 步 —— 点击展开",
+  "icon.tipExpand": "展开 Navisual",
+  "icon.askAnswer": "回答 Navisual…",
+  "icon.askFollowUp": "追问一句…",
 
   // ── 注册促销 ──────────────────────────────────────────────────────────────
   "promo.headline": "注册免费账户，送 {coins} 金币。",

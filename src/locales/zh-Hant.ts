@@ -30,7 +30,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   // ── 語言設定 ──────────────────────────────────────────────────────────────
   "lang.label": "介面語言",
   "lang.systemHint": "系統語言：{locale}",
-  "lang.aiNote": "AI 仍然會用你輸入的語言回答。",
+  "lang.aiNote": "Navisual AI 仍然會用你輸入的語言回答。",
 
   // ── 帳戶 ──────────────────────────────────────────────────────────────────
   "acct.signedInAs": "目前帳戶",
@@ -169,15 +169,15 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "panel.reanalyseTitle": "重新分析目前畫面",
   "panel.dismiss": "關掉",
 
-  "menu.chat": "\U0001f4ac 對話",
-  "menu.switchApp": "\U0001f3af 切換應用程式",
+  "menu.chat": "💬 對話",
+  "menu.switchApp": "🎯 切換應用程式",
   "menu.dockLeft": "\u25e7 停靠左側",
   "menu.dockRight": "\u25e8 停靠右側",
-  "menu.unmute": "\U0001f50a 取消靜音",
-  "menu.mute": "\U0001f507 靜音",
-  "menu.captionOn": "\U0001f4ac 字幕：開",
-  "menu.captionOff": "\U0001f4ac 字幕：關",
-  "menu.showPointer": "\U0001f441 顯示指標和字幕",
+  "menu.unmute": "🔊 取消靜音",
+  "menu.mute": "🔇 靜音",
+  "menu.captionOn": "💬 字幕：開",
+  "menu.captionOff": "💬 字幕：關",
+  "menu.showPointer": "👁 顯示指標和字幕",
   "menu.clearPointer": "\u2715 清除指標和字幕",
   "menu.expand": "\u2197 展開",
   "menu.collapse": "\u229f 收合",
@@ -229,14 +229,14 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
 
   // ── 狀態、路線、引導提示 (P2c) ────────────────────────────────────────────
   "status.workingOn": "正在處理",
-  "status.plannedRoute": "\U0001f5fa\ufe0f 規劃路線",
+  "status.plannedRoute": "🗺\ufe0f 規劃路線",
   "status.planFootnote": "這條路線會隨著 Navisual 了解更多而調整 —— 不是固定的。",
   "status.planEmpty": "還沒有規劃出路線 —— 等 Navisual 對後面的步驟看得更清楚時，就會出現在這裡。",
-  "status.copied": "\U0001f4cb 已複製",
+  "status.copied": "📋 已複製",
   "status.copiedTitle": "文字已複製到剪貼簿",
   "status.behindPanel": "\u25ce 這個位置好像被本面板擋住了 —— 把面板拖開就能看到標出的位置。",
   "status.noPointer": "\u2298 無法給出指標 —— 請照上面的說明操作",
-  "status.needsInput": "\U0001f4ac AI 需要你的輸入 —— 請在下面寫下你的回答",
+  "status.needsInput": "💬 AI 需要你的輸入 —— 請在下面寫下你的回答",
 
   "balance.viewBilling": "查看帳單",
   "balance.getMore": "取得更多次數",
@@ -252,7 +252,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "hint.gotIt": "知道了",
 
   // ── 工作階段清單與匯出 (P2c) ──────────────────────────────────────────────
-  "sess.saveThis": "\U0001f4be 儲存這次工作階段",
+  "sess.saveThis": "💾 儲存這次工作階段",
   "sess.saveThisTitle": "把這次工作階段 —— 步驟、螢幕截圖和對話 —— 儲存到一個資料夾",
   "sess.recent": "最近的工作",
   "sess.loading": "載入中\u2026",
@@ -263,7 +263,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "exp.title": "儲存這次工作階段",
   "exp.savedTo": "已儲存到",
   "exp.openFolderTitle": "開啟這個資料夾",
-  "exp.openFolder": "\U0001f4c2 開啟資料夾",
+  "exp.openFolder": "📂 開啟資料夾",
   "exp.copied": "\u2713 已複製",
   "exp.copyPath": "\u29c9 複製路徑",
   "exp.reviewBeforeSharing": "傳給別人之前先把資料夾看一遍：那些螢幕截圖就是你畫面的內容。",
@@ -282,6 +282,16 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
 
   "lightbox.loading": "載入中\u2026",
   "lightbox.close": "點擊任意位置關閉",
+
+  // ── 收合圖示的停留提示 (P2) ───────────────────────────────────────────────
+  "icon.tipFailed": "上一次請求失敗了 —— 點擊展開看原因",
+  "icon.tipThinking": "Navisual 正在思考\u2026",
+  "icon.tipNeedsInput": "Navisual 有話問你 —— 點擊展開",
+  "icon.tipStepHotkey": "第 {n} 步，共 {total} 步 —— 按 {hotkey} 進入下一步 \u00b7 點擊展開",
+  "icon.tipStep": "第 {n} 步，共 {total} 步 —— 點擊展開",
+  "icon.tipExpand": "展開 Navisual",
+  "icon.askAnswer": "回答 Navisual…",
+  "icon.askFollowUp": "追問一句…",
 
   // ── 註冊優惠 ──────────────────────────────────────────────────────────────
   "promo.headline": "註冊免費帳戶，送 {coins} 金幣。",
