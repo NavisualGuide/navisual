@@ -142,3 +142,31 @@ export function packStarter(authored: string): string {
   const key = PACK_STARTERS[authored];
   return key ? t(key) : authored;
 }
+
+/**
+ * The BCP-47 tag to hand `Intl`, derived from the active dictionary.
+ *
+ * Numbers and dates used to be formatted with `undefined`, i.e. the OS locale, and that
+ * was the right call while the panel had no language of its own: there was no better
+ * signal. Now there is one, and leaving them on the OS creates a mixture the app chose --
+ * an English UI on a Chinese desktop rendering a Chinese date, and the reverse. Both are
+ * worse than the original, because before v0.7.31 nobody had picked a language for the app
+ * to disagree with.
+ *
+ * English maps to en-GB, not en-US: this project writes dates day-first ("19 June 2026")
+ * everywhere else, including the site's legal pages.
+ */
+export function intlLocale(): string {
+  return i18n.locale === "zh-Hans" ? "zh-CN" : i18n.locale === "zh-Hant" ? "zh-TW" : "en-GB";
+}
+
+/** Numbers and dates move TOGETHER. Splitting them is what made one sentence disagree with
+ *  itself when the promo deadline was pinned and the coin count beside it was not (rev
+ *  2.115, reverted the same day). */
+export function fmtNum(n: number): string {
+  return n.toLocaleString(intlLocale());
+}
+
+export function fmtDate(d: Date, opts?: Intl.DateTimeFormatOptions): string {
+  return d.toLocaleDateString(intlLocale(), opts);
+}

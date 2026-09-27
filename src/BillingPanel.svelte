@@ -6,7 +6,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { billing } from "./lib/billing.svelte";
   import PromoOffer from "./PromoOffer.svelte";
-  import { t } from "./lib/i18n.svelte";
+  import { t, fmtNum } from "./lib/i18n.svelte";
 
   let {
     provider,
@@ -78,7 +78,7 @@
       bind:value={customAmount} placeholder={t("bill.customPlaceholder")} style="margin-top: 8px;" />
     <p class="setting-hint">
       {amountValid
-        ? t("bill.coins", { n: (customAmount * 200).toLocaleString() })
+        ? t("bill.coins", { n: fmtNum(customAmount * 200) })
         : t("bill.amountRange")}
     </p>
   {/if}

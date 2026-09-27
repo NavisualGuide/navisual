@@ -11,7 +11,7 @@
   // app says without a release. When no campaign is live the component renders nothing at
   // all, which is what retires the message everywhere at once.
   import { billing } from "./lib/billing.svelte";
-  import { t } from "./lib/i18n.svelte";
+  import { t, fmtNum, fmtDate } from "./lib/i18n.svelte";
   import { account } from "./lib/account.svelte";
 
   // Signed-in users are not shown the offer. Not because it would be wrong -- a signed-in
@@ -27,18 +27,11 @@
     if (!iso) return "";
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return "";
-    // OS locale (`undefined`) ON PURPOSE, matching every other formatted value in the
-    // app -- including `coins.toLocaleString()` in the very next line of this component,
-    // and the bare `toLocaleDateString()` in App.svelte.
-    //
-    // A Chinese Windows renders this "12月12日" inside an otherwise English sentence,
-    // which was raised as a defect 2026-09-27. Pinning it to "en-GB" was tried and
-    // REVERTED the same day: it made this the only pinned locale in the app and left the
-    // coin count beside it still following the OS, so one sentence disagreed with itself.
-    // A deadline is the actionable part of that sentence and reads fastest in the
-    // reader's own convention. Revisit only if the panel gets i18n, when the whole
-    // sentence would move together instead of one value inside it.
-    return d.toLocaleDateString(undefined, { day: "numeric", month: "long" });
+    // Follows the INTERFACE language now, not the OS. The comment this replaces said to
+    // revisit "only if the panel gets i18n, when the whole sentence would move together"
+    // -- that is exactly what happened in v0.7.31, and `fmtDate`/`fmtNum` are what keep
+    // the date and the coin count beside it moving together.
+    return fmtDate(d, { day: "numeric", month: "long" });
   });
 </script>
 
@@ -46,7 +39,7 @@
   <div class="promo">
     <span class="promo-gift" aria-hidden="true">🎁</span>
     <div class="promo-text">
-      <strong>{t("promo.headline", { coins: billing.promoOffer!.coins.toLocaleString() })}</strong>
+      <strong>{t("promo.headline", { coins: fmtNum(billing.promoOffer!.coins) })}</strong>
       <span class="promo-sub">
         {t("promo.sub")}{deadline ? t("promo.ends", { date: deadline }) : ""}.
       </span>

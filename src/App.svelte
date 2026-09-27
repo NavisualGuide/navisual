@@ -18,7 +18,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
-  import { i18n, t, packStarter, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
+  import { i18n, t, packStarter, fmtNum, fmtDate, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
   import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
   import AccountPanel from "./AccountPanel.svelte";
 
@@ -2312,7 +2312,7 @@ See the LICENSE file in the root of this repository for complete details.
     billing.clearPromoGranted();
     await addToHistory(
       "system",
-      `\u{1F381} ${coins.toLocaleString()} coins added to your account \u2014 thanks for signing up. ` +
+      `\u{1F381} ${fmtNum(coins)} coins added to your account \u2014 thanks for signing up. ` +
         `They work on the faster quality tiers; Navisual stays free either way.`,
     );
   }
@@ -2550,7 +2550,7 @@ See the LICENSE file in the root of this repository for complete details.
     if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
     const days = Math.round(hours / 24);
     if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
-    return new Date(then).toLocaleDateString();
+    return fmtDate(new Date(then));
   }
 
   // Every stored session as one self-contained HTML file each, into a folder the user
@@ -5694,7 +5694,7 @@ See the LICENSE file in the root of this repository for complete details.
           <div class="setting-group">
             <p class="setting-label" style="margin:0 0 8px">{t("usage.navisualAccount")}</p>
             {#if billing.tier === "paid" && billing.coins != null}
-              <p class="setting-hint">{t("usage.coinsLine", { coins: billing.coins.toLocaleString(), tier: TIER_LABELS[settingsForm.managed_tier] ?? "Regular", perReq: TIER_COINS[settingsForm.managed_tier] ?? 12 })}</p>
+              <p class="setting-hint">{t("usage.coinsLine", { coins: fmtNum(billing.coins), tier: TIER_LABELS[settingsForm.managed_tier] ?? "Regular", perReq: TIER_COINS[settingsForm.managed_tier] ?? 12 })}</p>
             {:else if usageManagedRemaining != null}
               <p class="setting-hint">{t("usage.freeLine", { left: usageManagedRemaining, total: 30 })}</p>
             {:else}
