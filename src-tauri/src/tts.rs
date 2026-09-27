@@ -297,19 +297,42 @@ mod imp {
         runs
     }
 
-    /// Best installed voice for `lang`, preferring a Natural (neural) voice and then
-    /// one matching `want_gender`. Gender is the point: Windows substitutes a voice of
-    /// its own choosing for text the current voice cannot pronounce, and on a default
-    /// install that turns a male English instruction into a female Chinese one halfway
-    /// through (reported live 2026-09-07). Ranking, not filtering — a language always
-    /// beats a gender, since the wrong gender is odd but the wrong language is silence.
-    fn pick_voice<'a>(voices: &'a [VoiceInfo], lang: &str, want_gender: u8) -> Option<&'a VoiceInfo> {
+    /// Best installed voice for `lang`, ranked: a Natural (neural) voice first, then one
+    /// whose full locale is exactly `prefer_locale`, then one matching `want_gender`.
+    /// Ranking, not filtering — a language beats a region and a region beats a gender,
+    /// since the wrong gender is odd but the wrong language is silence.
+    ///
+    /// Gender is in the key because Windows substitutes a voice of its own choosing for
+    /// text the current voice cannot pronounce, and on a default install that turns a male
+    /// English instruction into a female Chinese one halfway through (live, 2026-09-07).
+    ///
+    /// `prefer_locale` (the OS UI locale) is in the key because filtering on the PRIMARY
+    /// SUBTAG alone makes zh-CN, zh-TW and zh-HK interchangeable. With no neural voice
+    /// installed and several same-gender Chinese voices present, the old key was a total
+    /// tie — and `max_by_key` returns the LAST maximal element, so the winner was decided
+    /// by enumeration order. Measured from a zh-CN desktop on 2026-09-27: every utterance
+    /// went to `MSTTS_V110_zhTW_ZhiweiM`, a TAIWAN voice reading Simplified Mandarin,
+    /// purely because Zhiwei enumerates last. zh-CN Kangkang was installed and lost on order.
+    ///
+    /// Natural still outranks the region: the legacy-to-neural quality gap is far wider
+    /// than the gap between two Mandarin variants, which stay mutually intelligible.
+    ///
+    /// When nothing matches `prefer_locale` — a user writing Chinese on an en-US machine —
+    /// there is no signal about which variant they want and enumeration order still decides.
+    /// Left alone deliberately rather than guessed at.
+    fn pick_voice<'a>(
+        voices: &'a [VoiceInfo],
+        lang: &str,
+        prefer_locale: &str,
+        want_gender: u8,
+    ) -> Option<&'a VoiceInfo> {
         voices
             .iter()
             .filter(|v| !v.lang.is_empty() && v.lang == lang)
             .max_by_key(|v| {
                 (
                     v.natural,
+                    !prefer_locale.is_empty() && v.locale.eq_ignore_ascii_case(prefer_locale),
                     want_gender != GENDER_UNKNOWN && v.gender == want_gender,
                 )
             })
@@ -429,7 +452,7 @@ mod imp {
                     let want_gender = preferred.map(|v| v.gender).unwrap_or(GENDER_UNKNOWN);
                     let chosen: Option<String> = match preferred {
                         Some(v) if v.lang.is_empty() || v.lang == target => Some(v.id.clone()),
-                        _ => pick_voice(&voices, &target, want_gender)
+                        _ => pick_voice(&voices, &target, &fallback_locale, want_gender)
                             .map(|v| v.id.clone())
                             .or_else(|| {
                                 // No language metadata at all → first voice beats silence.
@@ -479,7 +502,7 @@ mod imp {
                         for (sc, run) in script_runs(&text) {
                             let foreign = lang_for_script(sc).filter(|l| *l != target);
                             let voice = match foreign
-                                .and_then(|l| pick_voice(&voices, l, primary_gender))
+                                .and_then(|l| pick_voice(&voices, l, &fallback_locale, primary_gender))
                             {
                                 Some(v) => {
                                     needs_ssml = true;
@@ -578,6 +601,18 @@ mod imp {
             }
         }
 
+        /// Same, but with a real BCP-47 locale — for the region-ranking tests.
+        fn vl(name: &str, locale: &str, gender: u8, natural: bool) -> VoiceInfo {
+            VoiceInfo {
+                id: format!("id-{name}"),
+                name: name.into(),
+                lang: lang_code_of_locale(locale),
+                locale: locale.into(),
+                gender,
+                natural,
+            }
+        }
+
         #[test]
         fn neutral_chars_do_not_split_runs() {
             // "Ctrl+B" must stay in one Latin run — punctuation and digits join the
@@ -605,7 +640,7 @@ mod imp {
                 v("Yaoyao", "zh", GENDER_FEMALE, false),
                 v("Kangkang", "zh", GENDER_MALE, false),
             ];
-            let got = pick_voice(&voices, "zh", GENDER_MALE).unwrap();
+            let got = pick_voice(&voices, "zh", "", GENDER_MALE).unwrap();
             assert_eq!(got.name, "Kangkang");
         }
 
@@ -617,15 +652,57 @@ mod imp {
                 v("Kangkang", "zh", GENDER_MALE, false),
                 v("Xiaoxiao Natural", "zh", GENDER_FEMALE, true),
             ];
-            let got = pick_voice(&voices, "zh", GENDER_MALE).unwrap();
+            let got = pick_voice(&voices, "zh", "", GENDER_MALE).unwrap();
             assert_eq!(got.name, "Xiaoxiao Natural");
         }
 
         #[test]
         fn language_is_never_traded_for_gender() {
             let voices = vec![v("David", "en", GENDER_MALE, false), v("Huihui", "zh", GENDER_FEMALE, false)];
-            assert_eq!(pick_voice(&voices, "zh", GENDER_MALE).unwrap().name, "Huihui");
-            assert!(pick_voice(&voices, "ja", GENDER_MALE).is_none());
+            assert_eq!(pick_voice(&voices, "zh", "", GENDER_MALE).unwrap().name, "Huihui");
+            assert!(pick_voice(&voices, "ja", "", GENDER_MALE).is_none());
+        }
+
+        #[test]
+        fn os_region_breaks_a_tie_between_chinese_variants() {
+            // The live regression (2026-09-27, zh-CN cloud desktop): no neural voice
+            // installed, three same-gender zh voices, and the zh-TW one enumerates last.
+            // `max_by_key` returns the last maximal element, so Zhiwei won every time and
+            // read Simplified Mandarin in a Taiwan voice while zh-CN Kangkang sat unused.
+            let voices = vec![
+                vl("Kangkang", "zh-CN", GENDER_MALE, false),
+                vl("Danny", "zh-HK", GENDER_MALE, false),
+                vl("Zhiwei", "zh-TW", GENDER_MALE, false),
+            ];
+            assert_eq!(
+                pick_voice(&voices, "zh", "zh-CN", GENDER_MALE).unwrap().name,
+                "Kangkang"
+            );
+            // Symmetric: a Taiwan desktop must not be handed a mainland voice.
+            assert_eq!(
+                pick_voice(&voices, "zh", "zh-TW", GENDER_MALE).unwrap().name,
+                "Zhiwei"
+            );
+            // No signal (Chinese reply on an en-US machine): enumeration order still
+            // decides. Asserted so the documented gap stays visible rather than implied.
+            assert_eq!(
+                pick_voice(&voices, "zh", "en-US", GENDER_MALE).unwrap().name,
+                "Zhiwei"
+            );
+        }
+
+        #[test]
+        fn natural_outranks_the_region() {
+            // Legacy-to-neural is a wider gap than zh-TW vs zh-CN, which stay mutually
+            // intelligible — so a neural Taiwan voice beats a legacy mainland one.
+            let voices = vec![
+                vl("Kangkang", "zh-CN", GENDER_MALE, false),
+                vl("HanHan Natural", "zh-TW", GENDER_MALE, true),
+            ];
+            assert_eq!(
+                pick_voice(&voices, "zh", "zh-CN", GENDER_MALE).unwrap().name,
+                "HanHan Natural"
+            );
         }
 
         #[test]
@@ -654,8 +731,8 @@ mod imp {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             }
             let voices = enum_voices();
-            let en = pick_voice(&voices, "en", GENDER_MALE).expect("an en voice");
-            let zh = pick_voice(&voices, "zh", en.gender).expect("a zh voice");
+            let en = pick_voice(&voices, "en", "", GENDER_MALE).expect("an en voice");
+            let zh = pick_voice(&voices, "zh", "", en.gender).expect("a zh voice");
             eprintln!("primary={} ({}), secondary={} ({})", en.name, en.gender, zh.name, zh.gender);
             assert_eq!(zh.gender, en.gender, "same-gender pick should be available here");
             let segs = vec![
