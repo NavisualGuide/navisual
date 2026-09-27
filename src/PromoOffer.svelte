@@ -26,6 +26,17 @@
     if (!iso) return "";
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return "";
+    // OS locale (`undefined`) ON PURPOSE, matching every other formatted value in the
+    // app -- including `coins.toLocaleString()` in the very next line of this component,
+    // and the bare `toLocaleDateString()` in App.svelte.
+    //
+    // A Chinese Windows renders this "12月12日" inside an otherwise English sentence,
+    // which was raised as a defect 2026-09-27. Pinning it to "en-GB" was tried and
+    // REVERTED the same day: it made this the only pinned locale in the app and left the
+    // coin count beside it still following the OS, so one sentence disagreed with itself.
+    // A deadline is the actionable part of that sentence and reads fastest in the
+    // reader's own convention. Revisit only if the panel gets i18n, when the whole
+    // sentence would move together instead of one value inside it.
     return d.toLocaleDateString(undefined, { day: "numeric", month: "long" });
   });
 </script>
