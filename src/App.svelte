@@ -749,23 +749,23 @@ See the LICENSE file in the root of this repository for complete details.
   function buildMenu(ctx: "icon" | "panel"): PanelMenuItem[] {
     const icon = ctx === "icon";
     const items: PanelMenuItem[] = [
-      { label: "→ Next", hotkey: settingsForm.hotkey_next || undefined,
+      { label: t("panel.next"), hotkey: settingsForm.hotkey_next || undefined,
         disabled: actionDisabled, run: () => nextStep() },
     ];
-    if (icon) items.push({ label: "💬 Chat", run: () => openIconChat() });
+    if (icon) items.push({ label: t("menu.chat"), run: () => openIconChat() });
     items.push({ sep: true });
 
     // Target + layout. dockPanel() already expands first when collapsed, so
     // "Dock left" from the fish does the obvious thing without a special case.
-    items.push({ label: "🎯 Switch app", run: () => openTargetPicker() });
-    items.push({ label: "◧ Dock left", run: () => dockPanel("left") });
-    items.push({ label: "◨ Dock right", run: () => dockPanel("right") });
+    items.push({ label: t("menu.switchApp"), run: () => openTargetPicker() });
+    items.push({ label: t("menu.dockLeft"), run: () => dockPanel("left") });
+    items.push({ label: t("menu.dockRight"), run: () => dockPanel("right") });
     items.push({ sep: true });
 
     // What the guidance is doing to your screen and speakers.
-    items.push({ label: isMuted ? "🔊 Unmute" : "🔇 Mute", run: () => toggleMute() });
+    items.push({ label: isMuted ? t("menu.unmute") : t("menu.mute"), run: () => toggleMute() });
     items.push({
-      label: settingsForm.subtitle_enabled ? "💬 Caption: on" : "💬 Caption: off",
+      label: settingsForm.subtitle_enabled ? t("menu.captionOn") : t("menu.captionOff"),
       run: () => quickToggleSubtitle(),
     });
     items.push({
@@ -775,19 +775,19 @@ See the LICENSE file in the root of this repository for complete details.
       // or the conversation (reported live). "Overlay" is deliberately avoided --
       // v0.4 E.11 retired it from user-facing strings in favour of naming the
       // things themselves.
-      label: isOverlayCleared ? "👁 Show pointer & caption" : "✕ Clear pointer & caption",
+      label: isOverlayCleared ? t("menu.showPointer") : t("menu.clearPointer"),
       run: () => (isOverlayCleared ? quickShowScreen() : quickClearScreen()),
     });
     items.push({ sep: true });
 
     if (icon) {
-      items.push({ label: "↗ Expand", hotkey: settingsForm.hotkey_icon || undefined,
+      items.push({ label: t("menu.expand"), hotkey: settingsForm.hotkey_icon || undefined,
                    run: () => expandToPanel() });
     } else {
-      items.push({ label: "⊟ Collapse", hotkey: settingsForm.hotkey_icon || undefined,
+      items.push({ label: t("menu.collapse"), hotkey: settingsForm.hotkey_icon || undefined,
                    run: () => collapseToIcon() });
     }
-    items.push({ label: "✕ Quit", danger: true, run: () => closeWindow() });
+    items.push({ label: t("menu.quit"), danger: true, run: () => closeWindow() });
     return items;
   }
 
@@ -3844,7 +3844,7 @@ See the LICENSE file in the root of this repository for complete details.
         }}
       />
       <div class="icon-chat-row">
-        <button class="icon-chat-send" onclick={submitIconChat} disabled={!iconChatText.trim()}>↩ Send</button>
+        <button class="icon-chat-send" onclick={submitIconChat} disabled={!iconChatText.trim()}>{t("panel.send")}</button>
         <button class="icon-chat-cancel" onclick={closeIconSurface}>Esc</button>
       </div>
     </div>
@@ -3955,10 +3955,10 @@ See the LICENSE file in the root of this repository for complete details.
              theming (paint comes from background-color on the mask, so the
              existing hover-to-red on Quit still works) — the actual files
              are public/icon-{about,settings,collapse,close}.svg. -->
-        <button class="hdr-btn hdr-icon-mask hdr-icon-about" onclick={() => openAbout("about")} title="About Navisual" aria-label="About Navisual"></button>
-        <button class="hdr-btn hdr-icon-mask hdr-icon-settings" onclick={() => openSettings()} title="Settings" aria-label="Settings"></button>
-        <button class="hdr-btn hdr-icon-mask hdr-icon-collapse" onclick={collapseToIcon} title="Collapse to floating icon" aria-label="Collapse to floating icon"></button>
-        <button class="hdr-btn hdr-btn-close hdr-icon-mask hdr-icon-close" onclick={closeWindow} title="Quit" aria-label="Quit"></button>
+        <button class="hdr-btn hdr-icon-mask hdr-icon-about" onclick={() => openAbout("about")} title={t("panel.about")} aria-label={t("panel.about")}></button>
+        <button class="hdr-btn hdr-icon-mask hdr-icon-settings" onclick={() => openSettings()} title={t("panel.settings")} aria-label={t("panel.settings")}></button>
+        <button class="hdr-btn hdr-icon-mask hdr-icon-collapse" onclick={collapseToIcon} title={t("panel.collapse")} aria-label={t("panel.collapse")}></button>
+        <button class="hdr-btn hdr-btn-close hdr-icon-mask hdr-icon-close" onclick={closeWindow} title={t("panel.quit")} aria-label={t("panel.quit")}></button>
       </div>
     </div>
 
@@ -4061,9 +4061,9 @@ See the LICENSE file in the root of this repository for complete details.
         {#if staleResponse && phase !== "thinking"}
           <div class="stale-banner" role="status">
             <span class="stale-icon">⚠</span>
-            <span class="stale-text">Screen changed while I was thinking — this guidance may be out of date.</span>
-            <button class="stale-action" onclick={() => { staleResponse = false; correction(); }} title="Re-analyse the current screen">↻ Re-analyse</button>
-            <button class="stale-dismiss" onclick={() => (staleResponse = false)} title="Dismiss">✕</button>
+            <span class="stale-text">{t("panel.staleText")}</span>
+            <button class="stale-action" onclick={() => { staleResponse = false; correction(); }} title={t("panel.reanalyseTitle")}>{t("panel.reanalyse")}</button>
+            <button class="stale-dismiss" onclick={() => (staleResponse = false)} title={t("panel.dismiss")}>✕</button>
           </div>
         {/if}
         <p class="latest-text">{currentInstruction}</p>
@@ -4072,9 +4072,9 @@ See the LICENSE file in the root of this repository for complete details.
         {#if pointerOccluded && phase === "guiding"}
           <div class="stale-banner" role="status">
             <span class="stale-icon">⊘</span>
-            <span class="stale-text">Target window isn't visible — bring it to the front to see the pointer.</span>
-            <button class="stale-action" onclick={() => { pointerOccluded = false; correction(); }} title="Re-analyse the current screen">↻ Re-analyse</button>
-            <button class="stale-dismiss" onclick={() => (pointerOccluded = false)} title="Dismiss">✕</button>
+            <span class="stale-text">{t("panel.occludedText")}</span>
+            <button class="stale-action" onclick={() => { pointerOccluded = false; correction(); }} title={t("panel.reanalyseTitle")}>{t("panel.reanalyse")}</button>
+            <button class="stale-dismiss" onclick={() => (pointerOccluded = false)} title={t("panel.dismiss")}>✕</button>
           </div>
         {/if}
 
@@ -4093,7 +4093,7 @@ See the LICENSE file in the root of this repository for complete details.
         {#if phase === "guiding"}
           <div class="wrong-footer">
             {#if !wrongPickerOpen}
-              <button class="wrong-btn" onclick={openWrongPicker} title="This guidance is wrong (Ctrl+E)">✗ This is wrong</button>
+              <button class="wrong-btn" onclick={openWrongPicker} title={t("panel.wrongTitle", { hotkey: prettyHotkey(settingsForm.hotkey_wrong) })}>{t("panel.wrong")}</button>
             {:else}
               <div class="reason-row">
                 <span class="reason-prompt">What went wrong?</span>
@@ -4352,7 +4352,7 @@ See the LICENSE file in the root of this repository for complete details.
       {#if isThinking}
         <div class="h-entry h-system h-thinking">
           <span class="h-label">·</span>
-          <span class="h-text thinking-dots">Thinking…</span>
+          <span class="h-text thinking-dots">{t("panel.thinking")}</span>
         </div>
       {/if}
     </div>
@@ -4386,7 +4386,7 @@ See the LICENSE file in the root of this repository for complete details.
             }
             addonPrompt = "hidden";
           }}
-          title="Dismiss">✕</button>
+          title={t("panel.dismiss")}>✕</button>
       </div>
     {/if}
 
@@ -4395,7 +4395,7 @@ See the LICENSE file in the root of this repository for complete details.
       {#if phase === "needs_input"}
         <div class="input-hint">💬 AI needs your input — type your answer below</div>
       {:else if phase === "guiding"}
-        <div class="input-hint">Type a follow-up or correction · ＋ for a new task</div>
+        <div class="input-hint">{t("panel.inputHint")}</div>
       {/if}
       <div class="task-input-wrap">
         <textarea
@@ -4444,10 +4444,10 @@ See the LICENSE file in the root of this repository for complete details.
         {/if}
       </div>
       {#if isThinking}
-        <button class="btn-ghost btn-full" onclick={cancelRequest}>⏹ Cancel ({(elapsedMs / 1000).toFixed(1)}s)</button>
+        <button class="btn-ghost btn-full" onclick={cancelRequest}>{t("panel.cancelElapsed", { secs: (elapsedMs / 1000).toFixed(1) })}</button>
       {:else}
         <button class="btn-primary btn-full" onclick={submitTask} disabled={!task.trim()}>
-          {phase === "needs_input" ? "↩ Send answer" : phase === "guiding" ? "↩ Follow up" : "Guide me"}
+          {phase === "needs_input" ? t("panel.sendAnswer") : phase === "guiding" ? t("panel.followUp") : t("panel.guideMe")}
         </button>
       {/if}
     </section>
@@ -4551,8 +4551,9 @@ See the LICENSE file in the root of this repository for complete details.
           {/if}
         </div>
       {/if}
-      <button class="btn-action btn-next" onclick={() => nextStep()} disabled={actionDisabled} title="Next step (Ctrl+`)">
-        → Next
+      <button class="btn-action btn-next" onclick={() => nextStep()} disabled={actionDisabled}
+        title={t("panel.nextTitle", { hotkey: prettyHotkey(settingsForm.hotkey_next) })}>
+        {t("panel.next")}
       </button>
       <button class="btn-action {autoAdvanceEnabled ? 'btn-pause' : 'btn-resume'}"
         onclick={() => {
@@ -4561,21 +4562,25 @@ See the LICENSE file in the root of this repository for complete details.
           invoke("save_settings", { payload: settingsForm }).catch(() => {});
           if (autoAdvanceEnabled) startAutopilotPolling(); else stopAutopilotPolling();
         }}
-        title={autoAdvanceEnabled ? "Autopilot on — click to turn off" : "Autopilot off — click to turn on"}>
-        {autoAdvanceEnabled ? "⏸ Autopilot" : "✈ Autopilot"}
+        title={autoAdvanceEnabled ? t("panel.autopilotOnTitle") : t("panel.autopilotOffTitle")}>
+        {autoAdvanceEnabled ? t("panel.autopilotOn") : t("panel.autopilotOff")}
       </button>
-      <button class="btn-action btn-new" onclick={newSession} title="Clear session and start fresh">
-        ＋ New task
+      <button class="btn-action btn-new" onclick={newSession} title={t("panel.newTaskTitle")}>
+        {t("panel.newTask")}
       </button>
       <button class="btn-action btn-history" class:btn-history-open={sessionPickerOpen}
         onclick={() => { if (sessionPickerOpen) sessionPickerOpen = false; else openSessionPicker(); }}
-        title="Recent tasks — reopen one to carry on">
+        title={t("panel.historyTitle")}>
         🕓
       </button>
       <button class="btn-action btn-mic" class:btn-mic-active={isRecording}
         onclick={toggleVoiceInput}
         disabled={!settingsForm.voice_input_enabled}
-        title={settingsForm.voice_input_enabled ? (isRecording ? `Stop recording (${prettyHotkey(settingsForm.hotkey_talk)})` : `Voice input (${prettyHotkey(settingsForm.hotkey_talk)})`) : "Enable voice input in Settings → Audio"}>
+        title={settingsForm.voice_input_enabled
+          ? (isRecording
+              ? t("panel.micStop", { hotkey: prettyHotkey(settingsForm.hotkey_talk) })
+              : t("panel.micStart", { hotkey: prettyHotkey(settingsForm.hotkey_talk) }))
+          : t("panel.micDisabled")}>
         🎤
       </button>
       <button class="btn-action btn-more" class:btn-more-open={showQuickMenu}

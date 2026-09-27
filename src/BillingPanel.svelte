@@ -53,7 +53,11 @@
   {/if}
   <div>
     <dt>{t("bill.freeRequests")}</dt>
-    <dd>{t("bill.freeLeft", { n: billing.freeRemaining ?? "—", total: 30 })}</dd>
+    <!-- A dash ALONE in the value slot means "not loaded yet"; a dash inside the sentence
+         does not survive translation. `还剩 — 次` reads as 还剩一次 -- "one left" -- because
+         the dash is close enough to 一 to be misread, which turns a missing value into a
+         confident and wrong statement about someone's balance. Reported live 2026-09-27. -->
+    <dd>{billing.freeRemaining === null ? "—" : t("bill.freeLeft", { n: billing.freeRemaining, total: 30 })}</dd>
   </div>
 </dl>
 <p class="setting-hint">{t("bill.tierHint")}</p>
