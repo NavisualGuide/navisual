@@ -4,7 +4,7 @@ Licensed under the Functional Source License, Version 1.1 (Apache 2.0).
 See the LICENSE file in the root of this repository for complete details.
 -->
 <script lang="ts">
-  import { onMount, onDestroy, tick } from "svelte";
+  import { onMount, onDestroy, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
   import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
@@ -569,12 +569,19 @@ See the LICENSE file in the root of this repository for complete details.
   // variable, three consumers -- and it re-measures, so a taller titlebar can never put
   // them back underneath.
   // Re-run the prefill when the interface language changes, so an untouched box does
-  // not sit there in the language the user just left. It is the one moment they are
-  // guaranteed to be looking at it. Guarded inside coldStartPrefill by phase and by
-  // whether the box has been typed in, so this cannot clobber real input.
+  // not sit there in the language the user just left.
+  //
+  // `untrack` is load-bearing, and the comment this replaces was wrong about it.
+  // "dependency only" described an INTENTION: Svelte 5 tracks every state read
+  // synchronously inside the effect, INCLUDING reads inside functions it calls, so
+  // coldStartPrefill's own guards (settingsForm.task_suggestions, phase, task,
+  // prefillActive, sharedApp) all became dependencies of this effect. It then ran on
+  // every phase change and every app switch -- and applyPrefill ends by calling
+  // taskInputEl.focus()/.select(), so each spurious run stole focus into the task box.
+  // That is a panel whose buttons appear not to work.
   $effect(() => {
-    i18n.locale; // dependency only
-    coldStartPrefill();
+    i18n.locale; // the ONE dependency this effect is meant to have
+    untrack(() => coldStartPrefill());
   });
 
   let titlebarEl: HTMLElement | undefined = $state();
