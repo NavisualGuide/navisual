@@ -411,11 +411,13 @@ See the LICENSE file in the root of this repository for complete details.
         return;
       }
       // Wording follows THIS Blender's own state, not any other install's.
-      const ver = st.target_version ? ` (Blender ${st.target_version})` : "";
+      const ver = st.target_version
+        ? t("addon.verSuffix", { version: st.target_version })
+        : "";
       addonMessage =
         st.target_installed_version !== null
-          ? `A newer Navisual add-on is available${ver} — updating keeps tool pointing exact.`
-          : `Install the Navisual add-on${ver} for exact tool pointing (one-time setup).`;
+          ? t("addon.update", { ver })
+          : t("addon.install", { ver });
       addonOfferVersion = st.target_version;
       addonPrompt = "offer";
     } catch (_) {
@@ -431,21 +433,20 @@ See the LICENSE file in the root of this repository for complete details.
         { hwnd: sharedApp?.hwnd ?? 0 },
       );
       if (r.installed.length === 0) {
-        addonMessage = `Couldn't install: ${r.errors[0] ?? "no Blender installation found"}`;
+        addonMessage = t("addon.failed", { reason: r.errors[0] ?? t("addon.noBlender") });
       } else if (r.needs_enable) {
         // Blender scans scripts/addons at STARTUP (or on Preferences → Add-ons →
         // Refresh), so a file copied into a running Blender is invisible until then —
         // omitting this step left the user hunting for an add-on that was already on
         // disk (live 2026-07-19). Restart is the instruction they verified; Refresh is
         // the faster alternative for anyone who spots the button.
-        addonMessage =
-          "Installed. Restart Blender (or press Refresh in Preferences → Add-ons), then search “Navisual” there and tick its checkbox. One time only.";
+        addonMessage = t("addon.needsEnable");
       } else {
-        addonMessage = "Updated. Restart Blender to load the new version.";
+        addonMessage = t("addon.updated");
       }
       addonPrompt = "done";
     } catch (e) {
-      addonMessage = `Couldn't install: ${e}`;
+      addonMessage = t("addon.failed", { reason: String(e) });
       addonPrompt = "done";
     }
   }
@@ -4396,10 +4397,10 @@ See the LICENSE file in the root of this repository for complete details.
           <button
             class="stale-action addon-what"
             onclick={() => openUrl("https://navisualguide.com/docs.html#apps")}
-            title="What the add-on does, and what it can't do">What's this?</button>
-          <button class="stale-action" onclick={installBlenderAddon}>Install</button>
+            title={t("addon.whatTitle")}>{t("addon.what")}</button>
+          <button class="stale-action" onclick={installBlenderAddon}>{t("addon.installBtn")}</button>
         {:else if addonPrompt === "installing"}
-          <span class="addon-busy">Installing…</span>
+          <span class="addon-busy">{t("addon.installing")}</span>
         {/if}
         <button
           class="stale-dismiss"
@@ -5626,7 +5627,7 @@ See the LICENSE file in the root of this repository for complete details.
         role="dialog"
         tabindex="-1"
         aria-modal="true"
-        aria-label="About Navisual"
+        aria-label={t("panel.about")}
         onclick={(e) => e.stopPropagation()}
         onkeydown={(e) => e.stopPropagation()}
       >
@@ -5635,8 +5636,8 @@ See the LICENSE file in the root of this repository for complete details.
           <button class="hdr-btn hdr-btn-close" onclick={() => (showAbout = false)}>✕</button>
         </div>
         <div class="modal-tabs">
-          <button class="tab-btn {aboutTab === 'about' ? 'tab-active' : ''}" onclick={() => (aboutTab = "about")}>About</button>
-          <button class="tab-btn {aboutTab === 'usage' ? 'tab-active' : ''}" onclick={() => { aboutTab = "usage"; loadUsage(); }}>Usage</button>
+          <button class="tab-btn {aboutTab === 'about' ? 'tab-active' : ''}" onclick={() => (aboutTab = "about")}>{t("about.tabAbout")}</button>
+          <button class="tab-btn {aboutTab === 'usage' ? 'tab-active' : ''}" onclick={() => { aboutTab = "usage"; loadUsage(); }}>{t("about.tabUsage")}</button>
         </div>
         {#if aboutTab === "about"}
         <div class="about-body">
@@ -5645,18 +5646,18 @@ See the LICENSE file in the root of this repository for complete details.
             <span class="about-name">Navisual</span>
             <span class="about-version">v{appVersion}</span>
           </div>
-          <p class="about-tagline">The AI guides, you decide.</p>
-          <p class="about-disclaimer">Navisual uses AI, which can make mistakes. Always verify each suggested action before performing it.</p>
+          <p class="about-tagline">{t("about.tagline")}</p>
+          <p class="about-disclaimer">{t("about.disclaimer")}</p>
           <div class="about-links">
-            <button class="about-link" onclick={() => openUrl("https://navisualguide.com/docs.html")}>User guide</button>
+            <button class="about-link" onclick={() => openUrl("https://navisualguide.com/docs.html")}>{t("about.userGuide")}</button>
             <!-- The first-run notice is shown once per install and has no reopen path,
                  so without this the policy was unreachable from inside a screen-reading
                  app. It is also what makes the notice's "reopen it any time from About"
                  true. -->
-            <button class="about-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy</button>
+            <button class="about-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("about.privacy")}</button>
             <button class="about-link" onclick={() => openUrl("https://navisualguide.com")}>navisualguide.com</button>
             <button class="about-link" onclick={() => openUrl("https://github.com/NavisualGuide/navisual")}>GitHub</button>
-            <button class="about-link" onclick={openFeedbackEmail}>Send feedback</button>
+            <button class="about-link" onclick={openFeedbackEmail}>{t("about.sendFeedback")}</button>
           </div>
 
           <!-- Update section. A Store build manages updates through the Store, so
@@ -5664,37 +5665,37 @@ See the LICENSE file in the root of this repository for complete details.
                either do nothing or violate Store policy. -->
           <div class="about-update">
             {#if isPackaged}
-              <span class="update-status">Updates are managed by the Microsoft Store.</span>
+              <span class="update-status">{t("about.storeUpdates")}</span>
             {:else if updateStatus === "downloading"}
-              <span class="update-status">Downloading… {updateProgress}%</span>
+              <span class="update-status">{t("about.downloading", { pct: updateProgress })}</span>
               <div class="update-progress-bar"><div class="update-progress-fill" style="width:{updateProgress}%"></div></div>
             {:else if updateStatus === "done"}
-              <span class="update-status update-done">✓ Installed — please restart Navisual</span>
+              <span class="update-status update-done">{t("about.installed")}</span>
             {:else if pendingUpdate}
-              <span class="update-status update-avail">v{pendingUpdate.version} available</span>
-              <button class="btn-primary" onclick={installUpdate}>Install &amp; restart</button>
+              <span class="update-status update-avail">{t("about.available", { version: pendingUpdate.version })}</span>
+              <button class="btn-primary" onclick={installUpdate}>{t("about.installRestart")}</button>
             {:else if updateStatus === "checking"}
-              <span class="update-status">Checking for updates…</span>
+              <span class="update-status">{t("about.checking")}</span>
             {:else}
-              <button class="btn-ghost" onclick={() => checkForUpdates(true)}>Check for updates</button>
+              <button class="btn-ghost" onclick={() => checkForUpdates(true)}>{t("about.checkUpdates")}</button>
             {/if}
           </div>
 
-          <p class="about-license">Licensed under FSL-1.1-Apache-2.0 — converts to Apache 2.0 two years after each release.</p>
-          <p class="about-license">The bundled Blender Nav-Pack references Blender's own icon designs (© Blender Foundation) for on-screen guidance only. Blender is a registered trademark of the Blender Foundation. Navisual is not affiliated with or endorsed by the Blender Foundation.</p>
+          <p class="about-license">{t("about.license")}</p>
+          <p class="about-license">{t("about.blenderNotice")}</p>
         </div>
         {:else}
         <!-- Usage tab — Navisual account (coins/free) kept separate from your-own-key token usage -->
         <div class="modal-body">
           <!-- Section 1 — Navisual managed account (coins or free requests) -->
           <div class="setting-group">
-            <p class="setting-label" style="margin:0 0 8px">Navisual account</p>
+            <p class="setting-label" style="margin:0 0 8px">{t("usage.navisualAccount")}</p>
             {#if billing.tier === "paid" && billing.coins != null}
-              <p class="setting-hint">🪙 {billing.coins.toLocaleString()} coins left · {TIER_LABELS[settingsForm.managed_tier] ?? "Regular"} tier · {TIER_COINS[settingsForm.managed_tier] ?? 12} coins/request</p>
+              <p class="setting-hint">{t("usage.coinsLine", { coins: billing.coins.toLocaleString(), tier: TIER_LABELS[settingsForm.managed_tier] ?? "Regular", perReq: TIER_COINS[settingsForm.managed_tier] ?? 12 })}</p>
             {:else if usageManagedRemaining != null}
-              <p class="setting-hint">Free tier — {usageManagedRemaining} / 30 requests left</p>
+              <p class="setting-hint">{t("usage.freeLine", { left: usageManagedRemaining, total: 30 })}</p>
             {:else}
-              <p class="setting-hint">Free tier</p>
+              <p class="setting-hint">{t("balance.freeTier")}</p>
             {/if}
           </div>
 
@@ -5703,17 +5704,17 @@ See the LICENSE file in the root of this repository for complete details.
           {#if settingsForm.developer_mode}
             <div class="setting-group">
               <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px">
-                <p class="setting-label" style="margin:0">Your own keys — token usage</p>
+                <p class="setting-label" style="margin:0">{t("usage.ownKeys")}</p>
                 <div style="display:flex; gap:6px">
-                  <button class="tab-btn {usagePeriod === 'today' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "today")}>Today</button>
-                  <button class="tab-btn {usagePeriod === 'month' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "month")}>This month</button>
+                  <button class="tab-btn {usagePeriod === 'today' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "today")}>{t("usage.today")}</button>
+                  <button class="tab-btn {usagePeriod === 'month' ? 'tab-active' : ''}" type="button" onclick={() => (usagePeriod = "month")}>{t("usage.thisMonth")}</button>
                 </div>
               </div>
 
               {#if !usageLoaded}
-                <p class="setting-hint">Loading…</p>
+                <p class="setting-hint">{t("usage.loading")}</p>
               {:else if usageView.length === 0}
-                <p class="setting-hint">No bring-your-own-key usage recorded yet.</p>
+                <p class="setting-hint">{t("usage.noneYet")}</p>
               {:else}
                 <div style="display:flex; flex-direction:column; gap:5px">
                   {#each usageView as r}
@@ -5725,29 +5726,29 @@ See the LICENSE file in the root of this repository for complete details.
                   {/each}
                   {#if usageHasEstimate}
                     <div style="display:flex; justify-content:space-between; gap:10px; font-size:13px; font-weight:600; border-top:1px solid var(--border); margin-top:4px; padding-top:7px">
-                      <span>Estimated total</span>
+                      <span>{t("usage.estimatedTotal")}</span>
                       <span style="min-width:62px; text-align:right">~${usageTotalCost.toFixed(2)}</span>
                     </div>
                   {/if}
                 </div>
                 {#if usageHasEstimate}
-                  <p class="setting-hint" style="margin-top:8px">Estimates only — based on each provider's published list pricing, which is set by the provider and subject to change. Check your provider's dashboard for actual charges.</p>
+                  <p class="setting-hint" style="margin-top:8px">{t("usage.estimateNote")}</p>
                 {/if}
               {/if}
 
               <div style="margin-top:14px">
-                <button class="btn-ghost" type="button" onclick={resetUsage}>↻ Reset usage</button>
+                <button class="btn-ghost" type="button" onclick={resetUsage}>{t("usage.reset")}</button>
               </div>
             </div>
           {:else if isByok}
             <div class="setting-group">
-              <p class="setting-label" style="margin:0 0 8px">Your own key</p>
-              <p class="setting-hint">Requests run on your own {PROVIDER_NAMES[settingsForm.api_provider] ?? "provider"} account — usage and charges are billed by your provider, not Navisual. Check your provider's dashboard for token counts and costs.</p>
+              <p class="setting-label" style="margin:0 0 8px">{t("usage.ownKey")}</p>
+              <p class="setting-hint">{t("usage.ownKeyNote", { provider: PROVIDER_NAMES[settingsForm.api_provider] ?? "provider" })}</p>
             </div>
           {:else if settingsForm.api_provider === "ollama"}
             <div class="setting-group">
-              <p class="setting-label" style="margin:0 0 8px">Local model</p>
-              <p class="setting-hint">Running locally with Ollama — nothing is billed and no usage leaves your machine.</p>
+              <p class="setting-label" style="margin:0 0 8px">{t("usage.localModel")}</p>
+              <p class="setting-hint">{t("usage.localNote")}</p>
             </div>
           {/if}
         </div>
