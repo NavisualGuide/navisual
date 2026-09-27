@@ -271,6 +271,13 @@ mod imp {
         }
     }
 
+    /// Is `lang` written in something other than the Latin alphabet? Exactly the set
+    /// [`lang_for_script`] can produce, which is the point: those are the languages where a
+    /// run of Latin letters is genuinely a foreign island rather than ordinary text.
+    fn is_non_latin_script_lang(lang: &str) -> bool {
+        matches!(lang, "zh" | "ja" | "ko" | "ru" | "ar")
+    }
+
     fn lang_for_script(sc: Script) -> Option<&'static str> {
         match sc {
             Script::Han => Some("zh"),
@@ -500,7 +507,32 @@ mod imp {
                     let mut needs_ssml = false;
                     if !primary_name.is_empty() {
                         for (sc, run) in script_runs(&text) {
-                            let foreign = lang_for_script(sc).filter(|l| *l != target);
+                            // The mapping below handles a non-Latin island inside a Latin
+                            // reply. It did NOT handle the mirror image, and that asymmetry
+                            // is audible: `lang_for_script(Latin)` is None, so every Latin
+                            // run inside a Chinese reply fell through to the PRIMARY voice
+                            // and a zh-CN voice read "Resize" and "Ctrl+B" with a heavy
+                            // Chinese accent. Reported live 2026-09-27, immediately after
+                            // the locale fix made the Chinese itself good enough that the
+                            // English stood out.
+                            //
+                            // Latin counts as foreign only when the reply's OWN language is
+                            // not Latin-scripted. Without that guard a French or German
+                            // reply is entirely Latin runs against a non-"en" target, and
+                            // every word of it would be handed to an English voice.
+                            //
+                            // The letter test keeps a digits-or-punctuation-only run -- which
+                            // `script_runs` tags Latin whenever it opens on a neutral char --
+                            // from forcing a pointless voice switch mid-sentence.
+                            let foreign = match sc {
+                                Script::Latin
+                                    if is_non_latin_script_lang(&target)
+                                        && run.chars().any(|c| c.is_alphabetic()) =>
+                                {
+                                    Some("en")
+                                }
+                                _ => lang_for_script(sc).filter(|l| *l != target),
+                            };
                             let voice = match foreign
                                 .and_then(|l| pick_voice(&voices, l, &fallback_locale, primary_gender))
                             {
@@ -703,6 +735,37 @@ mod imp {
                 pick_voice(&voices, "zh", "zh-CN", GENDER_MALE).unwrap().name,
                 "HanHan Natural"
             );
+        }
+
+        #[test]
+        fn latin_inside_a_chinese_reply_is_foreign() {
+            // The v0.7.30 follow-up: Chinese was fixed, and then the English in it was
+            // being read by the Chinese voice.
+            assert!(is_non_latin_script_lang("zh"));
+            assert!(is_non_latin_script_lang("ja"));
+            assert!(is_non_latin_script_lang("ko"));
+            assert!(is_non_latin_script_lang("ru"));
+            assert!(is_non_latin_script_lang("ar"));
+            // Latin-scripted languages must NOT treat their own text as foreign, or a
+            // French reply would be handed word by word to an English voice.
+            assert!(!is_non_latin_script_lang("en"));
+            assert!(!is_non_latin_script_lang("fr"));
+            assert!(!is_non_latin_script_lang("de"));
+            assert!(!is_non_latin_script_lang("es"));
+            assert!(!is_non_latin_script_lang("pt"));
+            assert!(!is_non_latin_script_lang(""));
+        }
+
+        #[test]
+        fn a_digits_only_run_is_not_a_voice_switch() {
+            // `script_runs` tags a run Latin when it opens on a neutral char, so the " 3 "
+            // in a Chinese sentence would otherwise pull an English voice in for digits.
+            // The guard is the letter test, asserted directly so no source literal has to
+            // carry non-ASCII: a run of digits and punctuation must not look like English.
+            assert!("Resize".chars().any(|c| c.is_alphabetic()));
+            assert!("Ctrl+B".chars().any(|c| c.is_alphabetic()));
+            assert!(!" 3. ".chars().any(|c| c.is_alphabetic()));
+            assert!(!"(1)".chars().any(|c| c.is_alphabetic()));
         }
 
         #[test]
