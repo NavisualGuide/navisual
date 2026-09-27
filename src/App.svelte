@@ -4951,20 +4951,20 @@ See the LICENSE file in the root of this repository for complete details.
         aria-label="Settings"
       >
         <div class="modal-header">
-          <span class="modal-title">Settings</span>
+          <span class="modal-title">{t("set.title")}</span>
           <button class="hdr-btn hdr-btn-close" onclick={() => (showSettings = false)}>✕</button>
         </div>
         <div class="modal-tabs">
-          <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>Provider</button>
+          <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>{t("set.tabProvider")}</button>
           <!-- Billing merged into Account (2026-09-06). Coins belong to an account,
                both were the only two live views outside the Apply/OK form, and buying
                while signed out already switched from one tab to the other mid-click. -->
-          <button class="tab-btn {settingsTab === 'account' ? 'tab-active' : ''}" onclick={() => { settingsTab = "account"; account.load(); refreshBalance(); }}>Account</button>
-          <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>Screen Guide</button>
-          <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>Hotkeys</button>
-          <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>Audio</button>
+          <button class="tab-btn {settingsTab === 'account' ? 'tab-active' : ''}" onclick={() => { settingsTab = "account"; account.load(); refreshBalance(); }}>{t("set.tabAccount")}</button>
+          <button class="tab-btn {settingsTab === 'screen-guide' ? 'tab-active' : ''}" onclick={() => (settingsTab = "screen-guide")}>{t("set.tabScreenGuide")}</button>
+          <button class="tab-btn {settingsTab === 'hotkeys' ? 'tab-active' : ''}" onclick={() => (settingsTab = "hotkeys")}>{t("set.tabHotkeys")}</button>
+          <button class="tab-btn {settingsTab === 'audio' ? 'tab-active' : ''}" onclick={() => (settingsTab = "audio")}>{t("set.tabAudio")}</button>
           {#if settingsForm.developer_mode}
-            <button class="tab-btn {settingsTab === 'developer' ? 'tab-active' : ''}" onclick={() => (settingsTab = "developer")}>Developer</button>
+            <button class="tab-btn {settingsTab === 'developer' ? 'tab-active' : ''}" onclick={() => (settingsTab = "developer")}>{t("set.tabDeveloper")}</button>
           {/if}
         </div>
 
@@ -5378,42 +5378,45 @@ See the LICENSE file in the root of this repository for complete details.
               {/if}
             </div>
             <div class="setting-group">
-              <p class="setting-label">Task suggestions</p>
+              <p class="setting-label">{t("sg.taskSuggestions")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.task_suggestions} />
-                <span>Prefill the task box with suggested next tasks — you can always type over them</span>
+                <span>{t("sg.taskSuggestionsToggle")}</span>
               </label>
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="overlay-color">Pointer color</label>
+              <label class="setting-label" for="overlay-color">{t("sg.pointerColor")}</label>
               <div class="color-row">
                 <input id="overlay-color" class="color-picker" type="color" bind:value={settingsForm.overlay_color} />
                 <span class="color-hex">{settingsForm.overlay_color}</span>
-                <button class="key-toggle" onclick={() => (settingsForm.overlay_color = "#FF6B35")}>Reset</button>
+                <button class="key-toggle" onclick={() => (settingsForm.overlay_color = "#FF6B35")}>{t("sg.reset")}</button>
               </div>
             </div>
             <div class="setting-group">
               <label class="setting-label" for="overlay-thickness">
-                Pointer thickness — {strokeScale(settingsForm.overlay_thickness).toFixed(2)}×{settingsForm.overlay_thickness === DEFAULT_THICKNESS ? " (default)" : ""}
+                {t("sg.pointerThickness", {
+                  scale: strokeScale(settingsForm.overlay_thickness).toFixed(2),
+                  suffix: settingsForm.overlay_thickness === DEFAULT_THICKNESS ? t("sg.default") : "",
+                })}
               </label>
               <input id="overlay-thickness" class="setting-range" type="range" min="1" max="10"
                 bind:value={settingsForm.overlay_thickness} />
             </div>
             <div class="setting-group">
-              <p class="setting-label">Live caption</p>
+              <p class="setting-label">{t("sg.liveCaption")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.subtitle_enabled} />
-                <span>Show instruction text at bottom of screen</span>
+                <span>{t("sg.liveCaptionToggle")}</span>
               </label>
             </div>
             <div class="setting-group">
-              <p class="setting-label">Autopilot</p>
+              <p class="setting-label">{t("sg.autopilot")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.auto_advance} />
-                <span>Automatically move to the next step when the screen changes</span>
+                <span>{t("sg.autopilotToggle")}</span>
               </label>
               <div class="sensitivity-row">
-                <span class="sensitivity-end">Less</span>
+                <span class="sensitivity-end">{t("sg.less")}</span>
                 <!-- Slider shows SENSITIVITY (right = more); stored value is autopilot_min_cells
                      (how many of 1024 cells must change — lower = more sensitive), so reverse:
                      min_cells = 46 − slider. Band 6–40 cells ≈ 0.6–4% of the window. -->
@@ -5422,67 +5425,60 @@ See the LICENSE file in the root of this repository for complete details.
                   type="range" min="6" max="40" step="2"
                   value={46 - settingsForm.autopilot_min_cells}
                   oninput={(e) => (settingsForm.autopilot_min_cells = 46 - Number(e.currentTarget.value))}
-                  aria-label="Autopilot screen-change sensitivity" />
-                <span class="sensitivity-end">More</span>
+                  aria-label={t("sg.sensitivityAria")} />
+                <span class="sensitivity-end">{t("sg.more")}</span>
               </div>
               <p class="setting-hint" style="margin-top:4px">
-                How much of the screen must change to auto-advance. <strong>Less</strong> ignores
-                typing and minor updates; <strong>More</strong> reacts to smaller changes like a
-                dialog opening.
+                {t("sg.sensitivityHint")}
               </p>
             </div>
             <div class="setting-group">
-              <p class="setting-label">Saved sessions</p>
+              <p class="setting-label">{t("sg.savedSessions")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.session_screenshots} />
-                <span>Keep each step's screenshot with the saved session</span>
+                <span>{t("sg.savedSessionsToggle")}</span>
               </label>
               <p class="setting-hint" style="margin-top:4px">
-                The only setting here that puts a picture of your screen on disk. It keeps the
-                same cropped, masked frame the AI was shown — never the whole monitor. The most
-                recent {sessionKeep} sessions are kept; older ones go with their screenshots.
+                {t("sg.savedSessionsHint", { n: sessionKeep })}
               </p>
             </div>
             <div class="setting-group">
-              <p class="setting-label">What you type</p>
+              <p class="setting-label">{t("sg.whatYouType")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.log_request_text} />
-                <span>Send the task I type along with step outcomes</span>
+                <span>{t("sg.whatYouTypeToggle")}</span>
               </label>
               <p class="setting-hint" style="margin-top:4px">
-                Sent with each step outcome, so we can see what people use Navisual for and
-                which tasks it handles badly. Screenshots are never sent.
+                {t("sg.whatYouTypeHint")}
                 <br><br>
-                <strong>If the AI runs on your own machine or network — localhost, or a box at
-                192.168.x — nothing is sent, whatever this says.</strong> Your own API key to a
-                provider like Anthropic or OpenAI does send it, unless you turn this off.
-                <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>Privacy policy</button>
+                <strong>{t("sg.whatYouTypeLocal")}</strong> {t("sg.whatYouTypeByok")}
+                <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("sg.privacyPolicy")}</button>
               </p>
             </div>
 
           {:else if settingsTab === "hotkeys"}
-            <p class="stub-hint" style="margin-bottom:10px">Click a field then press your shortcut combo. Re-registered immediately on Save — no restart needed.</p>
+            <p class="stub-hint" style="margin-bottom:10px">{t("hk.intro")}</p>
             <div class="setting-group">
-              <label class="setting-label">Next step</label>
+              <label class="setting-label">{t("hk.next")}</label>
               <HotkeyInput bind:value={settingsForm.hotkey_next} />
               {#if settingsForm.hotkey_next?.includes("Backquote")}
-                <p class="setting-hint" style="margin-top: 4px;">The <strong>~ (Tilde / Backtick)</strong> key is located directly below the Esc key (top left of the keyboard).</p>
+                <p class="setting-hint" style="margin-top: 4px;">{t("hk.backquoteHint")}</p>
               {/if}
             </div>
             <div class="setting-group">
-              <label class="setting-label">Mark wrong</label>
+              <label class="setting-label">{t("hk.wrong")}</label>
               <HotkeyInput bind:value={settingsForm.hotkey_wrong} />
             </div>
             <div class="setting-group">
-              <label class="setting-label">Pause / cancel</label>
+              <label class="setting-label">{t("hk.pause")}</label>
               <HotkeyInput bind:value={settingsForm.hotkey_pause} />
             </div>
             <div class="setting-group">
-              <label class="setting-label">Toggle icon mode</label>
+              <label class="setting-label">{t("hk.icon")}</label>
               <HotkeyInput bind:value={settingsForm.hotkey_icon} />
             </div>
             <div class="setting-group">
-              <label class="setting-label">Voice input (push-to-talk)</label>
+              <label class="setting-label">{t("hk.talk")}</label>
               <HotkeyInput bind:value={settingsForm.hotkey_talk} />
             </div>
 
@@ -5542,41 +5538,41 @@ See the LICENSE file in the root of this repository for complete details.
           {:else}
             <!-- Audio tab -->
             <div class="setting-group">
-              <p class="setting-label">Audio output (TTS)</p>
+              <p class="setting-label">{t("au.output")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.tts_enabled} />
-                <span>Enable text-to-speech for instructions</span>
+                <span>{t("au.outputToggle")}</span>
               </label>
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="tts-voice">Preferred voice (optional)</label>
+              <label class="setting-label" for="tts-voice">{t("au.preferredVoice")}</label>
               <select id="tts-voice" class="setting-select"
                 bind:value={settingsForm.tts_voice}
                 disabled={!settingsForm.tts_enabled}>
-                <option value="">Auto — match the language</option>
+                <option value="">{t("au.voiceAuto")}</option>
                 {#if availableVoices.length === 0}
-                  <option disabled value="">Loading voices…</option>
+                  <option disabled value="">{t("au.voicesLoading")}</option>
                 {/if}
                 {#each availableVoices as v}
                   <option value={v.id}>{v.name}</option>
                 {/each}
               </select>
-              <p class="stub-hint" style="margin-top:4px">Auto speaks each reply in its own language (using an installed voice for it). A picked voice is used for replies in its language; replies in other languages still auto-pick a matching voice.</p>
+              <p class="stub-hint" style="margin-top:4px">{t("au.voiceHint")}</p>
             </div>
             <div class="setting-group">
-              <p class="setting-label">Voice input</p>
+              <p class="setting-label">{t("au.input")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.voice_input_enabled} />
-                <span>Enable 🎤 push-to-talk</span>
+                <span>{t("au.inputToggle")}</span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Uses the WebView2 Web Speech API — audio is sent to Microsoft's online speech service; requires internet and microphone permission.</p>
+              <p class="stub-hint" style="margin-top:4px">{t("au.inputHint")}</p>
             </div>
             <div class="setting-group">
-              <label class="setting-label" for="voice-lang">Voice language</label>
+              <label class="setting-label" for="voice-lang">{t("au.voiceLanguage")}</label>
               <select id="voice-lang" class="setting-input setting-select"
                 bind:value={settingsForm.voice_language}
                 disabled={!settingsForm.tts_enabled && !settingsForm.voice_input_enabled}>
-                <option value="auto">Auto-detect</option>
+                <option value="auto">{t("au.autoDetect")}</option>
                 <option value="en-US">English (US)</option>
                 <option value="en-GB">English (UK)</option>
                 <option value="fr-FR">French</option>
@@ -5587,7 +5583,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <option value="ko-KR">Korean</option>
                 <option value="pt-BR">Portuguese (Brazil)</option>
               </select>
-              <p class="stub-hint" style="margin-top:4px">Sets both the TTS voice language and the voice-input language. Auto-detect speaks each reply in its own language and uses your OS language for voice input.</p>
+              <p class="stub-hint" style="margin-top:4px">{t("au.voiceLangHint")}</p>
             </div>
           {/if}
         </div>
@@ -5597,9 +5593,9 @@ See the LICENSE file in the root of this repository for complete details.
             {#if settingsError}
               <span class="settings-error">{settingsError}</span>
             {:else if settingsSaved}
-              <span class="settings-ok">✓ Saved — no restart required</span>
+              <span class="settings-ok">{t("set.saved")}</span>
             {:else}
-              <span class="settings-note">Changes take effect when you click Apply</span>
+              <span class="settings-note">{t("set.applyNote")}</span>
             {/if}
           </div>
           <div class="footer-actions">
@@ -5607,14 +5603,14 @@ See the LICENSE file in the root of this repository for complete details.
               class="btn-ghost btn-reset"
               class:btn-reset-armed={resetArmed}
               onclick={handleResetClick}
-              title="Restores EVERY setting on ALL tabs to its default — not just this tab. Your API keys are kept, but server addresses and model choices are not: a custom or local provider will need its URL and model set again.">
-              {resetArmed ? "Click again — resets ALL tabs" : "Reset all settings"}
+              title={t("set.resetTitle")}>
+              {resetArmed ? t("set.resetArmed") : t("set.reset")}
             </button>
-            <button class="btn-ghost" onclick={() => (showSettings = false)}>Cancel</button>
+            <button class="btn-ghost" onclick={() => (showSettings = false)}>{t("common.cancel")}</button>
             <button class="btn-ghost" onclick={applySettings} disabled={settingsSaving}>
-              {settingsSaving ? "Saving…" : "Apply"}
+              {settingsSaving ? t("set.saving") : t("set.apply")}
             </button>
-            <button class="btn-primary" onclick={applySettingsAndClose} disabled={settingsSaving}>OK</button>
+            <button class="btn-primary" onclick={applySettingsAndClose} disabled={settingsSaving}>{t("set.ok")}</button>
           </div>
         </div>
       </div>
