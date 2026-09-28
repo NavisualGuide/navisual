@@ -95,7 +95,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
 
   // ── 帳單與儲值 ────────────────────────────────────────────────────────────
   "bill.wrongProvider":
-    "金幣只在「託管」服務商底下消耗，而你目前用的是 {provider}。請先到「服務商」分頁切換再使用。",
+    "金幣只在「託管」服務商底下消耗，而你目前用的是「{provider}」。請先到「服務商」分頁切換再使用。",
   "bill.plan": "方案",
   "bill.planPaid": "付費（金幣）",
   "bill.planFree": "免費試用",
@@ -493,11 +493,8 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
 
   // ── 對話系統訊息 ──────────────────────────────────────────────────────────
   "msg.ready": "Navisual 已就緒 —— 正在使用 {provider}",
-  "msg.managedFree": "託管（免費）",
   "msg.screenChanged": "畫面變了 —— 正在確認下一步\u2026",
   "msg.skippingDone": "這一步你已經做過了 —— 直接跳過（沒有消耗 AI 請求）。",
-  "msg.wrongReanalysing": "已標記為錯誤 —— 正在重新分析\u2026",
-  "msg.userNote": "你的說明：",
   "msg.wrongPrompt": "哪裡不對 / 你希望看到什麼？",
   "msg.checkoutFailed": "付款失敗：",
   "msg.signInToBuy": "購買金幣前需要登入 —— 用下面的 Google 登入，或填寫電子郵件。",
@@ -535,6 +532,57 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "prov.managedPaid": "託管（{tier}）",
   "prov.managedFree": "託管（免費）",
   "prov.custom": "自訂",
+
+  // ── 語音語言（音訊分頁的下拉）────────────────────────────────────────────
+  "au.langEnUS": "英語（美國）",
+  "au.langEnGB": "英語（英國）",
+  "au.langFr": "法語",
+  "au.langDe": "德語",
+  "au.langEs": "西班牙語",
+  "au.langJa": "日語",
+  "au.langZhCN": "中文（簡體）",
+  "au.langKo": "韓語",
+  "au.langPtBR": "葡萄牙語（巴西）",
+
+  // ── 服務商分組，以及帶內嵌標記的提示 ──────────────────────────────────────
+  "pv.grpHosted": "Navisual（託管）",
+  "pv.grpByok": "自備金鑰",
+  "pv.grpLocal": "本機與自訂",
+  "pv.hintCustom": "任何相容 OpenAI 的 <code>/v1</code> 端點 —— 可以是本機伺服器（LM Studio、llama.cpp、vLLM）以完全離線執行，也可以是 DashScope 工作區網址或其他雲端服務。請用具<em>視覺</em>能力的模型，它才看得到畫面；本機伺服器的 API 金鑰可以留空。",
+  "pv.hintQwenBase": "DashScope 端點，已自動填好。若要用本機伺服器、DashScope 工作區網址或其他雲端服務，請改用<strong>{custom}</strong>服務商。",
+  "pv.hintCustomBase": "相容 OpenAI 的 <code>/v1</code> 端點 —— Navisual 會自動接上 <code>/chat/completions</code>。<br />LM Studio <code>http://localhost:1234/v1</code> \u00b7 llama.cpp / llamafile <code>http://localhost:8080/v1</code>（從另一台機器連線時請用主機的區域網路 IP）。也接受 DashScope 工作區網址（<code>ws-xxx.&lt;region&gt;.maas.aliyuncs.com/compatible-mode/v1</code>）或任何其他相容 OpenAI 的雲端服務。",
+  "pv.hintCustomModel": "請用具<em>視覺</em>能力的模型，它才看得到畫面。",
+
+  // ── 面板介面：停留提示與圖片替代文字 ──────────────────────────────────────
+  "panel.moreActions": "更多操作",
+  "panel.showPointer": "重新顯示指標和字幕",
+  "panel.hidePointer": "隱藏指標和字幕，讓你看清畫面",
+  "panel.thumbAlt": "螢幕截圖",
+  "panel.fullShotAlt": "完整螢幕截圖",
+  "panel.clickFullShot": "點擊檢視完整螢幕截圖",
+  "task.otherSuggestions": "其他工作建議",
+  "task.showOtherSuggestions": "顯示其他工作建議",
+  "exp.exporting": "正在匯出…",
+  "exp.exportSelected": "匯出選取的 {n} 個…",
+  "exp.exportAll": "匯出全部 {n} 個…",
+  "exp.opening": "正在開啟…",
+  "exp.openFile": "開啟檔案…",
+  "exp.saveTitle": "每個工作階段一個獨立的 HTML 檔案，任何瀏覽器都能開啟",
+  "exp.openTitle": "開啟一個匯出的工作階段檔案 —— 它會顯示在面板裡；只有你繼續在它裡面操作，它才會進入這個清單",
+
+  // ── 其餘的對話／帳戶訊息 ──────────────────────────────────────────────────
+  "wrong.shareNote": "會分享給 Navisual 團隊用於改進指引 —— 絕不包含你的畫面內容或你輸入的請求。",
+
+  "exp.folderLayout": "<code>steps/</code> 裡是未經處理的原始螢幕截圖，<code>steps-annotated/</code> 裡是加了標註的，旁邊還有一份可讀的 <code>session.md</code> 和完整記錄 <code>session.json</code>。你隨時可以用 <code>tools/annotate-session.ps1</code> 重新產生指標或字幕 —— 不需要重跑任何東西。",
+  "pv.keyPlaceholderOptional": "sk-\u2026（可留空）",
+
+  // ── HotkeyInput.svelte 與儲值金額 ─────────────────────────────────────────
+  "hk.pressCombo": "按下組合鍵\u2026",
+  "hk.clickToChange": "點擊修改",
+  "hk.clearTitle": "清除 —— 設為未設定",
+  "hk.clearAria": "清除快捷鍵",
+  "hk.inputAria": "快捷鍵：{key}。點擊錄製。",
+  "bill.coinsOption": "${usd} \u00b7 {coins} 金幣",
 
   // ── 註冊優惠 ──────────────────────────────────────────────────────────────
   "promo.headline": "註冊免費帳戶，送 {coins} 金幣。",

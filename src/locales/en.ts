@@ -514,11 +514,8 @@ export const en = {
 
   // ── Conversation system messages ──────────────────────────────────────────
   "msg.ready": "Navisual ready \u2014 using {provider}",
-  "msg.managedFree": "Managed (free)",
   "msg.screenChanged": "Screen changed \u2014 checking next step\u2026",
   "msg.skippingDone": "Skipping the already-done step \u2014 moving on (no AI request used).",
-  "msg.wrongReanalysing": "Wrong \u2014 re-analysing\u2026",
-  "msg.userNote": "User note:",
   "msg.wrongPrompt": "What went wrong / what would you like to see?",
   "msg.checkoutFailed": "Checkout failed:",
   "msg.signInToBuy": "Sign in to buy coins \u2014 use Google below, or enter your email.",
@@ -557,6 +554,57 @@ export const en = {
   "prov.managedPaid": "Managed ({tier})",
   "prov.managedFree": "Managed (free)",
   "prov.custom": "Custom",
+
+  // ── Voice languages (the Audio tab's dropdown) ────────────────────────────
+  "au.langEnUS": "English (US)",
+  "au.langEnGB": "English (UK)",
+  "au.langFr": "French",
+  "au.langDe": "German",
+  "au.langEs": "Spanish",
+  "au.langJa": "Japanese",
+  "au.langZhCN": "Chinese (Simplified)",
+  "au.langKo": "Korean",
+  "au.langPtBR": "Portuguese (Brazil)",
+
+  // ── Provider groups and the hints carrying inline markup ──────────────────
+  "pv.grpHosted": "Navisual (hosted)",
+  "pv.grpByok": "Bring your own key",
+  "pv.grpLocal": "Local & custom",
+  "pv.hintCustom": "Any OpenAI-compatible <code>/v1</code> endpoint \u2014 a local server (LM Studio, llama.cpp, vLLM) to run fully offline, a DashScope workspace URL, or another cloud. Use a <em>vision</em> model so it can see the screen; the API key is optional for local servers.",
+  "pv.hintQwenBase": "DashScope endpoint, filled in automatically. For a local server, a DashScope workspace URL, or another cloud, use the <strong>{custom}</strong> provider instead.",
+  "pv.hintCustomBase": "OpenAI-compatible <code>/v1</code> endpoint \u2014 Navisual appends <code>/chat/completions</code>.<br />LM Studio <code>http://localhost:1234/v1</code> \u00b7 llama.cpp / llamafile <code>http://localhost:8080/v1</code> (use the host's LAN IP from another machine). Also accepts a DashScope workspace URL (<code>ws-xxx.&lt;region&gt;.maas.aliyuncs.com/compatible-mode/v1</code>) or any other OpenAI-compatible cloud.",
+  "pv.hintCustomModel": "Use a <em>vision</em> model so it can see the screen.",
+
+  // ── Panel chrome: tooltips and image alternatives ─────────────────────────
+  "panel.moreActions": "More actions",
+  "panel.showPointer": "Show the pointer and caption again",
+  "panel.hidePointer": "Hide the pointer and caption so you can see the screen clearly",
+  "panel.thumbAlt": "screenshot",
+  "panel.fullShotAlt": "Full screenshot",
+  "panel.clickFullShot": "Click to view full screenshot",
+  "task.otherSuggestions": "Other suggested tasks",
+  "task.showOtherSuggestions": "Show other suggested tasks",
+  "exp.exporting": "Exporting…",
+  "exp.exportSelected": "Export {n} selected…",
+  "exp.exportAll": "Export all {n}…",
+  "exp.opening": "Opening…",
+  "exp.openFile": "Open a file…",
+  "exp.saveTitle": "One self-contained HTML file per session, readable in any browser",
+  "exp.openTitle": "Open an exported session file \u2014 it shows in the panel, and joins this list only if you carry on working in it",
+
+  // ── Remaining conversation / account messages ─────────────────────────────
+  "wrong.shareNote": "Shared with the Navisual team to improve guidance \u2014 never your screen or request text.",
+
+  "exp.folderLayout": "<code>steps/</code> holds the untouched screenshots and <code>steps-annotated/</code> the marked-up ones, alongside a readable <code>session.md</code> and the full record in <code>session.json</code>. You can redo the pointer or caption any time with <code>tools/annotate-session.ps1</code> \u2014 nothing needs re-running.",
+  "pv.keyPlaceholderOptional": "sk-\u2026 or leave blank",
+
+  // ── HotkeyInput.svelte and the top-up amounts ─────────────────────────────
+  "hk.pressCombo": "Press combo\u2026",
+  "hk.clickToChange": "click to change",
+  "hk.clearTitle": "Clear \u2014 set to none",
+  "hk.clearAria": "Clear hotkey",
+  "hk.inputAria": "Hotkey: {key}. Click to record.",
+  "bill.coinsOption": "${usd} \u00b7 {coins} coins",
 
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",

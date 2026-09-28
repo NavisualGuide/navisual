@@ -7,6 +7,7 @@
   import { billing } from "./lib/billing.svelte";
   import PromoOffer from "./PromoOffer.svelte";
   import { t, fmtNum } from "./lib/i18n.svelte";
+  import { providerName } from "./lib/providers";
 
   let {
     provider,
@@ -34,7 +35,7 @@
        section. It is the only ACTIONABLE fact here — coins bought now cannot be
        spent until the provider changes — and it was buried under three
        paragraphs of explanatory prose. -->
-  <p class="bill-warn">{t("bill.wrongProvider", { provider })}</p>
+  <p class="bill-warn">{t("bill.wrongProvider", { provider: providerName(provider) })}</p>
 {/if}
 
 <!-- Label/value pairs on one line each rather than stacked. The stacked form cost
@@ -66,10 +67,10 @@
 <div class="setting-group" style="margin-top: 14px;">
   <label class="setting-label" for="amount-select">{t("bill.topUpAmount")}</label>
   <select id="amount-select" class="setting-select" bind:value={buyAmount}>
-    <option value={5}>$5 · 1,000 coins</option>
-    <option value={10}>$10 · 2,000 coins</option>
-    <option value={20}>$20 · 4,000 coins</option>
-    <option value={50}>$50 · 10,000 coins</option>
+    <option value={5}>{t("bill.coinsOption", { usd: 5, coins: fmtNum(1000) })}</option>
+    <option value={10}>{t("bill.coinsOption", { usd: 10, coins: fmtNum(2000) })}</option>
+    <option value={20}>{t("bill.coinsOption", { usd: 20, coins: fmtNum(4000) })}</option>
+    <option value={50}>{t("bill.coinsOption", { usd: 50, coins: fmtNum(10000) })}</option>
     <option value="custom">{t("bill.custom")}</option>
   </select>
   {#if buyAmount === "custom"}

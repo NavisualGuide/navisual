@@ -326,7 +326,7 @@
   <p class="setting-hint">{t("acct.signInBlurb")}</p>
   <div class="setting-group">
     <label class="setting-label" for="acct-email">{t("common.email")}</label>
-    <input id="acct-email" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
+    <input id="acct-email" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder={t("common.emailPlaceholder")} />
   </div>
   <div class="setting-group">
     <label class="setting-label" for="acct-pw">{t("common.password")}</label>
@@ -369,7 +369,7 @@
   <p class="setting-hint">{t("acct.signUpBlurb")}</p>
   <div class="setting-group">
     <label class="setting-label" for="acct-email-up">{t("common.email")}</label>
-    <input id="acct-email-up" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
+    <input id="acct-email-up" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder={t("common.emailPlaceholder")} />
   </div>
   <div class="setting-group">
     <label class="setting-label" for="acct-pw-up">{t("common.password")}</label>
@@ -399,7 +399,7 @@
   <p class="setting-hint">{t("acct.forgotBlurb")}</p>
   <div class="setting-group">
     <label class="setting-label" for="acct-email-fp">{t("common.email")}</label>
-    <input id="acct-email-fp" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder="you@example.com" />
+    <input id="acct-email-fp" class="setting-input" type="email" autocomplete="username" bind:value={acctEmail} placeholder={t("common.emailPlaceholder")} />
   </div>
   <div class="setting-group" style="margin-top: 10px;">
     <button class="btn-primary" onclick={acctForgot} disabled={acctBusy}>{acctBusy ? t("acct.sending") : t("acct.sendResetCode")}</button>
@@ -421,7 +421,7 @@
     <button class="btn-primary" onclick={acctVerifyReset} disabled={acctBusy}>{acctBusy ? t("acct.saving") : t("acct.setNewPassword")}</button>
   </div>
   <div class="acct-links">
-    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>Cancel</button>
+    <button class="legal-link" onclick={() => { resetAcctFields(); account.view = "signin"; }}>{t("common.cancel")}</button>
   </div>
 {/if}
 

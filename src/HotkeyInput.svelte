@@ -1,5 +1,6 @@
 <script lang="ts">
   import { prettyHotkey } from "./lib/hotkey";
+  import { t } from "./lib/i18n.svelte";
 
   let { value = $bindable("") }: { value: string } = $props();
 
@@ -61,19 +62,19 @@
   onclick={startRecording}
   onkeydown={onKeyDown}
   onblur={onBlur}
-  aria-label="Hotkey: {displayValue}. Click to record."
+  aria-label={t("hk.inputAria", { key: displayValue })}
 >
   {#if recording}
-    <span class="recording-hint">Press combo…</span>
+    <span class="recording-hint">{t("hk.pressCombo")}</span>
   {:else}
     <span class="hotkey-badge">{displayValue}</span>
-    <span class="click-hint">click to change</span>
+    <span class="click-hint">{t("hk.clickToChange")}</span>
     {#if value}
       <button
         type="button"
         class="clear-btn"
-        title="Clear — set to none"
-        aria-label="Clear hotkey"
+        title={t("hk.clearTitle")}
+        aria-label={t("hk.clearAria")}
         onclick={clear}
       >×</button>
     {/if}

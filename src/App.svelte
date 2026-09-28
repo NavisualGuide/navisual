@@ -16,6 +16,7 @@ See the LICENSE file in the root of this repository for complete details.
   import HotkeyInput from "./HotkeyInput.svelte";
   import { prettyHotkey } from "./lib/hotkey";
   import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
+  import { providerName } from "./lib/providers";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
   import { i18n, t, packStarter, fmtNum, fmtDate, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
@@ -847,8 +848,8 @@ See the LICENSE file in the root of this repository for complete details.
     if (e.shiftKey) return;
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && sel.toString().trim()) return;
-    const t = e.target as HTMLElement | null;
-    if (t && t.closest("textarea, input, [contenteditable]")) return;
+    const el = e.target as HTMLElement | null;
+    if (el && el.closest("textarea, input, [contenteditable]")) return;
     // The picker overlays sit above the panel's own surface; its menu opened under them, at
     // the click point, listing actions that make no sense for a list row. Suppressed rather
     // than given a menu of its own: every action a row needs is already on it (open, tick to
@@ -2184,7 +2185,7 @@ See the LICENSE file in the root of this repository for complete details.
       const baseUrl = settingsForm.ollama_base_url?.trim() || "http://localhost:11434";
       const models = await invoke<string[]>("list_ollama_models", { baseUrl });
       ollamaModels = models;
-      ollamaModelsMsg = models.length ? "" : "No models found — pull one with `ollama pull`.";
+      ollamaModelsMsg = models.length ? "" : t("msg.noOllamaModels");
       customOllama = !ollamaModels.includes(settingsForm.ollama_model);
     } catch {
       ollamaModels = [];
@@ -2268,7 +2269,7 @@ See the LICENSE file in the root of this repository for complete details.
           settingsTab = "account";
           account.view = "signin";
           account.error = "";
-          account.notice = "Sign in to buy coins — use Google below, or enter your email.";
+          account.notice = t("msg.signInToBuy");
           showSettings = true;
           await tick();
           document.getElementById("acct-email")?.focus();
@@ -2289,7 +2290,7 @@ See the LICENSE file in the root of this repository for complete details.
       // Settings is still open on this path (it no longer closes up front), so
       // the history line would land behind the modal. Put the reason in the
       // panel as well, where the click happened.
-      account.error = "Checkout failed: " + String(e);
+      account.error = t("msg.checkoutFailed") + " " + String(e);
       addToHistory("system", "⚠️ " + t("msg.checkoutFailed") + " " + String(e));
       await setPanelOnTop(true); // nothing opened — restore always-on-top
     } finally {
@@ -2675,13 +2676,13 @@ See the LICENSE file in the root of this repository for complete details.
 
     history = [];
     let index = 0;
-    for (const t of detail.conversation) {
+    for (const turn of detail.conversation) {
       const at = index;
       index += 1;
       // A "Next" completion is stored as a machine-built `[User completed: "..."]` user
       // turn -- the app's words, not the person's. Show it as the clean system note the
       // live session uses, not as a user bubble with brackets.
-      const completed = t.content.startsWith('[User completed: "') && t.content.endsWith('"]');
+      const completed = turn.content.startsWith('[User completed: "') && turn.content.endsWith('"]');
       // A correction turn's CONTENT is the prompt the model was sent -- the "you pressed
       // wrong, re-examine the screen" briefing, with the user's own words appended after
       // `User note: `. Only that tail is theirs, and it is the only part worth showing; the
@@ -2690,38 +2691,38 @@ See the LICENSE file in the root of this repository for complete details.
       // The marker is written in src-tauri/src/lib.rs, where `user_text_owned` is built from
       // prompts::CORRECTION_CONTEXT. Change it there and change it here.
       const NOTE_MARKER = "User note: ";
-      const noteAt = t.role === "correction" ? t.content.indexOf(NOTE_MARKER) : -1;
+      const noteAt = turn.role === "correction" ? turn.content.indexOf(NOTE_MARKER) : -1;
       // Sessions stored before 2026-09-19 carry the whole composed prompt here, so the
       // note is followed by [Current Window Info] / [Screen Elements] and everything else.
       // Cut at the first context block: those all begin a line with `[`, and a note the
       // user typed does not.
-      const rawNote = noteAt >= 0 ? t.content.slice(noteAt + NOTE_MARKER.length) : "";
+      const rawNote = noteAt >= 0 ? turn.content.slice(noteAt + NOTE_MARKER.length) : "";
       const correctionText = rawNote.trim()
-        ? `Wrong \u2014 ${rawNote.split(/\n\[/)[0].trim()}`
-        : "Wrong \u2014 re-analysing\u2026";
+        ? `${t("wrong.generic")} \u2014 ${rawNote.split(/\n\[/)[0].trim()}`
+        : `${t("wrong.generic")} \u2014 ${t("msg.reanalysing")}`;
       // The instruction itself is deliberately NOT repeated on a completion row. It is what
       // we asked for, and it is already on screen as the step above; restating it made every
       // completion a wall of the same sentence twice.
       const role: HistoryRole = completed
         ? "completed"
-        : t.role === "assistant" ? "ai"
-        : t.role === "user" ? "user"
-        : t.role === "correction" ? "correction"
+        : turn.role === "assistant" ? "ai"
+        : turn.role === "user" ? "user"
+        : turn.role === "correction" ? "correction"
         // Anything unrecognised is shown as a system note rather than dropped -- a turn the
         // user can see is a turn they can judge.
         : "system";
       const rowId = await addToHistory(
         role,
-        completed ? completionLabel(t.clicked, t.advanced_by)
+        completed ? completionLabel(turn.clicked, turn.advanced_by)
         : role === "correction" ? correctionText
-        : t.content,
+        : turn.content,
       );
 
       const inline = pictures?.get(at);
       if (inline) attachInlineFrame(rowId, inline);
       // Fetched in the background, one row at a time: a session with twenty frames would
       // otherwise hold the transcript back behind a few megabytes of pictures.
-      else if (t.frame && framesFrom) loadStoredThumb(rowId, framesFrom, t.frame);
+      else if (turn.frame && framesFrom) loadStoredThumb(rowId, framesFrom, turn.frame);
     }
   }
 
@@ -2747,7 +2748,7 @@ See the LICENSE file in the root of this repository for complete details.
     // sentence that has to change when the feature does.
     await addToHistory(
       "system",
-      resumed.conversation.some((t) => t.frame)
+      resumed.conversation.some((c) => c.frame)
         ? t("msg.reopenedWithPics")
         : t("msg.reopenedNoPics"),
     );
@@ -3205,7 +3206,7 @@ See the LICENSE file in the root of this repository for complete details.
     // mislabel a repeated instruction as a success. At sequence end (no next
     // step) the AI genuinely must re-plan → normal correction below.
     if (category === "already_done" && !note && stepIndex + 1 < steps.length) {
-      addToHistory("system", "Skipping the already-done step — moving on (no AI request used).");
+      addToHistory("system", t("msg.skippingDone"));
       await nextStep(false, true, "already_done");
       return;
     }
@@ -3242,7 +3243,7 @@ See the LICENSE file in the root of this repository for complete details.
   function openFeedbackEmail() {
     const subject = `Navisual feedback (v${appVersion})`;
     const body = [
-      "What went wrong / what would you like to see?",
+      t("msg.wrongPrompt"),
       "",
       "",
       "—",
@@ -3343,12 +3344,6 @@ See the LICENSE file in the root of this repository for complete details.
   );
   let lastAppliedModel = $state<string>("");
 
-  // Friendly provider names for the Usage tab's "your own key" note.
-  const PROVIDER_NAMES: Record<string, string> = {
-    managed: "Navisual", anthropic: "Anthropic", gemini: "Google Gemini",
-    openai: "OpenAI", deepseek: "DeepSeek", qwen: "Qwen", ollama: "Ollama",
-    custom: "custom endpoint",
-  };
   // BYOK = a provider billed on the user's own account (not managed, not local Ollama).
   let isByok = $derived(!["managed", "ollama"].includes(settingsForm.api_provider));
 
@@ -4048,7 +4043,7 @@ See the LICENSE file in the root of this repository for complete details.
       <div class="plan-inline">
         <div class="plan-inline-header">
           <span class="plan-inline-title">{t("status.plannedRoute")}</span>
-          <button class="plan-inline-close" onclick={() => (planExpanded = false)} title="Close" aria-label="Close">✕</button>
+          <button class="plan-inline-close" onclick={() => (planExpanded = false)} title={t("common.close")} aria-label={t("common.close")}>✕</button>
         </div>
         {#if sessionPlanOutline.length > 0}
           <ol class="plan-overview-list">
@@ -4086,11 +4081,11 @@ See the LICENSE file in the root of this repository for complete details.
                instead, right where the thing it clears is showing. -->
           {#if !isThinking}
             {#if isOverlayCleared}
-              <button class="clear-toggle-btn" onclick={quickShowScreen} title="Show the pointer and caption again">
+              <button class="clear-toggle-btn" onclick={quickShowScreen} title={t("panel.showPointer")}>
                 👁 Show
               </button>
             {:else}
-              <button class="clear-toggle-btn" onclick={quickClearScreen} title="Hide the pointer and caption so you can see the screen clearly">
+              <button class="clear-toggle-btn" onclick={quickClearScreen} title={t("panel.hidePointer")}>
                 {t("st.clear")}
               </button>
             {/if}
@@ -4135,7 +4130,7 @@ See the LICENSE file in the root of this repository for complete details.
             {:else}
               <div class="reason-row">
                 <span class="reason-prompt">{t("wrong.prompt")}</span>
-                <button class="reason-cancel" onclick={() => (wrongPickerOpen = false)} title="Cancel" aria-label="Cancel">✕</button>
+                <button class="reason-cancel" onclick={() => (wrongPickerOpen = false)} title={t("common.cancel")} aria-label={t("common.cancel")}>✕</button>
               </div>
               <div class="reason-chips">
                 <button class="reason-chip" onclick={() => submitWrong("wrong_instruction")}>{t("wrong.instruction")}</button>
@@ -4154,7 +4149,7 @@ See the LICENSE file in the root of this repository for complete details.
               </div>
               <p class="feedback-hint">{t("wrong.hintOther")}</p>
               <p class="feedback-hint">{t("wrong.hintApp")}</p>
-              <p class="feedback-note">Shared with the Navisual team to improve guidance — never your screen or request text.</p>
+              <p class="feedback-note">{t("wrong.shareNote")}</p>
             {/if}
           </div>
         {/if}
@@ -4307,17 +4302,17 @@ See the LICENSE file in the root of this repository for complete details.
 
                 <!-- Template section (Pass 3 — nav-pack icon matching) -->
                 {#if locateTrace.template}
-                  {@const t = locateTrace.template}
+                  {@const tpl = locateTrace.template}
                   <div class="debug-section">
                     <div class="debug-section-head">
-                      Template · {t.templates_tried} icon{t.templates_tried === 1 ? "" : "s"}
-                      {#if t.scale_prior !== 1} · dpi prior {t.scale_prior.toFixed(2)}×{/if}
+                      Template · {tpl.templates_tried} icon{tpl.templates_tried === 1 ? "" : "s"}
+                      {#if tpl.scale_prior !== 1} · dpi prior {tpl.scale_prior.toFixed(2)}×{/if}
                     </div>
-                    <div class="debug-cand {t.accepted ? 'cand-selected' : 'cand-rejected'}">
-                      <span class="cand-mark">{t.accepted ? "✔" : "⊘"}</span>
-                      <span class="cand-text">{t.best_icon ? `"${t.best_icon}"` : "no icon decoded"}</span>
-                      <span class="cand-meta">{(t.best_score * 100).toFixed(0)}% · scale {t.best_scale.toFixed(2)}×{t.best_pos ? ` · @(${t.best_pos[0]},${t.best_pos[1]})` : ""}</span>
-                      {#if !t.accepted}<span class="cand-reason">— below 90% threshold</span>{/if}
+                    <div class="debug-cand {tpl.accepted ? 'cand-selected' : 'cand-rejected'}">
+                      <span class="cand-mark">{tpl.accepted ? "✔" : "⊘"}</span>
+                      <span class="cand-text">{tpl.best_icon ? `"${tpl.best_icon}"` : "no icon decoded"}</span>
+                      <span class="cand-meta">{(tpl.best_score * 100).toFixed(0)}% · scale {tpl.best_scale.toFixed(2)}×{tpl.best_pos ? ` · @(${tpl.best_pos[0]},${tpl.best_pos[1]})` : ""}</span>
+                      {#if !tpl.accepted}<span class="cand-reason">— below 90% threshold</span>{/if}
                     </div>
                   </div>
                 {/if}
@@ -4380,9 +4375,9 @@ See the LICENSE file in the root of this repository for complete details.
             <button
               class="h-thumb-btn"
               onclick={() => openLightbox(entry)}
-              title="Click to view full screenshot"
+              title={t("panel.clickFullShot")}
             >
-              <img class="h-thumb" src="data:image/jpeg;base64,{entry.thumb}" alt="screenshot" />
+              <img class="h-thumb" src="data:image/jpeg;base64,{entry.thumb}" alt={t("panel.thumbAlt")} />
             </button>
           {/if}
         </div>
@@ -4463,12 +4458,12 @@ See the LICENSE file in the root of this repository for complete details.
             class="suggest-toggle"
             class:suggest-toggle-open={showSuggestAlts}
             onclick={() => (showSuggestAlts = !showSuggestAlts)}
-            title="Other suggested tasks"
-            aria-label="Show other suggested tasks"
+            title={t("task.otherSuggestions")}
+            aria-label={t("task.showOtherSuggestions")}
             aria-expanded={showSuggestAlts}
           >▾</button>
           {#if showSuggestAlts}
-            <div class="suggest-menu" role="listbox" aria-label="Other suggested tasks">
+            <div class="suggest-menu" role="listbox" aria-label={t("task.otherSuggestions")}>
               {#each suggestAlternatives as s (s)}
                 <button
                   class="suggest-item"
@@ -4546,17 +4541,17 @@ See the LICENSE file in the root of this repository for complete details.
           <div class="session-pick-actions">
             <button class="session-pick-action" onclick={exportStoredSessions}
               disabled={sessionExportBusy || storedSessions.length === 0}
-              title="One self-contained HTML file per session, readable in any browser">
+              title={t("exp.saveTitle")}>
               {sessionExportBusy
-                ? "Exporting…"
+                ? t("exp.exporting")
                 : selectedSessions.length > 0
-                  ? `Export ${selectedSessions.length} selected…`
-                  : `Export all ${storedSessions.length}…`}
+                  ? t("exp.exportSelected", { n: selectedSessions.length })
+                  : t("exp.exportAll", { n: storedSessions.length })}
             </button>
             <button class="session-pick-action" onclick={openSessionFile}
               disabled={sessionImportBusy}
-              title="Open an exported session file — it shows in the panel, and joins this list only if you carry on working in it">
-              {sessionImportBusy ? "Opening…" : "Open a file…"}
+              title={t("exp.openTitle")}>
+              {sessionImportBusy ? t("exp.opening") : t("exp.openFile")}
             </button>
           </div>
           {#if sessionPickerLoading}
@@ -4623,7 +4618,7 @@ See the LICENSE file in the root of this repository for complete details.
       </button>
       <button class="btn-action btn-more" class:btn-more-open={showQuickMenu}
         onclick={() => { showQuickMenu = !showQuickMenu; }}
-        title="More actions">
+        title={t("panel.moreActions")}>
         ···
       </button>
     </div>
@@ -4763,11 +4758,7 @@ See the LICENSE file in the root of this repository for complete details.
             </button>
           </div>
           <p class="export-note">
-            <code>steps/</code> holds the untouched screenshots and
-            <code>steps-annotated/</code> the marked-up ones, alongside a readable
-            <code>session.md</code> and the full record in <code>session.json</code>.
-            You can redo the pointer or caption any time with
-            <code>tools/annotate-session.ps1</code> — nothing needs re-running.
+            {@html t("exp.folderLayout")}
           </p>
           <p class="export-note">
             {t("exp.reviewBeforeSharing")}
@@ -4858,7 +4849,7 @@ See the LICENSE file in the root of this repository for complete details.
         <img
           class="lightbox-img"
           src="data:image/jpeg;base64,{lightboxSrc}"
-          alt="Full screenshot"
+          alt={t("panel.fullShotAlt")}
         />
         <span class="lightbox-hint">{t("lightbox.close")}</span>
       {/if}
@@ -4953,7 +4944,7 @@ See the LICENSE file in the root of this repository for complete details.
         role="dialog"
         tabindex="-1"
         aria-modal="true"
-        aria-label="Settings"
+        aria-label={t("panel.settings")}
       >
         <div class="modal-header">
           <span class="modal-title">{t("set.title")}</span>
@@ -4990,17 +4981,17 @@ See the LICENSE file in the root of this repository for complete details.
               <select id="provider-select" class="setting-select"
                 bind:value={settingsForm.api_provider}
                 onchange={handleProviderChange}>
-                <optgroup label="Navisual (hosted)">
+                <optgroup label={t("pv.grpHosted")}>
                   <option value="managed">{t("pv.optManaged")}</option>
                 </optgroup>
-                <optgroup label="Bring your own key">
+                <optgroup label={t("pv.grpByok")}>
                   <option value="anthropic">Anthropic</option>
                   <option value="gemini">Google Gemini</option>
                   <option value="openai">OpenAI</option>
                   <option value="deepseek">DeepSeek</option>
                   <option value="qwen">Qwen (DashScope)</option>
                 </optgroup>
-                <optgroup label="Local &amp; custom">
+                <optgroup label={t("pv.grpLocal")}>
                   <option value="ollama">Ollama</option>
                   <option value="custom">{t("pv.optCustom")}</option>
                 </optgroup>
@@ -5024,7 +5015,7 @@ See the LICENSE file in the root of this repository for complete details.
               {:else if settingsForm.api_provider === "ollama"}
                 {t("pv.hintOllama")}
               {:else if settingsForm.api_provider === "custom"}
-                Any OpenAI-compatible <code>/v1</code> endpoint — a local server (LM Studio, llama.cpp, vLLM) to run fully offline, a DashScope workspace URL, or another cloud. Use a <em>vision</em> model so it can see the screen; the API key is optional for local servers.
+                {@html t("pv.hintCustom")}
               {/if}
             </p>
 
@@ -5284,7 +5275,7 @@ See the LICENSE file in the root of this repository for complete details.
                   <option value="intl">{t("pv.regionSingapore")}</option>
                   <option value="beijing">{t("pv.regionBeijing")}</option>
                 </select>
-                <p class="setting-hint">DashScope endpoint, filled in automatically. For a local server, a DashScope workspace URL, or another cloud, use the <strong>Custom (OpenAI-compatible)</strong> provider instead.</p>
+                <p class="setting-hint">{@html t("pv.hintQwenBase", { custom: t("pv.optCustom") })}</p>
               </div>
             {:else if settingsForm.api_provider === "custom"}
               <div class="setting-group">
@@ -5293,8 +5284,7 @@ See the LICENSE file in the root of this repository for complete details.
                   bind:value={settingsForm.custom_base_url}
                   placeholder="http://localhost:1234/v1" spellcheck="false" />
                 <p class="setting-hint">
-                  OpenAI-compatible <code>/v1</code> endpoint — Navisual appends <code>/chat/completions</code>.<br />
-                  LM Studio <code>http://localhost:1234/v1</code> · llama.cpp / llamafile <code>http://localhost:8080/v1</code> (use the host's LAN IP from another machine). Also accepts a DashScope workspace URL (<code>ws-xxx.&lt;region&gt;.maas.aliyuncs.com/compatible-mode/v1</code>) or any other OpenAI-compatible cloud.
+                  {@html t("pv.hintCustomBase")}
                 </p>
               </div>
               <div class="setting-group">
@@ -5302,7 +5292,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <input id="custom-model" class="setting-input" type="text"
                   bind:value={settingsForm.custom_model}
                   placeholder="e.g. qwen2.5-vl-7b-instruct" spellcheck="false" />
-                <p class="setting-hint">Use a <em>vision</em> model so it can see the screen.</p>
+                <p class="setting-hint">{@html t("pv.hintCustomModel")}</p>
               </div>
               <div class="setting-group">
                 <label class="setting-label" for="custom-key">{t("pv.apiKey")} <span style="opacity:.55">{t("pv.keyOptional")}</span></label>
@@ -5310,11 +5300,11 @@ See the LICENSE file in the root of this repository for complete details.
                   {#if showKeyCustom}
                     <input id="custom-key" class="setting-input" type="text"
                       bind:value={settingsForm.custom_api_key}
-                      placeholder="sk-… or leave blank" spellcheck="false" />
+                      placeholder={t("pv.keyPlaceholderOptional")} spellcheck="false" />
                   {:else}
                     <input id="custom-key" class="setting-input" type="password"
                       bind:value={settingsForm.custom_api_key}
-                      placeholder="sk-… or leave blank" spellcheck="false" />
+                      placeholder={t("pv.keyPlaceholderOptional")} spellcheck="false" />
                   {/if}
                   <button class="key-toggle" onclick={() => { showKeyCustom = !showKeyCustom; }}>
                     {showKeyCustom ? "Hide" : "Show"}
@@ -5578,15 +5568,15 @@ See the LICENSE file in the root of this repository for complete details.
                 bind:value={settingsForm.voice_language}
                 disabled={!settingsForm.tts_enabled && !settingsForm.voice_input_enabled}>
                 <option value="auto">{t("au.autoDetect")}</option>
-                <option value="en-US">English (US)</option>
-                <option value="en-GB">English (UK)</option>
-                <option value="fr-FR">French</option>
-                <option value="de-DE">German</option>
-                <option value="es-ES">Spanish</option>
-                <option value="ja-JP">Japanese</option>
-                <option value="zh-CN">Chinese (Simplified)</option>
-                <option value="ko-KR">Korean</option>
-                <option value="pt-BR">Portuguese (Brazil)</option>
+                <option value="en-US">{t("au.langEnUS")}</option>
+                <option value="en-GB">{t("au.langEnGB")}</option>
+                <option value="fr-FR">{t("au.langFr")}</option>
+                <option value="de-DE">{t("au.langDe")}</option>
+                <option value="es-ES">{t("au.langEs")}</option>
+                <option value="ja-JP">{t("au.langJa")}</option>
+                <option value="zh-CN">{t("au.langZhCN")}</option>
+                <option value="ko-KR">{t("au.langKo")}</option>
+                <option value="pt-BR">{t("au.langPtBR")}</option>
               </select>
               <p class="stub-hint" style="margin-top:4px">{t("au.voiceLangHint")}</p>
             </div>
@@ -5727,7 +5717,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <div style="display:flex; flex-direction:column; gap:5px">
                   {#each usageView as r}
                     <div style="display:flex; align-items:baseline; gap:10px; font-size:13px">
-                      <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model || PROVIDER_NAMES[r.provider] || r.provider}</span>
+                      <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary)">{r.model || providerName(r.provider)}</span>
                       <span style="white-space:nowrap; min-width:84px; text-align:right; color:var(--text-secondary)">{fmtTok(r.tokens)} tok</span>
                       <span style="white-space:nowrap; min-width:62px; text-align:right; color:{r.free ? 'var(--text-secondary)' : 'var(--text-primary)'}">{fmtCost(r.cost, r.free)}</span>
                     </div>
@@ -5751,7 +5741,7 @@ See the LICENSE file in the root of this repository for complete details.
           {:else if isByok}
             <div class="setting-group">
               <p class="setting-label" style="margin:0 0 8px">{t("usage.ownKey")}</p>
-              <p class="setting-hint">{t("usage.ownKeyNote", { provider: PROVIDER_NAMES[settingsForm.api_provider] ?? "provider" })}</p>
+              <p class="setting-hint">{t("usage.ownKeyNote", { provider: providerName(settingsForm.api_provider) })}</p>
             </div>
           {:else if settingsForm.api_provider === "ollama"}
             <div class="setting-group">
