@@ -478,9 +478,10 @@ export const en = {
   "pv.tierSmart": "Smart \u2014 best grounding \u00b7 18 coins/request",
   "pv.tierNoCoins": " (not enough coins)",
   "pv.tierHintFree": "Free requests are used automatically until they run out, no matter which tier is selected here \u2014 this only decides what happens afterward, or once you buy coins.",
-  "pv.tierHintSpeed": "GPT-5.6 Luna, falls back to Gemini 3.5 Flash-Lite. Cheapest; good for simple, text-heavy UIs. Coins are bought on the Account tab.",
-  "pv.tierHintSmart": "GPT-5.6 Terra, falls back to Gemini 3.7 Flash. Reasoning-enabled; the strongest on ambiguous or visually dense screens. Coins are bought on the Account tab.",
-  "pv.tierHintRegular": "Gemini 3.7 Flash, falls back to GPT-5.6 Terra. The best all-round default \u2014 measured on real sessions at 92% on-target pointing. Coins are bought on the Account tab.",
+  "pv.tierHintSpeed": "The fastest and cheapest tier; good for simple, text-heavy UIs. Coins are bought on the Account tab.",
+  "pv.tierHintSmart": "Reasoning-enabled; the strongest on ambiguous or visually dense screens. Coins are bought on the Account tab.",
+  "pv.tierHintRegular": "The best all-round default \u2014 measured on real sessions at 92% on-target pointing. Coins are bought on the Account tab.",
+  "pv.tierModelNote": "Which model answers a tier may change over time as we optimize for reliability and speed.",
 
   // Region + thinking effort
   "pv.regionBeijing": "China \u2014 Beijing",

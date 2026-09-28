@@ -162,7 +162,7 @@ pub struct Config {
     /// the privacy policy promised exactly that. The promise was removed rather
     /// than worked around: the founder's call was that logging a *derived* intent
     /// while claiming not to log the request reads as a dodge, and being plain is
-    /// better. Screenshots are still never stored.
+    /// better. No screenshot is ever attached to a feedback row.
     ///
     /// It is further gated by WHERE the AI runs -- see `request_text_loggable`.
     /// A request answered on the user's own machine or private network never
@@ -171,8 +171,10 @@ pub struct Config {
     /// Session export — the ✗/💾 "Save this session" flow (`session_export.rs`).
     ///
     /// Developer-gated for now at the founder's request: they are the only user of
-    /// it, and it is the one feature that deliberately writes screenshots of a real
-    /// screen to disk. Keeping it behind the flag means the ring buffer is the only
+    /// it, and it writes screenshots of a real screen to a folder the user picks.
+    /// (It stopped being the ONLY thing that puts them on disk when
+    /// `session_screenshots` shipped in v0.7.27 -- that one writes into the session
+    /// store and is off by default.) Keeping it behind the flag means the ring buffer is the only
     /// part running for everyone else, and that is memory-only.
     ///
     /// **The buffer keeps filling regardless.** Gating the UI, not the capture, is

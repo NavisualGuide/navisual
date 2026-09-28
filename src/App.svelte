@@ -1050,7 +1050,12 @@ See the LICENSE file in the root of this repository for complete details.
         tokens: usagePeriod === "today" ? r.daily_in + r.daily_out : r.monthly_in + r.monthly_out,
         cost: usagePeriod === "today" ? r.daily_cost : r.monthly_cost,
         free: r.free,
-      })),
+      }))
+      // usage.json accumulates a row per model ever used and never drops one, so
+      // switching to "today" listed two dozen models at 0 tok and buried the one
+      // that ran. Filtered AFTER the period is applied, so a model idle today but
+      // used this month still appears under "This month".
+      .filter((r) => r.tokens > 0),
   );
   let usageTotalCost = $derived(usageView.reduce((s, r) => s + (r.cost ?? 0), 0));
   let usageHasEstimate = $derived(usageView.some((r) => r.cost != null && !r.free));
@@ -5043,11 +5048,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <p class="setting-hint">
                   {#if settingsForm.managed_tier === "free"}
                     {t("pv.tierHintFree")}
-                  <!-- Model names must match the relay's TIER_ROUTES (relay/index.ts).
-                       All six were stale: the v0.7.12 roster change (2026-08-19) moved
-                       every tier onto the GPT-5.6 / Gemini 3.7 generation and this text
-                       was never updated, so a paying customer read superseded names for
-                       three weeks while deciding what their coins buy. -->
+                  <!-- These no longer name a model, on purpose. They used to have to
+                       match the relay's TIER_ROUTES (relay/index.ts), which meant a
+                       routing change needed a client release to stay true -- and once
+                       did not get one: the v0.7.12 roster change (2026-08-19) moved
+                       every tier onto the GPT-5.6 / Gemini 3.7 generation and all six
+                       names sat stale for three weeks, read by paying customers
+                       deciding what their coins buy. A tier is a promise about
+                       behaviour and price; which model keeps it is ours to change. -->
                   {:else if settingsForm.managed_tier === "speed"}
                     {t("pv.tierHintSpeed")}
                   {:else if settingsForm.managed_tier === "smart"}
@@ -5056,6 +5064,9 @@ See the LICENSE file in the root of this repository for complete details.
                     {t("pv.tierHintRegular")}
                   {/if}
                 </p>
+                {#if settingsForm.managed_tier !== "free"}
+                  <p class="setting-hint" style="margin-top:6px">{t("pv.tierModelNote")}</p>
+                {/if}
               </div>
             {/if}
 

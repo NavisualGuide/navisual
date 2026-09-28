@@ -458,9 +458,10 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "pv.tierSmart": "Smart —— 定位最準 \u00b7 每次 18 金幣",
   "pv.tierNoCoins": "（金幣不足）",
   "pv.tierHintFree": "無論這裡選哪一級，免費次數都會先自動用完 —— 這個選擇只決定用完之後、或你買了金幣之後走哪一級。",
-  "pv.tierHintSpeed": "GPT-5.6 Luna，回退到 Gemini 3.5 Flash-Lite。最便宜；適合結構單純、以文字為主的介面。金幣在「帳戶」分頁購買。",
-  "pv.tierHintSmart": "GPT-5.6 Terra，回退到 Gemini 3.7 Flash。已開啟推理；在語意含糊或視覺密集的畫面上最強。金幣在「帳戶」分頁購買。",
-  "pv.tierHintRegular": "Gemini 3.7 Flash，回退到 GPT-5.6 Terra。綜合最好的預設選擇 —— 在真實工作階段上實測指向命中率 92%。金幣在「帳戶」分頁購買。",
+  "pv.tierHintSpeed": "最快、最便宜的一級；適合結構單純、以文字為主的介面。金幣在「帳戶」分頁購買。",
+  "pv.tierHintSmart": "已開啟推理；在語意含糊或視覺密集的畫面上最強。金幣在「帳戶」分頁購買。",
+  "pv.tierHintRegular": "綜合最好的預設選擇 —— 在真實工作階段上實測指向命中率 92%。金幣在「帳戶」分頁購買。",
+  "pv.tierModelNote": "具體由哪個模型回答，會隨我們對穩定性和速度的調整而變化。",
 
   "pv.regionBeijing": "中國 —— 北京",
   "pv.regionSingapore": "國際 —— 新加坡",
