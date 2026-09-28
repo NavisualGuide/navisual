@@ -460,7 +460,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "pv.tierHintFree": "無論這裡選哪一級，免費次數都會先自動用完 —— 這個選擇只決定用完之後、或你買了金幣之後走哪一級。",
   "pv.tierHintSpeed": "最快、最便宜的一級；適合結構單純、以文字為主的介面。金幣在「帳戶」分頁購買。",
   "pv.tierHintSmart": "已開啟推理；在語意含糊或視覺密集的畫面上最強。金幣在「帳戶」分頁購買。",
-  "pv.tierHintRegular": "綜合最好的預設選擇 —— 在真實工作階段上實測指向命中率 92%。金幣在「帳戶」分頁購買。",
+  "pv.tierHintRegular": "綜合最好的預設選擇 —— 沒有特別理由就用它。金幣在「帳戶」分頁購買。",
   "pv.tierModelNote": "具體由哪個模型回答，會隨我們對穩定性和速度的調整而變化。",
 
   "pv.regionBeijing": "中國 —— 北京",
@@ -584,6 +584,9 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "hk.clearAria": "清除快捷鍵",
   "hk.inputAria": "快捷鍵：{key}。點擊錄製。",
   "bill.coinsOption": "${usd} \u00b7 {coins} 金幣",
+
+  "target.primary": "（主螢幕）",
+  "target.thisScreenOnly": "—— 只分享這一塊螢幕",
 
   // ── 註冊優惠 ──────────────────────────────────────────────────────────────
   "promo.headline": "註冊免費帳戶，送 {coins} 金幣。",

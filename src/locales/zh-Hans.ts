@@ -459,7 +459,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "pv.tierHintFree": "无论这里选哪一档，免费次数都会先自动用完 —— 这个选择只决定用完之后、或你买了金币之后走哪一档。",
   "pv.tierHintSpeed": "最快、最便宜的一档；适合结构简单、文字为主的界面。金币在「账户」标签页购买。",
   "pv.tierHintSmart": "开启了推理；在语义含糊或视觉密集的界面上最强。金币在「账户」标签页购买。",
-  "pv.tierHintRegular": "综合最好的默认选择 —— 在真实会话上实测指向命中率 92%。金币在「账户」标签页购买。",
+  "pv.tierHintRegular": "综合最好的默认选择 —— 没有特别理由就用它。金币在「账户」标签页购买。",
   "pv.tierModelNote": "具体由哪个模型回答，会随我们对稳定性和速度的调整而变化。",
 
   "pv.regionBeijing": "中国 —— 北京",
@@ -583,6 +583,9 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "hk.clearAria": "清除快捷键",
   "hk.inputAria": "快捷键：{key}。点击录制。",
   "bill.coinsOption": "${usd} \u00b7 {coins} 金币",
+
+  "target.primary": "（主屏）",
+  "target.thisScreenOnly": "—— 只共享这一块屏幕",
 
   // ── 注册促销 ──────────────────────────────────────────────────────────────
   "promo.headline": "注册免费账户，送 {coins} 金币。",

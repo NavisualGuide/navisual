@@ -4691,8 +4691,8 @@ See the LICENSE file in the root of this repository for complete details.
         {#each monitors as m (m.index)}
           <button class="target-pick-item" class:target-pick-selected={fullScreenTarget && fullScreenMonitorIndex === m.index} onclick={() => selectDesktop(m.index)}>
             <span class="target-pick-check">{fullScreenTarget && fullScreenMonitorIndex === m.index ? "✓" : ""}</span>
-            <span class="target-pick-name">🖥️ Screen {m.index + 1}{m.primary ? " (primary)" : ""}</span>
-            <span class="target-pick-sub">{m.width}×{m.height} — this screen only</span>
+            <span class="target-pick-name">🖥️ {t("target.screenN", { n: m.index + 1 })}{m.primary ? ` ${t("target.primary")}` : ""}</span>
+            <span class="target-pick-sub">{m.width}×{m.height} {t("target.thisScreenOnly")}</span>
           </button>
         {/each}
       {:else}
@@ -4953,7 +4953,8 @@ See the LICENSE file in the root of this repository for complete details.
       >
         <div class="modal-header">
           <span class="modal-title">{t("set.title")}</span>
-          <button class="hdr-btn hdr-btn-close" onclick={() => (showSettings = false)}>✕</button>
+          <button class="hdr-btn hdr-btn-close" onclick={() => (showSettings = false)}
+            title={t("common.close")} aria-label={t("common.close")}>✕</button>
         </div>
         <div class="modal-tabs">
           <button class="tab-btn {settingsTab === 'provider' ? 'tab-active' : ''}" onclick={() => (settingsTab = "provider")}>{t("set.tabProvider")}</button>
@@ -5642,7 +5643,8 @@ See the LICENSE file in the root of this repository for complete details.
       >
         <div class="modal-header">
           <span class="modal-title">Navisual</span>
-          <button class="hdr-btn hdr-btn-close" onclick={() => (showAbout = false)}>✕</button>
+          <button class="hdr-btn hdr-btn-close" onclick={() => (showAbout = false)}
+            title={t("common.close")} aria-label={t("common.close")}>✕</button>
         </div>
         <div class="modal-tabs">
           <button class="tab-btn {aboutTab === 'about' ? 'tab-active' : ''}" onclick={() => (aboutTab = "about")}>{t("about.tabAbout")}</button>

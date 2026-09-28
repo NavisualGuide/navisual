@@ -480,7 +480,7 @@ export const en = {
   "pv.tierHintFree": "Free requests are used automatically until they run out, no matter which tier is selected here \u2014 this only decides what happens afterward, or once you buy coins.",
   "pv.tierHintSpeed": "The fastest and cheapest tier; good for simple, text-heavy UIs. Coins are bought on the Account tab.",
   "pv.tierHintSmart": "Reasoning-enabled; the strongest on ambiguous or visually dense screens. Coins are bought on the Account tab.",
-  "pv.tierHintRegular": "The best all-round default \u2014 measured on real sessions at 92% on-target pointing. Coins are bought on the Account tab.",
+  "pv.tierHintRegular": "The best all-round default \u2014 pick this unless you have a reason not to. Coins are bought on the Account tab.",
   "pv.tierModelNote": "Which model answers a tier may change over time as we optimize for reliability and speed.",
 
   // Region + thinking effort
@@ -606,6 +606,9 @@ export const en = {
   "hk.clearAria": "Clear hotkey",
   "hk.inputAria": "Hotkey: {key}. Click to record.",
   "bill.coinsOption": "${usd} \u00b7 {coins} coins",
+
+  "target.primary": "(primary)",
+  "target.thisScreenOnly": "\u2014 this screen only",
 
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",
