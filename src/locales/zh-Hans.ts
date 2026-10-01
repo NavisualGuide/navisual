@@ -591,4 +591,13 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "promo.headline": "注册免费账户，送 {coins} 金币。",
   "promo.sub": "足够你试试 Navisual 中继上更快、更聪明的模型。Navisual 本身一直免费",
   "promo.ends": " —— 活动截止 {date}",
+
+  // ── No-target offer + backend error codes ──
+  "panel.noTargetOffer": "没有打开任何可引导的程序。我可以改为在这块屏幕上为你引导。",
+  "panel.guideOnScreen": "在这块屏幕上引导",
+  "panel.pickAnApp": "选择程序",
+  "msg.noTargetWindow": "没有打开的程序窗口，因此没有可查看的内容。",
+  "err.freeTrialExhausted": "免费次数已用完。",
+  "err.insufficientCoins": "金币不足，无法使用该质量档位。请购买后继续。",
+  "err.exportDisabled": "会话导出已关闭。请在「设置 \u2192 开发者」中开启。",
 };

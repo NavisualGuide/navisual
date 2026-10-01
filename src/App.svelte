@@ -20,6 +20,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
   import { i18n, t, packStarter, fmtNum, fmtDate, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
+  import type { MessageKey } from "./locales/en";
   import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
   import AccountPanel from "./AccountPanel.svelte";
 
@@ -72,6 +73,11 @@ See the LICENSE file in the root of this repository for complete details.
     // possibilities (empty otherwise). Shown as numbered overlay boxes; never a
     // picker — the user's next real click in the app resolves it.
     candidates: Rect[];
+    // Nothing to guide: the backend's z-order walk found no candidate window at all,
+    // i.e. an empty desktop. Distinct from a capture that failed, and the ONLY case
+    // where `error` is deliberately null -- the message lives here so it can be
+    // translated and carry buttons.
+    no_target: boolean;
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   // "completed" is the user's own action -- the machine-built `[User completed: "..."]`
@@ -1004,6 +1010,11 @@ See the LICENSE file in the root of this repository for complete details.
     fullScreenTarget = true;
     fullScreenMonitorIndex = monitorIndex;
   }
+
+  // Offer the screen as a target after a guide found no app window at all. Cleared by
+  // taking the offer, by picking a target, or by the next successful request -- a stale
+  // offer pointing at a screen the user already left is worse than none.
+  let noTargetOffer = $state(false);
 
   // UI state
   let iconMode = $state(false);
@@ -2837,6 +2848,53 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
+  // The backend emits stable CODES for the errors it can name, and the dictionary that
+  // translates them lives here -- a second copy in Rust would be a second thing to keep
+  // in sync. Keys are literals so a typo is still a compile error (the same reason
+  // `t()` takes a MessageKey). An unrecognised string is passed through unchanged,
+  // which is what every upstream/network error already is.
+  const ERROR_CODES: Record<string, MessageKey> = {
+    free_trial_exhausted: "err.freeTrialExhausted",
+    insufficient_coins: "err.insufficientCoins",
+    export_disabled: "err.exportDisabled",
+  };
+  function errText(raw: string | null | undefined, fallback: MessageKey): string {
+    if (!raw) return t(fallback);
+    const key = ERROR_CODES[raw];
+    return key ? t(key) : raw;
+  }
+
+  // Share this screen instead, when there was no app to guide. The scope change stays
+  // the user's (design decision 5) -- this is the one click, not an automatic widening.
+  // With one monitor `null` means the whole desktop, which is what the picker does too;
+  // with several, pick the one the panel is actually on.
+  async function guideOnThisScreen() {
+    noTargetOffer = false;
+    // `monitors` is filled by openTargetPicker() and by nothing else, so on a machine
+    // whose owner has never opened the picker it is still empty here -- which silently
+    // selected the whole stitched desktop on a multi-monitor setup (measured
+    // 2026-10-01). Load it if we have to; it is one cheap command.
+    if (monitors.length === 0) {
+      try {
+        monitors = await invoke<MonitorInfo[]>("list_monitors");
+      } catch {
+        // Leave it empty: `null` below means the whole desktop, which still works.
+      }
+    }
+    let index: number | null = null;
+    if (monitors.length > 1) {
+      const cx = window.screenX + window.outerWidth / 2;
+      const cy = window.screenY + window.outerHeight / 2;
+      const hit = monitors.find(
+        (m) => cx >= m.x && cx < m.x + m.width && cy >= m.y && cy < m.y + m.height,
+      );
+      index = hit ? hit.index : (monitors.find((m) => m.primary)?.index ?? 0);
+    }
+    await selectDesktop(index);
+    // guide() reads the box, and the failed attempt already put the task back in it.
+    await guide();
+  }
+
   async function guide() {
     if (!task.trim()) return;
     isOverlayCleared = false;
@@ -2870,7 +2928,13 @@ See the LICENSE file in the root of this repository for complete details.
       if (!res.ok) {
         phase = prevPhase;
         lastRequestFailed = true;
-          addToHistory("system", "⚠️ " + (res.error ?? t("msg.guideFailed")));
+        if (res.no_target) {
+          // Not a failure to report -- a choice to offer. The banner carries it.
+          addToHistory("system", "🖥️ " + t("msg.noTargetWindow"));
+          noTargetOffer = true;
+        } else {
+          addToHistory("system", "⚠️ " + errText(res.error, "msg.guideFailed"));
+        }
         if (taskText !== "") task = taskText;
         return;
       }
@@ -2981,7 +3045,7 @@ See the LICENSE file in the root of this repository for complete details.
         if (!res.ok) {
           phase = prevPhase;
           lastRequestFailed = true;
-          addToHistory("system", "⚠️ " + (res.error ?? t("msg.requeryFailed")));
+          addToHistory("system", "⚠️ " + errText(res.error, "msg.requeryFailed"));
           return;
         }
         applyResponse(res, 0, token);
@@ -3049,7 +3113,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64);
       if (!res.ok) {
         phase = prevPhase;
-        addToHistory("system", "⚠️ " + (res.error ?? t("msg.correctionFailed")));
+        addToHistory("system", "⚠️ " + errText(res.error, "msg.correctionFailed"));
         if (rawNote !== "") task = rawNote;
         return;
       }
@@ -4424,6 +4488,23 @@ See the LICENSE file in the root of this repository for complete details.
             }
             addonPrompt = "hidden";
           }}
+          title={t("panel.dismiss")}>✕</button>
+      </div>
+    {/if}
+
+    <!-- Nothing was open to guide. Offer the screen itself rather than dead-ending:
+         on an empty desktop the desktop IS what is on screen, and "open Excel" or
+         "where are my downloads" are real tasks. The scope change stays a click the
+         user makes (design decision 5) -- auto-widening to a full-screen capture is
+         exactly what was taken away from the AI. -->
+    {#if noTargetOffer}
+      <div class="stale-banner" role="status">
+        <span class="stale-icon">🖥️</span>
+        <span class="stale-text">{t("panel.noTargetOffer")}</span>
+        <button class="stale-action" onclick={guideOnThisScreen}>{t("panel.guideOnScreen")}</button>
+        <button class="stale-action" onclick={() => { noTargetOffer = false; targetPickerOpen = true; }}
+          >{t("panel.pickAnApp")}</button>
+        <button class="stale-dismiss" onclick={() => (noTargetOffer = false)}
           title={t("panel.dismiss")}>✕</button>
       </div>
     {/if}

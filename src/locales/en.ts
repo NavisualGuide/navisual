@@ -614,6 +614,15 @@ export const en = {
   "promo.headline": "Create a free account and get {coins} coins.",
   "promo.sub": "Enough to try the faster, smarter models on the Navisual relay. Navisual stays free to use",
   "promo.ends": " — offer ends {date}",
+
+  // ── No-target offer + backend error codes ──
+  "panel.noTargetOffer": "Nothing is open to guide. I can guide you on this screen instead.",
+  "panel.guideOnScreen": "Guide me on this screen",
+  "panel.pickAnApp": "Pick an app",
+  "msg.noTargetWindow": "No app window was open, so there was nothing to look at.",
+  "err.freeTrialExhausted": "Your free requests have been used.",
+  "err.insufficientCoins": "Not enough coins for this quality tier. Buy more to continue.",
+  "err.exportDisabled": "Session export is off. Turn it on in Settings \u2192 Developer.",
 };
 
 /** Every key the reference dictionary defines. Typing the call site and the other

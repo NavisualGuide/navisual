@@ -3171,6 +3171,15 @@ struct GuideResponse {
     /// frontend adjusts its copy and adds ALL boxes to the rejected-spot memory
     /// so a further "Wrong spot" escalates to the AI avoiding every shown box.
     candidates: Vec<capture::Rect>,
+    /// There was nothing to guide: the z-order walk found no candidate window at all,
+    /// which in practice means an empty desktop. Distinct from a capture that WAS
+    /// attempted and failed -- one sentence used to cover both, and it told the user to
+    /// go click a program even when the real fault was an encode error.
+    ///
+    /// The panel turns this into an offer (guide on this screen / pick an app) rather
+    /// than a dead end, so `error` is deliberately None alongside it: the message
+    /// belongs to the side that can localize it and hang buttons off it.
+    no_target: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -3883,6 +3892,7 @@ async fn guide(
                     suggested_tasks: Vec::new(),
         hint_shown: false,
         candidates: Vec::new(),
+        no_target: false,
                 });
             }
         }
@@ -4063,6 +4073,7 @@ async fn guide(
             )
         }
         Err(()) => {
+            let no_target = capture::get_active_window_info().is_none();
             return Ok(GuideResponse {
         last_click: None,
                 goal: session_goal(&state),
@@ -4080,11 +4091,19 @@ async fn guide(
                 model: None,
                 input_tokens: None,
                 output_tokens: None,
-                error: Some(
-                    "No application window found. Please click on the program you want \
-                     help with to bring it into focus, then try Guide me again."
-                        .to_string(),
-                ),
+                // `get_active_window_info()` is `get_foreground_target()` plus
+                // metadata, so None means the z-order walk found no candidate at all --
+                // an empty desktop. Anything else here is a capture that was attempted
+                // and failed, which must NOT tell the user to go click a program.
+                error: if no_target {
+                    None
+                } else {
+                    Some(
+                        "Could not capture the screen for this request. Try again, or \
+                         pick a different target from the chip in the title bar."
+                            .to_string(),
+                    )
+                },
                 debug_screenshot_path: None,
                 chat_thumb_b64: None,
                 locate_trace: None,
@@ -4092,6 +4111,7 @@ async fn guide(
                 suggested_tasks: Vec::new(),
         hint_shown: false,
         candidates: Vec::new(),
+        no_target,
             });
         }
     };
@@ -4495,13 +4515,11 @@ async fn guide(
                 model: Some(used_model.clone()),
                 input_tokens: Some(in_tok),
                 output_tokens: Some(out_tok),
-                error: Some(match err_str.as_str() {
-                    "free_trial_exhausted" => "Your free requests have been used.".to_string(),
-                    "insufficient_coins" => {
-                        "Not enough coins for this quality tier. Buy more to continue.".to_string()
-                    }
-                    _ => err_str,
-                }),
+                // Pass the code straight through. Converting it to English here is
+                // what put an English sentence in front of a Chinese user: the
+                // dictionary lives in the frontend, and a second copy in Rust would be
+                // a second thing to keep in sync (rule 8).
+                error: Some(err_str),
                 debug_screenshot_path: None,
                 chat_thumb_b64: None,
                 locate_trace: None,
@@ -4509,6 +4527,7 @@ async fn guide(
                 suggested_tasks: Vec::new(),
         hint_shown: false,
         candidates: Vec::new(),
+        no_target: false,
             });
         }
     };
@@ -4672,6 +4691,7 @@ async fn guide(
             suggested_tasks,
             hint_shown: false,
             candidates: Vec::new(),
+            no_target: false,
         });
     }
 
@@ -4822,6 +4842,7 @@ async fn guide(
         suggested_tasks,
         hint_shown,
         candidates: shown_candidates,
+        no_target: false,
     })
 }
 
@@ -4970,6 +4991,7 @@ async fn next_step(
         suggested_tasks: Vec::new(), // local advance — no AI call, no new guesses
         hint_shown,
         candidates: shown_candidates,
+        no_target: false,
     })
 }
 
@@ -5176,6 +5198,7 @@ async fn retry_locate(
         suggested_tasks: Vec::new(),
         hint_shown,
         candidates: shown_candidates,
+        no_target: false,
     })
 }
 
@@ -5646,10 +5669,13 @@ async fn send_correction(
             let err_str = e.to_string();
             if err_str == "free_trial_exhausted" {
                 let _ = app.emit("trial_exhausted", ());
-                return Err("Your free requests have been used.".to_string());
+                // The code goes out untranslated BY DESIGN: the panel maps it to a
+                // dictionary key. Rust was converting a perfectly good code INTO
+                // English, which is how a Chinese user met an English sentence.
+                return Err("free_trial_exhausted".to_string());
             } else if err_str == "insufficient_coins" {
                 let _ = app.emit("insufficient_coins", ());
-                return Err("Not enough coins for this quality tier. Buy more to continue.".to_string());
+                return Err("insufficient_coins".to_string());
             }
             return Err(err_str);
         }
@@ -5773,6 +5799,7 @@ async fn send_correction(
             suggested_tasks,
             hint_shown: false,
             candidates: Vec::new(),
+            no_target: false,
         });
     }
 
@@ -5889,6 +5916,7 @@ async fn send_correction(
         suggested_tasks,
         hint_shown,
         candidates: shown_candidates,
+        no_target: false,
     })
 }
 
@@ -6432,7 +6460,7 @@ fn export_enabled(state: &State<'_, AppState>) -> bool {
 #[tauri::command]
 async fn pick_export_folder(state: State<'_, AppState>) -> Result<Option<String>, String> {
     if !export_enabled(&state) {
-        return Err("Session export is off. Turn it on in Settings → Developer.".into());
+        return Err("export_disabled".into());
     }
     let start = state
         .export_dest
@@ -6469,7 +6497,7 @@ fn export_session(
     // that writes screenshots of a real screen to disk, so the guard belongs
     // beside the write rather than only in front of the button.
     if !export_enabled(&state) {
-        return Err("Session export is off. Turn it on in Settings → Developer.".into());
+        return Err("export_disabled".into());
     }
     let dest = destination
         .map(std::path::PathBuf::from)
