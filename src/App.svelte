@@ -3620,22 +3620,30 @@ See the LICENSE file in the root of this repository for complete details.
 
     // Phase 0.2: keep the "Shared: <App>" header chip in sync with whatever
     // window the backend is capturing.
-    listen<SharedAppInfo>("app_changed", (event) => {
+    // NULLABLE, and it really does arrive null: `announce_shared_app` emits
+    // `Option::<SharedAppInfoPayload>::None` whenever nothing qualifies as a target,
+    // which is what minimizing every window produces. This was typed non-nullable and
+    // dereferenced `event.payload.exe_name` directly, so that case threw a TypeError and
+    // silently abandoned the rest of the handler -- the add-on check and the prefill
+    // refresh never ran. The initial fetch below already types it `| null` and guards.
+    listen<SharedAppInfo | null>("app_changed", (event) => {
       const prevExe = sharedApp?.exe_name;
       const prevHwnd = sharedApp?.hwnd;
-      sharedApp = event.payload;
+      const next = event.payload ?? null;
+      sharedApp = next;
       maybeShowTargetHint();
       // Re-check on ANY target change, not just a different exe: switching from one
       // Blender to another (5.1 closed, 3.6 opened) keeps exe_name "blender", and the
       // exe-only guard skipped the check entirely (live 2026-07-19). The status call
       // is two local file reads — cheap enough for every target change.
-      if (event.payload.exe_name !== prevExe || event.payload.hwnd !== prevHwnd) {
+      if (next && (next.exe_name !== prevExe || next.hwnd !== prevHwnd)) {
         maybeOfferBlenderAddon();
       }
       // Workstream P: a different app means stale guesses — refresh the cold-start
       // prefill (no-op unless idle with an untouched box; clearPrefill first so an
-      // old app's prefill can't survive the switch).
-      if (event.payload.exe_name !== prevExe) {
+      // old app's prefill can't survive the switch). Losing the target counts as a
+      // change, so a prefill naming an app that is no longer there does not survive.
+      if (next?.exe_name !== prevExe) {
         if (prefillActive) {
           task = "";
           clearPrefill();
