@@ -2976,6 +2976,16 @@ fn install_blender_addon(
     result
 }
 
+/// Label for the capture indicator drawn around a whole-screen capture. The monitor
+/// index is the picker's own numbering, so the box agrees with the header chip.
+#[cfg(windows)]
+fn fs_label(monitor: Option<capture::Rect>) -> String {
+    match monitor {
+        Some(_) => "Screen".to_string(),
+        None => "Entire desktop".to_string(),
+    }
+}
+
 /// Must match Overlay.svelte's `APP_BOUNDARY_DURATION_MS` — no constant is
 /// shared across the Rust/Svelte boundary, so keep the two in sync by hand.
 /// Lowered 3_000 -> 2_200 on 2026-09-22 when the box was softened; this side only
@@ -3933,6 +3943,11 @@ async fn guide(
     }
     tokio::time::sleep(std::time::Duration::from_millis(33)).await;
 
+    // Clock the capture. Everything before this is two lock acquisitions and a 33ms
+    // settle sleep; everything after is pixels. If the empty-desktop answer feels like
+    // an AI round trip, this line is what says whether the capture is the reason.
+    let capture_started = std::time::Instant::now();
+
     #[allow(clippy::type_complexity)]
     let capture_result = tokio::task::spawn_blocking(move || -> Result<(String, Option<capture::Rect>, Option<usize>, Option<String>, Option<String>, Vec<u8>, Option<u64>, Option<Vec<u8>>, Option<capture::Rect>, Option<capture::RawExportFrame>), ()> {
         // ONE capture, two encodings.
@@ -4060,6 +4075,7 @@ async fn guide(
                 let base = app.path().app_local_data_dir().ok();
                 training_shot_file = save_training_shot(base.as_deref(), &request_id, &full_bytes);
             }
+            log::info!("[capture] ok in {} ms", capture_started.elapsed().as_millis());
             *state.chat_full_jpeg.lock() = Some(full_bytes);
             (
                 b64,
@@ -4074,6 +4090,15 @@ async fn guide(
         }
         Err(()) => {
             let no_target = capture::get_active_window_info().is_none();
+            log::info!(
+                "[capture] FAILED in {} ms — {} (no AI request made)",
+                capture_started.elapsed().as_millis(),
+                if no_target {
+                    "no candidate window exists (empty desktop)"
+                } else {
+                    "a target was found but the capture or encode failed"
+                }
+            );
             return Ok(GuideResponse {
         last_click: None,
                 goal: session_goal(&state),
@@ -4128,6 +4153,26 @@ async fn guide(
     if let Some(hwnd_raw) = new_hwnd_opt {
         state.guidance.lock().last_announced_hwnd = Some(hwnd_raw);
         announce_shared_app(&app, Some(hwnd_raw), true);
+    } else if let Some(region) = capture_rect_opt {
+        // A whole-screen capture has no hwnd, so the branch above never ran and the most
+        // invasive capture the app makes was the only one that announced nothing.
+        // Decision 5 promises a visible capture indicator; this is it, drawn around the
+        // region actually captured.
+        //
+        // NOT the thing suppressed in v0.7.29: that was the boundary chasing whichever
+        // app took FOCUS while a screen was the target, which outlined something that is
+        // not what we capture. This outlines exactly what we did capture, and only when
+        // a capture really happened. It is emitted here, after the pixels are read, so
+        // it cannot appear in the frame it announces.
+        if let Ok(update) = overlay::make_update(
+            overlay::OverlayKind::AppBoundary,
+            Some(region),
+            Some(fs_label(fs_monitor)),
+        ) {
+            if let Err(e) = overlay::emit_update(&app, update) {
+                log::debug!("screen_boundary emit failed: {e}");
+            }
+        }
     }
 
     // S.1 — Structured-Context enumeration at AI-capture time (v0.7 Workstream S): the
