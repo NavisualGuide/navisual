@@ -6071,6 +6071,19 @@ fn pin_full_screen_target(state: State<'_, AppState>, monitor_index: Option<usiz
         let _ = monitor_index;
         None
     };
+    // Rule 1. Which screen a full-screen capture actually covers was invisible from
+    // outside: the chip shows it until the next render and nothing wrote it down, so
+    // "which screen did it pick?" could not be answered from a log afterwards.
+    match monitor {
+        Some(r) => log::info!(
+            "[target] full-screen scope = monitor index {:?} at {},{} {}x{}",
+            monitor_index, r.x, r.y, r.width, r.height
+        ),
+        None => log::info!(
+            "[target] full-screen scope = ENTIRE virtual desktop (index {monitor_index:?}) \
+             -- expected only on a single-monitor machine"
+        ),
+    }
     let mut g = state.guidance.lock();
     g.full_screen_mode = true;
     g.full_screen_monitor = monitor;

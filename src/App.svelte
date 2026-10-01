@@ -1015,6 +1015,10 @@ See the LICENSE file in the root of this repository for complete details.
   // taking the offer, by picking a target, or by the next successful request -- a stale
   // offer pointing at a screen the user already left is worse than none.
   let noTargetOffer = $state(false);
+  // What to run again once the user has fixed the scope. The three callers fail in
+  // different ways -- a fresh task, an advance, a correction -- and re-running the wrong
+  // one is worse than not re-running at all, so each hands in its own closure.
+  let noTargetRetry = $state<(() => Promise<void>) | null>(null);
 
   // UI state
   let iconMode = $state(false);
@@ -2858,6 +2862,14 @@ See the LICENSE file in the root of this repository for complete details.
     insufficient_coins: "err.insufficientCoins",
     export_disabled: "err.exportDisabled",
   };
+  // Nothing was open to guide. Not an error to report -- a scope to offer. One helper so
+  // the three callers cannot drift (rule 18); each passes what to re-run afterwards.
+  function offerScreenInstead(retry: () => Promise<void>): void {
+    addToHistory("system", "🖥️ " + t("msg.noTargetWindow"));
+    noTargetRetry = retry;
+    noTargetOffer = true;
+  }
+
   function errText(raw: string | null | undefined, fallback: MessageKey): string {
     if (!raw) return t(fallback);
     const key = ERROR_CODES[raw];
@@ -2883,16 +2895,29 @@ See the LICENSE file in the root of this repository for complete details.
     }
     let index: number | null = null;
     if (monitors.length > 1) {
-      const cx = window.screenX + window.outerWidth / 2;
-      const cy = window.screenY + window.outerHeight / 2;
-      const hit = monitors.find(
-        (m) => cx >= m.x && cx < m.x + m.width && cy >= m.y && cy < m.y + m.height,
-      );
+      // Ask the OS which monitor the panel is on. The first version derived it from
+      // window.screenX + outerWidth/2, which is CSS pixels while MonitorInfo is
+      // PHYSICAL pixels -- identical at 100% scaling and wrong at any other, worst of
+      // all near a monitor boundary, which is exactly where the answer matters.
+      // currentMonitor() is already used twice in this file for the same reason.
+      let hit: MonitorInfo | undefined;
+      try {
+        const mon = await currentMonitor();
+        if (mon) hit = monitors.find((m) => m.x === mon.position.x && m.y === mon.position.y);
+      } catch {
+        // fall through to the primary
+      }
+      // With 2+ monitors this never resolves to null: the stitched virtual desktop is
+      // downscaled past usefulness, and the target picker does not offer it here either
+      // (its "Entire desktop" row lives in the single-monitor branch). `null` below is
+      // reachable only on a one-monitor machine, matching the picker exactly.
       index = hit ? hit.index : (monitors.find((m) => m.primary)?.index ?? 0);
     }
     await selectDesktop(index);
-    // guide() reads the box, and the failed attempt already put the task back in it.
-    await guide();
+    // Retry what actually failed -- a new task, an advance or a correction.
+    const again = noTargetRetry;
+    noTargetRetry = null;
+    if (again) await again();
   }
 
   async function guide() {
@@ -2929,9 +2954,8 @@ See the LICENSE file in the root of this repository for complete details.
         phase = prevPhase;
         lastRequestFailed = true;
         if (res.no_target) {
-          // Not a failure to report -- a choice to offer. The banner carries it.
-          addToHistory("system", "🖥️ " + t("msg.noTargetWindow"));
-          noTargetOffer = true;
+          // The task text is restored just below, so re-running guide() picks it up.
+          offerScreenInstead(() => guide());
         } else {
           addToHistory("system", "⚠️ " + errText(res.error, "msg.guideFailed"));
         }
@@ -3045,7 +3069,11 @@ See the LICENSE file in the root of this repository for complete details.
         if (!res.ok) {
           phase = prevPhase;
           lastRequestFailed = true;
-          addToHistory("system", "⚠️ " + errText(res.error, "msg.requeryFailed"));
+          if (res.no_target) {
+            offerScreenInstead(() => nextStep(viaAutopilot, skipFeedback, advance));
+          } else {
+            addToHistory("system", "⚠️ " + errText(res.error, "msg.requeryFailed"));
+          }
           return;
         }
         applyResponse(res, 0, token);
@@ -3113,7 +3141,11 @@ See the LICENSE file in the root of this repository for complete details.
       if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64);
       if (!res.ok) {
         phase = prevPhase;
-        addToHistory("system", "⚠️ " + errText(res.error, "msg.correctionFailed"));
+        if (res.no_target) {
+          offerScreenInstead(() => correction(category));
+        } else {
+          addToHistory("system", "⚠️ " + errText(res.error, "msg.correctionFailed"));
+        }
         if (rawNote !== "") task = rawNote;
         return;
       }
@@ -4498,14 +4530,17 @@ See the LICENSE file in the root of this repository for complete details.
          user makes (design decision 5) -- auto-widening to a full-screen capture is
          exactly what was taken away from the AI. -->
     {#if noTargetOffer}
-      <div class="stale-banner" role="status">
+      <div class="stale-banner notarget-banner" role="status">
         <span class="stale-icon">🖥️</span>
         <span class="stale-text">{t("panel.noTargetOffer")}</span>
-        <button class="stale-action" onclick={guideOnThisScreen}>{t("panel.guideOnScreen")}</button>
-        <button class="stale-action" onclick={() => { noTargetOffer = false; targetPickerOpen = true; }}
-          >{t("panel.pickAnApp")}</button>
-        <button class="stale-dismiss" onclick={() => (noTargetOffer = false)}
+        <button class="stale-dismiss" onclick={() => { noTargetOffer = false; noTargetRetry = null; }}
           title={t("panel.dismiss")}>✕</button>
+        <div class="notarget-actions">
+          <button class="stale-action" onclick={guideOnThisScreen}>{t("panel.guideOnScreen")}</button>
+          <button class="stale-action"
+            onclick={() => { noTargetOffer = false; noTargetRetry = null; openTargetPicker(); }}
+            >{t("panel.pickAnApp")}</button>
+        </div>
       </div>
     {/if}
 
@@ -7207,6 +7242,18 @@ See the LICENSE file in the root of this repository for complete details.
   .addon-banner .stale-action.addon-what:hover { color: #a8c2ff; }
   .addon-busy { font-size: 11px; color: var(--text-tertiary, #8a8a8a); flex-shrink: 0; }
   .stale-text { flex: 1; min-width: 0; }
+  /* A sentence plus TWO actions does not fit one row at the panel's 360px floor --
+     measured at 460px wide, the text already wrapped to three lines and squeezed both
+     buttons against the edge. Wrap instead: sentence and dismiss on top, actions on
+     their own row beneath. */
+  .notarget-banner { flex-wrap: wrap; }
+  .notarget-actions {
+    flex: 1 1 100%;
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+    margin-top: 2px;
+  }
   .stale-action {
     background: transparent;
     border: 1px solid rgba(255, 184, 0, 0.45);
