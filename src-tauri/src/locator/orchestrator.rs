@@ -90,6 +90,12 @@ pub struct LocateOptions {
     /// The `target_element_id` the AI returned for this step, if any. Only meaningful
     /// alongside `context_elements`; verified before use, never trusted blindly.
     pub selected_element_id: Option<u32>,
+    /// Set when the capture was a whole SCREEN rather than a window, carrying that
+    /// screen's rect. Two effects, both in A11y: the shell's own surfaces (taskbar,
+    /// desktop, tray, widgets) become legal search roots, because with no app open they
+    /// are the only thing a person can click; and roots are restricted to windows that
+    /// overlap this rect, so the screen the user did NOT share contributes nothing.
+    pub screen_scope: Option<Rect>,
 }
 
 /// B5 "wrong spot" veto for the deterministic passes: a result whose centre sits

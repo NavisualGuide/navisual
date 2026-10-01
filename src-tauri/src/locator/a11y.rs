@@ -212,7 +212,7 @@ pub(crate) fn target_has_matchable_name(target: &str) -> bool {
 /// Errors only when nothing is left to anchor on. That is unreachable via
 /// `find_element` (which checks [`target_has_matchable_name`] first) and exists so
 /// a future caller cannot rebuild a match-everything pattern by accident.
-fn build_name_regex(target: &str) -> Result<Regex> {
+fn build_name_regex(target: &str, shell_scope: bool) -> Result<Regex> {
     // Truncated labels (model copied a clipped "…" name) become a prefix match:
     // UIA accessible names are never visually truncated, so anchoring with `$`
     // on the clipped text would never match the real full name.
@@ -228,6 +228,14 @@ fn build_name_regex(target: &str) -> Result<Regex> {
     let has_word_char = target_norm.chars().any(|c| c.is_alphanumeric());
     let pattern = if prefix {
         format!(r"(?i)^[\W_]*{}", escaped)
+    } else if shell_scope && has_word_char {
+        // Shell surfaces label a control with its app name PLUS state: "Excel - 1
+        // running window", "Microsoft Edge pinned". The `$`-anchored form below cannot
+        // match any of them, so on an empty desktop the name pass was structurally
+        // incapable of finding the one thing the user can click. Allow a separator and
+        // anything after it -- which still refuses "Excelsior", because the character
+        // right after the target has to be a non-word one.
+        format!(r"(?i)^[\W_]*{}(?:[\W_].*)?$", escaped)
     } else if has_word_char {
         format!(r"(?i)^[\W_]*{}[\W_]*$", escaped)
     } else {
@@ -1250,17 +1258,23 @@ fn foreground_pid() -> (HWND, u32) {
 /// session pulled all of the shell's popup windows in as search roots (13 of them,
 /// live 2026-09-04) and matched an element in the notification area on another
 /// monitor.
-const SHELL_SKIP_CLASSES: &[&str] = &[
-    "Progman",       // Desktop window
+/// Never a search root, at any scope: an input-method window has nothing a person can
+/// click, so admitting it only spends the per-root time budget.
+const IME_SKIP_CLASSES: &[&str] = &["IME", "MSCTFIME UI", "Default IME"];
+
+/// The shell's own surfaces. Skipped when the scope is a WINDOW, because then the
+/// question is "which app is the user working in?" and these are noise. Admitted when
+/// the scope is a whole SCREEN, because then the question is "what can the user click?"
+/// and on an empty desktop these are the entire answer -- the taskbar alone exposes 29
+/// named buttons with bounding rects (measured 2026-10-01).
+const SHELL_SURFACE_CLASSES: &[&str] = &[
+    "Progman",       // Desktop window (its icon list is virtualised -- see below)
     "WorkerW",       // Desktop worker
     "Shell_TrayWnd", // Taskbar
     "Shell_SecondaryTrayWnd",
     "NotifyIconOverflowWindow",
     "TopLevelWindowForOverflowXamlIsland", // Win11 tray overflow flyout
-    "Windows.UI.Core.CoreWindow",          // IME, Xaml islands, Start menu
-    "IME",
-    "MSCTFIME UI",
-    "Default IME",
+    "Windows.UI.Core.CoreWindow",          // Xaml islands, Start menu, widgets
 ];
 
 /// Whether `hwnd` is a system shell / IME / overlay window we must never treat as
@@ -1274,13 +1288,27 @@ fn is_shell_window(hwnd: HWND) -> bool {
         return false;
     }
     let class = String::from_utf16_lossy(&buf[..n as usize]);
-    SHELL_SKIP_CLASSES.iter().any(|c| class == *c)
+    IME_SKIP_CLASSES.iter().any(|c| class == *c)
+        || SHELL_SURFACE_CLASSES.iter().any(|c| class == *c)
+}
+
+/// Windows that never make sense as a search root, whatever the scope.
+#[cfg(windows)]
+fn is_never_root(hwnd: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if n <= 0 {
+        return false;
+    }
+    let class = String::from_utf16_lossy(&buf[..n as usize]);
+    IME_SKIP_CLASSES.iter().any(|c| class == *c)
 }
 
 /// Enumerate visible, non-minimised, reasonably-sized top-level windows
 /// in z-order (topmost first). Excludes AI Navigator's own windows, system
 /// shell windows, and overlay-style utility windows.
-fn collect_visible_top_windows(our_pid: u32, max: usize) -> Vec<HWND> {
+fn collect_visible_top_windows(our_pid: u32, max: usize, scope: Option<Rect>) -> Vec<HWND> {
 
     let mut out = Vec::new();
     unsafe {
@@ -1294,7 +1322,22 @@ fn collect_visible_top_windows(our_pid: u32, max: usize) -> Vec<HWND> {
                     if GetWindowRect(hwnd, &mut rect).is_ok() {
                         let w = rect.right - rect.left;
                         let h = rect.bottom - rect.top;
-                        if w > 100 && h > 100 && !is_shell_window(hwnd) {
+                        // A whole-screen capture asks a different question, so it gets
+                        // different filters: the shell's surfaces are admitted, the size
+                        // floor drops to something a taskbar (~1920x48) or a gadget can
+                        // clear, and a root must actually intersect the screen that was
+                        // captured -- otherwise a two-monitor setup would offer controls
+                        // from the screen the user did not share.
+                        let keep = match scope {
+                            Some(region) => {
+                                w > 32
+                                    && h > 16
+                                    && !is_never_root(hwnd)
+                                    && rect_intersects(&rect, &region)
+                            }
+                            None => w > 100 && h > 100 && !is_shell_window(hwnd),
+                        };
+                        if keep {
                             out.push(hwnd);
                         }
                     }
@@ -1307,6 +1350,14 @@ fn collect_visible_top_windows(our_pid: u32, max: usize) -> Vec<HWND> {
         }
     }
     out
+}
+
+/// Does a window rect overlap the captured screen region at all?
+#[cfg(windows)]
+fn rect_intersects(w: &RECT, region: &Rect) -> bool {
+    let rx2 = region.x + region.width as i32;
+    let ry2 = region.y + region.height as i32;
+    w.left < rx2 && w.right > region.x && w.top < ry2 && w.bottom > region.y
 }
 
 /// Convert a UIA element to LocateResult, filtering out containers + off-screen.
@@ -1482,7 +1533,7 @@ pub fn find_element(
         opts.a11y_timeout_ms
     };
     let automation = UIAutomation::new().map_err(|e| anyhow!("UIAutomation init: {e}"))?;
-    let name_re = Arc::new(build_name_regex(target_text)?);
+    let name_re = Arc::new(build_name_regex(target_text, opts.screen_scope.is_some())?);
     trace.regex_used = name_re.as_str().to_string();
     let target_norm_len = norm_dashes(target_text).chars().count();
     let desired_ct = opts.role.as_deref().and_then(role_to_control_type);
@@ -1535,7 +1586,14 @@ pub fn find_element(
                 Err(_) => Vec::new(),
             }
         } else {
-            let wins = collect_visible_top_windows(our_pid, 8);
+            // In screen scope the shell surfaces come back in z-order, taskbar first
+            // and the desktop last, so the cap is raised a little to make sure Progman
+            // is still reached behind a few gadgets.
+            let wins = collect_visible_top_windows(
+                our_pid,
+                if opts.screen_scope.is_some() { 12 } else { 8 },
+                opts.screen_scope,
+            );
             framework_hwnd = wins.first().map(|h| h.0 as usize);
             wins.into_iter()
                 .filter_map(|h| automation.element_from_handle(h.into()).ok())
@@ -1786,6 +1844,29 @@ pub fn find_element(
         if let Some(ai) = opts.ai_bbox {
             if opts.bbox_decisive && !opts.icon_target {
                 let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                // On a shell surface the probe's role+size verification stops
+                // discriminating: every taskbar button is the same role and the same
+                // size, so a bbox guessed one icon off resolves to a neighbour and looks
+                // just as "verified". Measured 2026-10-01 -- asked for Excel, probe
+                // returned "Word - 1 running window" and it was accepted. In screen
+                // scope the resolved NAME has to match the target as well, otherwise we
+                // return nothing (rule 14: no pointer beats wrong pointer).
+                let probe_hit = if opts.screen_scope.is_some() {
+                    let agrees = probe
+                        .resolved_name
+                        .as_deref()
+                        .is_some_and(|n| name_re.is_match(&norm_dashes(n)));
+                    if !agrees {
+                        log::debug!(
+                            "[a11y] bbox probe resolved {:?}, which does not match {target_text:?} \
+                             on a shell surface — refusing it",
+                            probe.resolved_name
+                        );
+                    }
+                    probe_hit.filter(|_| agrees)
+                } else {
+                    probe_hit
+                };
                 trace.bbox_probe = Some(probe);
                 // B5 veto: the probe lands at the AI's predicted point, which on a
                 // retry is often exactly the spot the user just rejected.
@@ -2962,7 +3043,7 @@ mod tests {
     /// a correctly-grounded AI bbox. The user saw no pointer.
     #[test]
     fn a_punctuation_only_target_matches_itself_and_nothing_else() {
-        let re = build_name_regex("...").expect("\"...\" is a real label, not a truncation");
+        let re = build_name_regex("...", false).expect("\"...\" is a real label, not a truncation");
         assert!(re.is_match("..."), "an element literally named ... must be findable");
         assert!(!re.is_match(""), "THE BUG: an empty name must never match");
         assert!(!re.is_match("...."), "no loose padding for punctuation-only targets");
@@ -2987,11 +3068,11 @@ mod tests {
     fn ordinary_targets_are_unaffected() {
         for t in ["Insert", "OK", "2", "Sum of Output USD per…", "Layers"] {
             assert!(target_has_matchable_name(t));
-            assert!(build_name_regex(t).is_ok(), "{t:?} must still build");
+            assert!(build_name_regex(t, false).is_ok(), "{t:?} must still build");
         }
         // Only a genuinely empty target has nothing to anchor on.
         assert!(!target_has_matchable_name("   "));
-        assert!(build_name_regex("   ").is_err());
+        assert!(build_name_regex("   ", false).is_err());
     }
 
     #[test]
@@ -3026,9 +3107,32 @@ mod tests {
         assert_eq!(strip_accelerator("Control Panel"), "Control Panel");
     }
 
+    /// Shell surfaces label a control with its app name PLUS its state, so the
+    /// `$`-anchored window-scope pattern can never match one. Live 2026-10-01: asking to
+    /// open Excel on an empty desktop found nothing by name, fell through to the AI-bbox
+    /// probe, and pointed at "Word - 1 running window" instead.
+    #[test]
+    fn shell_scope_matches_taskbar_button_names() {
+        let re = build_name_regex("Excel", true).unwrap();
+        // The real names Shell_TrayWnd exposes, measured on this machine.
+        assert!(re.is_match(&norm_dashes("Excel - 1 running window")));
+        assert!(re.is_match(&norm_dashes("Excel pinned")));
+        assert!(re.is_match(&norm_dashes("Excel")));
+        // Still a different app, not a longer word that merely starts the same: the
+        // character after the target has to be a non-word one.
+        assert!(!re.is_match(&norm_dashes("Excelsior")));
+        assert!(!re.is_match(&norm_dashes("Word - 1 running window")));
+
+        // Window scope is unchanged -- the suffixed form must NOT match there, or every
+        // app would start matching its neighbours' labels.
+        let strict = build_name_regex("Excel", false).unwrap();
+        assert!(strict.is_match(&norm_dashes("Excel")));
+        assert!(!strict.is_match(&norm_dashes("Excel - 1 running window")));
+    }
+
     #[test]
     fn anchored_regex_rejects_partial_label() {
-        let re = build_name_regex("insert").unwrap();
+        let re = build_name_regex("insert", false).unwrap();
         assert!(re.is_match("Insert"));
         assert!(re.is_match("← Insert")); // leading non-word chars allowed
         assert!(!re.is_match("Insert Space")); // extra word → reject
@@ -3039,7 +3143,7 @@ mod tests {
     fn truncated_target_becomes_prefix_match() {
         // Model copied a clipped "…" label; UIA names are never truncated,
         // so the core must prefix-match the full accessible name.
-        let re = build_name_regex("Sum of Output USD per…").unwrap();
+        let re = build_name_regex("Sum of Output USD per…", false).unwrap();
         assert!(re.is_match("Sum of Output USD per 1M tokens"));
         assert!(!re.is_match("Total Output"));
     }
@@ -3091,7 +3195,7 @@ mod tests {
             .expect("Lightroom not running?");
         let automation = UIAutomation::new().unwrap();
         let lr = automation.element_from_handle(hwnd.into()).unwrap();
-        let re = build_name_regex("Vibrance").unwrap();
+        let re = build_name_regex("Vibrance", false).unwrap();
         let mut n = 0;
         let started = std::time::Instant::now();
         let hits = super::pane_fallback_match(&automation, &lr, &re, &mut n);
@@ -3423,7 +3527,7 @@ mod tests {
     fn deep_name_filter_tiers_short_targets_safely() {
         use super::{deep_name_filter, norm_dashes};
         let needle = norm_dashes("to");
-        let re = build_name_regex("To").unwrap();
+        let re = build_name_regex("To", false).unwrap();
         // The field actually named "To" → anchored.
         assert_eq!(deep_name_filter("To", &needle, &re), Some(true));
         // Prose/tooltips containing the word "to" must be rejected outright —
@@ -3447,7 +3551,7 @@ mod tests {
         // bbox. The anchored tier must rank the exact "Layers" above the fragment
         // "Layer" regardless of bbox distance.
         use super::candidate_name_anchored;
-        let re = build_name_regex("Layers").unwrap();
+        let re = build_name_regex("Layers", false).unwrap();
         assert!(candidate_name_anchored("Layers", &re));
         assert!(!candidate_name_anchored("Layer", &re)); // singular fragment = loose
         // The anchored tiers still apply their normalizations.
@@ -3524,14 +3628,14 @@ mod tests {
         // VS Code activity bar: accelerator-suffixed name → anchored via the
         // paren-suffix strip.
         let needle = norm_dashes("extensions");
-        let re = build_name_regex("Extensions").unwrap();
+        let re = build_name_regex("Extensions", false).unwrap();
         assert_eq!(
             deep_name_filter("Extensions (Ctrl+Shift+X)", &needle, &re),
             Some(true)
         );
         // Marketplace search box: longer name, label-sized → loose containment.
         let needle = norm_dashes("search extensions");
-        let re = build_name_regex("Search Extensions").unwrap();
+        let re = build_name_regex("Search Extensions", false).unwrap();
         assert_eq!(
             deep_name_filter("Search Extensions in Marketplace", &needle, &re),
             Some(false)
@@ -3540,7 +3644,7 @@ mod tests {
         // Live probe 2026-06-13: VS Code's real activity-bar Name is badged AND doubled.
         // The leading-label split (before the " (" keybinding) still anchors to "Extensions".
         let needle = norm_dashes("extensions");
-        let re = build_name_regex("Extensions").unwrap();
+        let re = build_name_regex("Extensions", false).unwrap();
         assert_eq!(
             deep_name_filter(
                 "Extensions (Ctrl+Shift+X) - 4 require restart Extensions (Ctrl+Shift+X) - 4 require restart",
@@ -3552,7 +3656,7 @@ mod tests {
         // The leading-label tier stays exact: a short target must NOT prefix-latch a
         // longer leading label.
         let needle = norm_dashes("to");
-        let re = build_name_regex("To").unwrap();
+        let re = build_name_regex("To", false).unwrap();
         assert_eq!(deep_name_filter("Tools (Ctrl+T) - 2 issues", &needle, &re), None);
     }
 
@@ -3561,7 +3665,7 @@ mod tests {
         // End-to-end name check the Pane fallback performs: the suffix-stripped
         // Lightroom name must satisfy the anchored target regex.
         use super::strip_paren_suffix;
-        let re = build_name_regex("Auto").unwrap();
+        let re = build_name_regex("Auto", false).unwrap();
         assert!(re.is_match(&norm_dashes(&strip_paren_suffix("Auto (Bridge View)"))));
         assert!(!re.is_match(&norm_dashes(&strip_paren_suffix("Auto Tone (Bridge View)"))));
         assert!(!re.is_match(&norm_dashes(&strip_paren_suffix("AgDevelop_navigatorPanel"))));

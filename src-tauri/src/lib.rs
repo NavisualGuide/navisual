@@ -894,6 +894,17 @@ fn locate_for_step(
             } else {
                 step.target_element_id
             };
+            // A capture that produced NO window handle was a whole-screen capture --
+            // full-screen mode is the only path that yields one -- and `pre_ocr` carries
+            // the region it covered. That pair is what tells A11y to admit the shell's
+            // own surfaces (taskbar, desktop, tray, gadgets) and to confine the search to
+            // the screen actually shared. Derived here rather than threaded through
+            // three call sites that would each have to re-derive it from these same two.
+            let screen_scope = if target_hwnd.is_none() {
+                pre_ocr.map(|(_, rect)| rect)
+            } else {
+                None
+            };
             let opts = locator::orchestrator::LocateOptions {
                 role: step
                     .target_role
@@ -910,6 +921,7 @@ fn locate_for_step(
                 icon_templates,
                 icon_region,
                 icon_target,
+                screen_scope,
                 icon_authoring_scale,
                 context_elements: context_elements.clone(),
                 selected_element_id,
@@ -6712,6 +6724,7 @@ async fn locate_a11y(
             icon_authoring_scale: 1.0,
             context_elements: None,
             selected_element_id: None,
+            screen_scope: None,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::a11y::find_element(&text, &opts))
@@ -6756,6 +6769,7 @@ async fn locate_element(
             icon_authoring_scale: 1.0,
             context_elements: None,
             selected_element_id: None,
+            screen_scope: None,
         };
         let (result, _trace) =
             tokio::task::spawn_blocking(move || locator::orchestrator::locate(&text, &opts, None))
