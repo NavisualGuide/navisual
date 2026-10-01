@@ -47,6 +47,14 @@ jobs:
       - name: Build frontend (type-check + bundle)
         run: pnpm run build
 
+      # Translation coverage. v0.7.32 found 96 strings that four manual extraction
+      # passes had each declared complete, so this is a gate rather than a sweep: it
+      # fails on any user-facing text that does not reach the dictionary. Strings that
+      # are English by decision live in tools/i18n-baseline.json, where adding one
+      # shows up in a diff.
+      - name: i18n coverage
+        run: pnpm run check:i18n
+
       - name: cargo check
         working-directory: src-tauri
         run: cargo check --all-features
