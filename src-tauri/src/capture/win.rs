@@ -650,16 +650,107 @@ pub struct MonitorInfo {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// The number Windows itself shows, parsed from `\\.\DISPLAYn`. NOT `index + 1`:
+    /// `index` is EnumDisplayMonitors order and the two disagree -- measured 2026-10-01,
+    /// our first screen was the OS's DISPLAY2. Labelling a row with the wrong one sends
+    /// anyone who checks Display Settings to the other monitor.
+    pub display_number: u32,
+    /// The monitor's own name ("S27R65x"), when Windows can tell us. `EnumDisplayDevices`
+    /// answers "Generic PnP Monitor" here, so this comes from QueryDisplayConfig.
+    pub name: Option<String>,
 }
 
 /// Enumerate connected monitors as `MonitorInfo` (index, primary flag, rect). Same
 /// ordering as `enumerate_monitor_rects()` so an index from one matches the other.
+/// Map each GDI device name (`\\.\DISPLAY1`) to the monitor's own name ("S27R65x").
+///
+/// `EnumDisplayDevices` is the obvious call and is useless for this: on Windows 10/11 it
+/// reports "Generic PnP Monitor" for essentially every panel. The friendly name lives in
+/// the display-config target info, which has to be reached through QueryDisplayConfig.
+///
+/// Best-effort by design -- every failure path yields an empty map, and the picker simply
+/// shows the number without a name. A screen list that loses a label is a smaller problem
+/// than one that fails to open.
+#[cfg(windows)]
+fn monitor_friendly_names() -> std::collections::HashMap<String, String> {
+    use windows::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+        DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+    };
+
+    let mut out = std::collections::HashMap::new();
+    unsafe {
+        let (mut n_paths, mut n_modes) = (0u32, 0u32);
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut n_paths, &mut n_modes).is_err() {
+            return out;
+        }
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); n_paths as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); n_modes as usize];
+        if QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut n_paths,
+            paths.as_mut_ptr(),
+            &mut n_modes,
+            modes.as_mut_ptr(),
+            None,
+        )
+        .is_err()
+        {
+            return out;
+        }
+        for path in paths.iter().take(n_paths as usize) {
+            // Which \\.\DISPLAYn this path drives.
+            let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+            src.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            src.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+            src.header.adapterId = path.sourceInfo.adapterId;
+            src.header.id = path.sourceInfo.id;
+            if DisplayConfigGetDeviceInfo(&mut src.header) != 0 {
+                continue;
+            }
+            // ...and what the panel on the other end calls itself.
+            let mut tgt = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+            tgt.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+            tgt.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
+            tgt.header.adapterId = path.targetInfo.adapterId;
+            tgt.header.id = path.targetInfo.id;
+            if DisplayConfigGetDeviceInfo(&mut tgt.header) != 0 {
+                continue;
+            }
+            let gdi = String::from_utf16_lossy(&src.viewGdiDeviceName)
+                .trim_end_matches('\0')
+                .to_string();
+            let friendly = String::from_utf16_lossy(&tgt.monitorFriendlyDeviceName)
+                .trim_end_matches('\0')
+                .trim()
+                .to_string();
+            if !gdi.is_empty() && !friendly.is_empty() {
+                out.insert(gdi, friendly);
+            }
+        }
+    }
+    out
+}
+
 pub fn list_monitors() -> Vec<MonitorInfo> {
+    let names = monitor_friendly_names();
     collect_all_monitors()
         .iter()
         .enumerate()
         .map(|(index, info)| {
             let r = info.monitorInfo.rcMonitor;
+            let device = String::from_utf16_lossy(&info.szDevice)
+                .trim_end_matches('\0')
+                .to_string();
+            // "\\.\DISPLAY3" -> 3. Falls back to index + 1 only if Windows gives us
+            // something unparseable, which would at least be a stable label.
+            let display_number = device
+                .rsplit("DISPLAY")
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(index as u32 + 1);
             MonitorInfo {
                 index,
                 // MONITORINFOF_PRIMARY (0x1) — not re-exported by windows-rs 0.62, inlined.
@@ -668,6 +759,8 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
                 y: r.top,
                 width: (r.right - r.left).max(0) as u32,
                 height: (r.bottom - r.top).max(0) as u32,
+                display_number,
+                name: names.get(&device).cloned(),
             }
         })
         .collect()

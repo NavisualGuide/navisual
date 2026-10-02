@@ -6147,6 +6147,30 @@ fn pin_full_screen_target(state: State<'_, AppState>, monitor_index: Option<usiz
     g.pinned_hwnd = None;
 }
 
+/// Light up one monitor so the picker can answer "which screen is this?" the way the
+/// Identify button in Display Settings does -- by marking the actual panel, rather than
+/// asking someone to trust a number. `None` clears it (pointer left the row, or the
+/// picker closed).
+///
+/// Reuses the capture-indicator box, which already knows how to outline a screen rect.
+/// It fades on its own after APP_BOUNDARY_DURATION_MS, which suits an identify flash:
+/// long enough to look up, gone before it becomes clutter.
+#[tauri::command]
+fn flash_monitor(app: AppHandle, monitor_index: Option<usize>) {
+    #[cfg(windows)]
+    {
+        let rect = monitor_index.and_then(capture::monitor_rect);
+        let label = rect.map(|_| "Screen".to_string());
+        if let Ok(update) = overlay::make_update(overlay::OverlayKind::AppBoundary, rect, label) {
+            let _ = overlay::emit_update(&app, update);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, monitor_index);
+    }
+}
+
 /// List connected monitors for the target picker's per-screen "share this screen" choices.
 #[tauri::command]
 fn list_monitors() -> Vec<capture::MonitorInfo> {
@@ -8370,6 +8394,7 @@ pub fn run() {
             list_monitors,
             pin_target_window,
             pin_full_screen_target,
+            flash_monitor,
             unpin_target_window,
             set_panel_border,
             dock_panel,

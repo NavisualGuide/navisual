@@ -649,7 +649,11 @@ See the LICENSE file in the root of this repository for complete details.
   let fullScreenTarget = $state(false);
   // Connected monitors. With 2+ the picker offers individual screens (a stitched
   // all-screens capture is downscaled past usefulness); with 1 it's "Entire desktop".
-  type MonitorInfo = { index: number; primary: boolean; x: number; y: number; width: number; height: number; };
+  // `display_number` is the number Windows itself shows, NOT index + 1 -- the two
+  // disagree (measured: our first screen was the OS's DISPLAY2), and a row labelled with
+  // the wrong one sends anyone checking Display Settings to the other monitor.
+  // `name` is the panel's own name ("S27R65x") when Windows will tell us.
+  type MonitorInfo = { index: number; primary: boolean; x: number; y: number; width: number; height: number; display_number: number; name: string | null; };
   let monitors = $state<MonitorInfo[]>([]);
   // Which screen the full-screen target is pinned to (null = whole desktop, the
   // single-monitor case). Drives the picker checkmark and the header chip label.
@@ -1002,6 +1006,9 @@ See the LICENSE file in the root of this repository for complete details.
   // monitor). Sticky like a pin; survives new tasks until the user picks a window or
   // Auto-detect again.
   async function selectDesktop(monitorIndex: number | null) {
+    // The identify mark belongs to the open picker; a row chosen or a picker dismissed
+    // must not leave a box sitting on someone's screen.
+    invoke("flash_monitor", { monitorIndex: null }).catch(() => {});
     targetPickerOpen = false;
     targetPickerMode = "target";
     if (iconSurface === "targets") await closeIconSurface();
@@ -4812,10 +4819,17 @@ See the LICENSE file in the root of this repository for complete details.
       {#if targetPickerMode === "dock"}
         <!-- nothing further: a screen isn't a window to dock beside the panel -->
       {:else if monitors.length > 1}
-        {#each monitors as m (m.index)}
-          <button class="target-pick-item" class:target-pick-selected={fullScreenTarget && fullScreenMonitorIndex === m.index} onclick={() => selectDesktop(m.index)}>
+        {#each [...monitors].sort((a, b) => a.display_number - b.display_number) as m (m.index)}
+          <!-- Hovering marks the real panel (see `flash_monitor`), so the question
+               "which screen is this?" has an answer that needs no reading. -->
+          <button class="target-pick-item" class:target-pick-selected={fullScreenTarget && fullScreenMonitorIndex === m.index}
+            onclick={() => selectDesktop(m.index)}
+            onmouseenter={() => invoke("flash_monitor", { monitorIndex: m.index }).catch(() => {})}
+            onmouseleave={() => invoke("flash_monitor", { monitorIndex: null }).catch(() => {})}
+            onfocus={() => invoke("flash_monitor", { monitorIndex: m.index }).catch(() => {})}
+            onblur={() => invoke("flash_monitor", { monitorIndex: null }).catch(() => {})}>
             <span class="target-pick-check">{fullScreenTarget && fullScreenMonitorIndex === m.index ? "✓" : ""}</span>
-            <span class="target-pick-name">🖥️ {t("target.screenN", { n: m.index + 1 })}{m.primary ? ` ${t("target.primary")}` : ""}</span>
+            <span class="target-pick-name">🖥️ {t("target.screenN", { n: m.display_number })}{m.name ? ` · ${m.name}` : ""}{m.primary ? ` ${t("target.primary")}` : ""}</span>
             <span class="target-pick-sub">{m.width}×{m.height} {t("target.thisScreenOnly")}</span>
           </button>
         {/each}
