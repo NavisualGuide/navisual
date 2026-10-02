@@ -3068,7 +3068,7 @@ pub fn refresh_active_window(app: &AppHandle) {
         return;
     };
     let active_info = capture::get_active_window_info();
-    let (announce_hwnd, changed, full_screen) = {
+    let (announce_hwnd, changed) = {
         let mut g = state.guidance.lock();
         if g.pinned_hwnd.is_none() {
             g.target_hwnd = active_info.as_ref().map(|info| info.hwnd);
@@ -3076,7 +3076,7 @@ pub fn refresh_active_window(app: &AppHandle) {
         let hwnd = g.pinned_hwnd.or(g.target_hwnd);
         let changed = hwnd != g.last_announced_hwnd;
         g.last_announced_hwnd = hwnd;
-        (hwnd, changed, g.full_screen_mode)
+        (hwnd, changed)
     };
     // A stale AI-bbox hint ring (drawn on a miss) is NOT tracked — it sits at fixed screen
     // coordinates and would otherwise linger over the newly-focused app (live 2026-07-24:
@@ -3107,12 +3107,13 @@ pub fn refresh_active_window(app: &AppHandle) {
     // not on every passive refresh (z-order shuffle, object update, same app
     // re-settling) — see commit 1601f40 for why a blanket flash-on-every-refresh
     // was reverted.
-    // ...but NOT when the user is sharing a whole screen. Picking "Screen 2" chooses a
-    // capture SCOPE, not an app, so outlining whichever window happens to take focus
-    // points at something that is not what we capture. The event still fires — the
-    // header chip renders the screen label ahead of `sharedApp`, and the prefill and
-    // pack checks downstream still want to know which app the user is in.
-    announce_shared_app(app, announce_hwnd, changed && !full_screen);
+    // The EVENT still fires and matters — the header chip, the prefill refresh and the
+    // nav-pack check all want to know which app the user moved to. The BOX does not: a
+    // passive focus change is not something that happened to the user's screen, and
+    // flashing one while nobody is using Navisual reads as "I just captured this".
+    // Boxes are now reserved for discrete events — a real capture, an explicit pin, a
+    // hovered screen row — which is why no definition of "currently guiding" is needed.
+    announce_shared_app(app, announce_hwnd, false);
 }
 
 #[cfg(not(windows))]

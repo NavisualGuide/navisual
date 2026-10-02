@@ -444,35 +444,47 @@
     // at the default thickness this is 4, exactly what it was before.
     const lw = Math.max(2, DEFAULT_THICKNESS * strokeScale());
 
-    // Inset the rect by half the widest stroke so the centered outline sits just
-    // INSIDE the window edge instead of straddling it — on a fullscreen window the
-    // straddling outer half is what bleeds onto the adjacent monitor. The soft glow
-    // beyond is clipped to the active screen by the caller (renderFrame).
-    const inset = lw * 1.1;
-    bx += inset; by += inset;
-    bw = Math.max(0, bw - inset * 2);
-    bh = Math.max(0, bh - inset * 2);
+    // A canvas stroke is CENTRED on its path, so a stroke of width w drawn at inset w/2
+    // has its outer edge exactly on the rect boundary: flush, with nothing spilling past
+    // it onto the adjacent monitor. Each stroke therefore gets half of ITS OWN width.
+    //
+    // One shared inset cannot do this for two strokes of different widths, and that was
+    // the bug: `lw * 1.1` for both left the accent line's outer edge 0.6*lw (~2.4px at
+    // the default weight) inside the rect — a visible sliver of screen outside the box,
+    // reported 2026-10-02 on both the app and the screen boxes.
+    const haloW = lw * 1.9;
+    // Returns a TUPLE, not number[]: `strokeRect` takes four arguments, and TypeScript
+    // refuses to spread an array whose length it cannot prove.
+    const flush = (w: number): [number, number, number, number] => [
+      bx + w / 2,
+      by + w / 2,
+      Math.max(0, bw - w),
+      Math.max(0, bh - w),
+    ];
 
-    // Subtle inset accent fill during the flash phase only
+    // Subtle accent fill during the flash phase only — the whole rect, since the fill
+    // has no stroke width to account for.
     if (age < flashEnd) {
       const flashFill = (1 - age / flashEnd) * 0.05;
       ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${flashFill})`;
       ctx.fillRect(bx, by, bw, bh);
     }
 
-    // Outer dark shadow for contrast against any background
+    // Dark halo for contrast against any background. Widest stroke, so the deepest
+    // inset — its outer edge still lands on the boundary.
     ctx.shadowBlur = 0;
     ctx.strokeStyle = `rgba(0, 0, 0, ${0.40 * opacity})`;
-    ctx.lineWidth = lw * 1.9;
+    ctx.lineWidth = haloW;
     ctx.lineJoin = "round";
-    ctx.strokeRect(bx, by, bw, bh);
+    ctx.strokeRect(...flush(haloW));
 
-    // Accent outline with glow
+    // Accent outline with glow. The soft glow beyond the stroke is clipped to the
+    // active screen by the caller (renderFrame).
     ctx.shadowColor = theme.color;
     ctx.shadowBlur = 6 * opacity + (age < flashEnd ? 6 : 0);
     ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${opacity})`;
     ctx.lineWidth = lw;
-    ctx.strokeRect(bx, by, bw, bh);
+    ctx.strokeRect(...flush(lw));
     ctx.shadowBlur = 0;
 
     return true;
