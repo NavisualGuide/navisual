@@ -6121,7 +6121,11 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) ->
 /// capture is downscaled past the point of usefulness. Sticky like a pin: every
 /// subsequent capture grabs this scope until the user picks a window or Auto-detect.
 #[tauri::command]
-fn pin_full_screen_target(state: State<'_, AppState>, monitor_index: Option<usize>) {
+fn pin_full_screen_target(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    monitor_index: Option<usize>,
+) {
     #[cfg(windows)]
     let monitor: Option<capture::Rect> = monitor_index.and_then(capture::monitor_rect);
     #[cfg(not(windows))]
@@ -6142,10 +6146,33 @@ fn pin_full_screen_target(state: State<'_, AppState>, monitor_index: Option<usiz
              -- expected only on a single-monitor machine"
         ),
     }
-    let mut g = state.guidance.lock();
-    g.full_screen_mode = true;
-    g.full_screen_monitor = monitor;
-    g.pinned_hwnd = None;
+    {
+        let mut g = state.guidance.lock();
+        g.full_screen_mode = true;
+        g.full_screen_monitor = monitor;
+        g.pinned_hwnd = None;
+    }
+    // A pin is a discrete event, so it gets the box -- exactly as pinning a window does
+    // (`pin_target_window` -> `announce_shared_app(.., true)`). This path drew nothing,
+    // and the picker's hover flash hid that for the per-screen rows: the box was already
+    // up when the click landed. The "Entire desktop" row has no hover flash -- it is the
+    // only full-screen row a one-monitor machine is offered -- so choosing it showed
+    // nothing at all (reported 2026-10-02). The whole-desktop rect also tells the truth
+    // in the case the log line above warns about: if it ever spans two screens, the box
+    // shows the user that it does.
+    #[cfg(windows)]
+    {
+        let rect = monitor.unwrap_or_else(capture::virtual_desktop_rect);
+        if let Ok(update) = overlay::make_update(
+            overlay::OverlayKind::AppBoundary,
+            Some(rect),
+            Some(fs_label(monitor)),
+        ) {
+            let _ = overlay::emit_update(&app, update);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 /// Light up one monitor so the picker can answer "which screen is this?" the way the

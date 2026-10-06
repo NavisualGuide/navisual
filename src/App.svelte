@@ -886,6 +886,7 @@ See the LICENSE file in the root of this repository for complete details.
 
   async function openTargetPicker(mode: "target" | "dock" = "target") {
     targetPickerMode = mode;
+    identifyArmed = true;
     dismissTargetHint(); // they found the picker — the coach mark is no longer needed
     [targetWindows, monitors] = await Promise.all([
       invoke<TargetWindowInfo[]>("list_target_windows"),
@@ -954,6 +955,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   async function selectTarget(hwnd: number | null) {
+    identifyArmed = false; // before any await -- see `identifyArmed`
     targetPickerOpen = false;
     targetPickerMode = "target";
     // Chosen from the fish: shrink straight back to 56px. Leaving the grown window
@@ -1006,9 +1008,9 @@ See the LICENSE file in the root of this repository for complete details.
   // monitor). Sticky like a pin; survives new tasks until the user picks a window or
   // Auto-detect again.
   async function selectDesktop(monitorIndex: number | null) {
-    // The identify mark belongs to the open picker; a row chosen or a picker dismissed
-    // must not leave a box sitting on someone's screen.
-    invoke("flash_monitor", { monitorIndex: null }).catch(() => {});
+    // No clear here any more: `pin_full_screen_target` now draws the pin's own box over
+    // the identify mark, and an un-awaited clear sent first could land after it.
+    identifyArmed = false; // before any await -- see `identifyArmed`
     targetPickerOpen = false;
     targetPickerMode = "target";
     if (iconSurface === "targets") await closeIconSurface();
@@ -1016,6 +1018,17 @@ See the LICENSE file in the root of this repository for complete details.
     pinnedHwnd = null;
     fullScreenTarget = true;
     fullScreenMonitorIndex = monitorIndex;
+  }
+
+  // The identify mark (hovering a screen row lights up that monitor) belongs to the OPEN
+  // picker. Choosing a row tears the list down -- which fires that row's own
+  // mouseleave/blur -- while the backend draws the pin's box, so an unguarded clear can
+  // land behind the pin and wipe the one box the user just asked for. Disarmed the
+  // moment a row is chosen, re-armed when the picker opens.
+  let identifyArmed = false;
+  function identifyScreen(monitorIndex: number | null) {
+    if (!identifyArmed) return;
+    invoke("flash_monitor", { monitorIndex }).catch(() => {});
   }
 
   // Offer the screen as a target after a guide found no app window at all. Cleared by
@@ -4824,10 +4837,10 @@ See the LICENSE file in the root of this repository for complete details.
                "which screen is this?" has an answer that needs no reading. -->
           <button class="target-pick-item" class:target-pick-selected={fullScreenTarget && fullScreenMonitorIndex === m.index}
             onclick={() => selectDesktop(m.index)}
-            onmouseenter={() => invoke("flash_monitor", { monitorIndex: m.index }).catch(() => {})}
-            onmouseleave={() => invoke("flash_monitor", { monitorIndex: null }).catch(() => {})}
-            onfocus={() => invoke("flash_monitor", { monitorIndex: m.index }).catch(() => {})}
-            onblur={() => invoke("flash_monitor", { monitorIndex: null }).catch(() => {})}>
+            onmouseenter={() => identifyScreen(m.index)}
+            onmouseleave={() => identifyScreen(null)}
+            onfocus={() => identifyScreen(m.index)}
+            onblur={() => identifyScreen(null)}>
             <span class="target-pick-check">{fullScreenTarget && fullScreenMonitorIndex === m.index ? "✓" : ""}</span>
             <span class="target-pick-name">🖥️ {t("target.screenN", { n: m.display_number })}{m.name ? ` · ${m.name}` : ""}{m.primary ? ` ${t("target.primary")}` : ""}</span>
             <span class="target-pick-sub">{m.width}×{m.height} {t("target.thisScreenOnly")}</span>
