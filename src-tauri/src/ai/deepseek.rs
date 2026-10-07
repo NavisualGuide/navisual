@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::ai::managed::navigate_step_tool;
 use crate::ai::prompts::SYSTEM_PROMPT;
-use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role};
+use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role, UsageDetail};
 
 /// Same schema instruction as Ollama — DeepSeek doesn't support function-calling
 /// for vision models, so we use prompt engineering + response_format:json_object.
@@ -58,6 +58,9 @@ pub struct DeepSeekClient {
     /// path -- every other model on this client uses prompted JSON, where there is no
     /// reasoning parameter to set.
     reasoning_effort: Option<String>,
+    /// The raw usage split of the last call -- see `UsageDetail`. A side channel rather than
+    /// a wider return tuple; `take_last_usage` reads it.
+    last_usage: parking_lot::Mutex<Option<UsageDetail>>,
 }
 
 impl DeepSeekClient {
@@ -88,7 +91,14 @@ impl DeepSeekClient {
             base_url,
             name,
             reasoning_effort,
+            last_usage: parking_lot::Mutex::new(None),
         })
+    }
+
+    /// The raw usage split of this client's last call, taken -- so a later call that reports
+    /// nothing can never be read as this one.
+    pub fn take_last_usage(&self) -> Option<UsageDetail> {
+        self.last_usage.lock().take()
     }
 
     pub async fn send_message(
@@ -308,6 +318,23 @@ impl DeepSeekClient {
                         if let Some(usage) = data["response"]["usage"].as_object() {
                             input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                             output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            // Responses API names: cache hits under input_tokens_details,
+                            // reasoning under output_tokens_details (both already included in
+                            // the totals above).
+                            let detail = |group: &str, key: &str| {
+                                usage
+                                    .get(group)
+                                    .and_then(|d| d.get(key))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                            };
+                            *self.last_usage.lock() = Some(UsageDetail {
+                                input: input_tokens,
+                                cached_input: detail("input_tokens_details", "cached_tokens"),
+                                cache_write: 0,
+                                output: output_tokens,
+                                reasoning: detail("output_tokens_details", "reasoning_tokens"),
+                            });
                             if !usage_logged {
                                 log::info!("[tokens] responses-api raw usage (once): {}", data["response"]["usage"]);
                                 usage_logged = true;
@@ -424,6 +451,18 @@ impl DeepSeekClient {
                     if cached > 0 {
                         log::info!("[tokens] in={input_tokens} cached={cached}");
                     }
+                    let reasoning = usage
+                        .get("completion_tokens_details")
+                        .and_then(|d| d.get("reasoning_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    *self.last_usage.lock() = Some(UsageDetail {
+                        input: input_tokens,
+                        cached_input: cached,
+                        cache_write: 0,
+                        output: output_tokens,
+                        reasoning,
+                    });
                 }
 
                 if let Some(fr) = data

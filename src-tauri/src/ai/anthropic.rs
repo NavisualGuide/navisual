@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::ai::prompts::SYSTEM_PROMPT;
-use crate::ai::types::{Message, NavigateStepResponse, Role};
+use crate::ai::types::{Message, NavigateStepResponse, Role, UsageDetail};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -14,6 +14,9 @@ pub struct AnthropicClient {
     #[allow(dead_code)]
     api_key: String,
     pub model: String,
+    /// The raw usage split of the last call -- see `UsageDetail`. A side channel rather than
+    /// a wider return tuple; `take_last_usage` reads it.
+    last_usage: parking_lot::Mutex<Option<UsageDetail>>,
 }
 
 impl AnthropicClient {
@@ -42,7 +45,14 @@ impl AnthropicClient {
             client,
             api_key,
             model,
+            last_usage: parking_lot::Mutex::new(None),
         })
+    }
+
+    /// The raw usage split of this client's last call, taken -- so a later call that reports
+    /// nothing can never be read as this one.
+    pub fn take_last_usage(&self) -> Option<UsageDetail> {
+        self.last_usage.lock().take()
     }
 
     #[allow(dead_code)]
@@ -158,6 +168,8 @@ impl AnthropicClient {
         let mut accumulated_json = String::new();
         let mut input_tokens = 0;
         let mut output_tokens = 0;
+        // (raw total, cache read, cache write) from message_start, for `UsageDetail`.
+        let mut raw_split = (0u64, 0u64, 0u64);
         let mut in_instruction = false;
         let mut emitted_instruction_len = 0;
 
@@ -229,6 +241,7 @@ impl AnthropicClient {
                             + cache_write as f64 * 1.25
                             + cache_read as f64 * 0.10;
                         input_tokens = billable.round() as u64;
+                        raw_split = (true_total, cache_read, cache_write);
 
                         if cache_write + cache_read > 0 {
                             log::info!(
@@ -252,6 +265,17 @@ impl AnthropicClient {
 
         let step_response: NavigateStepResponse = serde_json::from_str(&accumulated_json)
             .map_err(|e| anyhow!("Failed to parse tool JSON: {e}\n{accumulated_json}"))?;
+
+        // Output arrives on message_delta, after the input split, so the detail is written
+        // once the stream is done. Anthropic folds extended thinking into output_tokens and
+        // reports no separate count.
+        *self.last_usage.lock() = Some(UsageDetail {
+            input: raw_split.0,
+            cached_input: raw_split.1,
+            cache_write: raw_split.2,
+            output: output_tokens,
+            reasoning: 0,
+        });
 
         Ok((step_response, input_tokens, output_tokens))
     }

@@ -314,7 +314,7 @@ pub fn elements_context_block(
 pub fn os_context(os: &str) -> String {
     format!(
         "
-[System] {os}. Authoritative for the OS version only; the screenshot remains          authoritative for layout and for anything not stated here. Do not assume a UI from          the version — use it to choose wording and to rule out steps that cannot exist on          this release.
+[System] {os}. Authoritative for the OS version only; the screenshot remains authoritative for layout and for anything not stated here. Do not assume a UI from the version — use it to choose wording and to rule out steps that cannot exist on this release.
 "
     )
 }
@@ -551,6 +551,16 @@ language than the conversation."
 #[cfg(test)]
 mod tests {
     use super::{elements_context_block, pack_context_block};
+
+    // The line once carried three runs of ten spaces mid-sentence -- the mark of a string
+    // continuation flattened into literal spaces by an edit -- and went out like that on every
+    // request. Found by the replay harness's prompt dump, which shows the exact text sent.
+    #[test]
+    fn os_context_has_no_runs_of_spaces() {
+        let line = super::os_context("Windows 11 (build 26200)");
+        assert!(!line.contains("  "), "{line:?}");
+        assert!(line.contains("remains authoritative for layout"));
+    }
     use std::collections::BTreeMap;
 
     fn ctx_el(id: u32, name: &str, role: &str, x: i32, y: i32, w: u32, h: u32) -> crate::locator::ContextElement {

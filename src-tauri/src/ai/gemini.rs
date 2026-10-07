@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::ai::prompts::SYSTEM_PROMPT;
-use crate::ai::types::{Message, NavigateStepResponse, Role};
+use crate::ai::types::{Message, NavigateStepResponse, Role, UsageDetail};
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -19,6 +19,9 @@ pub struct GeminiClient {
     /// over `thinking_budget`: a 3.x model ignores the budget, and every model this app
     /// ships with is 3.x.
     thinking_level: Option<String>,
+    /// The raw usage split of the last call -- see `UsageDetail`. A side channel rather than
+    /// a wider return tuple; `take_last_usage` reads it.
+    last_usage: parking_lot::Mutex<Option<UsageDetail>>,
 }
 
 impl GeminiClient {
@@ -46,7 +49,14 @@ impl GeminiClient {
             model,
             thinking_budget,
             thinking_level,
+            last_usage: parking_lot::Mutex::new(None),
         })
+    }
+
+    /// The raw usage split of this client's last call, taken -- so a later call that reports
+    /// nothing can never be read as this one.
+    pub fn take_last_usage(&self) -> Option<UsageDetail> {
+        self.last_usage.lock().take()
     }
 
     #[allow(dead_code)]
@@ -250,6 +260,14 @@ impl GeminiClient {
                     .and_then(|t| t.as_u64())
                     .unwrap_or(0);
                 log::info!("[tokens] gemini in={input_tokens} out={output_tokens} cached={c}");
+                // Usage arrives on more than one chunk, cumulatively; the last one wins.
+                *self.last_usage.lock() = Some(UsageDetail {
+                    input: input_tokens,
+                    cached_input: c,
+                    cache_write: 0,
+                    output: output_tokens,
+                    reasoning: thoughts,
+                });
                 // A zero is ambiguous between "not caching" and "not reporting", so put the
                 // real field set on record once rather than guessing from the absence.
                 if c == 0 {

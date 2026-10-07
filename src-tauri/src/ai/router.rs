@@ -11,7 +11,7 @@ use crate::ai::gemini::{build_messages as build_gemini, GeminiClient};
 use crate::ai::managed::{build_messages as build_managed, ManagedClient};
 use crate::ai::ollama::{build_messages as build_ollama, OllamaClient};
 use crate::ai::session::SessionManager;
-use crate::ai::types::{NavigateStepResponse, Role};
+use crate::ai::types::{NavigateStepResponse, Role, UsageDetail};
 
 /// How many user+assistant exchanges of raw history to send. Deliberately expressed in
 /// exchanges rather than turns: the old constant was `10` turns, which is five exchanges, and
@@ -370,6 +370,21 @@ impl AiRouter {
         }
     }
 
+    /// The active client's raw usage split for its last call -- see `UsageDetail`. Taken, so
+    /// each call is read at most once. `None` for managed and Ollama, which do not record
+    /// one. Read by the replay harness straight after `send_guidance_request` returns.
+    pub(crate) fn take_client_usage(&self) -> Option<UsageDetail> {
+        match &self.client {
+            Some(ApiClient::Anthropic(c)) => c.take_last_usage(),
+            Some(ApiClient::Gemini(c)) => c.take_last_usage(),
+            Some(ApiClient::DeepSeek(c))
+            | Some(ApiClient::OpenAI(c))
+            | Some(ApiClient::Qwen(c))
+            | Some(ApiClient::Custom(c)) => c.take_last_usage(),
+            _ => None,
+        }
+    }
+
     pub async fn send_guidance_request(
         &mut self,
         user_text: &str,
@@ -405,6 +420,10 @@ impl AiRouter {
             })
             .collect::<Vec<_>>()
             .join("\n");
+
+        // Cleared first, so a provider that reports nothing this time cannot leave the
+        // previous call's split for `take_client_usage` to return.
+        let _ = self.take_client_usage();
 
         let result = match &mut self.client {
             Some(ApiClient::Anthropic(c)) => {

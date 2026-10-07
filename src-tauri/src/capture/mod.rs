@@ -459,6 +459,20 @@ pub fn window_fully_occluded(hwnd_raw: usize) -> bool {
     }
 }
 
+/// JPEG quality of the AI-bound screenshot. Named because the replay harness (`eval.rs`)
+/// must encode a fixture exactly as a live capture is encoded.
+pub const AI_JPEG_QUALITY: u8 = 75;
+
+/// The `[Current Window Info]` body for one window: its title and frame. Split out of
+/// `get_window_info` so the replay harness describes a fixture window in the same words
+/// the model sees for a real one.
+pub fn format_window_info(title: &str, rect: [i32; 4]) -> String {
+    format!(
+        "Title: '{}'\nRect: [{}, {}, {}, {}]",
+        title, rect[0], rect[1], rect[2], rect[3]
+    )
+}
+
 /// Get debug information about a specific window by its raw HWND.
 pub fn get_window_info(hwnd_raw: usize) -> String {
     #[cfg(windows)]

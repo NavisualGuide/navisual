@@ -18,6 +18,10 @@ mod session_html;
 mod session_export;
 mod track;
 mod tts;
+// Replay harness for the reasoning-harness study. Test-only, and every entry point is
+// #[ignore]d: a run spends real money on BYOK keys.
+#[cfg(test)]
+mod eval;
 
 use ai::config::Config;
 use ai::cost_tracker::CostTracker;
@@ -2307,6 +2311,46 @@ mod pointer_mark_tests {
 }
 
 #[cfg(test)]
+mod prompt_assembly_tests {
+    use super::*;
+
+    // These pin what `guide` and `send_correction` built inline before the extraction. The
+    // replay harness relies on the same functions, so a reorder here would silently change
+    // what every eval measured -- better a failing test than a quiet drift.
+
+    #[test]
+    fn window_context_keeps_the_order_the_model_has_always_seen() {
+        let s = window_context_text(
+            Some("Title: 'T'\nRect: [0, 0, 1, 1]"),
+            "[PACK]",
+            "[ELEMENTS]",
+            "[OS]",
+            Some("[STATE]"),
+            Some("[CLICK]"),
+        );
+        assert_eq!(
+            s,
+            "\n[Current Window Info]\nTitle: 'T'\nRect: [0, 0, 1, 1][PACK][ELEMENTS][OS][STATE][CLICK]"
+        );
+    }
+
+    #[test]
+    fn whole_screen_capture_drops_the_header_and_the_pack() {
+        assert_eq!(window_context_text(None, "[PACK]", "", "[OS]", None, None), "[OS]");
+    }
+
+    #[test]
+    fn turn1_prompt_is_request_then_context_then_language_tail() {
+        let p = compose_turn1_prompt("Open Settings", "\n[Current Window Info]\nX", None, "auto");
+        let head = crate::ai::prompts::initial_context_template("Open Settings");
+        let tail = crate::ai::prompts::reply_language_directive(None, "Open Settings", "auto");
+        assert_eq!(p, format!("{head}\n\n[Current Window Info]\nX{tail}"));
+        // No window context at all: no stray newline before the tail.
+        assert_eq!(compose_turn1_prompt("Open Settings", "", None, "auto"), format!("{head}{tail}"));
+    }
+}
+
+#[cfg(test)]
 mod logged_request_tests {
     use super::*;
 
@@ -2683,6 +2727,63 @@ async fn arm_candidates_if_shown(
 
 /// The `[System]` line, resolved once. The OS cannot change under a running process, and this
 /// rides on every request -- so the Win32 call happens on the first one and never again.
+/// The `[Current Window Info]` block and the context lines under it, in the order the model
+/// has always seen them. One function for every place that builds it -- `guide`,
+/// `send_correction` and the replay harness (`eval.rs`) -- because the order is part of the
+/// prompt, and a third hand-copied sequence would drift from the other two in silence.
+///
+/// `info` is `capture::get_window_info`'s text. `None` (a whole-screen capture) drops the
+/// header and the pack context with it, exactly as the inline versions did.
+fn window_context_text(
+    info: Option<&str>,
+    pack_context: &str,
+    elements_block: &str,
+    os_line: &str,
+    app_state: Option<&str>,
+    click_line: Option<&str>,
+) -> String {
+    let mut s = String::new();
+    if let Some(info) = info {
+        s = format!("\n[Current Window Info]\n{info}");
+        s.push_str(pack_context);
+    }
+    s.push_str(elements_block);
+    s.push_str(os_line);
+    if let Some(block) = app_state {
+        s.push_str(block);
+    }
+    if let Some(line) = click_line {
+        s.push_str(line);
+    }
+    s
+}
+
+/// `text`, then the window context on the next line when there is any. (Was the `add_grid`
+/// closure in `guide`, named for a grid suffix that no longer exists.)
+fn with_window_context(text: String, window_context: &str) -> String {
+    if !window_context.is_empty() {
+        format!("{text}\n{window_context}")
+    } else {
+        text
+    }
+}
+
+/// The first-turn user message: the request, the window context under it, and the
+/// reply-language anchor at the tail. Shared with the replay harness so an eval result
+/// measures the prompt the app actually sends.
+fn compose_turn1_prompt(
+    task: &str,
+    window_context: &str,
+    reply_sample: Option<&str>,
+    voice_language: &str,
+) -> String {
+    format!(
+        "{}{}",
+        with_window_context(crate::ai::prompts::initial_context_template(task), window_context),
+        crate::ai::prompts::reply_language_directive(reply_sample, task, voice_language)
+    )
+}
+
 fn os_context_line() -> &'static str {
     static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     LINE.get_or_init(|| match capture::os_version() {
@@ -4007,7 +4108,7 @@ async fn guide(
         // before the AI copy consumes it by downscaling.
         let ocr_png = capture::encode_png_for_ocr(&raw_img).ok();
         let ocr_rect = rect_opt;
-        let final_bytes = match capture::encode_capture_jpeg(raw_img, 75) {
+        let final_bytes = match capture::encode_capture_jpeg(raw_img, capture::AI_JPEG_QUALITY) {
             Ok(b) => b,
             Err(_) => return Err(()),
         };
@@ -4211,37 +4312,34 @@ async fn guide(
 
     let mut router = state.ai_router.lock().await;
 
-    let mut window_context = String::new();
-    if let Some(hwnd) = new_hwnd_opt {
-        let info = capture::get_window_info(hwnd);
-        window_context = format!("\n[Current Window Info]\n{}", info);
-        window_context.push_str(&active_pack_context(&state.packs, hwnd));
-    }
-    if let (Some(els), Some(rect)) = (context_elements.as_deref(), capture_rect_opt) {
-        window_context.push_str(&ai::prompts::elements_context_block(els, rect));
-    }
-    window_context.push_str(os_context_line());
+    let info = new_hwnd_opt.map(capture::get_window_info);
+    let pack_context = new_hwnd_opt
+        .map(|hwnd| active_pack_context(&state.packs, hwnd))
+        .unwrap_or_default();
+    let elements_block = match (context_elements.as_deref(), capture_rect_opt) {
+        (Some(els), Some(rect)) => ai::prompts::elements_context_block(els, rect),
+        _ => String::new(),
+    };
+    let os_line = os_context_line();
     // L1 app state from a script channel (Blender bridge today) — facts the screenshot
     // can't convey. Same capture-time atomicity as [Screen Elements]; absent when no
     // channel applies.
-    if let Some(block) = app_state_snapshot(new_hwnd_opt) {
-        window_context.push_str(&block);
-    }
+    let app_state_text = app_state_snapshot(new_hwnd_opt);
     // What the user actually did since the last turn, as a resolved control. Also (re)arms
     // the click hook for the app being guided — see `last_click` for the privacy contract.
-    if let Some(line) = last_click_snapshot(new_hwnd_opt) {
-        window_context.push_str(&line);
-    }
+    let click_line = last_click_snapshot(new_hwnd_opt);
+    let window_context = window_context_text(
+        info.as_deref(),
+        &pack_context,
+        &elements_block,
+        os_line,
+        app_state_text.as_deref(),
+        click_line.as_deref(),
+    );
 
     // Append window context to the prompt (no grid suffix any more — AI returns
     // target_bbox instead).
-    let add_grid = |text: String| -> String {
-        if !window_context.is_empty() {
-            format!("{text}\n{window_context}")
-        } else {
-            text
-        }
-    };
+    let add_grid = |text: String| -> String { with_window_context(text, &window_context) };
 
     // Streaming-first surfacing: as the instruction streams in token-by-token,
     // push it to BOTH the panel (stream_chunk) and the on-screen caption
@@ -4411,14 +4509,11 @@ async fn guide(
         // [Screen Elements] list (often in the app's UI language) between it and the model's reply.
         // Anchor on `task` itself at the tail so a short request can't be out-shouted by a screen
         // full of another language — the user's language ≠ app-UI-language case.
-        let prompt = format!(
-            "{}{}",
-            add_grid(crate::ai::prompts::initial_context_template(&task)),
-            crate::ai::prompts::reply_language_directive(
-                reply_sample.as_deref(),
-                &task,
-                &voice_language,
-            )
+        let prompt = compose_turn1_prompt(
+            &task,
+            &window_context,
+            reply_sample.as_deref(),
+            &voice_language,
         );
         (
             router
@@ -5541,20 +5636,25 @@ async fn send_correction(
         None => crate::ai::prompts::CORRECTION_CONTEXT.to_string(),
     };
 
-    let mut window_context = String::new();
-    if let Some(hwnd) = new_hwnd {
-        let info = capture::get_window_info(hwnd);
-        window_context = format!("\n[Current Window Info]\n{}", info);
-        window_context.push_str(&active_pack_context(&state.packs, hwnd));
-    }
-    if let (Some(els), Some(rect)) = (context_elements.as_deref(), new_capture_rect) {
-        window_context.push_str(&ai::prompts::elements_context_block(els, rect));
-    }
-    window_context.push_str(os_context_line());
+    let info = new_hwnd.map(capture::get_window_info);
+    let pack_context = new_hwnd
+        .map(|hwnd| active_pack_context(&state.packs, hwnd))
+        .unwrap_or_default();
+    let elements_block = match (context_elements.as_deref(), new_capture_rect) {
+        (Some(els), Some(rect)) => ai::prompts::elements_context_block(els, rect),
+        _ => String::new(),
+    };
+    let os_line = os_context_line();
     // L1 app state — same as guide()'s capture path.
-    if let Some(block) = app_state_snapshot(new_hwnd) {
-        window_context.push_str(&block);
-    }
+    let app_state_text = app_state_snapshot(new_hwnd);
+    let window_context = window_context_text(
+        info.as_deref(),
+        &pack_context,
+        &elements_block,
+        os_line,
+        app_state_text.as_deref(),
+        None,
+    );
 
     // Same language + goal anchor as guide()'s continuation turns — a correction is a
     // multi-turn continuation, equally prone to the Chinese-drift feedback loop. `router`

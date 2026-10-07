@@ -84,10 +84,7 @@ pub fn get_window_info(hwnd_raw: usize) -> String {
         // Class (Win32-internal name) and PID (random per-launch integer) were
         // dropped — noise to the model, no guidance value. The locator uses the
         // HWND directly, not this string.
-        format!(
-            "Title: '{}'\nRect: [{}, {}, {}, {}]",
-            title_str, rect.left, rect.top, rect.right, rect.bottom
-        )
+        super::format_window_info(&title_str, [rect.left, rect.top, rect.right, rect.bottom])
     }
 }
 

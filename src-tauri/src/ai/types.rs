@@ -284,6 +284,28 @@ fn sanitize_instruction_text(text: &str) -> (String, Vec<u32>) {
     (cleaned.trim().to_string(), ids)
 }
 
+/// Token usage as the provider reported it, before any billing weighting.
+///
+/// The `(in, out)` pair every client returns is what the cost tracker prices at one flat
+/// rate per model -- and Anthropic's `in` is already a billing-equivalent figure, not a raw
+/// count (see anthropic.rs). This keeps the raw split, for anything that needs to know HOW
+/// the input was billed: first of all the replay harness (`eval.rs`), because prompt caching
+/// is the largest cost lever the reasoning-harness study has to measure. A zero in a detail
+/// field means "not reported separately", not "none".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct UsageDetail {
+    /// All input tokens, cached or not.
+    pub input: u64,
+    /// The part of `input` served from the provider's prompt cache.
+    pub cached_input: u64,
+    /// Anthropic only: input written to the cache on this call (billed at a premium).
+    pub cache_write: u64,
+    /// All output tokens, reasoning included.
+    pub output: u64,
+    /// The part of `output` spent on reasoning, where the provider reports it.
+    pub reasoning: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NavigateStepResponse {
     pub steps: Vec<GuidanceStep>,
