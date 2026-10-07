@@ -33,7 +33,10 @@ param(
     [double]$MaxUsd = 1.0,
     [string]$Reasoning = '',
     [switch]$DryRun,
-    [string]$Rescore = ''
+    [string]$Rescore = '',
+    # A deliberate prompt change for an ablation (eval.rs lists the known ones). Empty = the
+    # app's own prompt, which is what every non-ablation run must use.
+    [string]$Variant = ''
 )
 
 # Not 'Stop': cargo writes its progress to stderr, and Windows PowerShell 5.1 turns each
@@ -73,6 +76,7 @@ foreach ($t in ($Targets -split ',')) {
     $env:NAVISUAL_EVAL_REASONING = $Reasoning
     $env:NAVISUAL_EVAL_DRY_RUN = $(if ($DryRun) { '1' } else { '' })
     $env:NAVISUAL_EVAL_OUT = ''
+    $env:NAVISUAL_EVAL_VARIANT = $Variant
     Write-Host "=== $($pair[0]) $($pair[1]) ==="
     # Release build: the downscale is several times slower unoptimised (CLAUDE.md rule 5),
     # and nothing about a debug build is closer to what ships.

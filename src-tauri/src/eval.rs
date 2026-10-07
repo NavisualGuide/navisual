@@ -87,6 +87,14 @@ struct Fixture {
     /// For `AvoidText`: the trap control, same units as `target_rect`.
     #[serde(default)]
     avoid_rect: Option<[i32; 4]>,
+    /// For `AvoidText`: the trap counts only as the first targeted step. "Close the dialog,
+    /// then click Export" is right; "click Export" while the dialog is open is the trap.
+    #[serde(default)]
+    avoid_first_only: bool,
+    /// Phrases that, found in any instruction, make the answer right in words even without a
+    /// pointer -- "press Ctrl+Z to undo" is the right first step and points at nothing.
+    #[serde(default)]
+    instruction_any: Vec<String>,
 }
 
 struct RunConfig {
@@ -102,6 +110,9 @@ struct RunConfig {
     dry_run: bool,
     /// Re-score this results file from its stored responses instead of calling anything.
     rescore: Option<PathBuf>,
+    /// A deliberate prompt change for an ablation -- the one sanctioned way this harness sends
+    /// something other than what the app sends. Empty = exactly the app's prompt.
+    variant: String,
     out: PathBuf,
 }
 
@@ -137,6 +148,13 @@ impl RunConfig {
         // A cap, not an estimate: the run stops before the call that would cross it.
         let max_usd = env_or("NAVISUAL_EVAL_MAX_USD", "1.00").parse().unwrap_or(1.0);
         let dry_run = env_or("NAVISUAL_EVAL_DRY_RUN", "") == "1";
+        let variant = env_or("NAVISUAL_EVAL_VARIANT", "");
+        // `no_rect` was the ablation that became the production prompt on 2026-10-07; its
+        // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
+        assert!(
+            ["", "with_rect"].contains(&variant.as_str()),
+            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect)"
+        );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -147,8 +165,9 @@ impl RunConfig {
             .filter(|v| !v.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| {
+                let tag = if variant.is_empty() { String::new() } else { format!("-{variant}") };
                 dir.join("results")
-                    .join(format!("{battery}-{provider}-{model}-{stamp}.jsonl"))
+                    .join(format!("{battery}-{provider}-{model}{tag}-{stamp}.jsonl"))
             });
         Self {
             dir,
@@ -162,6 +181,7 @@ impl RunConfig {
             max_usd,
             dry_run,
             rescore,
+            variant,
             out,
         }
     }
@@ -200,8 +220,12 @@ fn encode_fixture(path: &Path) -> (String, usize, u32, u32) {
 
 /// The turn-1 prompt `guide` would build for this window: no pack, no app-state channel and
 /// no click record, because a fixture has none of them.
-fn fixture_prompt(fx: &Fixture, voice_language: &str) -> String {
-    let info = capture::format_window_info(&fx.window_title, fx.window_rect);
+fn fixture_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
+    let info = match variant {
+        // The prompt before 2026-10-07: the title AND the window's frame.
+        "with_rect" => capture::format_window_info(&fx.window_title, fx.window_rect),
+        _ => capture::format_window_prompt_info(&fx.window_title),
+    };
     let window_context = crate::window_context_text(
         Some(&info),
         "",
@@ -277,7 +301,15 @@ fn score(fx: &Fixture, resp: &NavigateStepResponse, w: u32, h: u32) -> (Outcome,
         s.target_text.as_deref().is_some_and(|t| !t.trim().is_empty()) || real_bbox(s.target_bbox).is_some()
     });
     let first_instruction = resp.steps.first().map(|s| s.instruction.as_str()).unwrap_or("");
+    let said_it = !fx.instruction_any.is_empty()
+        && resp.steps.iter().any(|s| {
+            let i = normalize(&s.instruction);
+            fx.instruction_any.iter().any(|p| contains_phrase(&i, &normalize(p)))
+        });
     if first.is_none() && fx.pass_if != PassIf::AvoidText && fx.pass_if != PassIf::NeedsInput {
+        if said_it {
+            return (Outcome::Pass, format!("right in words, no pointer: {first_instruction:?}"));
+        }
         return (Outcome::NoTarget, format!("no target; first instruction: {first_instruction:?}"));
     }
     let text = first.and_then(|s| s.target_text.clone()).unwrap_or_default();
@@ -287,14 +319,22 @@ fn score(fx: &Fixture, resp: &NavigateStepResponse, w: u32, h: u32) -> (Outcome,
     let centre_str = centre.map_or("none".to_string(), |(x, y)| format!("({x:.0},{y:.0})"));
     let judge = |ok: bool| if ok { Outcome::Pass } else { Outcome::Wrong };
     match fx.pass_if {
-        PassIf::Text => (judge(text_ok), format!("target_text={text:?}")),
-        PassIf::Bbox => (judge(bbox_ok), format!("bbox_centre={centre_str}")),
+        PassIf::Text => (judge(text_ok || said_it), format!("target_text={text:?} said_it={said_it}")),
+        PassIf::Bbox => (judge(bbox_ok || said_it), format!("bbox_centre={centre_str} said_it={said_it}")),
         PassIf::TextOrBbox => (
-            judge(text_ok || bbox_ok),
-            format!("target_text={text:?} text_ok={text_ok} bbox_centre={centre_str} bbox_ok={bbox_ok}"),
+            judge(text_ok || bbox_ok || said_it),
+            format!(
+                "target_text={text:?} text_ok={text_ok} bbox_centre={centre_str} bbox_ok={bbox_ok} said_it={said_it}"
+            ),
         ),
         PassIf::AvoidText => {
-            let trap = resp.steps.iter().find(|s| {
+            // Only the first targeted step when the trap is a matter of order.
+            let considered: Vec<_> = if fx.avoid_first_only {
+                first.into_iter().collect()
+            } else {
+                resp.steps.iter().collect()
+            };
+            let trap = considered.into_iter().find(|s| {
                 s.target_text
                     .as_deref()
                     .is_some_and(|t| text_matches(t, &fx.target_text_none))
@@ -450,12 +490,13 @@ async fn replay_battery() {
     let fixtures = load_fixtures(&rc);
     assert!(!fixtures.is_empty(), "no fixtures under {}", rc.dir.join(&rc.battery).display());
     println!(
-        "[eval] {} item(s) x {} repeat(s) | {} {} | reasoning={} | cap ${:.2}{}",
+        "[eval] {} item(s) x {} repeat(s) | {} {} | reasoning={} | variant={} | cap ${:.2}{}",
         fixtures.len(),
         rc.repeat,
         rc.provider,
         rc.model,
         rc.reasoning.as_deref().unwrap_or("provider default"),
+        if rc.variant.is_empty() { "none (the app's prompt)" } else { rc.variant.as_str() },
         rc.max_usd,
         if rc.dry_run { " | DRY RUN" } else { "" }
     );
@@ -465,7 +506,7 @@ async fn replay_battery() {
         std::fs::create_dir_all(&dump).expect("dry-run dir");
         for (dir, fx) in &fixtures {
             let (b64, jpeg_len, w, h) = encode_fixture(&dir.join(&fx.image));
-            let prompt = fixture_prompt(fx, &rc.voice_language);
+            let prompt = fixture_prompt(fx, &rc.voice_language, &rc.variant);
             std::fs::write(dump.join(format!("{}.prompt.txt", fx.id)), &prompt).expect("prompt dump");
             {
                 use base64::Engine;
@@ -503,7 +544,7 @@ async fn replay_battery() {
                 break 'outer;
             }
             let (b64, jpeg_len, w, h) = encode_fixture(&dir.join(&fx.image));
-            let prompt = fixture_prompt(fx, &rc.voice_language);
+            let prompt = fixture_prompt(fx, &rc.voice_language, &rc.variant);
 
             let started = Instant::now();
             let mut first_token: Option<Instant> = None;
@@ -527,6 +568,7 @@ async fn replay_battery() {
                 "provider": rc.provider,
                 "model": rc.model,
                 "reasoning": rc.reasoning,
+                "variant": rc.variant,
                 "app_version": env!("CARGO_PKG_VERSION"),
                 "png": [w, h],
                 "jpeg_bytes": jpeg_len,
@@ -576,6 +618,17 @@ async fn replay_battery() {
                 Err(e) => {
                     println!("[eval] {:<28} ERROR | {e}", fx.id);
                     row["error"] = serde_json::json!(e.to_string());
+                    // An empty balance or a bad key fails every call after it the same way;
+                    // carrying on only fills the results file with copies of one error.
+                    let msg = e.to_string();
+                    if ["insufficient_quota", "credit_balance_exhausted", "invalid_api_key", "billing"]
+                        .iter()
+                        .any(|k| msg.contains(k))
+                    {
+                        append_line(&rc.out, &row);
+                        println!("[eval] STOP: the provider refused on account grounds, not on this item");
+                        break 'outer;
+                    }
                 }
             }
             append_line(&rc.out, &row);
@@ -617,6 +670,8 @@ mod tests {
             target_text_none: vec!["Q2 forecast (draft 2)".into()],
             target_rect: Some([100, 100, 200, 200]),
             avoid_rect: Some([500, 500, 600, 600]),
+            avoid_first_only: false,
+            instruction_any: vec![],
         }
     }
 
@@ -664,6 +719,29 @@ mod tests {
     }
 
     #[test]
+    fn the_right_answer_in_words_passes_without_a_pointer() {
+        let mut f = fx(PassIf::TextOrBbox);
+        f.instruction_any = vec!["ctrl+z".into(), "undo".into()];
+        let words = resp(r#"{"steps":[{"instruction":"Press Ctrl+Z right away to get it back."}]}"#);
+        let wrong = resp(r#"{"steps":[{"instruction":"Retype the paragraph from memory."}]}"#);
+        assert_eq!(score(&f, &words, 1000, 1000).0, Outcome::Pass);
+        assert_eq!(score(&f, &wrong, 1000, 1000).0, Outcome::NoTarget);
+    }
+
+    #[test]
+    fn a_trap_by_order_only_fails_as_the_first_step() {
+        let mut f = fx(PassIf::AvoidText);
+        f.avoid_first_only = true;
+        let later = resp(
+            r#"{"steps":[{"instruction":"Close the dialog","target_text":"Cancel"},
+                         {"instruction":"Then click it","target_text":"Q2 forecast (draft 2)"}]}"#,
+        );
+        let first = resp(r#"{"steps":[{"instruction":"Click it","target_text":"Q2 forecast (draft 2)"}]}"#);
+        assert_eq!(score(&f, &later, 1000, 1000).0, Outcome::Pass);
+        assert_eq!(score(&f, &first, 1000, 1000).0, Outcome::Wrong);
+    }
+
+    #[test]
     fn a_keyboard_answer_is_no_target_not_wrong() {
         let f = fx(PassIf::TextOrBbox);
         // What luna actually returned for "Zoom out a little": a shortcut and a zero box.
@@ -684,8 +762,13 @@ mod tests {
         let mut f = fx(PassIf::Text);
         f.task = "Open the second draft".into();
         f.window_title = "Contoso Notes".into();
-        let p = fixture_prompt(&f, "auto");
+        let p = fixture_prompt(&f, "auto", "");
         assert!(p.contains("Open the second draft"));
-        assert!(p.contains("[Current Window Info]\nTitle: 'Contoso Notes'\nRect: [0, 0, 1000, 1000]"));
+        assert!(p.contains("[Current Window Info]\nTitle: 'Contoso Notes'"));
+        assert!(!p.contains("Rect:"), "the app no longer states the window frame");
+        // The comparison variant adds the frame back and changes nothing else.
+        let old = fixture_prompt(&f, "auto", "with_rect");
+        assert!(old.contains("[Current Window Info]\nTitle: 'Contoso Notes'\nRect: [0, 0, 1000, 1000]"));
+        assert_eq!(old.replace("\nRect: [0, 0, 1000, 1000]", ""), p);
     }
 }
