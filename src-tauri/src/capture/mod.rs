@@ -463,9 +463,36 @@ pub fn window_fully_occluded(hwnd_raw: usize) -> bool {
 /// must encode a fixture exactly as a live capture is encoded.
 pub const AI_JPEG_QUALITY: u8 = 75;
 
-/// The `[Current Window Info]` body for one window: its title and frame. Split out of
-/// `get_window_info` so the replay harness describes a fixture window in the same words
-/// the model sees for a real one.
+/// The `[Current Window Info]` body the MODEL sees: the window title, and nothing else.
+///
+/// The frame (`Rect: [l, t, r, b]`) used to follow it and was dropped on 2026-10-07. The
+/// screenshot reaches the model downscaled (1920x1040 arrives as 1418x768) while the line stated
+/// the window's full size, and the OpenAI models measured boxes in the image they saw but
+/// normalised them against the size they were told: their pointer misses clustered at
+/// y = 0.74 x the truth, the downscale factor. With the line gone the cluster vanished for both
+/// OpenAI models and Gemini was unchanged item for item (navisual-internal
+/// docs/harness-plan.md §10). Boxes are normalised to the IMAGE (system prompt rule 6), so the
+/// model never needed the frame; the locator converts against the capture rect it holds itself.
+pub fn format_window_prompt_info(title: &str) -> String {
+    format!("Title: '{title}'")
+}
+
+/// The window prompt line for a live window -- see `format_window_prompt_info`.
+pub fn get_window_prompt_info(hwnd_raw: usize) -> String {
+    #[cfg(windows)]
+    {
+        format_window_prompt_info(&win::window_text(hwnd_raw))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd_raw;
+        String::from("Window info only available on Windows")
+    }
+}
+
+/// Title AND frame, for the debug-screenshot `.txt` dumps, where the frame still helps a person
+/// reading them. Not for the prompt -- see `format_window_prompt_info` for why. The replay
+/// harness uses it for its `with_rect` variant, which reproduces the pre-2026-10-07 prompt.
 pub fn format_window_info(title: &str, rect: [i32; 4]) -> String {
     format!(
         "Title: '{}'\nRect: [{}, {}, {}, {}]",

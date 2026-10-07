@@ -2732,7 +2732,7 @@ async fn arm_candidates_if_shown(
 /// `send_correction` and the replay harness (`eval.rs`) -- because the order is part of the
 /// prompt, and a third hand-copied sequence would drift from the other two in silence.
 ///
-/// `info` is `capture::get_window_info`'s text. `None` (a whole-screen capture) drops the
+/// `info` is `capture::get_window_prompt_info`'s text. `None` (a whole-screen capture) drops the
 /// header and the pack context with it, exactly as the inline versions did.
 fn window_context_text(
     info: Option<&str>,
@@ -4312,7 +4312,7 @@ async fn guide(
 
     let mut router = state.ai_router.lock().await;
 
-    let info = new_hwnd_opt.map(capture::get_window_info);
+    let info = new_hwnd_opt.map(capture::get_window_prompt_info);
     let pack_context = new_hwnd_opt
         .map(|hwnd| active_pack_context(&state.packs, hwnd))
         .unwrap_or_default();
@@ -5636,7 +5636,7 @@ async fn send_correction(
         None => crate::ai::prompts::CORRECTION_CONTEXT.to_string(),
     };
 
-    let info = new_hwnd.map(capture::get_window_info);
+    let info = new_hwnd.map(capture::get_window_prompt_info);
     let pack_context = new_hwnd
         .map(|hwnd| active_pack_context(&state.packs, hwnd))
         .unwrap_or_default();

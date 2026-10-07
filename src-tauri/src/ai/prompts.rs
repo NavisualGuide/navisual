@@ -90,7 +90,7 @@ actions — the user does everything.
    or background apps. If the user needs something outside the current window,
    DO NOT GUESS what it shows — ask them to bring that window or app into
    focus first. [Current Window Info] at the end of the prompt gives the
-   focused window's Title and Class: if focus moved to an application unrelated
+   focused window's title: if focus moved to an application unrelated
    to the task, do not guess inside the wrong application — ask the user to
    bring the correct one back into focus.
 10. GREY AREAS & THE INSTRUCTION PANEL: neutral grey areas in the screenshot
@@ -303,7 +303,7 @@ pub fn elements_context_block(
 ///
 /// **Why this is worth tokens:** Windows 10 and 11 ship substantially different Settings and
 /// Explorer UIs, and until now the model had to infer which one from pixels alone — the
-/// window title carries no version and `[Current Window Info]` sends only title and rect. When
+/// window title carries no version and `[Current Window Info]` sends only the title. When
 /// it infers wrong it does not fail visibly; it produces a confident, plausible path through a
 /// UI that is not on screen, which is the v0.7.25 failure mode and the dangerous one.
 ///
@@ -555,6 +555,16 @@ mod tests {
     // The line once carried three runs of ten spaces mid-sentence -- the mark of a string
     // continuation flattened into literal spaces by an edit -- and went out like that on every
     // request. Found by the replay harness's prompt dump, which shows the exact text sent.
+    // The model is told the window's title and nothing else: a stated window size next to a
+    // downscaled image made the OpenAI models normalise boxes against the wrong size
+    // (capture::format_window_prompt_info has the measurement). Rule 9 named "Title and Class"
+    // for years after Class was dropped -- a sentence describing behaviour owned by other code.
+    #[test]
+    fn the_model_gets_the_window_title_and_no_frame() {
+        assert_eq!(crate::capture::format_window_prompt_info("Book1 - Excel"), "Title: 'Book1 - Excel'");
+        assert!(!super::SYSTEM_PROMPT.contains("Title and Class"));
+    }
+
     #[test]
     fn os_context_has_no_runs_of_spaces() {
         let line = super::os_context("Windows 11 (build 26200)");

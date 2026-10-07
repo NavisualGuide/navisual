@@ -72,19 +72,27 @@ pub fn validate_hwnd_raw(hwnd_raw: usize) -> Option<Rect> {
 
 pub fn get_window_info(hwnd_raw: usize) -> String {
     let hwnd = HWND(hwnd_raw as *mut _);
+    let title_str = window_text(hwnd_raw);
     unsafe {
-        let mut title = [0u16; 256];
-        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut title);
-        let title_str = String::from_utf16_lossy(&title[..len as usize]);
-
         let mut rect = windows::Win32::Foundation::RECT::default();
         let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
 
-        // Title (app + document) + size are the only useful context for the AI.
-        // Class (Win32-internal name) and PID (random per-launch integer) were
-        // dropped — noise to the model, no guidance value. The locator uses the
-        // HWND directly, not this string.
+        // Class (Win32-internal name) and PID (random per-launch integer) were dropped long
+        // ago — noise to the model. Since 2026-10-07 the model gets the title alone
+        // (`get_window_prompt_info`); this title-and-frame form is for the debug dumps.
         super::format_window_info(&title_str, [rect.left, rect.top, rect.right, rect.bottom])
+    }
+}
+
+/// The window's title as the prompt has always read it: up to 255 UTF-16 units. (Nav-pack
+/// matching reads more, through `get_window_title`.) Shared by the prompt line and the debug
+/// dump so the two cannot truncate differently.
+pub fn window_text(hwnd_raw: usize) -> String {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        let mut title = [0u16; 256];
+        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut title);
+        String::from_utf16_lossy(&title[..len as usize])
     }
 }
 
