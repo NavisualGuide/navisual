@@ -194,13 +194,13 @@ impl GeminiClient {
             log_thinking_once("provider default (no thinkingConfig sent)");
         }
 
-        // Use streamGenerateContent with SSE (alt=sse)
-        let url = format!(
-            "{}/{}:streamGenerateContent?alt=sse&key={}",
-            GEMINI_API_BASE, effective_model, self.api_key
-        );
-
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let response = self
+            .client
+            .post(stream_url(effective_model))
+            .header("x-goog-api-key", &self.api_key)
+            .json(&payload)
+            .send()
+            .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -443,6 +443,15 @@ impl GeminiClient {
     }
 }
 
+/// The streaming endpoint (SSE). **The key is not in it**: it travels in the `x-goog-api-key`
+/// header, which Google documents alongside the `?key=` form. reqwest prints the request URL
+/// in every transport error -- "error sending request for url (...)" -- so a key in the query
+/// string was one network blip from the console, the log, and anything an error message
+/// reaches. Seen 2026-10-07, when a replay-harness run printed a BYOK key in full.
+fn stream_url(model: &str) -> String {
+    format!("{GEMINI_API_BASE}/{model}:streamGenerateContent?alt=sse")
+}
+
 pub fn build_messages(
     user_text: &str,
     screenshot_b64: Option<&str>,
@@ -502,5 +511,15 @@ fn log_thinking_once(what: &str) {
             log::info!("[reasoning] gemini {what}");
             *last = Some(what.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_api_key_never_rides_in_the_url() {
+        let url = super::stream_url("gemini-3.7-flash");
+        assert!(url.ends_with("/gemini-3.7-flash:streamGenerateContent?alt=sse"), "{url}");
+        assert!(!url.contains("key"), "{url}");
     }
 }
