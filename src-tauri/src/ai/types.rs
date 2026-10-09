@@ -137,6 +137,12 @@ pub struct GuidanceStep {
     /// live tree before use; never replaces `target_text` (four-pass fallback).
     #[serde(default, deserialize_with = "lax_element_id")]
     pub target_element_id: Option<u32>,
+    /// H1 (harness-plan.md): what the screen shows once the user has done this step, with
+    /// newly appearing text in double quotes, or "no visible change". Requested only when
+    /// `Config::expected_result` is on, and nothing acts on it yet: it is recorded (prompt
+    /// log, replay harness) so it can be measured first.
+    #[serde(default, deserialize_with = "lax_option")]
+    pub expected_result: Option<String>,
 }
 
 /// Lax element-id deserializer: models emit `12`, `"12"`, or `12.0`; anything else
@@ -462,6 +468,23 @@ mod tests {
 
     fn step(json: &str) -> GuidanceStep {
         serde_json::from_str(json).expect("GuidanceStep must deserialize")
+    }
+
+    // H1: requested only when the switch is on, and like every other field it never fails the
+    // parse -- a model that ignores it, or answers it with garbage, still guides.
+    #[test]
+    fn expected_result_is_lax() {
+        let s = step(r#"{"instruction": "x", "expected_result": "The \"Page Number\" menu opens."}"#);
+        assert_eq!(s.expected_result.as_deref(), Some("The \"Page Number\" menu opens."));
+        for absent in [
+            r#"{"instruction": "x"}"#,
+            r#"{"instruction": "x", "expected_result": null}"#,
+            r#"{"instruction": "x", "expected_result": "  "}"#,
+            r#"{"instruction": "x", "expected_result": 5}"#,
+            r#"{"instruction": "x", "expected_result": ["menu"]}"#,
+        ] {
+            assert!(step(absent).expected_result.is_none(), "{absent}");
+        }
     }
 
     #[test]

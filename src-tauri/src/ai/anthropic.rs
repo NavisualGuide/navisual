@@ -3,7 +3,7 @@ use reqwest::{header, Client};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::prompts::{add_expected_result, system_prompt};
 use crate::ai::types::{Message, NavigateStepResponse, Role, UsageDetail};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -17,6 +17,8 @@ pub struct AnthropicClient {
     /// The raw usage split of the last call -- see `UsageDetail`. A side channel rather than
     /// a wider return tuple; `take_last_usage` reads it.
     last_usage: parking_lot::Mutex<Option<UsageDetail>>,
+    /// H1 switch, set by the router from `Config::expected_result` (see `prompts::system_prompt`).
+    pub(crate) expected_result: bool,
 }
 
 impl AnthropicClient {
@@ -46,6 +48,7 @@ impl AnthropicClient {
             api_key,
             model,
             last_usage: parking_lot::Mutex::new(None),
+            expected_result: false,
         })
     }
 
@@ -70,7 +73,7 @@ impl AnthropicClient {
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
-        let tool_schema = json!({
+        let mut tool_schema = json!({
             "name": "navigate_step",
             "description": "Provide navigation instructions for the user. Return one or more steps. Steps with checkpoint=true will wait for the user to complete the action before proceeding.",
             "cache_control": {"type": "ephemeral"},
@@ -130,6 +133,9 @@ impl AnthropicClient {
                 }
             }
         });
+        if self.expected_result {
+            add_expected_result(&mut tool_schema);
+        }
 
         let payload = json!({
             "model": effective_model,
@@ -138,7 +144,7 @@ impl AnthropicClient {
             "system": [
                 {
                     "type": "text",
-                    "text": SYSTEM_PROMPT,
+                    "text": system_prompt(self.expected_result),
                     "cache_control": {"type": "ephemeral"}
                 }
             ],

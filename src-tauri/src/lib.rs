@@ -2340,6 +2340,48 @@ mod prompt_assembly_tests {
     }
 
     #[test]
+    fn use_a_appends_the_completed_steps_expectation_only_when_on() {
+        let step = |instruction: &str, expected: Option<&str>| {
+            let mut s: GuidanceStep =
+                serde_json::from_value(serde_json::json!({ "instruction": instruction })).unwrap();
+            s.expected_result = expected.map(str::to_string);
+            s
+        };
+        let steps = [
+            step("Click File.", Some("The File menu opens.")),
+            step("Press Ctrl+C.", None),
+        ];
+        let done = "[User completed: \"Click File.\"]";
+        let on = continuation_task(done, &steps, true);
+        assert!(on.starts_with(done));
+        assert!(on.contains("[Expected after that step: The File menu opens.]"));
+        // Off, no expectation, an unknown step, a resume: unchanged.
+        assert_eq!(continuation_task(done, &steps, false), done);
+        assert_eq!(continuation_task("[User completed: \"Press Ctrl+C.\"]", &steps, true), "[User completed: \"Press Ctrl+C.\"]");
+        assert_eq!(continuation_task("[User completed: \"Click Edit.\"]", &steps, true), "[User completed: \"Click Edit.\"]");
+        assert_eq!(continuation_task("", &steps, true), "");
+    }
+
+    #[test]
+    fn continuation_prompt_is_what_guide_built_inline() {
+        let task = "[User completed: \"Click Export.\"]";
+        let ctx = "\n[Current Window Info]\nTitle: 'Contoso Notes'";
+        let p = compose_continuation_prompt(task, "DONE: opened File.", ctx, "Export as PDF", None, "auto");
+        let inline = format!(
+            "{}{}{}",
+            format!(
+                "{task} The previous state summary: DONE: opened File.. Here is the current screen. Please provide the next instruction.\n{ctx}"
+            ),
+            crate::ai::prompts::goal_anchor("Export as PDF"),
+            crate::ai::prompts::reply_language_directive(None, "Export as PDF", "auto")
+        );
+        assert_eq!(p, inline);
+        // A resumed session (empty task) opens with the resume template instead.
+        let resumed = compose_continuation_prompt("", "S", "", "G", None, "auto");
+        assert!(resumed.starts_with(&crate::ai::prompts::session_resume_template("S")));
+    }
+
+    #[test]
     fn turn1_prompt_is_request_then_context_then_language_tail() {
         let p = compose_turn1_prompt("Open Settings", "\n[Current Window Info]\nX", None, "auto");
         let head = crate::ai::prompts::initial_context_template("Open Settings");
@@ -2782,6 +2824,62 @@ fn compose_turn1_prompt(
         with_window_context(crate::ai::prompts::initial_context_template(task), window_context),
         crate::ai::prompts::reply_language_directive(reply_sample, task, voice_language)
     )
+}
+
+/// A continuation turn's user message -- Next, a screen change, or a resumed session: the
+/// machine-built `[User completed: …]` line with the state summary (or the resume template when
+/// `task` is empty), the window context under it, then the goal and reply-language anchors at
+/// the tail. Extracted from `guide` for the same reason as `compose_turn1_prompt`: the replay
+/// harness sends turn 2 through it, so an eval of a continuation measures what the app sends.
+fn compose_continuation_prompt(
+    task: &str,
+    summary: &str,
+    window_context: &str,
+    original_task: &str,
+    reply_sample: Option<&str>,
+    voice_language: &str,
+) -> String {
+    let base = if task.is_empty() {
+        crate::ai::prompts::session_resume_template(summary)
+    } else {
+        format!(
+            "{task} The previous state summary: {summary}. \
+            Here is the current screen. Please provide the next instruction.",
+        )
+    };
+    format!(
+        "{}{}{}",
+        with_window_context(base, window_context),
+        // Restate the goal. CLAUDE.md and a comment in `guide` both once claimed
+        // `prompts::language_anchor` already did this on every continuation turn -- that
+        // function never existed; `reply_language_directive` kept the language half and
+        // dropped the goal half. Without this the objective is stated once on turn 1 and
+        // then evicted with the window, leaving the model steering from its own rolling
+        // summary (memory-management-plan.md §1).
+        crate::ai::prompts::goal_anchor(original_task),
+        crate::ai::prompts::reply_language_directive(reply_sample, original_task, voice_language)
+    )
+}
+
+/// Use A of H1 (harness-plan.md): the `[User completed: "…"]` line, followed by the completed
+/// step's own `expected_result` (`prompts::expectation_note`), when the switch is on and the
+/// step carried one. The step is found by its instruction, because the frontend builds the line
+/// from it. Anything else -- the switch off, a resumed session, an unknown step, a step without
+/// an expectation -- returns `task` unchanged.
+fn continuation_task(task: &str, steps: &[GuidanceStep], expected_result: bool) -> String {
+    if !expected_result {
+        return task.to_string();
+    }
+    let done = task
+        .strip_prefix("[User completed: \"")
+        .and_then(|t| t.strip_suffix("\"]"));
+    match done
+        .and_then(|d| steps.iter().find(|s| s.instruction == d))
+        .and_then(|s| s.expected_result.as_deref())
+    {
+        Some(e) => format!("{task}{}", crate::ai::prompts::expectation_note(e)),
+        None => task.to_string(),
+    }
 }
 
 fn os_context_line() -> &'static str {
@@ -4449,33 +4547,18 @@ async fn guide(
     let reply_sample = state.guidance.lock().reply_lang_sample.clone();
 
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
-        let summary = {
+        let expect = router.config.expected_result;
+        let (summary, task_line) = {
             let g = state.guidance.lock();
-            g.state_summary.clone()
+            (g.state_summary.clone(), continuation_task(&task, &g.steps, expect))
         };
-        let base = if task.is_empty() {
-            crate::ai::prompts::session_resume_template(&summary)
-        } else {
-            format!(
-                "{task} The previous state summary: {summary}. \
-                Here is the current screen. Please provide the next instruction.",
-            )
-        };
-        let prompt = format!(
-            "{}{}{}",
-            add_grid(base),
-            // Restate the goal. CLAUDE.md and a comment above both claimed
-            // `prompts::language_anchor` already did this on every continuation turn — that
-            // function never existed; `reply_language_directive` kept the language half and
-            // dropped the goal half. Without this the objective is stated once on turn 1 and
-            // then evicted with the window, leaving the model steering from its own rolling
-            // summary (memory-management-plan.md §1).
-            crate::ai::prompts::goal_anchor(&original_task),
-            crate::ai::prompts::reply_language_directive(
-                reply_sample.as_deref(),
-                &original_task,
-                &voice_language,
-            )
+        let prompt = compose_continuation_prompt(
+            &task_line,
+            &summary,
+            &window_context,
+            &original_task,
+            reply_sample.as_deref(),
+            &voice_language,
         );
         (
             router

@@ -19,6 +19,16 @@
 //!     App Control heuristics and contradict the product's promise. Deliberately absent.
 //!   * Session-scoped: `set_target_pid(0)` disarms it, and nothing is persisted to disk.
 
+/// The prompt line for a click on `role "name"`. One function, so the replay harness reports a
+/// click in exactly the words the app uses.
+pub(crate) fn prompt_line(role: &str, name: &str) -> String {
+    format!(
+        "\n[Last user action] The user clicked {role} \"{name}\". Treat this as what \
+         they just did — if it is not what you asked for, say so and correct course \
+         instead of assuming your previous step succeeded.\n"
+    )
+}
+
 #[cfg(windows)]
 mod imp {
     use parking_lot::Mutex;
@@ -187,12 +197,7 @@ mod imp {
             return None;
         }
         let (role, name) = c.resolved.clone()?;
-
-        Some(format!(
-            "\n[Last user action] The user clicked {role} \"{name}\". Treat this as what \
-             they just did — if it is not what you asked for, say so and correct course \
-             instead of assuming your previous step succeeded.\n"
-        ))
+        Some(super::prompt_line(&role, &name))
     }
 
     /// The same click as a bare display string -- `Button "Insert"` -- for the panel, and

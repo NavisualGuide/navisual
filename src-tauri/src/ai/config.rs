@@ -224,6 +224,14 @@ pub struct Config {
     /// BYOK only. The managed tiers do not read this -- wiring Speed/Regular/Smart to it is
     /// the open proposal this key exists to let us measure first.
     pub reasoning_effort: Option<String>,
+
+    /// H1, "predict, then verify" (navisual-internal `docs/harness-plan.md`): every step also
+    /// carries `expected_result` -- one sentence saying what the screen shows once the user has
+    /// done it, newly appearing text in quotes. **Off by default, and a hand-set `.env` key
+    /// only** (`EXPECTED_RESULT=true`): it costs ~100 input tokens on every request and nothing
+    /// acts on it yet, so it exists for the replay harness to measure before anything decides
+    /// whether it ships. Read once, by the router, which hands it to the active client.
+    pub expected_result: bool,
 }
 
 impl Default for Config {
@@ -288,6 +296,7 @@ impl Default for Config {
             session_screenshots: false,
             gemini_thinking_budget: None,
             reasoning_effort: None,
+            expected_result: false,
         }
     }
 }
@@ -570,6 +579,9 @@ impl Config {
             } else if !v.is_empty() {
                 log::warn!("[config] REASONING_EFFORT={v:?} is not one of {LEVELS:?}; ignored");
             }
+        }
+        if let Ok(v) = env::var("EXPECTED_RESULT") {
+            config.expected_result = truthy(&v);
         }
 
         // BYOK keys stored in the Windows Credential Manager are referenced from

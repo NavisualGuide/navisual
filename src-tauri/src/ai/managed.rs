@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::prompts::{add_expected_result, system_prompt};
 use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role};
 use crate::server::{
     load_session, refresh_session, save_session, sign_in_anonymously, SupabaseSession,
@@ -55,6 +55,8 @@ pub struct ManagedClient {
     /// All cached per-account values — see AccountState's doc comment for why this is
     /// one mutex and must stay that way.
     account: parking_lot::Mutex<AccountState>,
+    /// H1 switch, set by the router from `Config::expected_result` (see `prompts::system_prompt`).
+    pub(crate) expected_result: bool,
 }
 
 impl ManagedClient {
@@ -81,6 +83,7 @@ impl ManagedClient {
             session,
             session_path,
             account: parking_lot::Mutex::new(AccountState::default()),
+            expected_result: false,
         })
     }
 
@@ -168,7 +171,10 @@ impl ManagedClient {
             .map(|s| s.access_token.clone())
             .ok_or_else(|| anyhow!("no active Supabase session"))?;
 
-        let tool = navigate_step_tool();
+        let mut tool = navigate_step_tool();
+        if self.expected_result {
+            add_expected_result(&mut tool);
+        }
         let payload = json!({
             "model": self.model,
             // Paid-tier hint. The relay ignores it for free users (tier='free' in
@@ -499,6 +505,7 @@ impl ManagedClient {
                                 checkpoint: true,
                                 target_bbox: None,
                                 target_element_id: None,
+                                expected_result: None,
                             }],
                             state_summary: String::new(),
                             needs_input: true,
@@ -642,6 +649,7 @@ fn recover_leaked_pseudocall(content: &str) -> Option<NavigateStepResponse> {
             checkpoint: true,
             target_bbox,
             target_element_id: None,
+            expected_result: None,
         }],
         state_summary,
         needs_input: false,
@@ -654,11 +662,12 @@ pub fn build_messages(
     screenshot_b64: Option<&str>,
     state_summary: Option<&str>,
     conversation_history: &[Message],
+    expected_result: bool,
 ) -> Vec<Value> {
     let mut messages = Vec::new();
 
     // System prompt as a system role message (OpenAI format).
-    messages.push(json!({"role": "system", "content": SYSTEM_PROMPT}));
+    messages.push(json!({"role": "system", "content": system_prompt(expected_result)}));
 
     for turn in conversation_history {
         let role = match turn.role {

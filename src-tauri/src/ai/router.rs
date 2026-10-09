@@ -369,6 +369,23 @@ impl AiRouter {
             }
             _ => {}
         }
+
+        // H1 (harness-plan.md): the one place the switch is read; the clients only carry it.
+        let on = self.config.expected_result;
+        match &mut self.client {
+            Some(ApiClient::Anthropic(c)) => c.expected_result = on,
+            Some(ApiClient::Gemini(c)) => c.expected_result = on,
+            Some(ApiClient::Ollama(c)) => c.expected_result = on,
+            Some(ApiClient::DeepSeek(c))
+            | Some(ApiClient::OpenAI(c))
+            | Some(ApiClient::Qwen(c))
+            | Some(ApiClient::Custom(c)) => c.expected_result = on,
+            Some(ApiClient::Managed(c)) => c.expected_result = on,
+            None => {}
+        }
+        if on {
+            log::info!("[h1] expected_result on: rule 19 and the step field ride every request");
+        }
     }
 
     /// The active client's raw usage split for its last call -- see `UsageDetail`. Taken, so
@@ -426,6 +443,7 @@ impl AiRouter {
         // previous call's split for `take_client_usage` to return.
         let _ = self.take_client_usage();
 
+        let expect = self.config.expected_result;
         // No request URL reaches the screen through an error (redact.rs).
         let result = match &mut self.client {
             Some(ApiClient::Anthropic(c)) => {
@@ -437,7 +455,8 @@ impl AiRouter {
                 c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::Ollama(c)) => {
-                let msgs = build_ollama(user_text, screenshot_b64, state_summary, &conversation);
+                let msgs =
+                    build_ollama(user_text, screenshot_b64, state_summary, &conversation, expect);
                 c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::DeepSeek(c)) => {
@@ -450,21 +469,23 @@ impl AiRouter {
                 // Gated on the exact model string, not the provider, so the two confirmed
                 // text-only models can never accidentally get an image_url they'd 400 on.
                 let msgs = if c.model == "deepseek-v4-flash-vision-exp" {
-                    build_openai(user_text, screenshot_b64, state_summary, &conversation)
+                    build_openai(user_text, screenshot_b64, state_summary, &conversation, expect)
                 } else {
-                    build_deepseek(user_text, screenshot_b64, state_summary, &conversation)
+                    build_deepseek(user_text, screenshot_b64, state_summary, &conversation, expect)
                 };
                 c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::OpenAI(c)) | Some(ApiClient::Qwen(c)) | Some(ApiClient::Custom(c)) => {
                 // OpenAI (api.openai.com) and Qwen (DashScope) are both OpenAI-compat
                 // vision endpoints — they accept image_url and need the screenshot.
-                let msgs = build_openai(user_text, screenshot_b64, state_summary, &conversation);
+                let msgs =
+                    build_openai(user_text, screenshot_b64, state_summary, &conversation, expect);
                 c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::Managed(c)) => {
                 c.ensure_token().await.map_err(redact::request_urls)?;
-                let msgs = build_managed(user_text, screenshot_b64, state_summary, &conversation);
+                let msgs =
+                    build_managed(user_text, screenshot_b64, state_summary, &conversation, expect);
                 c.send_message(msgs, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             None => {

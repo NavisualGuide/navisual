@@ -4,7 +4,7 @@ use reqwest::{header, Client};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::prompts::{add_expected_result, system_prompt, with_expected_result_field};
 use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role};
 
 /// Appended to the system prompt so the model knows to return JSON.
@@ -50,6 +50,8 @@ pub struct OllamaClient {
     client: Client,
     pub model: String,
     pub base_url: String,
+    /// H1 switch, set by the router from `Config::expected_result` (see `prompts::system_prompt`).
+    pub(crate) expected_result: bool,
 }
 
 impl OllamaClient {
@@ -67,6 +69,7 @@ impl OllamaClient {
             client,
             model,
             base_url,
+            expected_result: false,
         })
     }
 
@@ -106,10 +109,14 @@ impl OllamaClient {
             })
         };
 
+        let mut schema = navigate_step_schema();
+        if self.expected_result {
+            add_expected_result(&mut schema);
+        }
         let mut response = self
             .client
             .post(&url)
-            .json(&build_payload(navigate_step_schema()))
+            .json(&build_payload(schema))
             .send()
             .await?;
         if !response.status().is_success() {
@@ -253,6 +260,7 @@ impl OllamaClient {
                 checkpoint: true,
                 target_bbox: None,
                 target_element_id: None,
+                expected_result: None,
             }],
             state_summary: "Continuing task...".to_string(),
             needs_input: false,
@@ -322,11 +330,16 @@ pub fn build_messages(
     screenshot_b64: Option<&str>,
     state_summary: Option<&str>,
     conversation_history: &[Message],
+    expected_result: bool,
 ) -> Vec<Value> {
     let mut messages = Vec::new();
 
     // Append the JSON format instruction so the model knows what to return.
-    let system_with_format = format!("{}{}", SYSTEM_PROMPT, JSON_FORMAT_INSTRUCTION);
+    let system_with_format = format!(
+        "{}{}",
+        system_prompt(expected_result),
+        with_expected_result_field(JSON_FORMAT_INSTRUCTION, expected_result)
+    );
     messages.push(json!({ "role": "system", "content": system_with_format }));
 
     for turn in conversation_history {

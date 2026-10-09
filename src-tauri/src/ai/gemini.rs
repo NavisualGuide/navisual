@@ -3,7 +3,7 @@ use reqwest::{header, Client};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::prompts::{add_expected_result, system_prompt};
 use crate::ai::types::{Message, NavigateStepResponse, Role, UsageDetail};
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -22,6 +22,8 @@ pub struct GeminiClient {
     /// The raw usage split of the last call -- see `UsageDetail`. A side channel rather than
     /// a wider return tuple; `take_last_usage` reads it.
     last_usage: parking_lot::Mutex<Option<UsageDetail>>,
+    /// H1 switch, set by the router from `Config::expected_result` (see `prompts::system_prompt`).
+    pub(crate) expected_result: bool,
 }
 
 impl GeminiClient {
@@ -50,6 +52,7 @@ impl GeminiClient {
             thinking_budget,
             thinking_level,
             last_usage: parking_lot::Mutex::new(None),
+            expected_result: false,
         })
     }
 
@@ -73,7 +76,7 @@ impl GeminiClient {
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let effective_model = model_override.unwrap_or(&self.model);
 
-        let tool_schema = json!({
+        let mut tool_schema = json!({
             "name": "navigate_step",
             "description": "Provide navigation instructions for the user. Return one or more steps. Steps with checkpoint=true will wait for the user to complete the action before proceeding.",
             "parameters": {
@@ -132,11 +135,14 @@ impl GeminiClient {
                 }
             }
         });
+        if self.expected_result {
+            add_expected_result(&mut tool_schema);
+        }
 
         let mut payload = json!({
             "contents": messages,
             "systemInstruction": {
-                "parts": [{"text": SYSTEM_PROMPT}]
+                "parts": [{"text": system_prompt(self.expected_result)}]
             },
             "tools": [{"function_declarations": [tool_schema]}],
             "toolConfig": {
@@ -421,6 +427,7 @@ impl GeminiClient {
                         checkpoint,
                         target_bbox: None,
                         target_element_id: None,
+                        expected_result: None,
                     }],
                     state_summary,
                     needs_input,

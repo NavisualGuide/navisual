@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::ai::managed::navigate_step_tool;
-use crate::ai::prompts::SYSTEM_PROMPT;
+use crate::ai::prompts::{add_expected_result, system_prompt, with_expected_result_field};
 use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role, UsageDetail};
 
 /// Same schema instruction as Ollama — DeepSeek doesn't support function-calling
@@ -61,6 +61,8 @@ pub struct DeepSeekClient {
     /// The raw usage split of the last call -- see `UsageDetail`. A side channel rather than
     /// a wider return tuple; `take_last_usage` reads it.
     last_usage: parking_lot::Mutex<Option<UsageDetail>>,
+    /// H1 switch, set by the router from `Config::expected_result` (see `prompts::system_prompt`).
+    pub(crate) expected_result: bool,
 }
 
 impl DeepSeekClient {
@@ -92,6 +94,7 @@ impl DeepSeekClient {
             name,
             reasoning_effort,
             last_usage: parking_lot::Mutex::new(None),
+            expected_result: false,
         })
     }
 
@@ -194,7 +197,10 @@ impl DeepSeekClient {
     ) -> Result<(NavigateStepResponse, u64, u64)> {
         let (instructions, input) = messages_to_responses_input(&messages);
 
-        let tool = navigate_step_tool();
+        let mut tool = navigate_step_tool();
+        if self.expected_result {
+            add_expected_result(&mut tool);
+        }
         let flat_tool = json!({
             "type": "function",
             "name": tool["function"]["name"],
@@ -678,6 +684,7 @@ fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
             checkpoint: true,
             target_bbox: None,
             target_element_id: None,
+            expected_result: None,
         });
         return Some(resp);
     }
@@ -701,6 +708,7 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
             checkpoint: true,
             target_bbox: None,
             target_element_id: None,
+            expected_result: None,
         }],
         state_summary: "Continuing task...".to_string(),
         needs_input: false,
@@ -726,12 +734,15 @@ pub fn build_messages(
     _screenshot_b64: Option<&str>,
     state_summary: Option<&str>,
     conversation_history: &[Message],
+    expected_result: bool,
 ) -> Vec<Value> {
     let mut messages = Vec::new();
 
     let system_with_format = format!(
         "{}{}{}",
-        SYSTEM_PROMPT, JSON_FORMAT_INSTRUCTION, TEXT_ONLY_NOTICE
+        system_prompt(expected_result),
+        with_expected_result_field(JSON_FORMAT_INSTRUCTION, expected_result),
+        TEXT_ONLY_NOTICE
     );
     messages.push(json!({ "role": "system", "content": system_with_format }));
 
@@ -769,10 +780,15 @@ pub fn build_openai_messages(
     screenshot_b64: Option<&str>,
     state_summary: Option<&str>,
     conversation_history: &[Message],
+    expected_result: bool,
 ) -> Vec<Value> {
     let mut messages = Vec::new();
 
-    let system_with_format = format!("{}{}", SYSTEM_PROMPT, JSON_FORMAT_INSTRUCTION);
+    let system_with_format = format!(
+        "{}{}",
+        system_prompt(expected_result),
+        with_expected_result_field(JSON_FORMAT_INSTRUCTION, expected_result)
+    );
     messages.push(json!({ "role": "system", "content": system_with_format }));
 
     for turn in conversation_history {

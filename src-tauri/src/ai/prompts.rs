@@ -191,6 +191,103 @@ actions — the user does everything.
 
 Use the navigate_step tool for all responses."#;
 
+// ---- H1: predict, then verify (navisual-internal docs/harness-plan.md) ----------------------
+//
+// Behind `Config::expected_result`, off by default. Off, every function here hands back exactly
+// what the request carried before H1 existed -- `Cow::Borrowed` of the same constant -- so the
+// production prompt is byte-for-byte unchanged until a measurement decides otherwise.
+
+/// The line every system prompt ends with; rule 19 goes in just before it.
+const PROMPT_TAIL: &str = "\n\nUse the navigate_step tool for all responses.";
+
+/// Rule 19, appended after rule 18 when H1 is on.
+pub const EXPECTED_RESULT_RULE: &str = r#"19. EXPECTED RESULT: for every step, set expected_result to one short
+    sentence saying what the screen will show right after the user does
+    that step. Put any text that will newly appear in double quotes, exactly
+    as it will be displayed - e.g. The "Page Number" menu opens. A step
+    whose effect cannot be seen (select all, copy) gets exactly "no visible
+    change". Describe the result, never the action. Navisual checks it
+    against the next screen; the user does not see it."#;
+
+/// The schema description of the step field (tool-calling providers).
+const EXPECTED_RESULT_FIELD: &str = "What the screen will show right after the user does this step, in one short sentence. Put any text that will newly appear in double quotes, exactly as it will be displayed. Exactly \"no visible change\" when the step changes nothing visible.";
+
+/// The same, as a line in a prompted-JSON field list (DeepSeek, Qwen, Ollama, custom).
+const EXPECTED_RESULT_FIELD_LINE: &str = "- expected_result: one short sentence - what the screen will show right after this step, with any newly appearing text in double quotes exactly as displayed; exactly \"no visible change\" when the step changes nothing visible (required)";
+
+/// The system prompt, carrying rule 19 when H1 is on.
+pub fn system_prompt(expected_result: bool) -> std::borrow::Cow<'static, str> {
+    if !expected_result {
+        return std::borrow::Cow::Borrowed(SYSTEM_PROMPT);
+    }
+    // Asserted by `h1_system_prompt_gets_rule_19_before_the_tail`.
+    let at = SYSTEM_PROMPT.rfind(PROMPT_TAIL).unwrap_or(SYSTEM_PROMPT.len());
+    std::borrow::Cow::Owned(format!(
+        "{}\n{}{}",
+        &SYSTEM_PROMPT[..at],
+        EXPECTED_RESULT_RULE,
+        &SYSTEM_PROMPT[at..]
+    ))
+}
+
+/// A prompted-JSON format instruction, with the `expected_result` line added after the
+/// `target_element_id` line when H1 is on.
+pub fn with_expected_result_field(
+    format_instruction: &'static str,
+    expected_result: bool,
+) -> std::borrow::Cow<'static, str> {
+    const ANCHOR: &str = "\n- target_element_id:";
+    let Some(start) = format_instruction.find(ANCHOR).filter(|_| expected_result) else {
+        return std::borrow::Cow::Borrowed(format_instruction);
+    };
+    let line_end = format_instruction[start + 1..]
+        .find('\n')
+        .map(|i| start + 1 + i)
+        .unwrap_or(format_instruction.len());
+    std::borrow::Cow::Owned(format!(
+        "{}\n{}{}",
+        &format_instruction[..line_end],
+        EXPECTED_RESULT_FIELD_LINE,
+        &format_instruction[line_end..]
+    ))
+}
+
+/// Use A: what follows `[User completed: "…"]` on the next request when the completed step
+/// carried an expectation -- the expectation itself, and how to weigh it against the new screen.
+/// Three outcomes, not two, because an unmet expectation may mean the user went ahead
+/// (harness-plan.md H1); `no visible change` hands the step back to rule 3.
+pub fn expectation_note(expected: &str) -> String {
+    format!(
+        " [Expected after that step: {expected}] Compare it with the current screen. If it \
+         matches, continue. If the screen is further along (the user went ahead), continue \
+         from where they are and never send them back. If neither, say what happened and \
+         correct course. For \"no visible change\", trust the confirmation."
+    )
+}
+
+/// Adds the required `expected_result` property to a navigate_step schema's step items,
+/// wherever the provider nests them (`input_schema`, `parameters`, `function.parameters`, or
+/// Ollama's bare format schema). Returns whether it found them.
+pub fn add_expected_result(schema: &mut serde_json::Value) -> bool {
+    let Some(obj) = schema.as_object_mut() else {
+        return false;
+    };
+    if obj.contains_key("steps") {
+        let items = &mut obj["steps"]["items"];
+        if let Some(props) = items.get_mut("properties").and_then(|p| p.as_object_mut()) {
+            props.insert(
+                "expected_result".into(),
+                serde_json::json!({"type": "string", "description": EXPECTED_RESULT_FIELD}),
+            );
+            if let Some(req) = items.get_mut("required").and_then(|r| r.as_array_mut()) {
+                req.push(serde_json::json!("expected_result"));
+            }
+            return true;
+        }
+    }
+    obj.values_mut().any(add_expected_result)
+}
+
 // Category-neutral (audit 2026-07-12 C8): a specific steering hint usually follows this
 // (the frontend folds in one of the ✗ Wrong reason categories — "wrong spot", "already
 // did that", etc.) but not always (a bare Wrong with no reason reaches this alone), so
@@ -558,21 +655,6 @@ language than the conversation."
 
 #[cfg(test)]
 mod tests {
-    // Rules 2-3, rewritten 2026-10-09 (harness-plan.md §10): the screen outranks a reported
-    // completion, and an unintended change is undone first. An earlier draft of rule 3 gave an
-    // example route -- "the menu instead of the button" -- and one model then skipped a
-    // highlighted toolbar button for the Format menu on an unrelated task. Keep routes unnamed.
-    #[test]
-    fn rules_2_and_3_put_the_screen_first_and_name_no_route() {
-        let p = super::SYSTEM_PROMPT;
-        assert!(p.contains("is not there, the screen outranks the confirmation"));
-        assert!(p.contains("make your FIRST step undo it"));
-        assert!(p.contains("selecting text, copying"));
-        assert!(p.contains("NEVER issue the identical instruction twice in a row"));
-        assert!(!p.contains("TRUST CONFIRMATIONS; NEVER REPEAT"));
-        assert!(!p.contains("instead of the button") && !p.contains("instead of the shortcut"));
-    }
-
     use super::{elements_context_block, pack_context_block};
 
     // The line once carried three runs of ten spaces mid-sentence -- the mark of a string
@@ -829,5 +911,85 @@ mod tests {
         // Kana disambiguates Japanese from Chinese even when kanji are present.
         assert_eq!(dominant_script_lang("ファイルを保存してください"), Some("ja"));
         assert_eq!(dominant_script_lang("just plain english"), None);
+    }
+
+    // H1 (harness-plan.md). Off is the production default and must send exactly what was sent
+    // before H1 existed: the switch is a measurement, and a measurement that changes the
+    // control group measures nothing.
+    #[test]
+    fn h1_off_sends_the_prompt_unchanged() {
+        use std::borrow::Cow;
+        assert!(matches!(super::system_prompt(false), Cow::Borrowed(p) if p == super::SYSTEM_PROMPT));
+        let fmt = "Step fields:\n- target_element_id: an id (optional)\n\nTop-level fields:";
+        assert!(matches!(super::with_expected_result_field(fmt, false), Cow::Borrowed(f) if f == fmt));
+        assert!(!super::SYSTEM_PROMPT.contains("expected_result"));
+    }
+
+    // Rules 2-3, rewritten 2026-10-09 (harness-plan.md §10): the screen outranks a reported
+    // completion, and an unintended change is undone first. An earlier draft of rule 3 gave an
+    // example route -- "the menu instead of the button" -- and one model then skipped a
+    // highlighted toolbar button for the Format menu on an unrelated task. Keep routes unnamed.
+    #[test]
+    fn rules_2_and_3_put_the_screen_first_and_name_no_route() {
+        let p = super::SYSTEM_PROMPT;
+        assert!(p.contains("is not there, the screen outranks the confirmation"));
+        assert!(p.contains("make your FIRST step undo it"));
+        assert!(p.contains("selecting text, copying"));
+        assert!(p.contains("NEVER issue the identical instruction twice in a row"));
+        assert!(!p.contains("TRUST CONFIRMATIONS; NEVER REPEAT"));
+        assert!(!p.contains("instead of the button") && !p.contains("instead of the shortcut"));
+    }
+
+    #[test]
+    fn h1_system_prompt_gets_rule_19_before_the_tail() {
+        // The insertion point has to exist exactly once, at the very end.
+        assert_eq!(super::SYSTEM_PROMPT.matches(super::PROMPT_TAIL).count(), 1);
+        assert!(super::SYSTEM_PROMPT.ends_with(super::PROMPT_TAIL));
+        let on = super::system_prompt(true);
+        assert!(on.contains("omit both together.\n19. EXPECTED RESULT:"), "rule 19 follows rule 18");
+        assert!(on.ends_with(super::PROMPT_TAIL));
+        assert_eq!(on.len(), super::SYSTEM_PROMPT.len() + 1 + super::EXPECTED_RESULT_RULE.len());
+    }
+
+    #[test]
+    fn h1_prompted_json_lists_get_the_field_line() {
+        let fmt = "Step fields:\n- clipboard: text\n- target_element_id: an id (optional)\n\nTop-level fields:";
+        let on = super::with_expected_result_field(fmt, true);
+        assert!(on.contains("- target_element_id: an id (optional)\n- expected_result: one short sentence"));
+        assert!(on.ends_with("(required)\n\nTop-level fields:"));
+        // Every prompted-JSON builder, as sent. The text-only DeepSeek builder too: a model that
+        // cannot see the screen can still say what the next one should show.
+        for content in [
+            crate::ai::deepseek::build_openai_messages("t", None, None, &[], true)[0]["content"].clone(),
+            crate::ai::deepseek::build_messages("t", None, None, &[], true)[0]["content"].clone(),
+            crate::ai::ollama::build_messages("t", None, None, &[], true)[0]["content"].clone(),
+        ] {
+            let c = content.as_str().unwrap();
+            assert!(c.contains("\n19. EXPECTED RESULT:"));
+            assert!(c.contains("\n- expected_result: one short sentence"));
+        }
+        let off = crate::ai::deepseek::build_openai_messages("t", None, None, &[], false);
+        assert!(!off[0]["content"].as_str().unwrap().contains("expected_result"));
+    }
+
+    #[test]
+    fn h1_schema_field_reaches_every_provider_shape() {
+        use serde_json::json;
+        // OpenAI function shape (managed relay and the BYOK Responses path share it).
+        let mut tool = crate::ai::managed::navigate_step_tool();
+        assert!(super::add_expected_result(&mut tool));
+        let items = &tool["function"]["parameters"]["properties"]["steps"]["items"];
+        assert_eq!(items["properties"]["expected_result"]["type"], "string");
+        assert!(items["required"].as_array().unwrap().contains(&json!("expected_result")));
+        // Anthropic's input_schema, and Ollama's bare format schema.
+        for mut schema in [
+            json!({"input_schema": {"properties": {"steps": {"items": {"properties": {}, "required": ["instruction"]}}}}}),
+            json!({"type": "object", "properties": {"steps": {"items": {"properties": {}}}}}),
+        ] {
+            assert!(super::add_expected_result(&mut schema));
+            assert!(schema.to_string().contains("\"expected_result\""));
+        }
+        // Not a navigate_step schema: says so instead of inventing a home for the field.
+        assert!(!super::add_expected_result(&mut json!({"properties": {"goal": {}}})));
     }
 }

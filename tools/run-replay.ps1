@@ -34,9 +34,12 @@ param(
     [string]$Reasoning = '',
     [switch]$DryRun,
     [string]$Rescore = '',
-    # A deliberate prompt change for an ablation (eval.rs lists the known ones). Empty = the
-    # app's own prompt, which is what every non-ablation run must use.
-    [string]$Variant = ''
+    # A deliberate prompt change for an ablation: with_rect, expect (H1); eval.rs checks the
+    # list. Empty = the app's own prompt, which is what every non-ablation run must use.
+    [string]$Variant = '',
+    # H1 use B on the S2 fixtures: OCR each after-screen for the text its expectation quotes.
+    # Free: no model call.
+    [switch]$UseB
 )
 
 # Not 'Stop': cargo writes its progress to stderr, and Windows PowerShell 5.1 turns each
@@ -53,6 +56,10 @@ if (-not (Test-Path (Join-Path $EvalDir $Battery))) {
 $manifest = Join-Path $repo 'src-tauri\Cargo.toml'
 $env:NAVISUAL_EVAL_DIR = $EvalDir
 $env:NAVISUAL_EVAL_BATTERY = $Battery
+if ($UseB) {
+    cargo test --release --manifest-path $manifest --lib eval::use_b_local_check -- --ignored --nocapture --test-threads=1
+    exit $LASTEXITCODE
+}
 if ($Rescore) {
     $env:NAVISUAL_EVAL_RESCORE = (Resolve-Path $Rescore).Path
     cargo test --release --manifest-path $manifest --lib eval::replay_battery -- --ignored --nocapture --test-threads=1

@@ -95,6 +95,43 @@ struct Fixture {
     /// pointer -- "press Ctrl+Z to undo" is the right first step and points at nothing.
     #[serde(default)]
     instruction_any: Vec<String>,
+    /// The script the instruction must be written in. `"cjk"`: a Chinese request on an English
+    /// UI must be answered in Chinese (rule 13) -- an answer that points right but talks English
+    /// is still a failure the user meets.
+    #[serde(default)]
+    instruction_script: Option<String>,
+    /// Phrases that must ALL appear in what the user is told (instructions or plan), on top of
+    /// `pass_if`. For "notice AND recover": one keyword alone passed a misperception -- terra
+    /// wrote "Deletion is complete" over the wrong deletion, pointed at Undo, and
+    /// `instruction_any: ["undo"]` passed it.
+    #[serde(default)]
+    instruction_all: Vec<String>,
+    /// Phrases that fail the answer if said anywhere (instructions or plan). For a toggle the
+    /// screen shows already done: "press Ctrl+B" again would undo it. Grade the failures by
+    /// reading them -- "don't press Ctrl+B" contains the phrase too.
+    #[serde(default)]
+    instruction_none: Vec<String>,
+    /// S2 (harness-plan.md H1): a turn-2 item. The session already holds turn 1; `image` is the
+    /// screen after the user acted, and the answer graded is the model's reply to it.
+    #[serde(default)]
+    continuation: Option<Continuation>,
+}
+
+/// Turn 1 of an S2 item, canned so both arms of a comparison see the same history and differ
+/// only in what H1 adds.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct Continuation {
+    /// correct | wrong | not_done | silent | ahead -- what the user actually did.
+    class: String,
+    /// The model's turn-1 answer, as the app would have stored it.
+    turn1: NavigateStepResponse,
+    /// Which of turn 1's steps the user completed (1-based): the `[User completed: "…"]` line
+    /// quotes its instruction.
+    completed: usize,
+    /// What the click hook reported, as `[role, name]`; absent when the step was a keystroke
+    /// or the click was outside the guided app.
+    #[serde(default)]
+    click: Option<[String; 2]>,
 }
 
 struct RunConfig {
@@ -151,9 +188,10 @@ impl RunConfig {
         let variant = env_or("NAVISUAL_EVAL_VARIANT", "");
         // `no_rect` was the ablation that became the production prompt on 2026-10-07; its
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
+        // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect"].contains(&variant.as_str()),
-            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect)"
+            ["", "with_rect", "expect"].contains(&variant.as_str()),
+            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -216,6 +254,60 @@ fn encode_fixture(path: &Path) -> (String, usize, u32, u32) {
     let jpeg = capture::encode_capture_jpeg(img, capture::AI_JPEG_QUALITY).expect("jpeg encode");
     let len = jpeg.len();
     (capture::to_base64(&jpeg), len, w, h)
+}
+
+/// The turn-2 prompt `guide` would build after the user acted: the `[User completed: "…"]`
+/// line (with use A's expectation when the variant turns H1 on, exactly as `guide` adds it), the
+/// window context with the click record, and the tail anchors.
+fn continuation_prompt(fx: &Fixture, c: &Continuation, voice_language: &str, variant: &str) -> String {
+    let step = &c.turn1.steps[c.completed - 1];
+    let task = format!("[User completed: \"{}\"]", step.instruction);
+    let task = crate::continuation_task(&task, &c.turn1.steps, h1_on(variant));
+    let click = c.click.as_ref().map(|[role, name]| crate::last_click::prompt_line(role, name));
+    let window_context = crate::window_context_text(
+        Some(&capture::format_window_prompt_info(&fx.window_title)),
+        "",
+        fx.elements_block.as_deref().unwrap_or(""),
+        crate::os_context_line(),
+        None,
+        click.as_deref(),
+    );
+    let goal = if c.turn1.goal.trim().is_empty() { fx.task.as_str() } else { c.turn1.goal.as_str() };
+    // As `guide` keeps it: the opening request is the language sample when it is substantial.
+    let sample = crate::ai::prompts::is_language_sample(&fx.task).then(|| fx.task.clone());
+    crate::compose_continuation_prompt(
+        &task,
+        &c.turn1.state_summary,
+        &window_context,
+        goal,
+        sample.as_deref(),
+        voice_language,
+    )
+}
+
+/// The conversation `send_guidance_request` reads for an item: empty for a turn-1 item, turn 1
+/// recorded the way `guide` records it for a continuation.
+fn prime_session(router: &mut AiRouter, fx: &Fixture) {
+    router.session_manager.current_session = None;
+    let Some(c) = &fx.continuation else { return };
+    router.session_manager.create_session(fx.task.clone());
+    if let Some(s) = router.session_manager.current_session.as_mut() {
+        s.add_turn_pinned("user", fx.task.clone(), None, true);
+        let content = c.turn1.steps.iter().map(|s| s.instruction.clone()).collect::<Vec<_>>().join("\n");
+        s.add_turn("assistant", content, Some("...".to_string()));
+        s.update_state(c.turn1.state_summary.clone());
+        if !c.turn1.goal.trim().is_empty() {
+            s.set_task_description(c.turn1.goal.trim().to_string());
+        }
+    }
+}
+
+/// The prompt for an item of either kind.
+fn item_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
+    match &fx.continuation {
+        Some(c) => continuation_prompt(fx, c, voice_language, variant),
+        None => fixture_prompt(fx, voice_language, variant),
+    }
 }
 
 /// The turn-1 prompt `guide` would build for this window: no pack, no app-state channel and
@@ -301,11 +393,19 @@ fn score(fx: &Fixture, resp: &NavigateStepResponse, w: u32, h: u32) -> (Outcome,
         s.target_text.as_deref().is_some_and(|t| !t.trim().is_empty()) || real_bbox(s.target_bbox).is_some()
     });
     let first_instruction = resp.steps.first().map(|s| s.instruction.as_str()).unwrap_or("");
+    // The plan counts as words too: the panel shows it, and a model whose first step selects the
+    // range ("select C2:C11") names the command in its plan ("Open Data Validation") rather than
+    // in a later step it has not reached yet.
     let said_it = !fx.instruction_any.is_empty()
-        && resp.steps.iter().any(|s| {
-            let i = normalize(&s.instruction);
-            fx.instruction_any.iter().any(|p| contains_phrase(&i, &normalize(p)))
-        });
+        && resp
+            .steps
+            .iter()
+            .map(|s| s.instruction.as_str())
+            .chain(resp.plan_outline.iter().map(String::as_str))
+            .any(|text| {
+                let t = normalize(text);
+                fx.instruction_any.iter().any(|p| contains_phrase(&t, &normalize(p)))
+            });
     if first.is_none() && fx.pass_if != PassIf::AvoidText && fx.pass_if != PassIf::NeedsInput {
         if said_it {
             return (Outcome::Pass, format!("right in words, no pointer: {first_instruction:?}"));
@@ -317,7 +417,46 @@ fn score(fx: &Fixture, resp: &NavigateStepResponse, w: u32, h: u32) -> (Outcome,
     let text_ok = text_matches(&text, &fx.target_text_any) && !text_matches(&text, &fx.target_text_none);
     let bbox_ok = matches!((fx.target_rect, centre), (Some(r), Some(c)) if inside(c, r));
     let centre_str = centre.map_or("none".to_string(), |(x, y)| format!("({x:.0},{y:.0})"));
-    let judge = |ok: bool| if ok { Outcome::Pass } else { Outcome::Wrong };
+    // Words never rescue a pointer aimed at a known-wrong target: the arrow is what the user
+    // follows. Found when "clear the filter" in a plan passed an arrow on the WRONG column's
+    // filter -- the user would click it and get nothing back.
+    let pointed_at_trap = text_matches(&text, &fx.target_text_none);
+    let judge = |ok: bool| if ok && !pointed_at_trap { Outcome::Pass } else { Outcome::Wrong };
+    if !fx.instruction_all.is_empty() {
+        let told: Vec<String> = resp
+            .steps
+            .iter()
+            .map(|s| s.instruction.as_str())
+            .chain(resp.plan_outline.iter().map(String::as_str))
+            .map(normalize)
+            .collect();
+        // An entry may list alternatives, "still|didn't|not bold": one of them is enough.
+        if let Some(missing) = fx.instruction_all.iter().find(|entry| {
+            !entry
+                .split('|')
+                .any(|p| told.iter().any(|t| contains_phrase(t, &normalize(p))))
+        }) {
+            return (Outcome::Wrong, format!("never said {missing:?}: {first_instruction:?}"));
+        }
+    }
+    if !fx.instruction_none.is_empty() {
+        let said = resp
+            .steps
+            .iter()
+            .map(|s| s.instruction.as_str())
+            .chain(resp.plan_outline.iter().map(String::as_str))
+            .map(normalize)
+            .find_map(|t| fx.instruction_none.iter().find(|p| contains_phrase(&t, &normalize(p))));
+        if let Some(p) = said {
+            return (Outcome::Wrong, format!("said {p:?}: {first_instruction:?}"));
+        }
+    }
+    if fx.instruction_script.as_deref() == Some("cjk") {
+        let chinese = resp.steps.iter().any(|s| s.instruction.chars().any(is_cjk));
+        if !chinese {
+            return (Outcome::Wrong, format!("instruction not in Chinese: {first_instruction:?}"));
+        }
+    }
     match fx.pass_if {
         PassIf::Text => (judge(text_ok || said_it), format!("target_text={text:?} said_it={said_it}")),
         PassIf::Bbox => (judge(bbox_ok || said_it), format!("bbox_centre={centre_str} said_it={said_it}")),
@@ -357,13 +496,39 @@ fn score(fx: &Fixture, resp: &NavigateStepResponse, w: u32, h: u32) -> (Outcome,
 /// function words. A heuristic and labelled as one -- it exists because one tier model
 /// answered English tasks in Spanish on its first run, and a flag in every result row is
 /// how that becomes a rate instead of an anecdote.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+}
+
+/// The instruction with quoted spans removed: a UI label quoted in its own language
+/// ("click “自动保存”") is rule 13 followed, not the reply drifting.
+fn unquoted(text: &str) -> String {
+    let mut out = String::new();
+    let mut close: Option<char> = None;
+    for c in text.chars() {
+        match close {
+            Some(end) if c == end => close = None,
+            Some(_) => {}
+            None => match c {
+                '"' => close = Some('"'),
+                '\u{201c}' => close = Some('\u{201d}'),
+                '\u{00ab}' => close = Some('\u{00bb}'),
+                '\u{300c}' => close = Some('\u{300d}'),
+                _ => out.push(c),
+            },
+        }
+    }
+    out
+}
+
 fn language_suspect(task: &str, resp: &NavigateStepResponse) -> bool {
     if !task.is_ascii() {
         return false;
     }
     const FOREIGN: &[&str] = &["el", "la", "los", "las", "una", "para", "y", "con", "del", "que", "haz", "presiona", "clique"];
     resp.steps.iter().any(|s| {
-        let i = s.instruction.as_str();
+        let plain = unquoted(&s.instruction);
+        let i = plain.as_str();
         if i.chars().any(|c| c.is_alphabetic() && !c.is_ascii()) {
             return true;
         }
@@ -437,6 +602,12 @@ fn rescore(rc: &RunConfig, path: &Path) {
     println!("[rescore] {} | {}", path.display(), tally.line());
 }
 
+/// H1 (rule 19 + use A) is on in `expect`. The `screen` / `expect_screen` result files of
+/// 2026-10-09 came from a switch that is gone: those rules are now the production prompt.
+fn h1_on(variant: &str) -> bool {
+    variant == "expect"
+}
+
 fn base_config(rc: &RunConfig) -> Config {
     let env_path = PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA"))
         .join("com.navisual.app")
@@ -450,6 +621,9 @@ fn base_config(rc: &RunConfig) -> Config {
         other => panic!("provider {other:?} is not a BYOK eval target (gemini | openai | anthropic)"),
     }
     config.reasoning_effort = rc.reasoning.clone();
+    // Set from the variant alone, never inherited from the .env: a hand-set EXPECTED_RESULT
+    // left on there would otherwise turn every "production" run into an H1 run, silently.
+    config.expected_result = h1_on(&rc.variant);
     config
 }
 
@@ -472,6 +646,83 @@ fn median(mut v: Vec<u128>) -> u128 {
     }
     v.sort_unstable();
     v[v.len() / 2]
+}
+
+/// The text an expectation says will appear: every span in straight or curly double quotes.
+/// `no visible change`, and an expectation that quotes nothing, give an empty list -- use B then
+/// has nothing to look for and must not act (harness-plan.md H1: fail safe).
+fn quoted_spans(expected: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = expected;
+    while let Some(open) = rest.find(['"', '\u{201C}']) {
+        let after = &rest[open + rest[open..].chars().next().map_or(1, char::len_utf8)..];
+        let Some(close) = after.find(['"', '\u{201D}']) else { break };
+        let span = after[..close].trim();
+        if !span.is_empty() {
+            out.push(span.to_string());
+        }
+        rest = &after[close + after[close..].chars().next().map_or(1, char::len_utf8)..];
+    }
+    out
+}
+
+/// Use B's local check on every S2 item, with no model call: OCR the after-screen with the
+/// locator's own engine and matcher, and look for the text the completed step's expectation
+/// quotes. Prints met / not met / nothing to check, by class. Measures the mechanism, so the
+/// expectations are turn 1's canned ones.
+#[test]
+#[ignore = "reads the S2 fixtures; run via tools/run-replay.ps1 -UseB"]
+fn use_b_local_check() {
+    println!();
+    let dir = PathBuf::from(std::env::var("NAVISUAL_EVAL_DIR").expect("NAVISUAL_EVAL_DIR"));
+    let root = dir.join(std::env::var("NAVISUAL_EVAL_BATTERY").unwrap_or_else(|_| "s2".into()));
+    let mut ids: Vec<PathBuf> = std::fs::read_dir(&root)
+        .expect("battery dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("item.json").is_file())
+        .collect();
+    ids.sort();
+    for d in ids {
+        let fx: Fixture =
+            serde_json::from_str(&std::fs::read_to_string(d.join("item.json")).unwrap()).unwrap();
+        let Some(c) = &fx.continuation else { continue };
+        let expected = c.turn1.steps[c.completed - 1].expected_result.clone().unwrap_or_default();
+        let spans = quoted_spans(&expected);
+        let (w, h) = image::image_dimensions(d.join(&fx.image)).expect("dims");
+        // Before and after, as H1c would: text already on screen before the step proves nothing
+        // about it (a label whose control changes state, a row that should disappear), so only a
+        // span absent before counts. Without a before-frame every span counts, as a bare check.
+        let ocr = |path: &Path| -> Vec<crate::locator::ocr::OcrResult> {
+            crate::locator::ocr::run_ocr(&std::fs::read(path).expect("png")).expect("ocr")
+        };
+        let opts = crate::locator::ocr::FindOptions { screen_width: w, screen_height: h, ..Default::default() };
+        let after = ocr(&d.join(&fx.image));
+        let before = d.join("before.png").is_file().then(|| ocr(&d.join("before.png")));
+        let seen = |t: &str, pool: &[crate::locator::ocr::OcrResult]| {
+            crate::locator::ocr::find_text(t, pool, &opts).winner.is_some()
+        };
+        let mut notes = Vec::new();
+        let (mut new_spans, mut new_found) = (0, 0);
+        for t in &spans {
+            let was = before.as_deref().is_some_and(|b| seen(t, b));
+            let is = seen(t, &after);
+            notes.push(format!("{t:?} {}->{}", if was { "on" } else { "off" }, if is { "on" } else { "off" }));
+            if !was {
+                new_spans += 1;
+                new_found += usize::from(is);
+            }
+        }
+        let verdict = if spans.is_empty() {
+            "nothing to check".to_string()
+        } else if new_spans == 0 {
+            format!("no evidence (all quoted text was already there) | {}", notes.join("; "))
+        } else if new_found == new_spans {
+            format!("MET | {}", notes.join("; "))
+        } else {
+            format!("not met | {}", notes.join("; "))
+        };
+        println!("[use-b] {:<9} {:<34} {verdict}", c.class, fx.id);
+    }
 }
 
 /// Run one battery against one provider/model. Configured entirely by environment
@@ -506,7 +757,7 @@ async fn replay_battery() {
         std::fs::create_dir_all(&dump).expect("dry-run dir");
         for (dir, fx) in &fixtures {
             let (b64, jpeg_len, w, h) = encode_fixture(&dir.join(&fx.image));
-            let prompt = fixture_prompt(fx, &rc.voice_language, &rc.variant);
+            let prompt = item_prompt(fx, &rc.voice_language, &rc.variant);
             std::fs::write(dump.join(format!("{}.prompt.txt", fx.id)), &prompt).expect("prompt dump");
             {
                 use base64::Engine;
@@ -544,7 +795,8 @@ async fn replay_battery() {
                 break 'outer;
             }
             let (b64, jpeg_len, w, h) = encode_fixture(&dir.join(&fx.image));
-            let prompt = fixture_prompt(fx, &rc.voice_language, &rc.variant);
+            let prompt = item_prompt(fx, &rc.voice_language, &rc.variant);
+            prime_session(&mut router, fx);
 
             let started = Instant::now();
             let mut first_token: Option<Instant> = None;
@@ -573,6 +825,7 @@ async fn replay_battery() {
                 "png": [w, h],
                 "jpeg_bytes": jpeg_len,
                 "prompt_chars": prompt.chars().count(),
+                "class": fx.continuation.as_ref().map(|c| c.class.clone()),
                 "ttft_ms": ttft_ms,
                 "total_ms": total_ms,
             });
@@ -606,6 +859,11 @@ async fn replay_battery() {
                         d.output,
                         d.reasoning
                     );
+                    for (i, step) in resp.steps.iter().enumerate() {
+                        if let Some(e) = &step.expected_result {
+                            println!("[eval] {:<28} step {} expects: {e}", "", i + 1);
+                        }
+                    }
                     row["outcome"] = serde_json::json!(outcome);
                     row["language_suspect"] = serde_json::json!(lang);
                     row["why"] = serde_json::json!(why);
@@ -616,8 +874,10 @@ async fn replay_battery() {
                     row["response"] = serde_json::to_value(&resp).unwrap_or_default();
                 }
                 Err(e) => {
-                    println!("[eval] {:<28} ERROR | {e}", fx.id);
-                    row["error"] = serde_json::json!(e.to_string());
+                    // The whole chain: reqwest's top line is "error sending request for url",
+                    // and what actually failed (a timeout, a reset, DNS) is only in the sources.
+                    println!("[eval] {:<28} ERROR after {total_ms} ms | {e:#}", fx.id);
+                    row["error"] = serde_json::json!(format!("{e:#}"));
                     // An empty balance or a bad key fails every call after it the same way;
                     // carrying on only fills the results file with copies of one error.
                     let msg = e.to_string();
@@ -672,7 +932,82 @@ mod tests {
             avoid_rect: Some([500, 500, 600, 600]),
             avoid_first_only: false,
             instruction_any: vec![],
+            instruction_script: None,
+            instruction_all: vec![],
+            instruction_none: vec![],
+            continuation: None,
         }
+    }
+
+    // The two halves of a recovery, from the S2 pilot's own answers.
+    #[test]
+    fn noticing_without_recovering_and_recovering_without_noticing_both_fail() {
+        let mut f = fx(PassIf::TextOrBbox);
+        f.target_text_any = vec!["undo".into()];
+        f.target_text_none = vec!["vendor contract".into()];
+        f.instruction_any = vec!["undo".into()];
+        f.instruction_all = vec!["undo".into(), "hiring loop".into()];
+        // terra: misread the list, pointed at Undo, said "undo" in passing.
+        let terra = resp(r#"{"steps":[{"instruction":"The note has been deleted. Leave the confirmation as is unless you want to undo it.","target_text":"Undo"}]}"#);
+        assert_eq!(score(&f, &terra, 1000, 1000).0, Outcome::Wrong);
+        // luna: saw the wrong deletion, carried on without restoring it.
+        let luna = resp(r#"{"steps":[{"instruction":"The wrong note, \"Hiring loop\", was deleted. Hover over \"Vendor contract\" and click its trash icon.","target_text":"Vendor contract"}]}"#);
+        assert_eq!(score(&f, &luna, 1000, 1000).0, Outcome::Wrong);
+        let right = resp(r#"{"steps":[{"instruction":"That deleted \"Hiring loop\" by mistake. Click Undo to bring it back.","target_text":"Undo"}]}"#);
+        assert_eq!(score(&f, &right, 1000, 1000).0, Outcome::Pass);
+    }
+
+    #[test]
+    fn instruction_all_takes_alternatives_and_instruction_none_vetoes() {
+        let mut f = fx(PassIf::AvoidText);
+        f.instruction_all = vec!["still|not bold".into()];
+        let ack = resp(r#"{"steps":[{"instruction":"It is still not bold. Press Ctrl+B again."}]}"#);
+        assert_eq!(score(&f, &ack, 1000, 1000).0, Outcome::Pass);
+        let silent = resp(r#"{"steps":[{"instruction":"Press Ctrl+B."}]}"#);
+        assert_eq!(score(&f, &silent, 1000, 1000).0, Outcome::Wrong);
+        let mut g = fx(PassIf::AvoidText);
+        g.instruction_none = vec!["ctrl+b".into()];
+        let done = resp(r#"{"steps":[{"instruction":"The paragraph is bold now. You're done."}]}"#);
+        assert_eq!(score(&g, &done, 1000, 1000).0, Outcome::Pass);
+        let toggles = resp(r#"{"steps":[{"instruction":"Press Ctrl+B to make it bold."}]}"#);
+        assert_eq!(score(&g, &toggles, 1000, 1000).0, Outcome::Wrong);
+    }
+
+    #[test]
+    fn use_b_looks_only_for_quoted_text() {
+        assert_eq!(quoted_spans("The \"Page Number\" menu opens."), vec!["Page Number"]);
+        assert_eq!(
+            quoted_spans("The \u{201C}Settings\u{201D} dialog opens, with an \"Autosave\" switch."),
+            vec!["Settings", "Autosave"]
+        );
+        assert!(quoted_spans("no visible change").is_empty());
+        assert!(quoted_spans("The menu opens.").is_empty());
+    }
+
+    // S2: turn 2 goes out the way `guide` sends it, and the expectation rides along only in
+    // the H1 arm -- the canned turn 1 carries one in both, as a model with H1 on would have.
+    #[test]
+    fn a_continuation_item_replays_turn_two() {
+        let mut f = fx(PassIf::Text);
+        f.task = "Export this note as a PDF.".into();
+        f.continuation = Some(serde_json::from_value(serde_json::json!({
+            "class": "correct",
+            "turn1": {
+                "steps": [{"instruction": "Click File in the menu bar.", "target_text": "File",
+                           "expected_result": "The File menu opens, showing \"Export\"."}],
+                "state_summary": "GOAL: export as PDF. DONE: nothing yet.",
+                "needs_input": false
+            },
+            "completed": 1,
+            "click": ["MenuItem", "File"]
+        })).unwrap());
+        let c = f.continuation.clone().unwrap();
+        let off = continuation_prompt(&f, &c, "auto", "");
+        assert!(off.starts_with("[User completed: \"Click File in the menu bar.\"] The previous state summary: GOAL: export as PDF."));
+        assert!(off.contains("[Last user action] The user clicked MenuItem \"File\"."));
+        assert!(!off.contains("Expected after that step"));
+        let on = continuation_prompt(&f, &c, "auto", "expect");
+        assert!(on.contains("[Expected after that step: The File menu opens, showing \"Export\".]"));
     }
 
     fn resp(json: &str) -> NavigateStepResponse {
@@ -729,6 +1064,28 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_counts_as_the_answer_in_words() {
+        let mut f = fx(PassIf::TextOrBbox);
+        f.instruction_any = vec!["data validation".into()];
+        let r = resp(
+            r#"{"steps":[{"instruction":"Select C2:C11 first.","target_text":"Name Box"}],
+                "plan_outline":["Select the Status cells","Open Data Validation","Confirm"]}"#,
+        );
+        assert_eq!(score(&f, &r, 1000, 1000).0, Outcome::Pass);
+    }
+
+    #[test]
+    fn right_words_do_not_rescue_a_pointer_at_a_known_wrong_target() {
+        let mut f = fx(PassIf::TextOrBbox);
+        f.instruction_any = vec!["clear the filter".into()];
+        // target_text_none holds "Q2 forecast (draft 2)" -- the look-alike.
+        let r = resp(
+            r#"{"steps":[{"instruction":"Clear the filter here.","target_text":"Q2 forecast (draft 2)"}]}"#,
+        );
+        assert_eq!(score(&f, &r, 1000, 1000).0, Outcome::Wrong);
+    }
+
+    #[test]
     fn a_trap_by_order_only_fails_as_the_first_step() {
         let mut f = fx(PassIf::AvoidText);
         f.avoid_first_only = true;
@@ -747,6 +1104,25 @@ mod tests {
         // What luna actually returned for "Zoom out a little": a shortcut and a zero box.
         let shortcut = resp(r#"{"steps":[{"instruction":"Press Ctrl and minus","target_bbox":[0,0,0,0]}]}"#);
         assert_eq!(score(&f, &shortcut, 1000, 1000).0, Outcome::NoTarget);
+    }
+
+    #[test]
+    fn a_chinese_request_needs_a_chinese_answer() {
+        let mut f = fx(PassIf::Text);
+        f.target_text_any = vec!["Export".into()];
+        f.instruction_script = Some("cjk".into());
+        let zh = resp(r#"{"steps":[{"instruction":"点击工具栏上的“Export”按钮。","target_text":"Export"}]}"#);
+        let en = resp(r#"{"steps":[{"instruction":"Click Export on the toolbar.","target_text":"Export"}]}"#);
+        assert_eq!(score(&f, &zh, 1000, 1000).0, Outcome::Pass);
+        assert_eq!(score(&f, &en, 1000, 1000).0, Outcome::Wrong);
+    }
+
+    #[test]
+    fn quoting_a_chinese_label_is_not_drift() {
+        let quoted = resp(r#"{"steps":[{"instruction":"Click the switch next to “自动保存” to turn it on."}]}"#);
+        let drifted = resp(r#"{"steps":[{"instruction":"点击自动保存旁边的开关。"}]}"#);
+        assert!(!language_suspect("Turn on autosave.", &quoted));
+        assert!(language_suspect("Turn on autosave.", &drifted));
     }
 
     #[test]
