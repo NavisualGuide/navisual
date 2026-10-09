@@ -15,15 +15,23 @@ actions — the user does everything.
    as checkpoint=true so the system waits for the user to complete it before
    calling you again.
 2. If the screen shows the user completed the step, acknowledge and advance. If
-   the screen shows something unexpected, describe what you see and suggest how
-   to recover.
-3. TRUST CONFIRMATIONS; NEVER REPEAT: if the user says they completed a step
-   ("done", "yes", "I did it", "ok"), TRUST them and advance — many actions
-   (placing a cursor, focusing a field, selecting text) leave no visible trace
-   in a screenshot. If you are about to give the exact same instruction as the
-   immediately preceding step, STOP: either (a) advance assuming the action
-   succeeded, or (b) ask a short yes/no question ("Did you click at the end of
-   that line?"). NEVER issue the identical instruction twice in a row.
+   the step did something other than intended — the wrong formatting, text typed
+   into the wrong place, the wrong item opened, changed or deleted — say plainly
+   what happened, and make your FIRST step undo it (Ctrl+Z or the Undo button;
+   Esc for a wrong menu or dialog; the same button again for wrong formatting).
+   Only then retry the original step. Never build on top of an unintended change.
+3. TRUST CONFIRMATIONS FOR WHAT LEAVES NO TRACE; NEVER REPEAT: if the user says
+   they completed a step ("done", "yes", "I did it", "ok"), TRUST them and
+   advance when the action leaves no visible trace (placing a cursor, focusing a
+   field, selecting text, copying). But when the step should have changed
+   something you can see — a button turning on, a word appearing in the status
+   bar, text turning bold, a name changing — look for that change first. If it
+   is not there, the screen outranks the confirmation: say it did not take
+   effect, and give a different way to do it than the one that just failed. If
+   you are about to give the exact same instruction as the immediately
+   preceding step, STOP: either (a) advance assuming the action succeeded, or
+   (b) ask a short yes/no question ("Did you click at the end of that line?").
+   NEVER issue the identical instruction twice in a row.
 4. If you need clarification, set needs_input=true and ask a short question in
    the instruction field.
 
@@ -550,6 +558,21 @@ language than the conversation."
 
 #[cfg(test)]
 mod tests {
+    // Rules 2-3, rewritten 2026-10-09 (harness-plan.md §10): the screen outranks a reported
+    // completion, and an unintended change is undone first. An earlier draft of rule 3 gave an
+    // example route -- "the menu instead of the button" -- and one model then skipped a
+    // highlighted toolbar button for the Format menu on an unrelated task. Keep routes unnamed.
+    #[test]
+    fn rules_2_and_3_put_the_screen_first_and_name_no_route() {
+        let p = super::SYSTEM_PROMPT;
+        assert!(p.contains("is not there, the screen outranks the confirmation"));
+        assert!(p.contains("make your FIRST step undo it"));
+        assert!(p.contains("selecting text, copying"));
+        assert!(p.contains("NEVER issue the identical instruction twice in a row"));
+        assert!(!p.contains("TRUST CONFIRMATIONS; NEVER REPEAT"));
+        assert!(!p.contains("instead of the button") && !p.contains("instead of the shortcut"));
+    }
+
     use super::{elements_context_block, pack_context_block};
 
     // The line once carried three runs of ten spaces mid-sentence -- the mark of a string
