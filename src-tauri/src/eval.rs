@@ -167,7 +167,7 @@ impl RunConfig {
         );
         let battery = env_or("NAVISUAL_EVAL_BATTERY", "s1");
         let provider = env_or("NAVISUAL_EVAL_PROVIDER", "gemini");
-        let model = env_or("NAVISUAL_EVAL_MODEL", "gemini-3.7-flash");
+        let model = env_or("NAVISUAL_EVAL_MODEL", "gemini-3.8-flash");
         // Unset = no reasoning field at all, which is what the managed tiers send
         // (settings.md: the tiers do not read REASONING_EFFORT).
         let reasoning = std::env::var("NAVISUAL_EVAL_REASONING")

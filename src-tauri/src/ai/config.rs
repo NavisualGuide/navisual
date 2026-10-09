@@ -242,7 +242,7 @@ impl Default for Config {
             anthropic_model: "claude-sonnet-5".to_string(),
             anthropic_fast_model: "claude-haiku-4-5-20251001".to_string(),
             gemini_api_key: None,
-            gemini_model: "gemini-3.7-flash".to_string(),
+            gemini_model: "gemini-3.8-flash".to_string(),
             gemini_fast_model: "gemini-2.5-flash-lite".to_string(),
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "llama3.2-vision".to_string(),

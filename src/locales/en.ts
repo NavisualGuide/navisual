@@ -451,7 +451,6 @@ export const en = {
   "pv.qRecommendedTextOnly": "(recommended, text-only)",
   "pv.qBestTextOnly": "(best quality, text-only)",
   "pv.qVisionExp": "(experimental, sees the screen)",
-  "pv.qNewest": "(newest \u2014 untested here)",
   "pv.qMultimodal": "(multimodal)",
   "pv.qCheapVision": "(fast, cheapest vision pick)",
 

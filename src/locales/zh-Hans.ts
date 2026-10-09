@@ -433,7 +433,6 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "pv.qRecommendedTextOnly": "（推荐，纯文本）",
   "pv.qBestTextOnly": "（质量最好，纯文本）",
   "pv.qVisionExp": "（实验性，能看屏幕）",
-  "pv.qNewest": "（最新 —— 这里还没测过）",
   "pv.qMultimodal": "（多模态）",
   "pv.qCheapVision": "（快，最便宜的视觉选择）",
 

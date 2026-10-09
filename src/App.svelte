@@ -1141,11 +1141,14 @@ See the LICENSE file in the root of this repository for complete details.
   let settingsSaving = $state(false);
   let settingsError = $state<string | null>(null);
   let settingsSaved = $state(false);
-  const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-4-6","claude-opus-4-7"];
-  const MODEL_PRESETS_GEMINI    = ["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-3.5-flash","gemini-3.1-pro-preview"];
-  const MODEL_PRESETS_OPENAI    = ["gpt-5.5","gpt-5.4-mini"];
+  // Each list must name exactly the <option>s of that provider's model dropdown below: a model
+  // missing here is shown as "Custom" with a text box. By 2026-10-09 four of the five had
+  // drifted, so every provider's default model opened as Custom.
+  const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-5","claude-opus-5"];
+  const MODEL_PRESETS_GEMINI    = ["gemini-3.8-flash","gemini-2.5-flash-lite","gemini-3.1-pro-preview","gemini-2.5-flash"];
+  const MODEL_PRESETS_OPENAI    = ["gpt-5.6-terra","gpt-5.6-luna","gpt-5.6-sol"];
   const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp"];
-  const MODEL_PRESETS_QWEN      = ["qwen3.6-plus","qwen3.5-omni-plus"];
+  const MODEL_PRESETS_QWEN      = ["qwen3.8-max","qwen3.7-flash","qwen3.5-omni-plus"];
   // Qwen DashScope OpenAI-compatible endpoints by region. Picking a region in the
   // Settings "Endpoint" dropdown auto-fills qwen_base_url; "Custom" reveals a free
   // field for local servers (LM Studio / llama.cpp) and workspace URLs (e.g. HK ws-xxx…).
@@ -5279,14 +5282,11 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="gemini-model" class="setting-select"
                   value={customGemini ? "__custom__" : settingsForm.gemini_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customGemini = false; settingsForm.gemini_model = v; } else { customGemini = true; settingsForm.gemini_model = ""; } }}>
-                  <option value="gemini-3.7-flash">gemini-3.7-flash {t("pv.qRecommended")}</option>
-                  <!-- 3.8 is listed but NOT the default. It is newer and the family
-                       prior is strong, but 3.7 is the one with measured grounding
-                       here (100% bbox, 92% hit, median 1px — model-comparison.md),
-                       and 3.8's model card says thinking cannot be set below "low",
-                       which is the shape that broke forced tool calls on OpenAI's
-                       reasoning models. Promote it once it has its own numbers. -->
-                  <option value="gemini-3.8-flash">gemini-3.8-flash {t("pv.qNewest")}</option>
+                  <!-- 3.7 is gone: Google retired it on 2026-10-09 and redirects every request
+                       naming it to 3.8, which has carried forced tool calls fine since
+                       (native API and the relay's OpenAI-compatible path, with and
+                       without thinking at "low"). -->
+                  <option value="gemini-3.8-flash">gemini-3.8-flash {t("pv.qRecommended")}</option>
                   <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite {t("pv.qFast")}</option>
                   <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview {t("pv.qBest")}</option>
                   <option value="gemini-2.5-flash">gemini-2.5-flash</option>
@@ -5294,7 +5294,7 @@ See the LICENSE file in the root of this repository for complete details.
                 </select>
                 {#if customGemini}
                   <input class="setting-input" type="text" bind:value={settingsForm.gemini_model}
-                    placeholder="e.g. gemini-3.7-flash" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. gemini-3.8-flash" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
 
