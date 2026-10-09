@@ -10,6 +10,7 @@ use crate::ai::deepseek::{
 use crate::ai::gemini::{build_messages as build_gemini, GeminiClient};
 use crate::ai::managed::{build_messages as build_managed, ManagedClient};
 use crate::ai::ollama::{build_messages as build_ollama, OllamaClient};
+use crate::ai::redact;
 use crate::ai::session::SessionManager;
 use crate::ai::types::{NavigateStepResponse, Role, UsageDetail};
 
@@ -425,18 +426,19 @@ impl AiRouter {
         // previous call's split for `take_client_usage` to return.
         let _ = self.take_client_usage();
 
+        // No request URL reaches the screen through an error (redact.rs).
         let result = match &mut self.client {
             Some(ApiClient::Anthropic(c)) => {
                 let msgs = build_anthropic(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, None, &mut on_chunk).await?
+                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::Gemini(c)) => {
                 let msgs = build_gemini(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, None, &mut on_chunk).await?
+                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::Ollama(c)) => {
                 let msgs = build_ollama(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, None, &mut on_chunk).await?
+                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::DeepSeek(c)) => {
                 // CONFIRMED 2026-05-24 (reconfirmed 2026-07-09): api.deepseek.com rejects
@@ -452,18 +454,18 @@ impl AiRouter {
                 } else {
                     build_deepseek(user_text, screenshot_b64, state_summary, &conversation)
                 };
-                c.send_message(msgs, None, &mut on_chunk).await?
+                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::OpenAI(c)) | Some(ApiClient::Qwen(c)) | Some(ApiClient::Custom(c)) => {
                 // OpenAI (api.openai.com) and Qwen (DashScope) are both OpenAI-compat
                 // vision endpoints — they accept image_url and need the screenshot.
                 let msgs = build_openai(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, None, &mut on_chunk).await?
+                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             Some(ApiClient::Managed(c)) => {
-                c.ensure_token().await?;
+                c.ensure_token().await.map_err(redact::request_urls)?;
                 let msgs = build_managed(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, &mut on_chunk).await?
+                c.send_message(msgs, &mut on_chunk).await.map_err(redact::request_urls)?
             }
             None => {
                 bail!(

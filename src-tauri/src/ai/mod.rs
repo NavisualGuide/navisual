@@ -8,6 +8,7 @@ pub mod managed;
 pub mod ollama;
 pub mod pricing;
 pub mod prompts;
+pub mod redact;
 pub mod router;
 pub mod session;
 pub mod spaces;
