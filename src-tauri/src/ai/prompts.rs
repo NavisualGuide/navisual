@@ -164,8 +164,11 @@ actions — the user does everything.
     truncated away, so anything you leave out is gone for good. Rewrite it in
     full each turn, carrying: the user's GOAL in their own words (keep it
     verbatim until they change it), any CONSTRAINTS they stated ("not the
-    title page"), what is DONE so far, and anything TRIED THAT FAILED so you
-    do not propose it again. Never assume an earlier turn is still visible.
+    title page"), what is DONE so far, anything TRIED THAT FAILED so you
+    do not propose it again, and anything you have SEEN on an earlier
+    screen that the user may still need once it is gone, copied exactly --
+    you will not see that screen again. Never assume an earlier turn is
+    still visible.
     Not shown to the user.
 17. SUGGESTED NEXT TASKS: when the current task looks complete, or no task is
     stated yet, you MAY set suggested_tasks (top-level, next to state_summary)
@@ -215,38 +218,28 @@ const EXPECTED_RESULT_FIELD: &str = "What the screen will show right after the u
 /// The same, as a line in a prompted-JSON field list (DeepSeek, Qwen, Ollama, custom).
 const EXPECTED_RESULT_FIELD_LINE: &str = "- expected_result: one short sentence - what the screen will show right after this step, with any newly appearing text in double quotes exactly as displayed; exactly \"no visible change\" when the step changes nothing visible (required)";
 
-// ---- S3 ablation: what the screen showed (navisual-internal docs/harness-plan.md S3) ------------
+// ---- Rule 16's schema twin ------------------------------------------------------------------
 //
-// The first S3 run (2026-10-10) found rule 16's four slots hold the task, not the screen: luna and
-// flash rewrote DONE from the current screenshot every turn, so a code in a dialog the user closed
-// was gone from the summary one turn later. Test builds only -- the replay harness sets the
-// switch, and the app's prompt cannot change through it.
-
-#[cfg(test)]
-pub static REMEMBER_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(test)]
-const RULE16_FAILED: &str = "anything TRIED THAT FAILED so you\n    do not propose it again.";
-#[cfg(test)]
-const RULE16_SEEN: &str = "anything TRIED THAT FAILED so you\n    do not propose it again, and anything you have SEEN on an earlier\n    screen that the user may still need once it is gone, copied exactly --\n    you will not see that screen again.";
-
-fn base_prompt() -> std::borrow::Cow<'static, str> {
-    #[cfg(test)]
-    if REMEMBER_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
-        return std::borrow::Cow::Owned(SYSTEM_PROMPT.replacen(RULE16_FAILED, RULE16_SEEN, 1));
-    }
-    std::borrow::Cow::Borrowed(SYSTEM_PROMPT)
-}
+// The description of `state_summary` in the navigate_step schema says what rule 16 says. It was
+// three identical literals (Anthropic, Gemini, managed -- which OpenAI also uses) until rule 16
+// gained its fifth slot on 2026-10-10: S3 found the summary kept what the user DID and never what
+// the screen SHOWED, because no slot asked for it (harness-plan.md). One constant now, so the
+// copies cannot disagree; the two prompted-JSON field lines are pinned by a test instead.
+pub const STATE_SUMMARY_FIELD: &str = "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, anything TRIED THAT FAILED, and anything you have SEEN on an earlier screen that the user may still need once it is gone, copied exactly. Never assume an earlier turn is still visible.";
 
 /// The system prompt, carrying rule 19 when H1 is on.
 pub fn system_prompt(expected_result: bool) -> std::borrow::Cow<'static, str> {
-    let base = base_prompt();
     if !expected_result {
-        return base;
+        return std::borrow::Cow::Borrowed(SYSTEM_PROMPT);
     }
     // Asserted by `h1_system_prompt_gets_rule_19_before_the_tail`.
-    let at = base.rfind(PROMPT_TAIL).unwrap_or(base.len());
-    std::borrow::Cow::Owned(format!("{}\n{}{}", &base[..at], EXPECTED_RESULT_RULE, &base[at..]))
+    let at = SYSTEM_PROMPT.rfind(PROMPT_TAIL).unwrap_or(SYSTEM_PROMPT.len());
+    std::borrow::Cow::Owned(format!(
+        "{}\n{}{}",
+        &SYSTEM_PROMPT[..at],
+        EXPECTED_RESULT_RULE,
+        &SYSTEM_PROMPT[at..]
+    ))
 }
 
 /// A prompted-JSON format instruction, with the `expected_result` line added after the
@@ -687,7 +680,16 @@ mod tests {
     fn the_model_gets_the_window_title_and_no_frame() {
         assert_eq!(crate::capture::format_window_prompt_info("Book1 - Excel"), "Title: 'Book1 - Excel'");
         assert!(!super::SYSTEM_PROMPT.contains("Title and Class"));
-        assert_eq!(super::SYSTEM_PROMPT.matches(super::RULE16_FAILED).count(), 1, "the S3 ablation's anchor");
+        // Rule 16's fifth slot, in the rule and in every field description that restates it.
+        let seen = "anything you have SEEN on an earlier";
+        assert!(super::SYSTEM_PROMPT.contains(seen), "rule 16");
+        assert!(super::STATE_SUMMARY_FIELD.contains("anything you have SEEN on an earlier screen"));
+        for (who, format) in [
+            ("deepseek", crate::ai::deepseek::JSON_FORMAT_INSTRUCTION),
+            ("ollama", crate::ai::ollama::JSON_FORMAT_INSTRUCTION),
+        ] {
+            assert!(format.contains("anything you have SEEN on an earlier screen"), "{who}'s field line");
+        }
     }
 
     #[test]

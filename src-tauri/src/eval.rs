@@ -190,10 +190,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "remember"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both, remember)"
+             inspect_first, read_text, read_text_first, look_both)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -852,9 +852,6 @@ async fn replay_battery() {
         rescore(&rc, &path);
         return;
     }
-    // S3's rule-16 ablation on single screens too: a rule change is measured on turn 1 as well
-    // as on the turns it is about (rule 21).
-    crate::ai::prompts::REMEMBER_SEEN.store(rc.variant == "remember", std::sync::atomic::Ordering::Relaxed);
     let fixtures = load_fixtures(&rc);
     assert!(!fixtures.is_empty(), "no fixtures under {}", rc.dir.join(&rc.battery).display());
     println!(
@@ -1209,9 +1206,8 @@ fn probe_outcome(resp: &NavigateStepResponse, sx: &SessionFixture) -> &'static s
 async fn replay_sessions() {
     println!();
     let rc = RunConfig::from_env();
-    // `remember`: rule 16 with a slot for what an earlier screen showed (prompts::REMEMBER_SEEN).
-    assert!(rc.variant.is_empty() || rc.variant == "remember", "S3 variants: none, or remember");
-    crate::ai::prompts::REMEMBER_SEEN.store(rc.variant == "remember", std::sync::atomic::Ordering::Relaxed);
+    // The 2026-10-10 `remember` ablation is rule 16 now; results tagged `remember` are that rule.
+    assert!(rc.variant.is_empty(), "S3 runs the app's prompt; no variant");
     let window: usize = env_or("NAVISUAL_EVAL_WINDOW", "0").parse().unwrap_or(0);
     let sessions = load_sessions(&rc);
     assert!(!sessions.is_empty(), "no sessions under {}", rc.dir.join(&rc.battery).display());

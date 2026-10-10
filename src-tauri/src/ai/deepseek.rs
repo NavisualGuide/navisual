@@ -10,7 +10,7 @@ use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role, UsageD
 
 /// Same schema instruction as Ollama — DeepSeek doesn't support function-calling
 /// for vision models, so we use prompt engineering + response_format:json_object.
-const JSON_FORMAT_INSTRUCTION: &str = r#"
+pub(crate) const JSON_FORMAT_INSTRUCTION: &str = r#"
 
 IMPORTANT: Respond ONLY with a single valid JSON object — no markdown, no explanation. The top-level object has exactly three keys: "steps", "state_summary", "needs_input".
 
@@ -40,7 +40,7 @@ Step fields (inside "steps" array only):
 
 Top-level fields (outside "steps", required):
 - goal: the user's overall objective, carried across turns. MERGE later detail into it rather than replacing it ('centre them at the bottom' refines the goal, it is not a new goal); replace it outright only on a genuine task switch; omit to leave it unchanged
-- state_summary: your ONLY memory between turns (earlier turns are truncated away). Rewrite it in full each turn carrying the user's GOAL in their own words, any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED
+- state_summary: your ONLY memory between turns (earlier turns are truncated away). Rewrite it in full each turn carrying the user's GOAL in their own words, any CONSTRAINTS they stated, what is DONE, anything TRIED THAT FAILED, and anything you have SEEN on an earlier screen that the user may still need once it is gone, copied exactly
 - needs_input: true only if you must ask the user a question before continuing
 
 Optional top-level fields:
