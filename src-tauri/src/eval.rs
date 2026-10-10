@@ -80,6 +80,12 @@ struct Fixture {
     /// file next to `image`. The `ui_tree` variant offers it; every other run ignores it.
     #[serde(default)]
     ui_snapshot: Option<String>,
+    /// With `avoid_text`: the answer must also say why the trap is wrong (`instruction_any`), and a
+    /// step that points at the trap while saying so is not taking it -- "Paste is disabled because
+    /// nothing is copied" with the pointer on the greyed button is the right answer, and "press
+    /// Ctrl+V to paste" with no pointer is not. Off by default, so older batteries grade as they did.
+    #[serde(default)]
+    say_why: bool,
     pass_if: PassIf,
     #[serde(default)]
     target_text_any: Vec<String>,
@@ -479,14 +485,23 @@ fn score(fx: &Fixture, resp: &NavigateStepResponse, w: u32, h: u32) -> (Outcome,
             } else {
                 resp.steps.iter().collect()
             };
+            let explains = |s: &crate::ai::types::GuidanceStep| {
+                let t = normalize(&s.instruction);
+                fx.instruction_any.iter().any(|p| contains_phrase(&t, &normalize(p)))
+            };
             let trap = considered.into_iter().find(|s| {
-                s.target_text
+                let points = s
+                    .target_text
                     .as_deref()
                     .is_some_and(|t| text_matches(t, &fx.target_text_none))
-                    || matches!((fx.avoid_rect, real_bbox(s.target_bbox)), (Some(r), Some(b)) if inside(bbox_centre(b, w, h), r))
+                    || matches!((fx.avoid_rect, real_bbox(s.target_bbox)), (Some(r), Some(b)) if inside(bbox_centre(b, w, h), r));
+                points && !(fx.say_why && explains(s))
             });
             match trap {
                 Some(s) => (Outcome::Wrong, format!("instructed the trap: {:?}", s.instruction)),
+                None if fx.say_why && !said_it => {
+                    (Outcome::Wrong, format!("never said why: {first_instruction:?}"))
+                }
                 None => (
                     Outcome::Pass,
                     format!("avoided the trap; first instruction: {first_instruction:?}"),
@@ -1580,6 +1595,7 @@ mod tests {
             image: "x.png".into(),
             elements_block: None,
             ui_snapshot: None,
+            say_why: false,
             pass_if,
             target_text_any: vec!["Q3 forecast (draft 2)".into()],
             target_text_none: vec!["Q2 forecast (draft 2)".into()],
