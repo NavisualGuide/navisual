@@ -190,10 +190,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "earlier_list"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both)"
+             inspect_first, read_text, read_text_first, look_both, recall, earlier_list)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -1105,6 +1105,8 @@ fn load_sessions(rc: &RunConfig) -> Vec<(PathBuf, SessionFixture)> {
 
 /// The prompt and the summary argument `guide` would send for turn `k` of a typed session: turn 1
 /// is a new task, every later turn a typed reply (the panel is guiding, so `isReply`).
+/// `earlier` is H6's list of earlier screens (`inspect::recall_index`), empty without it; it rides
+/// at the end of the window context, so it is never stored in history and the anchors stay last.
 fn session_prompt(
     k: usize,
     text: &str,
@@ -1112,8 +1114,9 @@ fn session_prompt(
     original_task: &str,
     sample: Option<&str>,
     voice_language: &str,
+    earlier: &str,
 ) -> String {
-    let window_context = crate::window_context_text(
+    let mut window_context = crate::window_context_text(
         Some(&capture::format_window_prompt_info(title)),
         "",
         "",
@@ -1121,6 +1124,9 @@ fn session_prompt(
         None,
         None,
     );
+    if !earlier.is_empty() {
+        window_context = format!("{window_context}\n{earlier}");
+    }
     if k == 1 {
         crate::compose_turn1_prompt(text, &window_context, sample, voice_language)
     } else {
@@ -1207,7 +1213,15 @@ async fn replay_sessions() {
     println!();
     let rc = RunConfig::from_env();
     // The 2026-10-10 `remember` ablation is rule 16 now; results tagged `remember` are that rule.
-    assert!(rc.variant.is_empty(), "S3 runs the app's prompt; no variant");
+    // `recall`: H6, every earlier screen of the session offered to `recall` on every turn.
+    // `earlier_list`: the list of earlier screens (turn, title, words) without the tool -- the
+    // first H6 run answered the rename and the deleted note from the titles in that list alone.
+    assert!(
+        ["", "recall", "earlier_list"].contains(&rc.variant.as_str()),
+        "S3 variants: none, recall, earlier_list"
+    );
+    let list_on = rc.variant == "recall" || rc.variant == "earlier_list";
+    let recall_on = rc.variant == "recall";
     let window: usize = env_or("NAVISUAL_EVAL_WINDOW", "0").parse().unwrap_or(0);
     let sessions = load_sessions(&rc);
     assert!(!sessions.is_empty(), "no sessions under {}", rc.dir.join(&rc.battery).display());
@@ -1252,6 +1266,9 @@ async fn replay_sessions() {
             let mut summary = String::new();
             let mut sample: Option<String> = None;
             let mut trace = String::new();
+            // H6: every main turn's screen as it was sent, and the list naming them.
+            let mut earlier: Vec<crate::ai::inspect::EarlierScreen> = Vec::new();
+            let mut index: Vec<(usize, String, String)> = Vec::new();
             for k in 1..=last_main + 1 {
                 if spent >= rc.max_usd {
                     println!("[s3] STOP: spent ${spent:.4} reached the ${:.2} cap", rc.max_usd);
@@ -1266,19 +1283,24 @@ async fn replay_sessions() {
                     } else {
                         sample.clone()
                     };
-                    let prompt = session_prompt(k, &p.text, &p.title, &original, probe_sample.as_deref(), &rc.voice_language);
+                    let list = if list_on { crate::ai::inspect::recall_index(&index) } else { String::new() };
+                    let prompt = session_prompt(k, &p.text, &p.title, &original, probe_sample.as_deref(), &rc.voice_language, &list);
                     let (b64, _, _, _) = encode_fixture(&dir.join(&p.image));
                     router.inspect_frame = None;
+                    router.recall_screens = (recall_on && !earlier.is_empty()).then(|| std::sync::Arc::new(earlier.clone()));
                     let started = Instant::now();
                     let result = router.send_guidance_request(&prompt, Some(&b64), Some(&summary), |_, _| {}).await;
                     let total_ms = started.elapsed().as_millis();
                     let detail = router.take_client_usage();
+                    let looks = router.take_inspects();
                     let (bill_in, bill_out) = router.get_last_usage();
                     let usd = crate::ai::pricing::estimate_cost(&rc.provider, &rc.model, bill_in, bill_out).unwrap_or(0.0);
                     spent += usd;
+                    let recalled_turns: Vec<usize> = looks.iter().filter_map(|l| l.turn).collect();
                     let mut row = serde_json::json!({
                         "run_id": run_id, "rep": rep, "session": sx.id, "kind": sx.kind,
                         "battery": rc.battery, "provider": rc.provider, "model": rc.model,
+                        "variant": rc.variant, "looks": looks,
                         "window": router.conversation_exchanges, "turn": k, "role": "probe",
                         "distance": p.distance, "text": p.text, "fact": sx.fact, "summary_in": summary,
                         "total_ms": total_ms, "usage": detail, "est_usd_flat": usd,
@@ -1289,11 +1311,12 @@ async fn replay_sessions() {
                             let outcome = probe_outcome(&resp, sx);
                             outcomes.push((sx.kind.clone(), p.distance, outcome));
                             println!(
-                                "[s3] {:<22} d={:<2} PROBE {:<8} | summary had it: {} | ${usd:.4} | {:?}",
+                                "[s3] {:<22} d={:<2} PROBE {:<8} | summary had it: {} | recalled turns {:?} | ${usd:.4} | {:?}",
                                 sx.id,
                                 p.distance,
                                 outcome,
                                 if has_fact(&summary, &sx.expect_any) { "yes" } else { "no " },
+                                recalled_turns,
                                 told(&resp)
                             );
                             row["outcome"] = serde_json::json!(outcome);
@@ -1321,9 +1344,11 @@ async fn replay_sessions() {
                     .as_ref()
                     .map(|s| s.task_description.clone())
                     .unwrap_or_default();
-                let prompt = session_prompt(k, &t.text, &t.title, &original, sample.as_deref(), &rc.voice_language);
+                let list = if list_on { crate::ai::inspect::recall_index(&index) } else { String::new() };
+                let prompt = session_prompt(k, &t.text, &t.title, &original, sample.as_deref(), &rc.voice_language, &list);
                 let (b64, _, _, _) = encode_fixture(&dir.join(&t.image));
                 router.inspect_frame = None;
+                router.recall_screens = (recall_on && !earlier.is_empty()).then(|| std::sync::Arc::new(earlier.clone()));
                 let summary_arg = (k > 1).then(|| summary.clone());
                 let mut attempt = 0;
                 let (result, total_ms) = loop {
@@ -1336,12 +1361,14 @@ async fn replay_sessions() {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 };
                 let detail = router.take_client_usage();
+                let looks = router.take_inspects();
                 let (bill_in, bill_out) = router.get_last_usage();
                 let usd = crate::ai::pricing::estimate_cost(&rc.provider, &rc.model, bill_in, bill_out).unwrap_or(0.0);
                 spent += usd;
                 let mut row = serde_json::json!({
                     "run_id": run_id, "rep": rep, "session": sx.id, "kind": sx.kind,
                     "battery": rc.battery, "provider": rc.provider, "model": rc.model,
+                    "variant": rc.variant, "looks": looks,
                     "window": router.conversation_exchanges, "turn": k, "role": "main",
                     "text": t.text, "summary_in": summary, "total_ms": total_ms,
                     "usage": detail, "est_usd_flat": usd, "served_model": router.take_served_model(),
@@ -1363,6 +1390,8 @@ async fn replay_sessions() {
                             );
                         }
                         summary = resp.state_summary.clone();
+                        earlier.push(crate::ai::inspect::EarlierScreen { turn: k, jpeg_b64: b64.clone() });
+                        index.push((k, t.title.clone(), t.text.clone()));
                         if k >= sx.fact_turn {
                             trace.push(if has_fact(&summary, &sx.expect_any) { 'F' } else { '.' });
                         }

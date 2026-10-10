@@ -57,6 +57,9 @@ pub struct AiRouter {
     /// `inspect` to crop. Set by the caller; used only when `config.inspect` is on and the frame
     /// was reduced enough to need it (`inspect::offered`).
     pub inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
+    /// H6: earlier screens of this session that `recall` can return. Set by the caller per
+    /// request; nothing in the app sets it yet, so only the replay harness offers the tool.
+    pub recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
     /// The window `send_guidance_request` sends, in exchanges: `CONVERSATION_EXCHANGES` in the
     /// app. A field only so the replay harness can run the memory plan's 3 / 5 / 8 comparison
     /// (S3); nothing in the app changes it.
@@ -80,6 +83,7 @@ impl AiRouter {
             last_conversation: String::new(),
             last_conversation_turns: 0,
             inspect_frame: None,
+            recall_screens: None,
             conversation_exchanges: CONVERSATION_EXCHANGES,
         };
         router.init_client();
@@ -488,11 +492,13 @@ impl AiRouter {
                 c.inspect_frame = zoom;
                 c.inspect_mode = mode;
                 c.inspect_tools = self.config.inspect_tools;
+                c.recall_screens = self.recall_screens.clone();
             }
             Some(ApiClient::OpenAI(c)) => {
                 c.inspect_frame = zoom;
                 c.inspect_mode = mode;
                 c.inspect_tools = self.config.inspect_tools;
+                c.recall_screens = self.recall_screens.clone();
             }
             _ => {}
         }

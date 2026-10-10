@@ -28,6 +28,8 @@ pub struct GeminiClient {
     pub(crate) inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
     pub(crate) inspect_mode: crate::ai::inspect::Mode,
     pub(crate) inspect_tools: crate::ai::inspect::Tools,
+    /// H6: earlier screens `recall` can return, set per request by the router.
+    pub(crate) recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
     last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
     /// `modelVersion` of the last response: the model that answered, which is not always the one
     /// named (Google redirected gemini-3.7-flash to 3.8 on 2026-10-09).
@@ -64,6 +66,7 @@ impl GeminiClient {
             inspect_frame: None,
             inspect_mode: crate::ai::inspect::Mode::Off,
             inspect_tools: crate::ai::inspect::Tools::Zoom,
+            recall_screens: None,
             last_inspects: parking_lot::Mutex::new(Vec::new()),
             last_served: parking_lot::Mutex::new(None),
         })
@@ -226,13 +229,15 @@ impl GeminiClient {
         // H2 (`inspect.rs`): when a frame is offered the model may zoom before it answers, up to
         // MAX_INSPECTS times; each zoom is one more round on the same contents, the crop riding
         // back inside the functionResponse. Only the navigate_step round streams a caption.
-        let frame = self.inspect_frame.clone();
+        // H6 `recall` joins the same loop when earlier screens are offered.
+        let sources = crate::ai::inspect::Sources {
+            frame: self.inspect_frame.clone(),
+            earlier: self.recall_screens.clone(),
+        };
         self.last_inspects.lock().clear();
-        let look_names = self.inspect_tools.names();
+        let look_names = sources.names(self.inspect_tools);
         let mut declared = vec![tool_schema.clone()];
-        for (name, description, parameters) in
-            crate::ai::inspect::declarations(self.inspect_mode, self.inspect_tools)
-        {
+        for (name, description, parameters) in crate::ai::inspect::declarations(self.inspect_mode, &look_names) {
             declared.push(json!({"name": name, "description": description, "parameters": parameters}));
         }
         let mut contents: Vec<Value> = payload["contents"].as_array().cloned().unwrap_or_default();
@@ -243,12 +248,20 @@ impl GeminiClient {
         use futures_util::StreamExt;
 
         let (accumulated_json, raw_text) = loop {
-            let zoom_open = frame.is_some() && zooms < crate::ai::inspect::MAX_INSPECTS;
+            let zoom_open = !look_names.is_empty() && zooms < crate::ai::inspect::MAX_INSPECTS;
             payload["contents"] = Value::Array(contents.clone());
             if zoom_open {
-                // `First`: the opening round may only look.
-                let mut allowed: Vec<&str> = look_names.to_vec();
-                if !(zooms == 0 && self.inspect_mode == crate::ai::inspect::Mode::First) {
+                // `First`: the opening round may only look at the current frame. Recall is
+                // never forced -- most turns need no earlier screen.
+                let forced = zooms == 0
+                    && self.inspect_mode == crate::ai::inspect::Mode::First
+                    && sources.frame.is_some();
+                let mut allowed: Vec<&str> = if forced {
+                    self.inspect_tools.names().to_vec()
+                } else {
+                    look_names.clone()
+                };
+                if !forced {
                     allowed.insert(0, "navigate_step");
                 }
                 payload["tools"] = json!([{"function_declarations": declared.clone()}]);
@@ -422,17 +435,17 @@ impl GeminiClient {
             }
 
             if accumulated_json.trim().is_empty() && zoom_open {
-                if let (Some(args), Some(f)) = (inspect_args, frame.as_ref()) {
+                if let Some(args) = inspect_args {
                     zooms += 1;
-                    let (answer, look) = crate::ai::inspect::answer(&inspect_name, f.clone(), args).await;
+                    let (answer, look) = crate::ai::inspect::answer(&inspect_name, &sources, args).await;
                     if let Some(l) = look {
-                        log::info!("[inspect] gemini {} {zooms}: {:?}", l.tool, l.region);
+                        log::info!("[inspect] gemini {} {zooms}: {:?} turn {:?}", l.tool, l.region, l.turn);
                         self.last_inspects.lock().push(l);
                     }
                     let reply = match answer {
-                        crate::ai::inspect::Reply::Image(b64) => json!({"functionResponse": {
+                        crate::ai::inspect::Reply::Image(b64, caption) => json!({"functionResponse": {
                             "name": inspect_name,
-                            "response": {"result": "the region at full resolution"},
+                            "response": {"result": caption},
                             "parts": [{"inlineData": {"mimeType": "image/jpeg", "data": b64}}]
                         }}),
                         crate::ai::inspect::Reply::Text(text) => json!({"functionResponse": {
