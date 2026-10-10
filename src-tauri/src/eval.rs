@@ -190,8 +190,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first"].contains(&variant.as_str()),
-            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, inspect_first)"
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both"]
+                .contains(&variant.as_str()),
+            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
+             inspect_first, read_text, read_text_first, look_both)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -626,13 +628,23 @@ fn base_config(rc: &RunConfig) -> Config {
     config.expected_result = h1_on(&rc.variant);
     // H2: the zoom tool, offered by the router only when the frame was reduced below
     // inspect::MIN_SCALE -- so on a 1080p fixture this variant sends what production sends.
-    config.inspect = match rc.variant.as_str() {
-        "inspect" => crate::ai::inspect::Mode::Choice,
-        "inspect_note" => crate::ai::inspect::Mode::Note,
-        "inspect_first" => crate::ai::inspect::Mode::First,
-        _ => crate::ai::inspect::Mode::Off,
+    // H4: `read_text` alone (the model's choice, or forced first), or both tools by choice.
+    use crate::ai::inspect::{Mode, Tools};
+    (config.inspect, config.inspect_tools) = match rc.variant.as_str() {
+        "inspect" => (Mode::Choice, Tools::Zoom),
+        "inspect_note" => (Mode::Note, Tools::Zoom),
+        "inspect_first" => (Mode::First, Tools::Zoom),
+        "read_text" => (Mode::Choice, Tools::Text),
+        "read_text_first" => (Mode::First, Tools::Text),
+        "look_both" => (Mode::Choice, Tools::Both),
+        _ => (Mode::Off, Tools::Zoom),
     };
     config
+}
+
+/// Whether a variant hands the router the native frame for a look tool.
+fn config_looks(variant: &str) -> bool {
+    variant.starts_with("inspect") || variant.starts_with("read_text") || variant == "look_both"
 }
 
 fn append_line(path: &Path, value: &serde_json::Value) {
@@ -733,6 +745,100 @@ fn use_b_local_check() {
     }
 }
 
+/// H4 step 0, no model call: what Windows.Media.Ocr reads off each fixture of a battery, whole
+/// at 1x and tiled at 2x and 3x (Lanczos3, as `try_region_ocr` upscales). Prints every line
+/// with its box in fixture pixels. `NAVISUAL_EVAL_OCR_ITEMS` (comma-separated ids) narrows it.
+#[test]
+#[ignore = "reads the fixtures; run by name"]
+fn ocr_probe() {
+    println!();
+    let dir = PathBuf::from(std::env::var("NAVISUAL_EVAL_DIR").expect("NAVISUAL_EVAL_DIR"));
+    let root = dir.join(std::env::var("NAVISUAL_EVAL_BATTERY").unwrap_or_else(|_| "s2b_2160".into()));
+    let only: Vec<String> = std::env::var("NAVISUAL_EVAL_OCR_ITEMS")
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+    let mut ids: Vec<PathBuf> = std::fs::read_dir(&root)
+        .expect("battery dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("item.json").is_file())
+        .collect();
+    ids.sort();
+    let png = |img: &image::RgbImage| -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).expect("png");
+        buf.into_inner()
+    };
+    for d in ids {
+        let fx: Fixture =
+            serde_json::from_str(&std::fs::read_to_string(d.join("item.json")).unwrap()).unwrap();
+        if !only.is_empty() && !only.contains(&fx.id) {
+            continue;
+        }
+        let img = image::open(d.join(&fx.image)).expect("image").to_rgb8();
+        let (w, h) = img.dimensions();
+        println!("=== {} ({w}x{h})", fx.id);
+        for up in [1u32, 2, 3] {
+            // Tiles small enough that the upscaled tile stays under the engine's size limit,
+            // overlapping by 60 px so a line cut by one edge is whole in the neighbour.
+            let (tw, th) = if up == 1 { (w, h) } else { (1280.min(w), 720.min(h)) };
+            let started = Instant::now();
+            let mut lines: Vec<(u32, u32, u32, u32, String)> = Vec::new();
+            let mut y = 0;
+            loop {
+                let mut x = 0;
+                loop {
+                    let cw = tw.min(w - x);
+                    let ch = th.min(h - y);
+                    let tile = image::imageops::crop_imm(&img, x, y, cw, ch).to_image();
+                    let tile = if up == 1 {
+                        tile
+                    } else {
+                        image::imageops::resize(&tile, cw * up, ch * up, image::imageops::FilterType::Lanczos3)
+                    };
+                    match crate::locator::ocr::run_ocr(&png(&tile)) {
+                        Ok(rs) => {
+                            // run_ocr returns each line, then its words; keep the lines only --
+                            // a line is the one whose box contains the words that follow it.
+                            let mut last: Option<(i32, i32, u32, u32)> = None;
+                            for r in rs {
+                                let inside = last.is_some_and(|(lx, ly, lw, lh)| {
+                                    r.bbox.0 >= lx
+                                        && r.bbox.1 >= ly
+                                        && r.bbox.0 + r.bbox.2 as i32 <= lx + lw as i32
+                                        && r.bbox.1 + r.bbox.3 as i32 <= ly + lh as i32
+                                        && r.text.split(' ').count() == 1
+                                });
+                                if inside {
+                                    continue;
+                                }
+                                last = Some(r.bbox);
+                                let bx = x + (r.bbox.0.max(0) as u32) / up;
+                                let by = y + (r.bbox.1.max(0) as u32) / up;
+                                lines.push((bx, by, r.bbox.2 / up, r.bbox.3 / up, r.text));
+                            }
+                        }
+                        Err(e) => println!("  [{up}x] tile {x},{y}: {e}"),
+                    }
+                    if x + cw >= w {
+                        break;
+                    }
+                    x += cw - 60;
+                }
+                if y + th.min(h - y) >= h {
+                    break;
+                }
+                y += th - 60;
+            }
+            lines.sort_by_key(|l| (l.1 / 8, l.0));
+            lines.dedup_by(|a, b| a.4 == b.4 && a.0.abs_diff(b.0) < 40 && a.1.abs_diff(b.1) < 40);
+            println!("  -- {up}x: {} line(s), {} ms", lines.len(), started.elapsed().as_millis());
+            for (x, y, lw, lh, t) in &lines {
+                println!("  [{up}x] ({x:4},{y:4} {lw:4}x{lh:2}) {t}");
+            }
+        }
+    }
+}
+
 /// Run one battery against one provider/model. Configured entirely by environment
 /// variables -- see `tools/run-replay.ps1`, which sets them.
 #[tokio::test]
@@ -805,7 +911,7 @@ async fn replay_battery() {
             let (b64, jpeg_len, w, h) = encode_fixture(&dir.join(&fx.image));
             let prompt = item_prompt(fx, &rc.voice_language, &rc.variant);
             prime_session(&mut router, fx);
-            router.inspect_frame = rc.variant.starts_with("inspect").then(|| {
+            router.inspect_frame = config_looks(&rc.variant).then(|| {
                 std::sync::Arc::new(
                     image::open(dir.join(&fx.image)).expect("fixture image").to_rgb8(),
                 )

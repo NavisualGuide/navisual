@@ -407,7 +407,7 @@ impl AiRouter {
     /// H2: the pixel boxes the model zoomed into on the last call, taken. The harness reads it;
     /// the app only logs them (`[inspect]`) until the tool ships.
     #[cfg(test)]
-    pub fn take_inspects(&self) -> Vec<[u32; 4]> {
+    pub fn take_inspects(&self) -> Vec<crate::ai::inspect::Look> {
         match &self.client {
             Some(ApiClient::Gemini(c)) => c.take_inspects(),
             Some(ApiClient::OpenAI(c)) => c.take_inspects(),
@@ -482,10 +482,12 @@ impl AiRouter {
             Some(ApiClient::Gemini(c)) => {
                 c.inspect_frame = zoom;
                 c.inspect_mode = mode;
+                c.inspect_tools = self.config.inspect_tools;
             }
             Some(ApiClient::OpenAI(c)) => {
                 c.inspect_frame = zoom;
                 c.inspect_mode = mode;
+                c.inspect_tools = self.config.inspect_tools;
             }
             _ => {}
         }

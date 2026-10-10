@@ -66,7 +66,8 @@ pub struct DeepSeekClient {
     /// H2: the frame `inspect` crops from (OpenAI via Responses only); `None` = no tool.
     pub(crate) inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
     pub(crate) inspect_mode: crate::ai::inspect::Mode,
-    last_inspects: parking_lot::Mutex<Vec<[u32; 4]>>,
+    pub(crate) inspect_tools: crate::ai::inspect::Tools,
+    last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
     /// `response.model` of the last Responses API call: the model that answered.
     last_served: parking_lot::Mutex<Option<String>>,
 }
@@ -103,6 +104,7 @@ impl DeepSeekClient {
             expected_result: false,
             inspect_frame: None,
             inspect_mode: crate::ai::inspect::Mode::Off,
+            inspect_tools: crate::ai::inspect::Tools::Zoom,
             last_inspects: parking_lot::Mutex::new(Vec::new()),
             last_served: parking_lot::Mutex::new(None),
         })
@@ -115,7 +117,7 @@ impl DeepSeekClient {
     }
 
     #[cfg(test)]
-    pub fn take_inspects(&self) -> Vec<[u32; 4]> {
+    pub fn take_inspects(&self) -> Vec<crate::ai::inspect::Look> {
         std::mem::take(&mut *self.last_inspects.lock())
     }
 
@@ -254,12 +256,14 @@ impl DeepSeekClient {
         // navigate_step again. Only the navigate_step round streams a caption.
         let frame = self.inspect_frame.clone();
         self.last_inspects.lock().clear();
-        let inspect_tool = json!({
-            "type": "function",
-            "name": crate::ai::inspect::NAME,
-            "description": crate::ai::inspect::description(self.inspect_mode),
-            "parameters": crate::ai::inspect::parameters(),
-        });
+        let look_names = self.inspect_tools.names();
+        let mut declared = vec![flat_tool.clone()];
+        for (name, description, parameters) in
+            crate::ai::inspect::declarations(self.inspect_mode, self.inspect_tools)
+        {
+            declared.push(json!({"type": "function", "name": name,
+                                 "description": description, "parameters": parameters}));
+        }
         let mut total = UsageDetail::default();
         let mut zooms = 0usize;
         let mut follow_up: Option<(String, Value)> = None;
@@ -267,10 +271,11 @@ impl DeepSeekClient {
             let zoom_open = frame.is_some() && zooms < crate::ai::inspect::MAX_INSPECTS;
             let mut p = payload.clone();
             if zoom_open {
-                p["tools"] = json!([flat_tool.clone(), inspect_tool.clone()]);
-                // `First`: the opening round may only zoom.
+                p["tools"] = Value::Array(declared.clone());
+                // `First`: the opening round must look -- with both tools offered, it is forced
+                // to the first (the zoom), since a forced choice names one function.
                 p["tool_choice"] = if zooms == 0 && self.inspect_mode == crate::ai::inspect::Mode::First {
-                    json!({"type": "function", "name": crate::ai::inspect::NAME})
+                    json!({"type": "function", "name": look_names[0]})
                 } else {
                     json!("required")
                 };
@@ -285,19 +290,21 @@ impl DeepSeekClient {
             total.cached_input += round.usage.cached_input;
             total.output += round.usage.output;
             total.reasoning += round.usage.reasoning;
-            if round.name == crate::ai::inspect::NAME && zoom_open {
+            if look_names.contains(&round.name.as_str()) && zoom_open {
                 if let Some(f) = frame.as_ref() {
                     zooms += 1;
                     let args: Value =
                         serde_json::from_str(&round.arguments).unwrap_or_else(|_| json!({}));
-                    let output = match crate::ai::inspect::crop(f, &args) {
-                        Some((b64, b)) => {
-                            self.last_inspects.lock().push(b);
-                            log::info!("[inspect] {} zoom {zooms}: {b:?}", self.name);
-                            json!([{"type": "input_image",
-                                    "image_url": format!("data:image/jpeg;base64,{b64}")}])
-                        }
-                        None => json!("that region is too small; give a larger one"),
+                    let (answer, look) = crate::ai::inspect::answer(&round.name, f.clone(), args).await;
+                    if let Some(l) = look {
+                        log::info!("[inspect] {} {} {zooms}: {:?}", self.name, l.tool, l.region);
+                        self.last_inspects.lock().push(l);
+                    }
+                    let output = match answer {
+                        crate::ai::inspect::Reply::Image(b64) => json!([{"type": "input_image",
+                            "image_url": format!("data:image/jpeg;base64,{b64}")}]),
+                        crate::ai::inspect::Reply::Text(text) => json!(text),
+                        crate::ai::inspect::Reply::Refused(why) => json!(why),
                     };
                     follow_up = Some((
                         round.response_id.clone(),
@@ -382,7 +389,7 @@ impl DeepSeekClient {
                     Some("response.function_call_arguments.delta") => {
                         if let Some(delta) = data["delta"].as_str() {
                             r.arguments.push_str(delta);
-                            if r.name == crate::ai::inspect::NAME {
+                            if r.name == crate::ai::inspect::NAME || r.name == crate::ai::inspect::READ_TEXT {
                                 continue;
                             }
 

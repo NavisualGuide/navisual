@@ -27,7 +27,8 @@ pub struct GeminiClient {
     /// H2: the frame `inspect` crops from, set per request by the router; `None` = no tool.
     pub(crate) inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
     pub(crate) inspect_mode: crate::ai::inspect::Mode,
-    last_inspects: parking_lot::Mutex<Vec<[u32; 4]>>,
+    pub(crate) inspect_tools: crate::ai::inspect::Tools,
+    last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
     /// `modelVersion` of the last response: the model that answered, which is not always the one
     /// named (Google redirected gemini-3.7-flash to 3.8 on 2026-10-09).
     last_served: parking_lot::Mutex<Option<String>>,
@@ -62,6 +63,7 @@ impl GeminiClient {
             expected_result: false,
             inspect_frame: None,
             inspect_mode: crate::ai::inspect::Mode::Off,
+            inspect_tools: crate::ai::inspect::Tools::Zoom,
             last_inspects: parking_lot::Mutex::new(Vec::new()),
             last_served: parking_lot::Mutex::new(None),
         })
@@ -74,7 +76,7 @@ impl GeminiClient {
     }
 
     #[cfg(test)]
-    pub fn take_inspects(&self) -> Vec<[u32; 4]> {
+    pub fn take_inspects(&self) -> Vec<crate::ai::inspect::Look> {
         std::mem::take(&mut *self.last_inspects.lock())
     }
 
@@ -226,11 +228,13 @@ impl GeminiClient {
         // back inside the functionResponse. Only the navigate_step round streams a caption.
         let frame = self.inspect_frame.clone();
         self.last_inspects.lock().clear();
-        let inspect_decl = json!({
-            "name": crate::ai::inspect::NAME,
-            "description": crate::ai::inspect::description(self.inspect_mode),
-            "parameters": crate::ai::inspect::parameters(),
-        });
+        let look_names = self.inspect_tools.names();
+        let mut declared = vec![tool_schema.clone()];
+        for (name, description, parameters) in
+            crate::ai::inspect::declarations(self.inspect_mode, self.inspect_tools)
+        {
+            declared.push(json!({"name": name, "description": description, "parameters": parameters}));
+        }
         let mut contents: Vec<Value> = payload["contents"].as_array().cloned().unwrap_or_default();
         let mut total = UsageDetail::default();
         let mut zooms = 0usize;
@@ -242,13 +246,12 @@ impl GeminiClient {
             let zoom_open = frame.is_some() && zooms < crate::ai::inspect::MAX_INSPECTS;
             payload["contents"] = Value::Array(contents.clone());
             if zoom_open {
-                // `First`: the opening round may only zoom.
-                let allowed = if zooms == 0 && self.inspect_mode == crate::ai::inspect::Mode::First {
-                    json!([crate::ai::inspect::NAME])
-                } else {
-                    json!(["navigate_step", crate::ai::inspect::NAME])
-                };
-                payload["tools"] = json!([{"function_declarations": [tool_schema.clone(), inspect_decl.clone()]}]);
+                // `First`: the opening round may only look.
+                let mut allowed: Vec<&str> = look_names.to_vec();
+                if !(zooms == 0 && self.inspect_mode == crate::ai::inspect::Mode::First) {
+                    allowed.insert(0, "navigate_step");
+                }
+                payload["tools"] = json!([{"function_declarations": declared.clone()}]);
                 payload["toolConfig"] = json!({"functionCallingConfig": {
                     "mode": "ANY",
                     "allowedFunctionNames": allowed
@@ -287,6 +290,7 @@ impl GeminiClient {
             let mut model_parts: Vec<Value> = Vec::new();
             let mut inspect_args: Option<Value> = None;
             let mut inspect_id: Option<Value> = None;
+            let mut inspect_name = String::new();
 
             while let Some(event_result) = stream.next().await {
                 let event = event_result?;
@@ -360,7 +364,8 @@ impl GeminiClient {
                                 }
                                 if let Some(fn_call) = part.get("functionCall") {
                                     let name = fn_call.get("name").and_then(|n| n.as_str());
-                                    if name == Some(crate::ai::inspect::NAME) {
+                                    if name.is_some_and(|n| look_names.contains(&n)) {
+                                        inspect_name = name.unwrap_or_default().to_string();
                                         inspect_args = fn_call.get("args").cloned();
                                         inspect_id = fn_call.get("id").cloned();
                                     } else if name == Some("navigate_step") {
@@ -419,19 +424,24 @@ impl GeminiClient {
             if accumulated_json.trim().is_empty() && zoom_open {
                 if let (Some(args), Some(f)) = (inspect_args, frame.as_ref()) {
                     zooms += 1;
-                    let reply = match crate::ai::inspect::crop(f, &args) {
-                        Some((b64, b)) => {
-                            self.last_inspects.lock().push(b);
-                            log::info!("[inspect] gemini zoom {zooms}: {b:?}");
-                            json!({"functionResponse": {
-                                "name": crate::ai::inspect::NAME,
-                                "response": {"result": "the region at full resolution"},
-                                "parts": [{"inlineData": {"mimeType": "image/jpeg", "data": b64}}]
-                            }})
-                        }
-                        None => json!({"functionResponse": {
-                            "name": crate::ai::inspect::NAME,
-                            "response": {"error": "that region is too small; give a larger one"}
+                    let (answer, look) = crate::ai::inspect::answer(&inspect_name, f.clone(), args).await;
+                    if let Some(l) = look {
+                        log::info!("[inspect] gemini {} {zooms}: {:?}", l.tool, l.region);
+                        self.last_inspects.lock().push(l);
+                    }
+                    let reply = match answer {
+                        crate::ai::inspect::Reply::Image(b64) => json!({"functionResponse": {
+                            "name": inspect_name,
+                            "response": {"result": "the region at full resolution"},
+                            "parts": [{"inlineData": {"mimeType": "image/jpeg", "data": b64}}]
+                        }}),
+                        crate::ai::inspect::Reply::Text(text) => json!({"functionResponse": {
+                            "name": inspect_name,
+                            "response": {"result": text}
+                        }}),
+                        crate::ai::inspect::Reply::Refused(why) => json!({"functionResponse": {
+                            "name": inspect_name,
+                            "response": {"error": why}
                         }}),
                     };
                     // The 3.8 migration guide asks every FunctionResponse to carry the call's id

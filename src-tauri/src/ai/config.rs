@@ -238,6 +238,8 @@ pub struct Config {
     /// **Off by default, a hand-set `.env` key only** (`INSPECT=choice|note|first`), for the
     /// replay harness -- see `inspect::Mode`.
     pub inspect: crate::ai::inspect::Mode,
+    /// Which look tools `inspect` offers: the zoom (H2), `read_text` (H4, OCR), or both.
+    pub inspect_tools: crate::ai::inspect::Tools,
 }
 
 impl Default for Config {
@@ -304,6 +306,7 @@ impl Default for Config {
             reasoning_effort: None,
             expected_result: false,
             inspect: crate::ai::inspect::Mode::Off,
+            inspect_tools: crate::ai::inspect::Tools::Zoom,
         }
     }
 }
@@ -592,6 +595,9 @@ impl Config {
         }
         if let Ok(v) = env::var("INSPECT") {
             config.inspect = crate::ai::inspect::Mode::parse(&v);
+        }
+        if let Ok(v) = env::var("INSPECT_TOOLS") {
+            config.inspect_tools = crate::ai::inspect::Tools::parse(&v);
         }
 
         // BYOK keys stored in the Windows Credential Manager are referenced from
