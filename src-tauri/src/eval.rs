@@ -1226,6 +1226,10 @@ async fn replay_sessions() {
     );
     let list_on = rc.variant != "no_list";
     let recall_on = rc.variant == "recall";
+    // `inline`: each probe is recorded into the session as the turn it was, so a later probe
+    // sees what an earlier one looked up -- and whether the model wrote it down. `branch` (the
+    // default): each probe is asked on a copy the main line never sees.
+    let inline = env_or("NAVISUAL_EVAL_PROBES", "branch") == "inline";
     let window: usize = env_or("NAVISUAL_EVAL_WINDOW", "0").parse().unwrap_or(0);
     let sessions = load_sessions(&rc);
     assert!(!sessions.is_empty(), "no sessions under {}", rc.dir.join(&rc.battery).display());
@@ -1239,7 +1243,7 @@ async fn replay_sessions() {
     if window > 0 {
         router.conversation_exchanges = window;
     }
-    let out = if window > 0 {
+    let mut out = if window > 0 {
         rc.out.with_file_name(format!(
             "{}-w{window}.jsonl",
             rc.out.file_stem().unwrap_or_default().to_string_lossy()
@@ -1247,14 +1251,18 @@ async fn replay_sessions() {
     } else {
         rc.out.clone()
     };
+    if inline {
+        out = out.with_file_name(format!("{}-inline.jsonl", out.file_stem().unwrap_or_default().to_string_lossy()));
+    }
     println!(
-        "[s3] {} session(s) x {} repeat(s) | {} {} | window {} exchanges | variant {} | cap ${:.2}",
+        "[s3] {} session(s) x {} repeat(s) | {} {} | window {} exchanges | variant {} | probes {} | cap ${:.2}",
         sessions.len(),
         rc.repeat,
         rc.provider,
         rc.model,
         router.conversation_exchanges,
         if rc.variant.is_empty() { "none" } else { rc.variant.as_str() },
+        if inline { "inline" } else { "branch" },
         rc.max_usd
     );
     let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -1263,8 +1271,6 @@ async fn replay_sessions() {
 
     'outer: for rep in 0..rc.repeat {
         for (dir, sx) in &sessions {
-            let max_d = sx.probes.iter().map(|p| p.distance).max().unwrap_or(0);
-            let last_main = (sx.fact_turn + max_d - 1).min(sx.turns.len());
             router.session_manager.current_session = None;
             router.session_manager.create_session(sx.turns[0].text.clone());
             let mut summary = String::new();
@@ -1272,13 +1278,22 @@ async fn replay_sessions() {
             let mut trace = String::new();
             // H6: every main turn's screen as it was sent.
             let mut earlier: Vec<crate::ai::inspect::EarlierScreen> = Vec::new();
-            for k in 1..=last_main + 1 {
+            // `k` is the session's turn number, `next` the next scripted turn: they part once an
+            // inline probe has been recorded as a turn of its own.
+            let mut k = 1usize;
+            let mut next = 0usize;
+            let mut sent = vec![false; sx.probes.len()];
+            loop {
                 if spent >= rc.max_usd {
                     println!("[s3] STOP: spent ${spent:.4} reached the ${:.2} cap", rc.max_usd);
                     break 'outer;
                 }
-                // Probes due at k, each on a copy of the session as it stands after turn k-1.
-                for p in sx.probes.iter().filter(|p| sx.fact_turn + p.distance == k) {
+                // A probe due at k: on a copy of the session as it stands after turn k-1, or, inline,
+                // as turn k itself.
+                let due = (0..sx.probes.len()).find(|&i| !sent[i] && sx.fact_turn + sx.probes[i].distance == k);
+                if let Some(i) = due {
+                    sent[i] = true;
+                    let p = &sx.probes[i];
                     let snapshot = router.session_manager.current_session.clone();
                     let original = snapshot.as_ref().map(|s| s.task_description.clone()).unwrap_or_default();
                     let probe_sample = if crate::ai::prompts::is_language_sample(&p.text) {
@@ -1296,6 +1311,7 @@ async fn replay_sessions() {
                     let started = Instant::now();
                     let result = router.send_guidance_request(&prompt, Some(&b64), Some(&summary), |_, _| {}).await;
                     let total_ms = started.elapsed().as_millis();
+                    let mut recorded = false;
                     let detail = router.take_client_usage();
                     let looks = router.take_inspects();
                     let (bill_in, bill_out) = router.get_last_usage();
@@ -1306,7 +1322,7 @@ async fn replay_sessions() {
                         "run_id": run_id, "rep": rep, "session": sx.id, "kind": sx.kind,
                         "battery": rc.battery, "provider": rc.provider, "model": rc.model,
                         "variant": rc.variant, "looks": looks,
-                        "window": router.conversation_exchanges, "turn": k, "role": "probe",
+                        "window": router.conversation_exchanges, "turn": k, "role": "probe", "inline": inline,
                         "distance": p.distance, "text": p.text, "fact": sx.fact, "summary_in": summary,
                         "total_ms": total_ms, "usage": detail, "est_usd_flat": usd,
                         "served_model": router.take_served_model(),
@@ -1326,6 +1342,29 @@ async fn replay_sessions() {
                             );
                             row["outcome"] = serde_json::json!(outcome);
                             row["response"] = serde_json::to_value(&resp).unwrap_or_default();
+                            if inline {
+                                let mut steps = resp.steps.clone();
+                                crate::ai::types::sanitize_steps(&mut steps);
+                                if let Some(session) = router.session_manager.current_session.as_mut() {
+                                    crate::record_exchange(
+                                        session,
+                                        &p.text,
+                                        false,
+                                        &resp.goal,
+                                        resp.plan_outline.clone(),
+                                        resp.plan_completed_count,
+                                        &resp.state_summary,
+                                        &steps,
+                                        Some(p.title.clone()),
+                                    );
+                                }
+                                summary = resp.state_summary.clone();
+                                if crate::ai::prompts::is_language_sample(&p.text) {
+                                    sample = Some(p.text.clone());
+                                }
+                                earlier.push(crate::ai::inspect::EarlierScreen { turn: k, jpeg_b64: b64.clone() });
+                                recorded = true;
+                            }
                         }
                         Err(e) => {
                             println!("[s3] {:<22} d={:<2} PROBE ERROR | {e:#}", sx.id, p.distance);
@@ -1333,13 +1372,18 @@ async fn replay_sessions() {
                         }
                     }
                     append_line(&out, &row);
+                    if recorded {
+                        k += 1;
+                        continue;
+                    }
                     router.session_manager.current_session = snapshot;
                 }
-                if k > last_main {
+                if sent.iter().all(|s| *s) || next >= sx.turns.len() {
                     break;
                 }
                 // The main line: turn k as the app would send and record it.
-                let t = &sx.turns[k - 1];
+                let t = &sx.turns[next];
+                next += 1;
                 if k == 1 || crate::ai::prompts::is_language_sample(&t.text) {
                     sample = crate::ai::prompts::is_language_sample(&t.text).then(|| t.text.clone());
                 }
@@ -1413,6 +1457,7 @@ async fn replay_sessions() {
                     }
                 }
                 append_line(&out, &row);
+                k += 1;
             }
             println!("[s3] {:<22} summary held the fact from turn {}: {trace}", sx.id, sx.fact_turn);
         }
