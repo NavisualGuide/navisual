@@ -53,6 +53,10 @@ pub struct AiRouter {
     /// is several instructions joined with `\n` (`steps.join("\n")` in `guide`), so counting
     /// lines overstates the window -- which the first version of the [memory] log line did.
     last_conversation_turns: usize,
+    /// H2: the native-resolution frame of the capture the next request is made from, for
+    /// `inspect` to crop. Set by the caller; used only when `config.inspect` is on and the frame
+    /// was reduced enough to need it (`inspect::offered`).
+    pub inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
 }
 
 impl AiRouter {
@@ -71,6 +75,7 @@ impl AiRouter {
             last_usage: (0, 0),
             last_conversation: String::new(),
             last_conversation_turns: 0,
+            inspect_frame: None,
         };
         router.init_client();
         router
@@ -388,6 +393,28 @@ impl AiRouter {
         }
     }
 
+    /// The model that actually answered the last call, as the provider reports it (Gemini,
+    /// OpenAI via Responses), taken. A provider can redirect a model name.
+    #[cfg(test)]
+    pub fn take_served_model(&self) -> Option<String> {
+        match &self.client {
+            Some(ApiClient::Gemini(c)) => c.take_served(),
+            Some(ApiClient::OpenAI(c)) => c.take_served(),
+            _ => None,
+        }
+    }
+
+    /// H2: the pixel boxes the model zoomed into on the last call, taken. The harness reads it;
+    /// the app only logs them (`[inspect]`) until the tool ships.
+    #[cfg(test)]
+    pub fn take_inspects(&self) -> Vec<[u32; 4]> {
+        match &self.client {
+            Some(ApiClient::Gemini(c)) => c.take_inspects(),
+            Some(ApiClient::OpenAI(c)) => c.take_inspects(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The active client's raw usage split for its last call -- see `UsageDetail`. Taken, so
     /// each call is read at most once. `None` for managed and Ollama, which do not record
     /// one. Read by the replay harness straight after `send_guidance_request` returns.
@@ -444,6 +471,24 @@ impl AiRouter {
         let _ = self.take_client_usage();
 
         let expect = self.config.expected_result;
+        // H2: the clients only zoom when handed a frame, and only these two speak the loop.
+        let mode = self.config.inspect;
+        let zoom = if mode != crate::ai::inspect::Mode::Off {
+            crate::ai::inspect::offered(&self.inspect_frame)
+        } else {
+            None
+        };
+        match &mut self.client {
+            Some(ApiClient::Gemini(c)) => {
+                c.inspect_frame = zoom;
+                c.inspect_mode = mode;
+            }
+            Some(ApiClient::OpenAI(c)) => {
+                c.inspect_frame = zoom;
+                c.inspect_mode = mode;
+            }
+            _ => {}
+        }
         // No request URL reaches the screen through an error (redact.rs).
         let result = match &mut self.client {
             Some(ApiClient::Anthropic(c)) => {

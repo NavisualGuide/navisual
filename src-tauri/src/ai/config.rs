@@ -232,6 +232,12 @@ pub struct Config {
     /// acts on it yet, so it exists for the replay harness to measure before anything decides
     /// whether it ships. Read once, by the router, which hands it to the active client.
     pub expected_result: bool,
+
+    /// H2, `inspect` (harness-plan.md): the model may zoom into the current capture at native
+    /// resolution before answering, when the AI image was reduced below `inspect::MIN_SCALE`.
+    /// **Off by default, a hand-set `.env` key only** (`INSPECT=choice|note|first`), for the
+    /// replay harness -- see `inspect::Mode`.
+    pub inspect: crate::ai::inspect::Mode,
 }
 
 impl Default for Config {
@@ -297,6 +303,7 @@ impl Default for Config {
             gemini_thinking_budget: None,
             reasoning_effort: None,
             expected_result: false,
+            inspect: crate::ai::inspect::Mode::Off,
         }
     }
 }
@@ -582,6 +589,9 @@ impl Config {
         }
         if let Ok(v) = env::var("EXPECTED_RESULT") {
             config.expected_result = truthy(&v);
+        }
+        if let Ok(v) = env::var("INSPECT") {
+            config.inspect = crate::ai::inspect::Mode::parse(&v);
         }
 
         // BYOK keys stored in the Windows Credential Manager are referenced from

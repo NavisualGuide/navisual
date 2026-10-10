@@ -63,6 +63,12 @@ pub struct DeepSeekClient {
     last_usage: parking_lot::Mutex<Option<UsageDetail>>,
     /// H1 switch, set by the router from `Config::expected_result` (see `prompts::system_prompt`).
     pub(crate) expected_result: bool,
+    /// H2: the frame `inspect` crops from (OpenAI via Responses only); `None` = no tool.
+    pub(crate) inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
+    pub(crate) inspect_mode: crate::ai::inspect::Mode,
+    last_inspects: parking_lot::Mutex<Vec<[u32; 4]>>,
+    /// `response.model` of the last Responses API call: the model that answered.
+    last_served: parking_lot::Mutex<Option<String>>,
 }
 
 impl DeepSeekClient {
@@ -95,6 +101,10 @@ impl DeepSeekClient {
             reasoning_effort,
             last_usage: parking_lot::Mutex::new(None),
             expected_result: false,
+            inspect_frame: None,
+            inspect_mode: crate::ai::inspect::Mode::Off,
+            last_inspects: parking_lot::Mutex::new(Vec::new()),
+            last_served: parking_lot::Mutex::new(None),
         })
     }
 
@@ -102,6 +112,16 @@ impl DeepSeekClient {
     /// nothing can never be read as this one.
     pub fn take_last_usage(&self) -> Option<UsageDetail> {
         self.last_usage.lock().take()
+    }
+
+    #[cfg(test)]
+    pub fn take_inspects(&self) -> Vec<[u32; 4]> {
+        std::mem::take(&mut *self.last_inspects.lock())
+    }
+
+    #[cfg(test)]
+    pub fn take_served(&self) -> Option<String> {
+        self.last_served.lock().take()
     }
 
     pub async fn send_message(
@@ -212,7 +232,7 @@ impl DeepSeekClient {
             "model": effective_model,
             "instructions": instructions,
             "input": input,
-            "tools": [flat_tool],
+            "tools": [flat_tool.clone()],
             "tool_choice": {"type": "function", "name": "navigate_step"},
             "stream": true,
         });
@@ -228,26 +248,83 @@ impl DeepSeekClient {
             log_effort_once("provider default (no reasoning field sent)");
         }
 
-        self.stream_once_responses_api(&payload, on_chunk).await
+        // H2 (`inspect.rs`): with a frame offered, `tool_choice: required` lets the model zoom
+        // first; each zoom continues the same response (`previous_response_id`) with the crop
+        // inside the function_call_output. After MAX_INSPECTS the original payload forces
+        // navigate_step again. Only the navigate_step round streams a caption.
+        let frame = self.inspect_frame.clone();
+        self.last_inspects.lock().clear();
+        let inspect_tool = json!({
+            "type": "function",
+            "name": crate::ai::inspect::NAME,
+            "description": crate::ai::inspect::description(self.inspect_mode),
+            "parameters": crate::ai::inspect::parameters(),
+        });
+        let mut total = UsageDetail::default();
+        let mut zooms = 0usize;
+        let mut follow_up: Option<(String, Value)> = None;
+        loop {
+            let zoom_open = frame.is_some() && zooms < crate::ai::inspect::MAX_INSPECTS;
+            let mut p = payload.clone();
+            if zoom_open {
+                p["tools"] = json!([flat_tool.clone(), inspect_tool.clone()]);
+                // `First`: the opening round may only zoom.
+                p["tool_choice"] = if zooms == 0 && self.inspect_mode == crate::ai::inspect::Mode::First {
+                    json!({"type": "function", "name": crate::ai::inspect::NAME})
+                } else {
+                    json!("required")
+                };
+                p["parallel_tool_calls"] = json!(false);
+            }
+            if let Some((id, input)) = &follow_up {
+                p["previous_response_id"] = json!(id);
+                p["input"] = input.clone();
+            }
+            let round = self.stream_round_responses_api(&p, on_chunk).await?;
+            total.input += round.usage.input;
+            total.cached_input += round.usage.cached_input;
+            total.output += round.usage.output;
+            total.reasoning += round.usage.reasoning;
+            if round.name == crate::ai::inspect::NAME && zoom_open {
+                if let Some(f) = frame.as_ref() {
+                    zooms += 1;
+                    let args: Value =
+                        serde_json::from_str(&round.arguments).unwrap_or_else(|_| json!({}));
+                    let output = match crate::ai::inspect::crop(f, &args) {
+                        Some((b64, b)) => {
+                            self.last_inspects.lock().push(b);
+                            log::info!("[inspect] {} zoom {zooms}: {b:?}", self.name);
+                            json!([{"type": "input_image",
+                                    "image_url": format!("data:image/jpeg;base64,{b64}")}])
+                        }
+                        None => json!("that region is too small; give a larger one"),
+                    };
+                    follow_up = Some((
+                        round.response_id.clone(),
+                        json!([{"type": "function_call_output", "call_id": round.call_id, "output": output}]),
+                    ));
+                    continue;
+                }
+            }
+            *self.last_usage.lock() = Some(total);
+            let resp = self.parse_navigate(&round.arguments, round.emitted_instruction_len, on_chunk)?;
+            return Ok((resp, total.input, total.output));
+        }
     }
 
-    /// SSE parser for `/v1/responses`. Genuinely different event vocabulary from
-    /// Chat Completions (see `stream_once`) — no `choices[].delta`, instead typed
-    /// `type`-tagged events. The only one that matters for us is
-    /// `response.function_call_arguments.delta` (`delta` field, accumulated —
-    /// forcing exactly one tool via `tool_choice` means there's only ever one
-    /// function_call item, so no need to key deltas by `item_id`/`output_index`).
-    /// Live-caption extraction reuses the exact same `instruction_delta` scan
-    /// `stream_once` uses on Chat Completions' `content` — same partial-JSON
-    /// shape, same technique. `response.completed` carries the full final
-    /// `response` object (incl. `usage`) as a cross-check / token-count source;
-    /// the accumulated `delta` buffer is what's actually parsed, since it's
-    /// confirmed byte-identical to the completed event's own copy.
-    async fn stream_once_responses_api(
+    /// SSE parser for one `/v1/responses` round. Genuinely different event vocabulary from
+    /// Chat Completions (see `stream_once`) — no `choices[].delta`, instead typed `type`-tagged
+    /// events: `response.output_item.added` names the function being called,
+    /// `response.function_call_arguments.delta` carries its arguments (accumulated —
+    /// `parallel_tool_calls: false` or a forced tool means one function_call item per round),
+    /// and `response.completed` carries the response id and `usage`. Live captions reuse the
+    /// `instruction_delta` scan `stream_once` uses on Chat Completions' `content`, for
+    /// navigate_step only — an `inspect` call has no instruction to show.
+    async fn stream_round_responses_api(
         &self,
         payload: &Value,
         on_chunk: &mut impl FnMut(&str, usize),
-    ) -> Result<(NavigateStepResponse, u64, u64)> {
+    ) -> Result<ResponsesRound> {
         let response = self
             .client
             .post("https://api.openai.com/v1/responses")
@@ -262,11 +339,8 @@ impl DeepSeekClient {
             bail!("{} Responses API error ({}): {}", self.name, status, body);
         }
 
-        let mut arguments = String::new();
-        let mut input_tokens = 0u64;
-        let mut output_tokens = 0u64;
+        let mut r = ResponsesRound::default();
         let mut in_instruction = false;
-        let mut emitted_instruction_len = 0usize;
         let mut line_buf = String::new();
         let mut usage_logged = false;
 
@@ -294,26 +368,40 @@ impl DeepSeekClient {
                 };
 
                 match data["type"].as_str() {
+                    Some("response.created") => {
+                        if let Some(id) = data["response"]["id"].as_str() {
+                            r.response_id = id.to_string();
+                        }
+                    }
+                    Some("response.output_item.added")
+                        if data["item"]["type"].as_str() == Some("function_call") =>
+                    {
+                        r.name = data["item"]["name"].as_str().unwrap_or_default().to_string();
+                        r.call_id = data["item"]["call_id"].as_str().unwrap_or_default().to_string();
+                    }
                     Some("response.function_call_arguments.delta") => {
                         if let Some(delta) = data["delta"].as_str() {
-                            arguments.push_str(delta);
+                            r.arguments.push_str(delta);
+                            if r.name == crate::ai::inspect::NAME {
+                                continue;
+                            }
 
                             let prefix = r#""instruction":""#;
                             let prefix_sp = r#""instruction": ""#;
                             if !in_instruction
-                                && (arguments.contains(prefix) || arguments.contains(prefix_sp))
+                                && (r.arguments.contains(prefix) || r.arguments.contains(prefix_sp))
                             {
                                 in_instruction = true;
                             }
                             if in_instruction {
                                 let (d, new_len) = crate::ai::streaming::instruction_delta(
-                                    &arguments,
-                                    emitted_instruction_len,
+                                    &r.arguments,
+                                    r.emitted_instruction_len,
                                 );
                                 if !d.is_empty() {
-                                    on_chunk(&d, crate::ai::streaming::count_streamed_steps(&arguments));
+                                    on_chunk(&d, crate::ai::streaming::count_streamed_steps(&r.arguments));
                                 }
-                                emitted_instruction_len = new_len;
+                                r.emitted_instruction_len = new_len;
                             }
                         }
                     }
@@ -321,12 +409,17 @@ impl DeepSeekClient {
                         bail!("{} Responses API stream error: {}", self.name, data);
                     }
                     Some("response.completed") => {
+                        if let Some(id) = data["response"]["id"].as_str() {
+                            r.response_id = id.to_string();
+                        }
+                        if let Some(m) = data["response"]["model"].as_str() {
+                            *self.last_served.lock() = Some(m.to_string());
+                        }
                         if let Some(usage) = data["response"]["usage"].as_object() {
-                            input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                            output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                             // Responses API names: cache hits under input_tokens_details,
                             // reasoning under output_tokens_details (both already included in
-                            // the totals above).
+                            // the totals).
+                            let top = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
                             let detail = |group: &str, key: &str| {
                                 usage
                                     .get(group)
@@ -334,13 +427,13 @@ impl DeepSeekClient {
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0)
                             };
-                            *self.last_usage.lock() = Some(UsageDetail {
-                                input: input_tokens,
+                            r.usage = UsageDetail {
+                                input: top("input_tokens"),
                                 cached_input: detail("input_tokens_details", "cached_tokens"),
                                 cache_write: 0,
-                                output: output_tokens,
+                                output: top("output_tokens"),
                                 reasoning: detail("output_tokens_details", "reasoning_tokens"),
-                            });
+                            };
                             if !usage_logged {
                                 log::info!("[tokens] responses-api raw usage (once): {}", data["response"]["usage"]);
                                 usage_logged = true;
@@ -351,12 +444,21 @@ impl DeepSeekClient {
                 }
             }
         }
+        Ok(r)
+    }
 
+    /// The navigate_step answer of the last round, parsed, with the first step shown as the
+    /// caption if nothing streamed.
+    fn parse_navigate(
+        &self,
+        arguments: &str,
+        emitted_instruction_len: usize,
+        on_chunk: &mut impl FnMut(&str, usize),
+    ) -> Result<NavigateStepResponse> {
         if arguments.trim().is_empty() {
             bail!("{}: Responses API stream produced no function_call_arguments", self.name);
         }
-
-        let resp: NavigateStepResponse = serde_json::from_str(&arguments).map_err(|e| {
+        let resp: NavigateStepResponse = serde_json::from_str(arguments).map_err(|e| {
             anyhow::anyhow!(
                 "{}: function_call arguments didn't match the schema: {} — raw: {}",
                 self.name,
@@ -364,14 +466,12 @@ impl DeepSeekClient {
                 arguments
             )
         })?;
-
         if emitted_instruction_len == 0 {
             if let Some(step) = resp.steps.first() {
                 on_chunk(&step.instruction, resp.steps.len().max(1));
             }
         }
-
-        Ok((resp, input_tokens, output_tokens))
+        Ok(resp)
     }
 
     /// One streamed request. Returns `Ok(None)` when the model produced no usable
@@ -598,6 +698,18 @@ impl DeepSeekClient {
 /// fresh session with no prior assistant turn, so this never surfaced until
 /// real multi-turn history hit it live. Mirror the relay's fix here too —
 /// keep the two in sync.
+/// One `/v1/responses` round: which function the model called, its arguments, and what to
+/// continue from.
+#[derive(Default)]
+struct ResponsesRound {
+    name: String,
+    call_id: String,
+    response_id: String,
+    arguments: String,
+    emitted_instruction_len: usize,
+    usage: UsageDetail,
+}
+
 fn messages_to_responses_input(messages: &[Value]) -> (String, Vec<Value>) {
     let mut instructions = String::new();
     let mut input = Vec::new();

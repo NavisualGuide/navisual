@@ -190,8 +190,8 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect"].contains(&variant.as_str()),
-            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect)"
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first"].contains(&variant.as_str()),
+            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, inspect_first)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -624,6 +624,14 @@ fn base_config(rc: &RunConfig) -> Config {
     // Set from the variant alone, never inherited from the .env: a hand-set EXPECTED_RESULT
     // left on there would otherwise turn every "production" run into an H1 run, silently.
     config.expected_result = h1_on(&rc.variant);
+    // H2: the zoom tool, offered by the router only when the frame was reduced below
+    // inspect::MIN_SCALE -- so on a 1080p fixture this variant sends what production sends.
+    config.inspect = match rc.variant.as_str() {
+        "inspect" => crate::ai::inspect::Mode::Choice,
+        "inspect_note" => crate::ai::inspect::Mode::Note,
+        "inspect_first" => crate::ai::inspect::Mode::First,
+        _ => crate::ai::inspect::Mode::Off,
+    };
     config
 }
 
@@ -797,6 +805,11 @@ async fn replay_battery() {
             let (b64, jpeg_len, w, h) = encode_fixture(&dir.join(&fx.image));
             let prompt = item_prompt(fx, &rc.voice_language, &rc.variant);
             prime_session(&mut router, fx);
+            router.inspect_frame = rc.variant.starts_with("inspect").then(|| {
+                std::sync::Arc::new(
+                    image::open(dir.join(&fx.image)).expect("fixture image").to_rgb8(),
+                )
+            });
 
             let started = Instant::now();
             let mut first_token: Option<Instant> = None;
@@ -810,6 +823,8 @@ async fn replay_battery() {
             let total_ms = started.elapsed().as_millis();
             let ttft_ms = first_token.map(|t| t.duration_since(started).as_millis());
             let detail = router.take_client_usage();
+            let inspects = router.take_inspects();
+            let served_model = router.take_served_model();
             let (bill_in, bill_out) = router.get_last_usage();
 
             let mut row = serde_json::json!({
@@ -828,6 +843,8 @@ async fn replay_battery() {
                 "class": fx.continuation.as_ref().map(|c| c.class.clone()),
                 "ttft_ms": ttft_ms,
                 "total_ms": total_ms,
+                "inspects": inspects,
+                "served_model": served_model,
             });
             match result {
                 Ok(resp) => {
