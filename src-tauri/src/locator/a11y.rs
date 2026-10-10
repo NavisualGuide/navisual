@@ -954,6 +954,17 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let _ = cache.add_property(UIProperty::IsOffscreen);
     let _ = cache.add_property(UIProperty::ClassName); // for the Excel walk's dedup
     let _ = cache.add_property(UIProperty::IsEnabled); // greyed-out marker for the prompt
+    // States for `ContextElement::state`; read only where the pattern is reported.
+    for p in [
+        UIProperty::ToggleToggleState,
+        UIProperty::IsTogglePatternAvailable,
+        UIProperty::SelectionItemIsSelected,
+        UIProperty::IsSelectionItemPatternAvailable,
+        UIProperty::ValueValue,
+        UIProperty::IsValuePatternAvailable,
+    ] {
+        let _ = cache.add_property(p);
+    }
 
     // ONE gather pipeline with two independent guards (restructured 2026-08-16). It used to be
     // two mutually-exclusive branches — "Excel walks INSTEAD, everyone else bulks" — and then
@@ -1065,6 +1076,7 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                 // wrongly calling a live control "disabled" would steer the model away
                 // from a valid target (the worse error of the two).
                 enabled: el.is_cached_enabled().unwrap_or(true),
+                state: cached_state(el, ct),
             });
         }
     };
@@ -1289,6 +1301,40 @@ pub fn snapshot_ui_tree(hwnd_raw: usize) -> Result<Vec<super::UiNode>, String> {
         }
     }
     Ok(out)
+}
+
+/// `ContextElement::state` from cached properties. A pattern property read from an element without
+/// the pattern returns its default (toggle "indeterminate", not selected), so each is read only
+/// where the element reports the pattern. A value is kept only for a combo box, slider or spinner:
+/// an edit box's value is typed content, and the screenshot already shows what is visible of it.
+fn cached_state(el: &UIElement, ct: ControlType) -> Option<String> {
+    let has = |p| -> bool {
+        el.get_cached_property_value(p).ok().and_then(|v| TryInto::<bool>::try_into(v).ok()).unwrap_or(false)
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if has(UIProperty::IsTogglePatternAvailable) {
+        let t: Option<i32> = el.get_cached_property_value(UIProperty::ToggleToggleState).ok().and_then(|v| v.try_into().ok());
+        match t {
+            Some(0) => parts.push("OFF".into()),
+            Some(1) => parts.push("ON".into()),
+            _ => {}
+        }
+    }
+    if has(UIProperty::IsSelectionItemPatternAvailable) {
+        let s: Option<bool> = el.get_cached_property_value(UIProperty::SelectionItemIsSelected).ok().and_then(|v| v.try_into().ok());
+        if s == Some(true) {
+            parts.push("SELECTED".into());
+        }
+    }
+    if matches!(ct, ControlType::ComboBox | ControlType::Slider | ControlType::Spinner)
+        && has(UIProperty::IsValuePatternAvailable)
+    {
+        let v: Option<String> = el.get_cached_property_value(UIProperty::ValueValue).ok().and_then(|v| TryInto::<String>::try_into(v).ok());
+        if let Some(v) = v.map(|v| v.trim().chars().take(40).collect::<String>()).filter(|v| !v.is_empty()) {
+            parts.push(format!("value=\"{v}\""));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" | "))
 }
 
 pub fn verify_context_element(snap: &super::ContextElement) -> (Option<Rect>, String) {

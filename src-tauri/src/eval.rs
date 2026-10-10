@@ -76,6 +76,10 @@ struct Fixture {
     /// "no list", the case for apps without an accessibility tree or over the 300 cap.
     #[serde(default)]
     elements_block: Option<String>,
+    /// The same list with each element's state (`Config::list_states`), written by the capture
+    /// test; the `list_states` variant sends it in place of `elements_block`.
+    #[serde(default)]
+    elements_block_states: Option<String>,
     /// H3: the accessibility snapshot taken with the screenshot (`a11y::snapshot_ui_tree`), a JSON
     /// file next to `image`. The `ui_tree` variant offers it; every other run ignores it.
     #[serde(default)]
@@ -200,10 +204,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list", "ui_tree"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list", "ui_tree", "list_states"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list, ui_tree)"
+             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list, ui_tree, list_states)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -268,6 +272,15 @@ fn encode_fixture(path: &Path) -> (String, usize, u32, u32) {
     (capture::to_base64(&jpeg), len, w, h)
 }
 
+/// The [Screen Elements] block an item sends: with each element's state under `list_states`
+/// (when the fixture has that block), the production block otherwise.
+fn elements_for<'a>(fx: &'a Fixture, variant: &str) -> &'a str {
+    match (variant, fx.elements_block_states.as_deref()) {
+        ("list_states", Some(b)) => b,
+        _ => fx.elements_block.as_deref().unwrap_or(""),
+    }
+}
+
 /// The turn-2 prompt `guide` would build after the user acted: the `[User completed: "…"]`
 /// line (with use A's expectation when the variant turns H1 on, exactly as `guide` adds it), the
 /// window context with the click record, and the tail anchors.
@@ -279,7 +292,7 @@ fn continuation_prompt(fx: &Fixture, c: &Continuation, voice_language: &str, var
     let window_context = crate::window_context_text(
         Some(&capture::format_window_prompt_info(&fx.window_title)),
         "",
-        fx.elements_block.as_deref().unwrap_or(""),
+        elements_for(fx, variant),
         crate::os_context_line(),
         None,
         click.as_deref(),
@@ -333,7 +346,7 @@ fn fixture_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
     let window_context = crate::window_context_text(
         Some(&info),
         "",
-        fx.elements_block.as_deref().unwrap_or(""),
+        elements_for(fx, variant),
         crate::os_context_line(),
         None,
         None,
@@ -883,9 +896,13 @@ fn capture_ui_fixture() {
     let img = crate::capture::capture_region_raw(rect, &[]).expect("capture");
     img.save(out.join("screen.png")).expect("png");
     let window_title = crate::capture::get_window_title(hwnd);
-    let (elements_block, sc) = match crate::locator::a11y::enumerate_context_elements(hwnd) {
-        Ok(els) => (crate::ai::prompts::elements_context_block(&els, rect), format!("{} elements", els.len())),
-        Err(e) => (String::new(), e),
+    let (elements_block, elements_block_states, sc) = match crate::locator::a11y::enumerate_context_elements(hwnd) {
+        Ok(els) => (
+            crate::ai::prompts::elements_context_block(&els, rect),
+            crate::ai::prompts::elements_context_block_with(&els, rect, true),
+            format!("{} elements, {} with a state", els.len(), els.iter().filter(|e| e.state.is_some()).count()),
+        ),
+        Err(e) => (String::new(), String::new(), e),
     };
     let nodes = crate::locator::a11y::snapshot_ui_tree(hwnd).unwrap_or_else(|e| panic!("snapshot: {e}"));
     std::fs::write(out.join("ui.json"), serde_json::to_string_pretty(&nodes).unwrap()).expect("ui.json");
@@ -903,6 +920,7 @@ fn capture_ui_fixture() {
         "avoid_rect": null,
         "notes": "",
         "elements_block": if elements_block.is_empty() { serde_json::Value::Null } else { serde_json::json!(elements_block) },
+        "elements_block_states": if elements_block_states.is_empty() { serde_json::Value::Null } else { serde_json::json!(elements_block_states) },
         "ui_snapshot": "ui.json",
     });
     std::fs::write(out.join("item.json"), serde_json::to_string_pretty(&item).unwrap() + "\n").expect("item.json");
@@ -1594,6 +1612,7 @@ mod tests {
             window_rect: [0, 0, 1000, 1000],
             image: "x.png".into(),
             elements_block: None,
+            elements_block_states: None,
             ui_snapshot: None,
             say_why: false,
             pass_if,

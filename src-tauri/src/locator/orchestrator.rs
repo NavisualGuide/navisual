@@ -1272,6 +1272,7 @@ mod tests {
                 role: "Button".to_string(),
                 rect: bbox_stub(),
                 enabled: true,
+                state: None,
             },
             ContextElement {
                 id: 2,
@@ -1279,6 +1280,7 @@ mod tests {
                 role: "TabItem".to_string(),
                 rect: bbox_stub(),
                 enabled: true,
+                state: None,
             },
         ];
         // Fabricated id → not in snapshot.

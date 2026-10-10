@@ -1652,6 +1652,7 @@ mod context_cache_tests {
                 height: 10,
             },
             enabled: true,
+            state: None,
         }
     }
 
@@ -4522,7 +4523,7 @@ async fn guide(
         .map(|hwnd| active_pack_context(&state.packs, hwnd))
         .unwrap_or_default();
     let elements_block = match (context_elements.as_deref(), capture_rect_opt) {
-        (Some(els), Some(rect)) => ai::prompts::elements_context_block(els, rect),
+        (Some(els), Some(rect)) => ai::prompts::elements_context_block_with(els, rect, router.config.list_states),
         _ => String::new(),
     };
     let os_line = os_context_line();
@@ -5798,7 +5799,7 @@ async fn send_correction(
         .map(|hwnd| active_pack_context(&state.packs, hwnd))
         .unwrap_or_default();
     let elements_block = match (context_elements.as_deref(), new_capture_rect) {
-        (Some(els), Some(rect)) => ai::prompts::elements_context_block(els, rect),
+        (Some(els), Some(rect)) => ai::prompts::elements_context_block_with(els, rect, router.config.list_states),
         _ => String::new(),
     };
     let os_line = os_context_line();

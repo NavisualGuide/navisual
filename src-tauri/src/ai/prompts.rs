@@ -368,9 +368,21 @@ are pressed, not pasted), instead of pointing at a button:\n",
 /// model can cross-reference the list against what it sees in the screenshot. Names are
 /// truncated for display only — the id resolves into the full snapshot. Empty input or
 /// a degenerate capture rect → empty string (callers append unconditionally).
+/// The block as it was before states existed; the app calls `elements_context_block_with`.
+#[cfg(test)]
 pub fn elements_context_block(
     elements: &[crate::locator::ContextElement],
     capture_rect: crate::capture::Rect,
+) -> String {
+    elements_context_block_with(elements, capture_rect, false)
+}
+
+/// The block with each element's state when `states` is on (`Config::list_states`): ON / OFF,
+/// SELECTED, a combo box's value. Off, it is byte-identical to the block before states existed.
+pub fn elements_context_block_with(
+    elements: &[crate::locator::ContextElement],
+    capture_rect: crate::capture::Rect,
+    states: bool,
 ) -> String {
     if elements.is_empty() || capture_rect.width == 0 || capture_rect.height == 0 {
         return String::new();
@@ -379,9 +391,15 @@ pub fn elements_context_block(
     let mut block = String::from(
         "\n[Screen Elements] — interactive elements detected on the current screen.\n\
          If your target is one of these, set target_element_id to its id (and still fill target_text).\n\
-         A row ending in | DISABLED is greyed out and CANNOT be clicked — see rule 7.\n\
-         id | role | name | center x,y (0-1000)\n",
+         A row ending in | DISABLED is greyed out and CANNOT be clicked — see rule 7.\n",
     );
+    if states {
+        block.push_str(
+            "| ON or | OFF is a switch or check box's current state, | SELECTED the current choice, \
+             | value=\"...\" a box's current value.\n",
+        );
+    }
+    block.push_str("id | role | name | center x,y (0-1000)\n");
     for el in elements {
         let cx = ((el.rect.x - capture_rect.x) as f64 + el.rect.width as f64 / 2.0)
             / capture_rect.width as f64
@@ -405,6 +423,13 @@ pub fn elements_context_block(
             (cy.round() as i64).clamp(0, 1000),
             if el.enabled { "" } else { " | DISABLED" },
         ));
+        if states {
+            if let Some(st) = &el.state {
+                // Before the newline just written.
+                block.pop();
+                block.push_str(&format!(" | {st}\n"));
+            }
+        }
     }
     block
 }
@@ -730,7 +755,26 @@ mod tests {
                 height: h,
             },
             enabled,
+            state: None,
         }
+    }
+
+    #[test]
+    fn elements_block_carries_states_only_when_asked() {
+        let rect = crate::capture::Rect { x: 0, y: 0, width: 1000, height: 1000 };
+        let mut sw = ctx_el(1, "Transparency effects", "Button", 100, 100, 20, 20);
+        sw.state = Some("ON".into());
+        let mut mode = ctx_el(2, "Choose your mode", "ComboBox", 200, 200, 20, 20);
+        mode.state = Some("value=\"Dark\"".into());
+        let plain = super::elements_context_block(&[sw.clone(), mode.clone()], rect);
+        assert!(!plain.contains("| ON") && !plain.contains("value="), "off: the block as before
+{plain}");
+        let with = super::elements_context_block_with(&[sw, mode], rect, true);
+        assert!(with.contains("1 | button | \"Transparency effects\" | 110,110 | ON
+"), "{with}");
+        assert!(with.contains("2 | combobox | \"Choose your mode\" | 210,210 | value=\"Dark\"
+"), "{with}");
+        assert!(with.contains("| ON or | OFF is a switch"), "the legend says what the markers mean");
     }
 
     #[test]

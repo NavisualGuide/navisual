@@ -126,6 +126,10 @@ pub struct ContextElement {
     /// `Custom Paper Size...` was selected and confidently instructed, because nothing
     /// in the pipeline consulted this property. See locator-testing.md §I.5 item 0.
     pub enabled: bool,
+    /// What a screenshot shows only faintly: `ON` / `OFF` for a switch or check box, `SELECTED`
+    /// for the current choice, `value="..."` for a combo box or slider -- several joined by " | ".
+    /// Read only where the element has the pattern. Rendered only with `Config::list_states`.
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

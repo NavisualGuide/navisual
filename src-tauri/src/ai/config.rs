@@ -245,6 +245,9 @@ pub struct Config {
     pub earlier_screens: bool,
     /// Screens one `recall` may return (H6); 1 as measured, more for the higher tier. `RECALL_MAX`.
     pub recall_max: usize,
+    /// States in the [Screen Elements] list (ON / OFF, SELECTED, a box's value). Off until
+    /// measured; `LIST_STATES`.
+    pub list_states: bool,
 }
 
 impl Default for Config {
@@ -314,6 +317,7 @@ impl Default for Config {
             inspect_tools: crate::ai::inspect::Tools::Zoom,
             earlier_screens: true,
             recall_max: 1,
+            list_states: false,
         }
     }
 }
@@ -605,6 +609,9 @@ impl Config {
         }
         if let Ok(v) = env::var("EARLIER_SCREENS") {
             config.earlier_screens = truthy(&v);
+        }
+        if let Ok(v) = env::var("LIST_STATES") {
+            config.list_states = truthy(&v);
         }
         if let Ok(v) = env::var("RECALL_MAX") {
             config.recall_max = v.trim().parse().unwrap_or(1).clamp(1, 4);
