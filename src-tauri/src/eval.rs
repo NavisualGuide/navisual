@@ -1158,11 +1158,19 @@ fn has_fact(text: &str, expect_any: &[String]) -> bool {
     })
 }
 
-/// What the user is told: every instruction and every target_text.
+/// What the user gets: every instruction, every target_text, and anything put on their clipboard
+/// -- luna answered "paste the offsite details" with the date on the clipboard.
 fn told(resp: &NavigateStepResponse) -> String {
     resp.steps
         .iter()
-        .map(|s| format!("{} {}", s.instruction, s.target_text.as_deref().unwrap_or("")))
+        .map(|s| {
+            format!(
+                "{} {} {}",
+                s.instruction,
+                s.target_text.as_deref().unwrap_or(""),
+                s.clipboard.as_deref().unwrap_or("")
+            )
+        })
         .collect::<Vec<_>>()
         .join(" | ")
 }
