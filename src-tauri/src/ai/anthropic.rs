@@ -122,6 +122,7 @@ impl AnthropicClient {
                         "description": "A short route overview toward the goal — like a map app's route overview, not turn-by-turn directions (that's steps/instruction). 2-8 short plain-language milestones, e.g. ['Open the Insert tab', 'Add page numbers', 'Set them to start at page 3', 'Skip the title page']. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append to it) whenever your understanding of the route changes — it is expected to change as you learn more. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task where a route overview would add nothing."
                     },
                     "plan_completed_count": {"type": "integer", "description": "How many of plan_outline's milestones (counting from the first) are already done — 0 means you're still on the first one, 1 means the first is done and you're on the second, etc. Update it whenever a milestone is finished, and again whenever you revise plan_outline itself (count against the NEW list). Omit to leave the previous count unchanged; meaningless without plan_outline, so omit both together."},
+                    "keep": {"type": "array", "items": {"type": "string"}, "description": crate::ai::prompts::KEEP_FIELD},
                     "state_summary": {"type": "string", "description": crate::ai::prompts::STATE_SUMMARY_FIELD},
                     "needs_input": {"type": "boolean"},
                     "suggested_tasks": {

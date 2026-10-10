@@ -493,12 +493,14 @@ impl AiRouter {
                 c.inspect_mode = mode;
                 c.inspect_tools = self.config.inspect_tools;
                 c.recall_screens = self.recall_screens.clone();
+                c.recall_max = self.config.recall_max;
             }
             Some(ApiClient::OpenAI(c)) => {
                 c.inspect_frame = zoom;
                 c.inspect_mode = mode;
                 c.inspect_tools = self.config.inspect_tools;
                 c.recall_screens = self.recall_screens.clone();
+                c.recall_max = self.config.recall_max;
             }
             _ => {}
         }

@@ -243,6 +243,8 @@ pub struct Config {
     /// The list of earlier screens in every request after the first (`Session::earlier_screens`):
     /// turn, window title, what the user said. On by default on this branch; `EARLIER_SCREENS`.
     pub earlier_screens: bool,
+    /// Screens one `recall` may return (H6); 1 as measured, more for the higher tier. `RECALL_MAX`.
+    pub recall_max: usize,
 }
 
 impl Default for Config {
@@ -311,6 +313,7 @@ impl Default for Config {
             inspect: crate::ai::inspect::Mode::Off,
             inspect_tools: crate::ai::inspect::Tools::Zoom,
             earlier_screens: true,
+            recall_max: 1,
         }
     }
 }
@@ -602,6 +605,9 @@ impl Config {
         }
         if let Ok(v) = env::var("EARLIER_SCREENS") {
             config.earlier_screens = truthy(&v);
+        }
+        if let Ok(v) = env::var("RECALL_MAX") {
+            config.recall_max = v.trim().parse().unwrap_or(1).clamp(1, 4);
         }
         if let Ok(v) = env::var("INSPECT_TOOLS") {
             config.inspect_tools = crate::ai::inspect::Tools::parse(&v);

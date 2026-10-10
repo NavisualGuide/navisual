@@ -164,12 +164,12 @@ actions — the user does everything.
     truncated away, so anything you leave out is gone for good. Rewrite it in
     full each turn, carrying: the user's GOAL in their own words (keep it
     verbatim until they change it), any CONSTRAINTS they stated ("not the
-    title page"), what is DONE so far, anything TRIED THAT FAILED so you
-    do not propose it again, and anything you have SEEN on an earlier
-    screen that the user may still need once it is gone, copied exactly --
-    you will not see that screen again. Never assume an earlier turn is
-    still visible.
-    Not shown to the user.
+    title page"), what is DONE so far, and anything TRIED THAT FAILED so you
+    do not propose it again. Never assume an earlier turn is still visible.
+    Not shown to the user. When a screen shows something the user may still
+    need once it is gone, put it in keep, copied exactly: kept notes are never
+    rewritten and come back on every later turn, so write each one once. The
+    same goes for anything you look up on an earlier screen.
 17. SUGGESTED NEXT TASKS: when the current task looks complete, or no task is
     stated yet, you MAY set suggested_tasks (top-level, next to state_summary)
     to up to 3 SHORT suggestions phrased as tasks the user would ask for
@@ -225,7 +225,11 @@ const EXPECTED_RESULT_FIELD_LINE: &str = "- expected_result: one short sentence 
 // gained its fifth slot on 2026-10-10: S3 found the summary kept what the user DID and never what
 // the screen SHOWED, because no slot asked for it (harness-plan.md). One constant now, so the
 // copies cannot disagree; the two prompted-JSON field lines are pinned by a test instead.
-pub const STATE_SUMMARY_FIELD: &str = "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, anything TRIED THAT FAILED, and anything you have SEEN on an earlier screen that the user may still need once it is gone, copied exactly. Never assume an earlier turn is still visible.";
+pub const STATE_SUMMARY_FIELD: &str = "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED. Never assume an earlier turn is still visible. Facts to keep for the rest of the session go in keep, not here.";
+
+/// The schema description of `keep` (rule 16). No example, by rule 21: an example names a kind of
+/// fact, and that kind is then what the model keeps.
+pub const KEEP_FIELD: &str = "Facts the user may still need after they leave the screen, each copied exactly as it was shown. Kept notes are never rewritten and come back on every later turn: add a fact once, and never repeat one already kept. Omit when there is nothing new.";
 
 /// The system prompt, carrying rule 19 when H1 is on.
 pub fn system_prompt(expected_result: bool) -> std::borrow::Cow<'static, str> {
@@ -680,15 +684,15 @@ mod tests {
     fn the_model_gets_the_window_title_and_no_frame() {
         assert_eq!(crate::capture::format_window_prompt_info("Book1 - Excel"), "Title: 'Book1 - Excel'");
         assert!(!super::SYSTEM_PROMPT.contains("Title and Class"));
-        // Rule 16's fifth slot, in the rule and in every field description that restates it.
-        let seen = "anything you have SEEN on an earlier";
-        assert!(super::SYSTEM_PROMPT.contains(seen), "rule 16");
-        assert!(super::STATE_SUMMARY_FIELD.contains("anything you have SEEN on an earlier screen"));
+        // Rule 16 sends facts to keep, and every field list that restates the schema has it.
+        assert!(super::SYSTEM_PROMPT.contains("put it in keep, copied exactly"), "rule 16");
+        assert!(!super::SYSTEM_PROMPT.contains("anything you have SEEN"), "the summary slot is gone");
+        assert!(super::STATE_SUMMARY_FIELD.contains("go in keep, not here"));
         for (who, format) in [
             ("deepseek", crate::ai::deepseek::JSON_FORMAT_INSTRUCTION),
             ("ollama", crate::ai::ollama::JSON_FORMAT_INSTRUCTION),
         ] {
-            assert!(format.contains("anything you have SEEN on an earlier screen"), "{who}'s field line");
+            assert!(format.contains("- keep: facts the user may still need"), "{who}'s field line");
         }
     }
 

@@ -37,6 +37,8 @@ const MAX_PINNED_TURNS: usize = 5;
 const MAX_EARLIER_SCREENS: usize = 40;
 /// What the user said, cut to this many characters per line of that list.
 const EARLIER_SAID_CHARS: usize = 80;
+/// Kept notes held at most; past this the oldest goes. About 15 tokens each.
+const MAX_KEPT_NOTES: usize = 15;
 
 /// Whether a string may be used as a frame's file name.
 ///
@@ -192,6 +194,18 @@ pub struct Session {
     pub token_usage: TokenUsage,
     pub started_at: String,
     pub last_active_at: String,
+    /// Facts the model asked to keep (`NavigateStepResponse::keep`), oldest first, never
+    /// rewritten; handed back on every turn by `kept_notes`. `#[serde(default)]` so sessions saved
+    /// before this existed load with none.
+    #[serde(default)]
+    pub kept: Vec<KeptNote>,
+}
+
+/// One kept fact and the turn it was kept on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeptNote {
+    pub turn: usize,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -215,6 +229,7 @@ impl Session {
             token_usage: TokenUsage::default(),
             started_at: now.clone(),
             last_active_at: now,
+            kept: Vec::new(),
         }
     }
 
@@ -368,6 +383,41 @@ impl Session {
                 Some(title) => out.push_str(&format!("\nturn {}: {title} -- \"{said}\"", i + 1)),
                 None => out.push_str(&format!("\nturn {}: \"{said}\"", i + 1)),
             }
+        }
+        out
+    }
+
+    /// Add the facts a turn asked to keep, numbered with the latest user turn. A fact already kept
+    /// (case and spacing aside) is not added twice; past `MAX_KEPT_NOTES` the oldest goes.
+    pub fn add_kept(&mut self, notes: &[String]) {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let turn = self
+            .conversation
+            .iter()
+            .filter(|t| matches!(t.role.as_str(), "user" | "correction"))
+            .count();
+        for n in notes {
+            let n = n.trim();
+            if n.is_empty() || self.kept.iter().any(|k| norm(&k.text) == norm(n)) {
+                continue;
+            }
+            self.kept.push(KeptNote { turn, text: n.to_string() });
+        }
+        let over = self.kept.len().saturating_sub(MAX_KEPT_NOTES);
+        if over > 0 {
+            self.kept.drain(..over);
+        }
+    }
+
+    /// The kept notes as the model reads them back, word for word, with the turn each was kept
+    /// on. Empty when there are none.
+    pub fn kept_notes(&self) -> String {
+        if self.kept.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("[Kept notes] Facts kept on earlier turns of this session, word for word:");
+        for k in &self.kept {
+            out.push_str(&format!("\n- (turn {}) {}", k.turn, k.text));
         }
         out
     }
@@ -909,6 +959,25 @@ mod tests {
         assert!(list.ends_with("\nturn 2: \"Next\""), "a blank title is no title: {list}");
         assert!(s.earlier_screens(true).contains("recall(turn) shows one again"));
         assert!(!list.contains("Double-click"), "the assistant's words are not listed");
+    }
+
+    #[test]
+    fn kept_notes_only_grow_and_never_repeat() {
+        let mut s = Session::new("t".into());
+        assert!(s.kept_notes().is_empty());
+        s.add_turn("user", "I opened Share.".into(), None);
+        s.add_kept(&["Share code: 7Q4-KM2".into(), "  ".into()]);
+        s.add_turn("assistant", "Send the code.".into(), None);
+        s.add_turn("user", "Next".into(), None);
+        s.add_kept(&["share  code: 7q4-km2".into(), "Offsite: 14 November".into()]);
+        assert_eq!(s.kept.len(), 2, "the same fact is not kept twice");
+        let block = s.kept_notes();
+        assert!(block.contains("\n- (turn 1) Share code: 7Q4-KM2\n- (turn 2) Offsite: 14 November"), "{block}");
+        for i in 0..20 {
+            s.add_kept(&[format!("fact {i}")]);
+        }
+        assert_eq!(s.kept.len(), 15);
+        assert_eq!(s.kept.last().unwrap().text, "fact 19");
     }
 
     #[test]

@@ -190,10 +190,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "no_list"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both, recall, no_list)"
+             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -642,6 +642,8 @@ fn base_config(rc: &RunConfig) -> Config {
     // The list of earlier screens is the app's default now; `no_list` takes it away. Set here,
     // never inherited from the .env.
     config.earlier_screens = rc.variant != "no_list";
+    // `recall3`: one recall may return up to three screens (the higher tier's setting).
+    config.recall_max = if rc.variant == "recall3" { 3 } else { 1 };
     config
 }
 
@@ -1130,7 +1132,7 @@ fn session_prompt(
         None,
         None,
     );
-    let window_context = crate::with_earlier_screens(window_context, session, list_on, offer_recall);
+    let window_context = crate::with_session_memory(window_context, session, list_on, offer_recall);
     if k == 1 {
         crate::compose_turn1_prompt(text, &window_context, sample, voice_language)
     } else {
@@ -1221,11 +1223,11 @@ async fn replay_sessions() {
     // H6, every earlier screen of the session offered to `recall` on every turn. (Before the list
     // was the default, the 2026-10-10 `earlier_list` runs were the list alone.)
     assert!(
-        ["", "recall", "no_list"].contains(&rc.variant.as_str()),
-        "S3 variants: none, recall, no_list"
+        ["", "recall", "recall3", "no_list"].contains(&rc.variant.as_str()),
+        "S3 variants: none, recall, recall3, no_list"
     );
     let list_on = rc.variant != "no_list";
-    let recall_on = rc.variant == "recall";
+    let recall_on = rc.variant.starts_with("recall");
     // `inline`: each probe is recorded into the session as the turn it was, so a later probe
     // sees what an earlier one looked up -- and whether the model wrote it down. `branch` (the
     // default): each probe is asked on a copy the main line never sees.
@@ -1317,7 +1319,7 @@ async fn replay_sessions() {
                     let (bill_in, bill_out) = router.get_last_usage();
                     let usd = crate::ai::pricing::estimate_cost(&rc.provider, &rc.model, bill_in, bill_out).unwrap_or(0.0);
                     spent += usd;
-                    let recalled_turns: Vec<usize> = looks.iter().filter_map(|l| l.turn).collect();
+                    let recalled_turns: Vec<usize> = looks.iter().flat_map(|l| l.turns.iter().copied()).collect();
                     let mut row = serde_json::json!({
                         "run_id": run_id, "rep": rep, "session": sx.id, "kind": sx.kind,
                         "battery": rc.battery, "provider": rc.provider, "model": rc.model,
@@ -1356,6 +1358,7 @@ async fn replay_sessions() {
                                         &resp.state_summary,
                                         &steps,
                                         Some(p.title.clone()),
+                                        &resp.keep,
                                     );
                                 }
                                 summary = resp.state_summary.clone();
@@ -1439,6 +1442,7 @@ async fn replay_sessions() {
                                 &resp.state_summary,
                                 &steps,
                                 Some(t.title.clone()),
+                                &resp.keep,
                             );
                         }
                         summary = resp.state_summary.clone();
@@ -1447,6 +1451,14 @@ async fn replay_sessions() {
                             trace.push(if has_fact(&summary, &sx.expect_any) { 'F' } else { '.' });
                         }
                         row["summary_has_fact"] = serde_json::json!(has_fact(&summary, &sx.expect_any));
+                        let kept = router
+                            .session_manager
+                            .current_session
+                            .as_ref()
+                            .map(|s| s.kept.iter().map(|k| k.text.clone()).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        row["kept_has_fact"] = serde_json::json!(kept.iter().any(|k| has_fact(k, &sx.expect_any)));
+                        row["kept"] = serde_json::json!(kept);
                         row["response"] = serde_json::to_value(&resp).unwrap_or_default();
                     }
                     Err(e) => {

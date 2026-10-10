@@ -30,6 +30,7 @@ pub struct GeminiClient {
     pub(crate) inspect_tools: crate::ai::inspect::Tools,
     /// H6: earlier screens `recall` can return, set per request by the router.
     pub(crate) recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
+    pub(crate) recall_max: usize,
     last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
     /// `modelVersion` of the last response: the model that answered, which is not always the one
     /// named (Google redirected gemini-3.7-flash to 3.8 on 2026-10-09).
@@ -67,6 +68,7 @@ impl GeminiClient {
             inspect_mode: crate::ai::inspect::Mode::Off,
             inspect_tools: crate::ai::inspect::Tools::Zoom,
             recall_screens: None,
+            recall_max: 1,
             last_inspects: parking_lot::Mutex::new(Vec::new()),
             last_served: parking_lot::Mutex::new(None),
         })
@@ -150,6 +152,7 @@ impl GeminiClient {
                         "description": "A short route overview toward the goal — like a map app's route overview, not turn-by-turn directions (that's steps/instruction). 2-8 short plain-language milestones, e.g. ['Open the Insert tab', 'Add page numbers', 'Set them to start at page 3', 'Skip the title page']. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append to it) whenever your understanding of the route changes — it is expected to change as you learn more. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task where a route overview would add nothing."
                     },
                     "plan_completed_count": {"type": "integer", "description": "How many of plan_outline's milestones (counting from the first) are already done — 0 means you're still on the first one, 1 means the first is done and you're on the second, etc. Update it whenever a milestone is finished, and again whenever you revise plan_outline itself (count against the NEW list). Omit to leave the previous count unchanged; meaningless without plan_outline, so omit both together."},
+                    "keep": {"type": "array", "items": {"type": "string"}, "description": crate::ai::prompts::KEEP_FIELD},
                     "state_summary": {"type": "string", "description": crate::ai::prompts::STATE_SUMMARY_FIELD},
                     "needs_input": {"type": "boolean"},
                     "suggested_tasks": {
@@ -233,11 +236,14 @@ impl GeminiClient {
         let sources = crate::ai::inspect::Sources {
             frame: self.inspect_frame.clone(),
             earlier: self.recall_screens.clone(),
+            recall_max: self.recall_max,
         };
         self.last_inspects.lock().clear();
         let look_names = sources.names(self.inspect_tools);
         let mut declared = vec![tool_schema.clone()];
-        for (name, description, parameters) in crate::ai::inspect::declarations(self.inspect_mode, &look_names) {
+        for (name, description, parameters) in
+            crate::ai::inspect::declarations(self.inspect_mode, &look_names, self.recall_max)
+        {
             declared.push(json!({"name": name, "description": description, "parameters": parameters}));
         }
         let mut contents: Vec<Value> = payload["contents"].as_array().cloned().unwrap_or_default();
@@ -439,14 +445,14 @@ impl GeminiClient {
                     zooms += 1;
                     let (answer, look) = crate::ai::inspect::answer(&inspect_name, &sources, args).await;
                     if let Some(l) = look {
-                        log::info!("[inspect] gemini {} {zooms}: {:?} turn {:?}", l.tool, l.region, l.turn);
+                        log::info!("[inspect] gemini {} {zooms}: {:?} turns {:?}", l.tool, l.region, l.turns);
                         self.last_inspects.lock().push(l);
                     }
                     let reply = match answer {
-                        crate::ai::inspect::Reply::Image(b64, caption) => json!({"functionResponse": {
+                        crate::ai::inspect::Reply::Images(images, caption) => json!({"functionResponse": {
                             "name": inspect_name,
                             "response": {"result": caption},
-                            "parts": [{"inlineData": {"mimeType": "image/jpeg", "data": b64}}]
+                            "parts": images.iter().map(|b64| json!({"inlineData": {"mimeType": "image/jpeg", "data": b64}})).collect::<Vec<_>>()
                         }}),
                         crate::ai::inspect::Reply::Text(text) => json!({"functionResponse": {
                             "name": inspect_name,
@@ -540,6 +546,7 @@ impl GeminiClient {
                 let fallback = NavigateStepResponse {
                     goal: String::new(),
                     plan_outline: Vec::new(),
+            keep: Vec::new(),
                     plan_completed_count: None,
                     steps: vec![crate::ai::types::GuidanceStep {
                         instruction: clean_instruction,

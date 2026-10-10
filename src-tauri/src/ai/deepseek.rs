@@ -45,6 +45,7 @@ Top-level fields (outside "steps", required):
 
 Optional top-level fields:
 - suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence
+- keep: facts the user may still need after they leave the screen, each copied exactly as shown; kept notes come back on every later turn and are never rewritten, so add each once and never repeat one already kept (omit when there is nothing new)
 - plan_outline: a short route overview toward the goal — like a map app's route overview, not turn-by-turn (that's steps/instruction). 2-8 short plain-language milestones, e.g. ["Open the Insert tab", "Add page numbers", "Set them to start at page 3"]. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append) whenever your understanding of the route changes. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task
 - plan_completed_count: how many of plan_outline's milestones (counting from the first) are already done — 0 means still on the first one, 1 means the first is done and you're on the second, etc. Update as milestones finish, and again whenever you revise plan_outline (count against the NEW list). Omit to leave the previous count unchanged; meaningless without plan_outline, so omit both together"#;
 
@@ -69,6 +70,7 @@ pub struct DeepSeekClient {
     pub(crate) inspect_tools: crate::ai::inspect::Tools,
     /// H6: earlier screens `recall` can return (OpenAI via Responses only).
     pub(crate) recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
+    pub(crate) recall_max: usize,
     last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
     /// `response.model` of the last Responses API call: the model that answered.
     last_served: parking_lot::Mutex<Option<String>>,
@@ -108,6 +110,7 @@ impl DeepSeekClient {
             inspect_mode: crate::ai::inspect::Mode::Off,
             inspect_tools: crate::ai::inspect::Tools::Zoom,
             recall_screens: None,
+            recall_max: 1,
             last_inspects: parking_lot::Mutex::new(Vec::new()),
             last_served: parking_lot::Mutex::new(None),
         })
@@ -261,11 +264,14 @@ impl DeepSeekClient {
         let sources = crate::ai::inspect::Sources {
             frame: self.inspect_frame.clone(),
             earlier: self.recall_screens.clone(),
+            recall_max: self.recall_max,
         };
         self.last_inspects.lock().clear();
         let look_names = sources.names(self.inspect_tools);
         let mut declared = vec![flat_tool.clone()];
-        for (name, description, parameters) in crate::ai::inspect::declarations(self.inspect_mode, &look_names) {
+        for (name, description, parameters) in
+            crate::ai::inspect::declarations(self.inspect_mode, &look_names, self.recall_max)
+        {
             declared.push(json!({"type": "function", "name": name,
                                  "description": description, "parameters": parameters}));
         }
@@ -306,17 +312,20 @@ impl DeepSeekClient {
                         serde_json::from_str(&round.arguments).unwrap_or_else(|_| json!({}));
                     let (answer, look) = crate::ai::inspect::answer(&round.name, &sources, args).await;
                     if let Some(l) = look {
-                        log::info!("[inspect] {} {} {zooms}: {:?} turn {:?}", self.name, l.tool, l.region, l.turn);
+                        log::info!("[inspect] {} {} {zooms}: {:?} turns {:?}", self.name, l.tool, l.region, l.turns);
                         self.last_inspects.lock().push(l);
                     }
                     let output = match answer {
                         // A zoom's crop goes back alone, as H2 was measured; a recalled screen
                         // says which turn it is.
-                        crate::ai::inspect::Reply::Image(b64, caption) if round.name == crate::ai::inspect::RECALL => json!([
-                            {"type": "input_text", "text": caption},
-                            {"type": "input_image", "image_url": format!("data:image/jpeg;base64,{b64}")}]),
-                        crate::ai::inspect::Reply::Image(b64, _) => json!([{"type": "input_image",
-                            "image_url": format!("data:image/jpeg;base64,{b64}")}]),
+                        crate::ai::inspect::Reply::Images(images, caption) if round.name == crate::ai::inspect::RECALL => {
+                            let mut parts = vec![json!({"type": "input_text", "text": caption})];
+                            parts.extend(images.iter().map(|b64| json!({"type": "input_image",
+                                "image_url": format!("data:image/jpeg;base64,{b64}")})));
+                            Value::Array(parts)
+                        }
+                        crate::ai::inspect::Reply::Images(images, _) => Value::Array(images.iter().map(|b64| json!({
+                            "type": "input_image", "image_url": format!("data:image/jpeg;base64,{b64}")})).collect()),
                         crate::ai::inspect::Reply::Text(text) => json!(text),
                         crate::ai::inspect::Reply::Refused(why) => json!(why),
                     };
@@ -830,6 +839,7 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
     NavigateStepResponse {
         goal: String::new(),
         plan_outline: Vec::new(),
+            keep: Vec::new(),
         plan_completed_count: None,
         steps: vec![GuidanceStep {
             instruction: text.to_string(),

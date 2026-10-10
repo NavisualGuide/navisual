@@ -56,6 +56,15 @@ session, exactly as it was sent then. Use it when you need something that was on
 screen and is neither on the current screen nor in your summary. The earlier screens are listed \
 by turn in the message.";
 
+/// The same, when one call may return several screens (`Sources::recall_max` above 1).
+const RECALL_MANY_DESCRIPTION: &str = "Look again at screenshots from earlier turns of this \
+session, exactly as they were sent then. Use it when you need something that was on earlier \
+screens and is neither on the current screen nor in your summary -- including what changed \
+between them. The earlier screens are listed by turn in the message.";
+
+/// Said with every recalled screen: one look is enough if what was needed is written down.
+const RECALL_KEEP_HINT: &str = " If you will need something from it again, put it in keep.";
+
 const LIMIT_ONE: &str = " You may call it at most twice per answer; then answer with navigate_step.";
 
 /// Said only in `Mode::Note`: a fact about the image, never a size or coordinate of the user's
@@ -145,6 +154,8 @@ pub struct EarlierScreen {
 pub struct Sources {
     pub frame: Option<Arc<RgbImage>>,
     pub earlier: Option<Arc<Vec<EarlierScreen>>>,
+    /// Screens one recall may return; 0 or 1 is one, as H6 was measured.
+    pub recall_max: usize,
 }
 
 impl Sources {
@@ -167,8 +178,9 @@ pub fn is_look(name: &str) -> bool {
 }
 
 /// (name, description, parameters) of every tool in `names`. One tool keeps the exact wording H2
-/// was measured with; several share one sentence naming the joint budget.
-pub fn declarations(mode: Mode, names: &[&'static str]) -> Vec<(&'static str, String, Value)> {
+/// was measured with; several share one sentence naming the joint budget. `recall_max` above 1
+/// lets one recall name several turns.
+pub fn declarations(mode: Mode, names: &[&'static str], recall_max: usize) -> Vec<(&'static str, String, Value)> {
     let limit = if names.len() > 1 {
         let (last, rest) = names.split_last().expect("non-empty");
         format!(
@@ -184,9 +196,28 @@ pub fn declarations(mode: Mode, names: &[&'static str]) -> Vec<(&'static str, St
             NAME => (n, describe(DESCRIPTION, mode, &limit), parameters()),
             READ_TEXT => (n, describe(READ_TEXT_DESCRIPTION, mode, &limit), parameters()),
             // A fact about the current frame does not belong on recall: no reduction note.
+            _ if recall_max > 1 => (
+                n,
+                format!("{RECALL_MANY_DESCRIPTION} Name at most {recall_max} turns in one call.{limit}"),
+                recall_many_parameters(recall_max),
+            ),
             _ => (n, format!("{RECALL_DESCRIPTION}{limit}"), recall_parameters()),
         })
         .collect()
+}
+
+fn recall_many_parameters(max: usize) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "turns": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": format!("turn numbers from the list of earlier screens, at most {max}")
+            }
+        },
+        "required": ["turns"]
+    })
 }
 
 fn recall_parameters() -> Value {
@@ -209,13 +240,14 @@ pub struct Look {
     pub region: [u32; 4],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<usize>,
 }
 
-/// What goes back to the model for one call. An image carries the sentence that names it.
+/// What goes back to the model for one call. Images carry the sentence that names them; a zoom is
+/// one image, a recall one or more.
 pub enum Reply {
-    Image(String, String),
+    Images(Vec<String>, String),
     Text(String),
     Refused(&'static str),
 }
@@ -224,15 +256,36 @@ pub enum Reply {
 /// reply and, when something was looked at, the record of it.
 pub async fn answer(name: &str, sources: &Sources, args: Value) -> (Reply, Option<Look>) {
     if name == RECALL {
-        let turn = args.get("turn").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let found = sources.earlier.as_ref().and_then(|e| e.iter().find(|s| s.turn == turn));
-        return match found {
-            Some(s) => (
-                Reply::Image(s.jpeg_b64.clone(), format!("the screenshot from turn {turn}")),
-                Some(Look { tool: RECALL, region: [0; 4], text: None, turn: Some(turn) }),
+        // `turns` when several are allowed, `turn` as H6 was measured; either is read.
+        let mut asked: Vec<usize> = args
+            .get("turns")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_u64).map(|t| t as usize).collect())
+            .unwrap_or_default();
+        if let Some(t) = args.get("turn").and_then(Value::as_u64) {
+            asked.push(t as usize);
+        }
+        asked.dedup();
+        asked.truncate(sources.recall_max.max(1));
+        let found: Vec<&EarlierScreen> = asked
+            .iter()
+            .filter_map(|t| sources.earlier.as_ref().and_then(|e| e.iter().find(|s| s.turn == *t)))
+            .collect();
+        if found.is_empty() {
+            return (Reply::Refused("there is no earlier screen with that turn number"), None);
+        }
+        let turns: Vec<usize> = found.iter().map(|s| s.turn).collect();
+        let caption = match turns.as_slice() {
+            [one] => format!("the screenshot from turn {one}.{RECALL_KEEP_HINT}"),
+            many => format!(
+                "the screenshots from turns {}, in that order.{RECALL_KEEP_HINT}",
+                many.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
             ),
-            None => (Reply::Refused("there is no earlier screen with that turn number"), None),
         };
+        return (
+            Reply::Images(found.iter().map(|s| s.jpeg_b64.clone()).collect(), caption),
+            Some(Look { tool: RECALL, region: [0; 4], text: None, turns }),
+        );
     }
     let Some(frame) = sources.frame.clone() else {
         return (Reply::Refused("that tool is not available for this screen"), None);
@@ -242,7 +295,7 @@ pub async fn answer(name: &str, sources: &Sources, args: Value) -> (Reply, Optio
         return match out {
             Ok(Some((text, region))) => (
                 Reply::Text(text.clone()),
-                Some(Look { tool: READ_TEXT, region, text: Some(text), turn: None }),
+                Some(Look { tool: READ_TEXT, region, text: Some(text), turns: Vec::new() }),
             ),
             Ok(None) => (Reply::Refused("that region is too small; give a larger one"), None),
             Err(_) => (Reply::Refused("the text could not be read"), None),
@@ -250,8 +303,8 @@ pub async fn answer(name: &str, sources: &Sources, args: Value) -> (Reply, Optio
     }
     match crop(&frame, &args) {
         Some((b64, region)) => (
-            Reply::Image(b64, "the region at full resolution".to_string()),
-            Some(Look { tool: NAME, region, text: None, turn: None }),
+            Reply::Images(vec![b64], "the region at full resolution".to_string()),
+            Some(Look { tool: NAME, region, text: None, turns: Vec::new() }),
         ),
         None => (Reply::Refused("that region is too small; give a larger one"), None),
     }
@@ -404,34 +457,44 @@ mod tests {
         assert_eq!(Tools::parse("text"), Tools::Text);
         assert_eq!(Tools::parse("both"), Tools::Both);
         assert_eq!(Tools::parse(""), Tools::Zoom);
-        let zoom = declarations(Mode::Choice, Tools::Zoom.names());
+        let zoom = declarations(Mode::Choice, Tools::Zoom.names(), 1);
         assert_eq!(zoom.len(), 1);
         assert_eq!(zoom[0].1, description(Mode::Choice));
         assert!(zoom[0].1.ends_with("at most twice per answer; then answer with navigate_step."));
-        let both = declarations(Mode::Note, Tools::Both.names());
+        let both = declarations(Mode::Note, Tools::Both.names(), 1);
         assert_eq!(both.iter().map(|d| d.0).collect::<Vec<_>>(), vec![NAME, READ_TEXT]);
         assert!(both.iter().all(|d| d.1.contains("inspect and read_text at most twice in total")));
         assert!(both.iter().all(|d| d.1.contains("reduced to fit")));
-        assert!(declarations(Mode::First, Tools::Text.names())[0].1.contains("characters only"));
+        assert!(declarations(Mode::First, Tools::Text.names(), 1)[0].1.contains("characters only"));
     }
 
     #[test]
     fn recall_is_offered_only_with_earlier_screens_and_finds_them_by_turn() {
         let none = Sources::default();
         assert!(none.names(Tools::Zoom).is_empty());
-        let earlier = Sources {
-            frame: None,
-            earlier: Some(Arc::new(vec![EarlierScreen { turn: 2, jpeg_b64: "AAA".into() }])),
-        };
+        let screens = vec![
+            EarlierScreen { turn: 2, jpeg_b64: "AAA".into() },
+            EarlierScreen { turn: 5, jpeg_b64: "BBB".into() },
+        ];
+        let earlier = Sources { frame: None, earlier: Some(Arc::new(screens)), recall_max: 1 };
         assert_eq!(earlier.names(Tools::Zoom), vec![RECALL], "no frame, no zoom");
-        let d = declarations(Mode::Note, &[RECALL]);
+        let d = declarations(Mode::Note, &[RECALL], 1);
         assert!(d[0].1.contains("earlier turn") && !d[0].1.contains("reduced"), "{}", d[0].1);
+        assert!(d[0].2["properties"].get("turn").is_some(), "one screen per call, as measured");
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let (reply, look) = rt.block_on(answer(RECALL, &earlier, json!({"turn": 2})));
-        assert!(matches!(reply, Reply::Image(ref b, ref c) if b == "AAA" && c.contains("turn 2")));
-        assert_eq!(look.unwrap().turn, Some(2));
+        assert!(matches!(reply, Reply::Images(ref b, ref c) if b == &["AAA"] && c.contains("turn 2") && c.contains("keep")));
+        assert_eq!(look.unwrap().turns, vec![2]);
+        let (_, look) = rt.block_on(answer(RECALL, &earlier, json!({"turns": [5, 2]})));
+        assert_eq!(look.unwrap().turns, vec![5], "one allowed: the first named");
         let (reply, look) = rt.block_on(answer(RECALL, &earlier, json!({"turn": 9})));
         assert!(matches!(reply, Reply::Refused(_)) && look.is_none());
+        let many = Sources { recall_max: 3, ..earlier.clone() };
+        let d = declarations(Mode::Choice, &[RECALL], 3);
+        assert!(d[0].1.contains("at most 3 turns") && d[0].2["properties"].get("turns").is_some());
+        let (reply, look) = rt.block_on(answer(RECALL, &many, json!({"turns": [5, 2, 9]})));
+        assert!(matches!(reply, Reply::Images(ref b, ref c) if b.len() == 2 && c.contains("turns 5, 2")));
+        assert_eq!(look.unwrap().turns, vec![5, 2], "an unknown turn is skipped");
 
     }
 

@@ -357,6 +357,11 @@ pub struct NavigateStepResponse {
     /// never auto-submits. Absence is the norm mid-task.
     #[serde(default, deserialize_with = "lax_suggestions")]
     pub suggested_tasks: Vec<String>,
+    /// Facts to keep for the rest of the session, each written once (rule 16): the app adds them
+    /// to `Session::kept` and hands them back on every later turn, so a summary rewritten from the
+    /// current screen cannot crowd them out. Empty is normal.
+    #[serde(default, deserialize_with = "lax_keep")]
+    pub keep: Vec<String>,
     // The old AI-driven full-screen request field was removed 2026-07-12 (audit
     // F12) — the mechanism was deleted at SDD rev 2.17 and the field had been
     // inert ever since. Stray model output still emitting the key is simply
@@ -368,6 +373,25 @@ pub struct NavigateStepResponse {
 /// runaway/garbage string, not a task — dropped, not truncated); case-insensitive
 /// dedupe; hard cap 3. A non-array or otherwise malformed value becomes an empty
 /// list — never a parse failure (the [`lax_bbox`]/[`lax_overlay`] precedent).
+/// `keep`: strings only, trimmed, none empty, each at most 200 characters, at most 5 per turn.
+/// Garbage is dropped, never a failed parse.
+fn lax_keep<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let Some(arr) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(arr
+        .iter()
+        .filter_map(|v| v.as_str().map(str::trim))
+        .filter(|s| !s.is_empty() && s.chars().count() <= 200)
+        .take(5)
+        .map(str::to_string)
+        .collect())
+}
+
 fn lax_suggestions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
