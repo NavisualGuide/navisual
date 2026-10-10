@@ -2881,8 +2881,27 @@ fn compose_reply_prompt(
     )
 }
 
+/// The window context with the list of earlier screens after it, when that list is on and has
+/// anything in it. One function for `guide`, `send_correction` and the replay harness.
+fn with_earlier_screens(
+    window_context: String,
+    session: Option<&crate::ai::session::Session>,
+    on: bool,
+    offer_recall: bool,
+) -> String {
+    let list = match session {
+        Some(s) if on => s.earlier_screens(offer_recall),
+        _ => String::new(),
+    };
+    match (window_context.is_empty(), list.is_empty()) {
+        (_, true) => window_context,
+        (true, false) => list,
+        (false, false) => format!("{window_context}\n{list}"),
+    }
+}
+
 /// What an answer writes into the session: the model-owned goal and plan, the state summary,
-/// the user's turn and the assistant's steps. Extracted from `guide` so a replayed multi-turn
+/// the user's turn (with the window it was on) and the assistant's steps. Extracted from `guide` so a replayed multi-turn
 /// session (S3) remembers exactly what the app remembers -- the window, the pinning and the
 /// summary are the whole of the app's working memory, and a harness copy would drift.
 #[allow(clippy::too_many_arguments)]
@@ -2895,6 +2914,7 @@ fn record_exchange(
     response_plan_completed_count: Option<usize>,
     state_summary: &str,
     steps: &[GuidanceStep],
+    window_title: Option<String>,
 ) {
     // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
     // the field leaves the stored goal alone rather than wiping it — the failure mode here
@@ -2937,6 +2957,7 @@ fn record_exchange(
     // exactly `task.starts_with("[User completed:")`, set at the top of `guide`).
     let pinned = !task.is_empty() && !is_next_requery;
     session.add_turn_pinned("user", user_turn_text, None, pinned);
+    session.set_last_user_turn_title(window_title);
     let content = steps
         .iter()
         .map(|s| s.instruction.clone())
@@ -4518,6 +4539,13 @@ async fn guide(
         app_state_text.as_deref(),
         click_line.as_deref(),
     );
+    // The list of earlier screens: which window each earlier turn was in, and what the user said.
+    let window_context = with_earlier_screens(
+        window_context,
+        router.session_manager.current_session.as_ref(),
+        router.config.earlier_screens,
+        false,
+    );
 
 
     // Streaming-first surfacing: as the instruction streams in token-by-token,
@@ -4906,6 +4934,7 @@ async fn guide(
             response_plan_completed_count,
             &state_summary,
             &steps,
+            new_hwnd_opt.map(capture::get_window_title),
         );
         // Searches back for the user turn, so it lands there though the assistant's is newer.
         session.set_last_user_turn_facts(clicked.clone(), advance.clone(), frame.clone());
@@ -5779,6 +5808,12 @@ async fn send_correction(
         os_line,
         app_state_text.as_deref(),
         None,
+    );
+    let window_context = with_earlier_screens(
+        window_context,
+        router.session_manager.current_session.as_ref(),
+        router.config.earlier_screens,
+        false,
     );
 
     // Same language + goal anchor as guide()'s continuation turns — a correction is a

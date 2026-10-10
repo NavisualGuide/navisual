@@ -190,10 +190,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "earlier_list"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "no_list"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both, recall, earlier_list)"
+             inspect_first, read_text, read_text_first, look_both, recall, no_list)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -639,6 +639,9 @@ fn base_config(rc: &RunConfig) -> Config {
         "look_both" => (Mode::Choice, Tools::Both),
         _ => (Mode::Off, Tools::Zoom),
     };
+    // The list of earlier screens is the app's default now; `no_list` takes it away. Set here,
+    // never inherited from the .env.
+    config.earlier_screens = rc.variant != "no_list";
     config
 }
 
@@ -1105,8 +1108,9 @@ fn load_sessions(rc: &RunConfig) -> Vec<(PathBuf, SessionFixture)> {
 
 /// The prompt and the summary argument `guide` would send for turn `k` of a typed session: turn 1
 /// is a new task, every later turn a typed reply (the panel is guiding, so `isReply`).
-/// `earlier` is H6's list of earlier screens (`inspect::recall_index`), empty without it; it rides
-/// at the end of the window context, so it is never stored in history and the anchors stay last.
+/// The list of earlier screens comes from the session through `with_earlier_screens`, exactly as
+/// `guide` adds it, so it is never stored in history and the anchors stay last.
+#[allow(clippy::too_many_arguments)]
 fn session_prompt(
     k: usize,
     text: &str,
@@ -1114,9 +1118,11 @@ fn session_prompt(
     original_task: &str,
     sample: Option<&str>,
     voice_language: &str,
-    earlier: &str,
+    session: Option<&crate::ai::session::Session>,
+    list_on: bool,
+    offer_recall: bool,
 ) -> String {
-    let mut window_context = crate::window_context_text(
+    let window_context = crate::window_context_text(
         Some(&capture::format_window_prompt_info(title)),
         "",
         "",
@@ -1124,9 +1130,7 @@ fn session_prompt(
         None,
         None,
     );
-    if !earlier.is_empty() {
-        window_context = format!("{window_context}\n{earlier}");
-    }
+    let window_context = crate::with_earlier_screens(window_context, session, list_on, offer_recall);
     if k == 1 {
         crate::compose_turn1_prompt(text, &window_context, sample, voice_language)
     } else {
@@ -1213,14 +1217,14 @@ async fn replay_sessions() {
     println!();
     let rc = RunConfig::from_env();
     // The 2026-10-10 `remember` ablation is rule 16 now; results tagged `remember` are that rule.
-    // `recall`: H6, every earlier screen of the session offered to `recall` on every turn.
-    // `earlier_list`: the list of earlier screens (turn, title, words) without the tool -- the
-    // first H6 run answered the rename and the deleted note from the titles in that list alone.
+    // The app's default carries the list of earlier screens; `no_list` takes it away. `recall`:
+    // H6, every earlier screen of the session offered to `recall` on every turn. (Before the list
+    // was the default, the 2026-10-10 `earlier_list` runs were the list alone.)
     assert!(
-        ["", "recall", "earlier_list"].contains(&rc.variant.as_str()),
-        "S3 variants: none, recall, earlier_list"
+        ["", "recall", "no_list"].contains(&rc.variant.as_str()),
+        "S3 variants: none, recall, no_list"
     );
-    let list_on = rc.variant == "recall" || rc.variant == "earlier_list";
+    let list_on = rc.variant != "no_list";
     let recall_on = rc.variant == "recall";
     let window: usize = env_or("NAVISUAL_EVAL_WINDOW", "0").parse().unwrap_or(0);
     let sessions = load_sessions(&rc);
@@ -1266,9 +1270,8 @@ async fn replay_sessions() {
             let mut summary = String::new();
             let mut sample: Option<String> = None;
             let mut trace = String::new();
-            // H6: every main turn's screen as it was sent, and the list naming them.
+            // H6: every main turn's screen as it was sent.
             let mut earlier: Vec<crate::ai::inspect::EarlierScreen> = Vec::new();
-            let mut index: Vec<(usize, String, String)> = Vec::new();
             for k in 1..=last_main + 1 {
                 if spent >= rc.max_usd {
                     println!("[s3] STOP: spent ${spent:.4} reached the ${:.2} cap", rc.max_usd);
@@ -1283,8 +1286,10 @@ async fn replay_sessions() {
                     } else {
                         sample.clone()
                     };
-                    let list = if list_on { crate::ai::inspect::recall_index(&index) } else { String::new() };
-                    let prompt = session_prompt(k, &p.text, &p.title, &original, probe_sample.as_deref(), &rc.voice_language, &list);
+                    let prompt = session_prompt(
+                        k, &p.text, &p.title, &original, probe_sample.as_deref(), &rc.voice_language,
+                        snapshot.as_ref(), list_on, recall_on && !earlier.is_empty(),
+                    );
                     let (b64, _, _, _) = encode_fixture(&dir.join(&p.image));
                     router.inspect_frame = None;
                     router.recall_screens = (recall_on && !earlier.is_empty()).then(|| std::sync::Arc::new(earlier.clone()));
@@ -1344,8 +1349,10 @@ async fn replay_sessions() {
                     .as_ref()
                     .map(|s| s.task_description.clone())
                     .unwrap_or_default();
-                let list = if list_on { crate::ai::inspect::recall_index(&index) } else { String::new() };
-                let prompt = session_prompt(k, &t.text, &t.title, &original, sample.as_deref(), &rc.voice_language, &list);
+                let prompt = session_prompt(
+                    k, &t.text, &t.title, &original, sample.as_deref(), &rc.voice_language,
+                    router.session_manager.current_session.as_ref(), list_on, recall_on && !earlier.is_empty(),
+                );
                 let (b64, _, _, _) = encode_fixture(&dir.join(&t.image));
                 router.inspect_frame = None;
                 router.recall_screens = (recall_on && !earlier.is_empty()).then(|| std::sync::Arc::new(earlier.clone()));
@@ -1387,11 +1394,11 @@ async fn replay_sessions() {
                                 resp.plan_completed_count,
                                 &resp.state_summary,
                                 &steps,
+                                Some(t.title.clone()),
                             );
                         }
                         summary = resp.state_summary.clone();
                         earlier.push(crate::ai::inspect::EarlierScreen { turn: k, jpeg_b64: b64.clone() });
-                        index.push((k, t.title.clone(), t.text.clone()));
                         if k >= sx.fact_turn {
                             trace.push(if has_fact(&summary, &sx.expect_any) { 'F' } else { '.' });
                         }

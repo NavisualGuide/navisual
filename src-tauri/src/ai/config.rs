@@ -240,6 +240,9 @@ pub struct Config {
     pub inspect: crate::ai::inspect::Mode,
     /// Which look tools `inspect` offers: the zoom (H2), `read_text` (H4, OCR), or both.
     pub inspect_tools: crate::ai::inspect::Tools,
+    /// The list of earlier screens in every request after the first (`Session::earlier_screens`):
+    /// turn, window title, what the user said. On by default on this branch; `EARLIER_SCREENS`.
+    pub earlier_screens: bool,
 }
 
 impl Default for Config {
@@ -307,6 +310,7 @@ impl Default for Config {
             expected_result: false,
             inspect: crate::ai::inspect::Mode::Off,
             inspect_tools: crate::ai::inspect::Tools::Zoom,
+            earlier_screens: true,
         }
     }
 }
@@ -595,6 +599,9 @@ impl Config {
         }
         if let Ok(v) = env::var("INSPECT") {
             config.inspect = crate::ai::inspect::Mode::parse(&v);
+        }
+        if let Ok(v) = env::var("EARLIER_SCREENS") {
+            config.earlier_screens = truthy(&v);
         }
         if let Ok(v) = env::var("INSPECT_TOOLS") {
             config.inspect_tools = crate::ai::inspect::Tools::parse(&v);

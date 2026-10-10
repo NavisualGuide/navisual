@@ -17,8 +17,8 @@
 //! H6 `recall` rides it too: an earlier turn's screenshot, exactly as it was sent then. S3 found
 //! the state summary keeps what the user did and almost never what the screen showed, and a fact
 //! that did not matter when it was on screen is written down by nobody (a date seen once: 0 of 18
-//! under either rule 16). The model picks the turn from `recall_index`, a list of earlier screens
-//! the caller adds to the window context.
+//! under either rule 16). The model picks the turn from `Session::earlier_screens`, the list of
+//! earlier screens in the window context.
 
 use std::sync::Arc;
 
@@ -199,24 +199,7 @@ fn recall_parameters() -> Value {
     })
 }
 
-/// The list of earlier screens the caller adds to the window context: turn, window title and what
-/// the user typed then (cut at 80 characters). Titles and words already went to the model on their
-/// own turns; this only says which turn they belong to. Test builds only until the app keeps
-/// the screens to offer.
-#[cfg(test)]
-pub fn recall_index(entries: &[(usize, String, String)]) -> String {
-    if entries.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from(
-        "[Earlier screens] Screenshots from earlier turns of this session; recall(turn) shows one again.",
-    );
-    for (turn, title, said) in entries {
-        let said: String = said.chars().take(80).collect();
-        out.push_str(&format!("\nturn {turn}: {title} -- \"{said}\""));
-    }
-    out
-}
+
 
 /// One look-tool call as the harness records it: which tool, the pixel box, for `read_text` the
 /// text that went back, and for `recall` the turn.
@@ -449,9 +432,7 @@ mod tests {
         assert_eq!(look.unwrap().turn, Some(2));
         let (reply, look) = rt.block_on(answer(RECALL, &earlier, json!({"turn": 9})));
         assert!(matches!(reply, Reply::Refused(_)) && look.is_none());
-        let index = recall_index(&[(2, "Contoso Notes - Team offsite".into(), "Make it bold.".into())]);
-        assert!(index.ends_with("turn 2: Contoso Notes - Team offsite -- \"Make it bold.\""), "{index}");
-        assert!(recall_index(&[]).is_empty());
+
     }
 
     #[test]

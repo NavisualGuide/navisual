@@ -32,6 +32,11 @@ const EVICTION_BATCH: usize = 6;
 /// bound in a chatty session. Oldest-first eviction: if the goal has been restated since, the
 /// first phrasing is the stale one.
 const MAX_PINNED_TURNS: usize = 5;
+/// Earlier turns the list of earlier screens names at most, most recent kept. Each line is about
+/// 20 tokens; past this the oldest are counted rather than listed.
+const MAX_EARLIER_SCREENS: usize = 40;
+/// What the user said, cut to this many characters per line of that list.
+const EARLIER_SAID_CHARS: usize = 80;
 
 /// Whether a string may be used as a frame's file name.
 ///
@@ -106,6 +111,11 @@ pub struct Turn {
     /// Where the pointer landed on that frame, and what it takes to redraw it (§4.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<StoredMark>,
+    /// The title of the window this user turn was guided from, for the list of earlier screens
+    /// (`Session::earlier_screens`). Absent on a whole-screen capture, which has no window, and
+    /// on every turn stored before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
 }
 
 /// What was drawn on a stored frame, kept so the picture can be redrawn WITH its pointer
@@ -232,6 +242,7 @@ impl Session {
             advanced_by: None,
             frame: None,
             mark: None,
+            window_title: None,
         });
         self.last_active_at = Local::now().to_rfc3339();
         if pinned {
@@ -316,6 +327,49 @@ impl Session {
             turn.advanced_by = advanced_by;
             turn.frame = frame;
         }
+    }
+
+    /// The window title of the user turn just added -- see `Turn::window_title`. Searches back
+    /// for the user turn, like `set_last_user_turn_facts`. An empty title is no title.
+    pub fn set_last_user_turn_title(&mut self, title: Option<String>) {
+        if let Some(turn) = self.last_user_side_turn() {
+            turn.window_title = title.filter(|t| !t.trim().is_empty());
+        }
+    }
+
+    /// The list of earlier screens (S3/H6, harness-plan.md): one line per earlier user turn --
+    /// its number, the window it was on, what the user said -- so the model knows which window
+    /// each turn was in long after the turn left the window. On the S3 memory battery it held
+    /// every fact a window title carried (an old file name, a deleted note) on all three models,
+    /// where the model's own summary held them by luck. Everything in it already went to the
+    /// model on its own turn; this only says which turn it belonged to. `offer_recall` names the
+    /// H6 tool in the heading when that tool is offered. Empty before the second turn.
+    pub fn earlier_screens(&self, offer_recall: bool) -> String {
+        let turns: Vec<&Turn> = self
+            .conversation
+            .iter()
+            .filter(|t| matches!(t.role.as_str(), "user" | "correction"))
+            .collect();
+        if turns.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from(if offer_recall {
+            "[Earlier screens] Screenshots from earlier turns of this session; recall(turn) shows one again."
+        } else {
+            "[Earlier screens] The window and what the user said on each earlier turn of this session."
+        });
+        let skip = turns.len().saturating_sub(MAX_EARLIER_SCREENS);
+        if skip > 0 {
+            out.push_str(&format!("\n({skip} earlier turns not listed)"));
+        }
+        for (i, t) in turns.iter().enumerate().skip(skip) {
+            let said: String = t.content.chars().take(EARLIER_SAID_CHARS).collect();
+            match t.window_title.as_deref() {
+                Some(title) => out.push_str(&format!("\nturn {}: {title} -- \"{said}\"", i + 1)),
+                None => out.push_str(&format!("\nturn {}: \"{said}\"", i + 1)),
+            }
+        }
+        out
     }
 
     /// Record what was drawn for this turn's step, once the locator has decided it.
@@ -837,6 +891,36 @@ mod tests {
         );
         assert!(!dir.join("frames").join("evil.png").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn earlier_screens_name_each_user_turn_with_its_window() {
+        let mut s = Session::new("t".into());
+        assert!(s.earlier_screens(false).is_empty(), "nothing before the second turn");
+        s.add_turn_pinned("user", "Rename this note to Q3 budget.".into(), None, true);
+        s.set_last_user_turn_title(Some("Contoso Notes - Q3 planning".into()));
+        s.add_turn("assistant", "Double-click the name.".into(), None);
+        s.add_turn("user", "Next".into(), None);
+        s.set_last_user_turn_title(Some("  ".into()));
+        s.add_turn("assistant", "Type Q3 budget.".into(), None);
+        let list = s.earlier_screens(false);
+        assert!(list.starts_with("[Earlier screens] The window and what the user said"), "{list}");
+        assert!(list.contains("\nturn 1: Contoso Notes - Q3 planning -- \"Rename this note to Q3 budget.\""));
+        assert!(list.ends_with("\nturn 2: \"Next\""), "a blank title is no title: {list}");
+        assert!(s.earlier_screens(true).contains("recall(turn) shows one again"));
+        assert!(!list.contains("Double-click"), "the assistant's words are not listed");
+    }
+
+    #[test]
+    fn earlier_screens_count_what_they_leave_out() {
+        let mut s = Session::new("t".into());
+        for i in 0..45 {
+            s.add_turn("user", format!("request {i}"), None);
+            s.add_turn("assistant", "ok".into(), None);
+        }
+        let list = s.earlier_screens(false);
+        assert!(list.contains("(5 earlier turns not listed)"), "{list}");
+        assert!(list.contains("\nturn 6: \"request 5\"") && list.ends_with("turn 45: \"request 44\""));
     }
 
     #[test]
