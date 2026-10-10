@@ -2801,7 +2801,8 @@ fn window_context_text(
 }
 
 /// `text`, then the window context on the next line when there is any. (Was the `add_grid`
-/// closure in `guide`, named for a grid suffix that no longer exists.)
+/// closure in `guide`, named for a grid suffix that no longer exists; its last use is now
+/// `compose_reply_prompt`.)
 fn with_window_context(text: String, window_context: &str) -> String {
     if !window_context.is_empty() {
         format!("{text}\n{window_context}")
@@ -2859,6 +2860,89 @@ fn compose_continuation_prompt(
         crate::ai::prompts::goal_anchor(original_task),
         crate::ai::prompts::reply_language_directive(reply_sample, original_task, voice_language)
     )
+}
+
+/// A typed reply mid-session (`is_reply`): the user's own words with the window context under
+/// them, then the goal and reply-language anchors. The state summary does not ride in this text
+/// -- it goes to `send_guidance_request` separately. Extracted from `guide` so the replay
+/// harness's multi-turn sessions (S3) send what the app sends.
+fn compose_reply_prompt(
+    task: &str,
+    window_context: &str,
+    original_task: &str,
+    reply_sample: Option<&str>,
+    voice_language: &str,
+) -> String {
+    format!(
+        "{}{}{}",
+        with_window_context(task.to_string(), window_context),
+        crate::ai::prompts::goal_anchor(original_task),
+        crate::ai::prompts::reply_language_directive(reply_sample, original_task, voice_language)
+    )
+}
+
+/// What an answer writes into the session: the model-owned goal and plan, the state summary,
+/// the user's turn and the assistant's steps. Extracted from `guide` so a replayed multi-turn
+/// session (S3) remembers exactly what the app remembers -- the window, the pinning and the
+/// summary are the whole of the app's working memory, and a harness copy would drift.
+#[allow(clippy::too_many_arguments)]
+fn record_exchange(
+    session: &mut crate::ai::session::Session,
+    task: &str,
+    is_next_requery: bool,
+    response_goal: &str,
+    response_plan_outline: Vec<String>,
+    response_plan_completed_count: Option<usize>,
+    state_summary: &str,
+    steps: &[GuidanceStep],
+) {
+    // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
+    // the field leaves the stored goal alone rather than wiping it — the failure mode here
+    // must be inaction, never destruction.
+    if !response_goal.trim().is_empty() && response_goal.trim() != session.task_description {
+        log::info!(
+            "[memory] goal (model): {:?} -> {:?}",
+            session.task_description,
+            response_goal
+        );
+        session.set_task_description(response_goal.trim().to_string());
+    }
+    // Same contract as goal: empty means "unchanged". Unlike goal, a non-empty
+    // outline always replaces rather than being compared first — a revised route
+    // is the expected, routine case (the model is meant to redraw it as the plan
+    // develops), not a rare correction worth logging every time.
+    if !response_plan_outline.is_empty() {
+        session.set_plan_outline(response_plan_outline);
+    }
+    // Applied AFTER set_plan_outline so a same-turn revision clamps the count
+    // against the NEW list length, not a stale one.
+    if let Some(count) = response_plan_completed_count {
+        session.set_plan_completed_count(count);
+    }
+    session.update_state(state_summary.to_string());
+    let user_turn_text = if task.is_empty() {
+        "Next".to_string()
+    } else {
+        task.to_string()
+    };
+    // Pin turns where the user stated intent IN THEIR OWN WORDS — the opening task and any
+    // `needs_input` answer. Those are the only turns the model cannot reconstruct from a
+    // summary. Retention by KIND, not recency.
+    //
+    // `!task.is_empty()` alone is NOT that test, and using it pinned 18 of 36 turns in a
+    // live 16-step session (2026-08-14): a → Next re-query carries a machine-built
+    // "[User completed: …]" string, so `task` is non-empty and every turn got pinned —
+    // which makes pinning meaningless and stops the window evicting user turns at all,
+    // growing the prompt without bound. `is_next_requery` is the discriminator (it is
+    // exactly `task.starts_with("[User completed:")`, set at the top of `guide`).
+    let pinned = !task.is_empty() && !is_next_requery;
+    session.add_turn_pinned("user", user_turn_text, None, pinned);
+    let content = steps
+        .iter()
+        .map(|s| s.instruction.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    session.add_turn("assistant", content, Some("...".to_string()));
 }
 
 /// Use A of H1 (harness-plan.md): the `[User completed: "…"]` line, followed by the completed
@@ -4435,9 +4519,6 @@ async fn guide(
         click_line.as_deref(),
     );
 
-    // Append window context to the prompt (no grid suffix any more — AI returns
-    // target_bbox instead).
-    let add_grid = |text: String| -> String { with_window_context(text, &window_context) };
 
     // Streaming-first surfacing: as the instruction streams in token-by-token,
     // push it to BOTH the panel (stream_chunk) and the on-screen caption
@@ -4571,15 +4652,12 @@ async fn guide(
             let g = state.guidance.lock();
             g.state_summary.clone()
         };
-        let prompt = format!(
-            "{}{}{}",
-            add_grid(task.clone()),
-            crate::ai::prompts::goal_anchor(&original_task),
-            crate::ai::prompts::reply_language_directive(
-                reply_sample.as_deref(),
-                &original_task,
-                &voice_language,
-            )
+        let prompt = compose_reply_prompt(
+            &task,
+            &window_context,
+            &original_task,
+            reply_sample.as_deref(),
+            &voice_language,
         );
         (
             router
@@ -4819,54 +4897,18 @@ async fn guide(
     };
 
     if let Some(session) = &mut router.session_manager.current_session {
-        // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
-        // the field leaves the stored goal alone rather than wiping it — the failure mode here
-        // must be inaction, never destruction.
-        if !response_goal.trim().is_empty() && response_goal.trim() != session.task_description {
-            log::info!(
-                "[memory] goal (model): {:?} -> {:?}",
-                session.task_description,
-                response_goal
-            );
-            session.set_task_description(response_goal.trim().to_string());
-        }
-        // Same contract as goal: empty means "unchanged". Unlike goal, a non-empty
-        // outline always replaces rather than being compared first — a revised route
-        // is the expected, routine case (the model is meant to redraw it as the plan
-        // develops), not a rare correction worth logging every time.
-        if !response_plan_outline.is_empty() {
-            session.set_plan_outline(response_plan_outline);
-        }
-        // Applied AFTER set_plan_outline so a same-turn revision clamps the count
-        // against the NEW list length, not a stale one.
-        if let Some(count) = response_plan_completed_count {
-            session.set_plan_completed_count(count);
-        }
-        session.update_state(state_summary.clone());
-        let user_turn_text = if task.is_empty() {
-            "Next".to_string()
-        } else {
-            task.clone()
-        };
-        // Pin turns where the user stated intent IN THEIR OWN WORDS — the opening task and any
-        // `needs_input` answer. Those are the only turns the model cannot reconstruct from a
-        // summary. Retention by KIND, not recency.
-        //
-        // `!task.is_empty()` alone is NOT that test, and using it pinned 18 of 36 turns in a
-        // live 16-step session (2026-08-14): a → Next re-query carries a machine-built
-        // "[User completed: …]" string, so `task` is non-empty and every turn got pinned —
-        // which makes pinning meaningless and stops the window evicting user turns at all,
-        // growing the prompt without bound. `is_next_requery` is the discriminator (it is
-        // exactly `task.starts_with("[User completed:")`, set at the top of this fn).
-        let pinned = !task.is_empty() && !is_next_requery;
-        session.add_turn_pinned("user", user_turn_text, None, pinned);
+        record_exchange(
+            session,
+            &task,
+            is_next_requery,
+            &response_goal,
+            response_plan_outline,
+            response_plan_completed_count,
+            &state_summary,
+            &steps,
+        );
+        // Searches back for the user turn, so it lands there though the assistant's is newer.
         session.set_last_user_turn_facts(clicked.clone(), advance.clone(), frame.clone());
-        let content = steps
-            .iter()
-            .map(|s| s.instruction.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-        session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
         // Bound the store as it grows, not only at launch — a machine that stays
         // on for days must not drift past the limit between restarts.

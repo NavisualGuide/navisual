@@ -57,6 +57,10 @@ pub struct AiRouter {
     /// `inspect` to crop. Set by the caller; used only when `config.inspect` is on and the frame
     /// was reduced enough to need it (`inspect::offered`).
     pub inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
+    /// The window `send_guidance_request` sends, in exchanges: `CONVERSATION_EXCHANGES` in the
+    /// app. A field only so the replay harness can run the memory plan's 3 / 5 / 8 comparison
+    /// (S3); nothing in the app changes it.
+    pub conversation_exchanges: usize,
 }
 
 impl AiRouter {
@@ -76,6 +80,7 @@ impl AiRouter {
             last_conversation: String::new(),
             last_conversation_turns: 0,
             inspect_frame: None,
+            conversation_exchanges: CONVERSATION_EXCHANGES,
         };
         router.init_client();
         router
@@ -442,7 +447,7 @@ impl AiRouter {
         let conversation = if let Some(session) = &self.session_manager.current_session {
             // Exchanges, not turns. The previous `10` meant ten *turns* — and a request appends
             // two — so it delivered five exchanges while reading as ten steps.
-            session.get_conversation_for_api_exchanges(CONVERSATION_EXCHANGES)
+            session.get_conversation_for_api_exchanges(self.conversation_exchanges)
         } else {
             Vec::new()
         };

@@ -215,19 +215,38 @@ const EXPECTED_RESULT_FIELD: &str = "What the screen will show right after the u
 /// The same, as a line in a prompted-JSON field list (DeepSeek, Qwen, Ollama, custom).
 const EXPECTED_RESULT_FIELD_LINE: &str = "- expected_result: one short sentence - what the screen will show right after this step, with any newly appearing text in double quotes exactly as displayed; exactly \"no visible change\" when the step changes nothing visible (required)";
 
+// ---- S3 ablation: what the screen showed (navisual-internal docs/harness-plan.md S3) ------------
+//
+// The first S3 run (2026-10-10) found rule 16's four slots hold the task, not the screen: luna and
+// flash rewrote DONE from the current screenshot every turn, so a code in a dialog the user closed
+// was gone from the summary one turn later. Test builds only -- the replay harness sets the
+// switch, and the app's prompt cannot change through it.
+
+#[cfg(test)]
+pub static REMEMBER_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+const RULE16_FAILED: &str = "anything TRIED THAT FAILED so you\n    do not propose it again.";
+#[cfg(test)]
+const RULE16_SEEN: &str = "anything TRIED THAT FAILED so you\n    do not propose it again, and anything you have SEEN on an earlier\n    screen that the user may still need once it is gone, copied exactly --\n    you will not see that screen again.";
+
+fn base_prompt() -> std::borrow::Cow<'static, str> {
+    #[cfg(test)]
+    if REMEMBER_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
+        return std::borrow::Cow::Owned(SYSTEM_PROMPT.replacen(RULE16_FAILED, RULE16_SEEN, 1));
+    }
+    std::borrow::Cow::Borrowed(SYSTEM_PROMPT)
+}
+
 /// The system prompt, carrying rule 19 when H1 is on.
 pub fn system_prompt(expected_result: bool) -> std::borrow::Cow<'static, str> {
+    let base = base_prompt();
     if !expected_result {
-        return std::borrow::Cow::Borrowed(SYSTEM_PROMPT);
+        return base;
     }
     // Asserted by `h1_system_prompt_gets_rule_19_before_the_tail`.
-    let at = SYSTEM_PROMPT.rfind(PROMPT_TAIL).unwrap_or(SYSTEM_PROMPT.len());
-    std::borrow::Cow::Owned(format!(
-        "{}\n{}{}",
-        &SYSTEM_PROMPT[..at],
-        EXPECTED_RESULT_RULE,
-        &SYSTEM_PROMPT[at..]
-    ))
+    let at = base.rfind(PROMPT_TAIL).unwrap_or(base.len());
+    std::borrow::Cow::Owned(format!("{}\n{}{}", &base[..at], EXPECTED_RESULT_RULE, &base[at..]))
 }
 
 /// A prompted-JSON format instruction, with the `expected_result` line added after the
@@ -668,6 +687,7 @@ mod tests {
     fn the_model_gets_the_window_title_and_no_frame() {
         assert_eq!(crate::capture::format_window_prompt_info("Book1 - Excel"), "Title: 'Book1 - Excel'");
         assert!(!super::SYSTEM_PROMPT.contains("Title and Class"));
+        assert_eq!(super::SYSTEM_PROMPT.matches(super::RULE16_FAILED).count(), 1, "the S3 ablation's anchor");
     }
 
     #[test]

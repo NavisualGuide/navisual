@@ -190,10 +190,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "remember"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both)"
+             inspect_first, read_text, read_text_first, look_both, remember)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -852,6 +852,9 @@ async fn replay_battery() {
         rescore(&rc, &path);
         return;
     }
+    // S3's rule-16 ablation on single screens too: a rule change is measured on turn 1 as well
+    // as on the turns it is about (rule 21).
+    crate::ai::prompts::REMEMBER_SEEN.store(rc.variant == "remember", std::sync::atomic::Ordering::Relaxed);
     let fixtures = load_fixtures(&rc);
     assert!(!fixtures.is_empty(), "no fixtures under {}", rc.dir.join(&rc.battery).display());
     println!(
@@ -1036,6 +1039,368 @@ async fn replay_battery() {
     println!("[eval] results: {}", rc.out.display());
 }
 
+// ================================================================== S3: working memory
+
+/// S3 (harness-plan.md): one scripted session. Every turn is something the user typed with the
+/// screen they typed it on; the model's answers are recorded into the session exactly as `guide`
+/// records them (`record_exchange`), so what reaches turn k is the app's own working memory --
+/// the window, the pinned user turns, the model's rolling summary and goal. A fact shows on
+/// screen up to `fact_turn` and never again; each probe asks for it at `distance` turns after,
+/// on a branch the main line never sees.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SessionFixture {
+    id: String,
+    /// before_edit | closed_dialog | gone_toast | other_view -- what kind of fact.
+    kind: String,
+    /// The fact, for people reading the item.
+    fact: String,
+    /// 1-based: the last turn whose screen shows the fact.
+    fact_turn: usize,
+    /// Text that IS the fact; an answer recalls it when what the user is told contains one.
+    expect_any: Vec<String>,
+    /// The other candidates on the probe screen: an answer naming one of them alongside the fact
+    /// listed the choices rather than remembering (luna, first run, the four Trash notes).
+    #[serde(default)]
+    distractors: Vec<String>,
+    /// Where the fact can still be found in the app: an answer that sends the user there is
+    /// `looked` -- the right result one step later, not memory.
+    #[serde(default)]
+    lookup_any: Vec<String>,
+    turns: Vec<SessionTurn>,
+    probes: Vec<SessionProbe>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SessionTurn {
+    image: String,
+    title: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SessionProbe {
+    /// Sent as turn `fact_turn + distance`.
+    distance: usize,
+    image: String,
+    title: String,
+    text: String,
+}
+
+/// Every `session.json` under the battery directory, in directory order.
+fn load_sessions(rc: &RunConfig) -> Vec<(PathBuf, SessionFixture)> {
+    let root = rc.dir.join(&rc.battery);
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("session.json").is_file())
+        .collect();
+    dirs.sort();
+    dirs.into_iter()
+        .map(|d| {
+            let text = std::fs::read_to_string(d.join("session.json")).expect("session.json");
+            let sx: SessionFixture = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{}: {e}", d.join("session.json").display()));
+            (d, sx)
+        })
+        .filter(|(_, sx)| rc.only.is_empty() || rc.only.iter().any(|o| o == &sx.id))
+        .collect()
+}
+
+/// The prompt and the summary argument `guide` would send for turn `k` of a typed session: turn 1
+/// is a new task, every later turn a typed reply (the panel is guiding, so `isReply`).
+fn session_prompt(
+    k: usize,
+    text: &str,
+    title: &str,
+    original_task: &str,
+    sample: Option<&str>,
+    voice_language: &str,
+) -> String {
+    let window_context = crate::window_context_text(
+        Some(&capture::format_window_prompt_info(title)),
+        "",
+        "",
+        crate::os_context_line(),
+        None,
+        None,
+    );
+    if k == 1 {
+        crate::compose_turn1_prompt(text, &window_context, sample, voice_language)
+    } else {
+        crate::compose_reply_prompt(text, &window_context, original_task, sample, voice_language)
+    }
+}
+
+fn normalize_fact(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn has_fact(text: &str, expect_any: &[String]) -> bool {
+    let t = normalize_fact(text);
+    expect_any.iter().any(|e| {
+        let e = normalize_fact(e);
+        !e.is_empty() && t.contains(&e)
+    })
+}
+
+/// What the user is told: every instruction and every target_text.
+fn told(resp: &NavigateStepResponse) -> String {
+    resp.steps
+        .iter()
+        .map(|s| format!("{} {}", s.instruction, s.target_text.as_deref().unwrap_or("")))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// A probe's outcome. `recalled`: the fact is in what the user is told, and no distractor with
+/// it. `carried`: not yet, but it is in this answer's own summary, goal or plan -- an answer is
+/// 1-4 steps, and the first run had terra open the rename command now and keep the old name for
+/// the next step. `looked`: it sends the user back to where the fact still is. `denied`: it says
+/// the fact never existed ("No share code was shown earlier in our session" -- flash, first run),
+/// which tells the user they misremember. `asked`: the answer asks or admits it cannot tell -- an
+/// honest miss. `missed`: it answered without the fact, which includes guessing. The phrase lists
+/// are a first sort; read the answers.
+fn probe_outcome(resp: &NavigateStepResponse, sx: &SessionFixture) -> &'static str {
+    let said = told(resp);
+    if has_fact(&said, &sx.expect_any) && !has_fact(&said, &sx.distractors) {
+        return "recalled";
+    }
+    let kept = format!("{} {} {}", resp.state_summary, resp.goal, resp.plan_outline.join(" "));
+    if has_fact(&kept, &sx.expect_any) && !has_fact(&kept, &sx.distractors) {
+        return "carried";
+    }
+    if has_fact(&said, &sx.lookup_any) {
+        return "looked";
+    }
+    let l = said.to_lowercase().replace('\u{2019}', "'");
+    let denial = [
+        "not mentioned", "wasn't mentioned", "was not shown", "wasn't shown", "never shown",
+        "was not displayed", "wasn't displayed", "no earlier", "there was no", "there is no record",
+    ];
+    // "No share code was shown earlier": the negation sits before the noun.
+    let no_noun = (l.starts_with("no ") || l.contains(" no "))
+        && (l.contains("was shown earlier") || l.contains("was displayed earlier"));
+    if no_noun || denial.iter().any(|p| l.contains(p)) {
+        return "denied";
+    }
+    let honest = [
+        "don't know", "do not know", "not sure", "can't see", "cannot see", "can't tell",
+        "cannot tell", "no longer", "not visible", "isn't visible", "remind me", "what was",
+        "which note", "do you remember", "if you remember", "don't have", "do not have",
+        "not shown", "unable to",
+    ];
+    if resp.needs_input || honest.iter().any(|p| l.contains(p)) {
+        "asked"
+    } else {
+        "missed"
+    }
+}
+
+/// S3: replay each session, probing at its distances. `NAVISUAL_EVAL_WINDOW` sets the
+/// conversation window in exchanges (the app's is 5) -- the memory plan's 3 / 5 / 8 A/B.
+#[tokio::test]
+#[ignore = "spends real BYOK money; run via tools/run-replay.ps1 -Sessions"]
+async fn replay_sessions() {
+    println!();
+    let rc = RunConfig::from_env();
+    // `remember`: rule 16 with a slot for what an earlier screen showed (prompts::REMEMBER_SEEN).
+    assert!(rc.variant.is_empty() || rc.variant == "remember", "S3 variants: none, or remember");
+    crate::ai::prompts::REMEMBER_SEEN.store(rc.variant == "remember", std::sync::atomic::Ordering::Relaxed);
+    let window: usize = env_or("NAVISUAL_EVAL_WINDOW", "0").parse().unwrap_or(0);
+    let sessions = load_sessions(&rc);
+    assert!(!sessions.is_empty(), "no sessions under {}", rc.dir.join(&rc.battery).display());
+    let session_dir = std::env::temp_dir().join(format!("navisual-eval-{}", std::process::id()));
+    let mut router = AiRouter::new(
+        base_config(&rc),
+        CostTracker::new(None),
+        SessionManager::new(session_dir),
+        None,
+    );
+    if window > 0 {
+        router.conversation_exchanges = window;
+    }
+    let out = if window > 0 {
+        rc.out.with_file_name(format!(
+            "{}-w{window}.jsonl",
+            rc.out.file_stem().unwrap_or_default().to_string_lossy()
+        ))
+    } else {
+        rc.out.clone()
+    };
+    println!(
+        "[s3] {} session(s) x {} repeat(s) | {} {} | window {} exchanges | variant {} | cap ${:.2}",
+        sessions.len(),
+        rc.repeat,
+        rc.provider,
+        rc.model,
+        router.conversation_exchanges,
+        if rc.variant.is_empty() { "none" } else { rc.variant.as_str() },
+        rc.max_usd
+    );
+    let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut spent = 0.0f64;
+    let mut outcomes: Vec<(String, usize, &'static str)> = Vec::new();
+
+    'outer: for rep in 0..rc.repeat {
+        for (dir, sx) in &sessions {
+            let max_d = sx.probes.iter().map(|p| p.distance).max().unwrap_or(0);
+            let last_main = (sx.fact_turn + max_d - 1).min(sx.turns.len());
+            router.session_manager.current_session = None;
+            router.session_manager.create_session(sx.turns[0].text.clone());
+            let mut summary = String::new();
+            let mut sample: Option<String> = None;
+            let mut trace = String::new();
+            for k in 1..=last_main + 1 {
+                if spent >= rc.max_usd {
+                    println!("[s3] STOP: spent ${spent:.4} reached the ${:.2} cap", rc.max_usd);
+                    break 'outer;
+                }
+                // Probes due at k, each on a copy of the session as it stands after turn k-1.
+                for p in sx.probes.iter().filter(|p| sx.fact_turn + p.distance == k) {
+                    let snapshot = router.session_manager.current_session.clone();
+                    let original = snapshot.as_ref().map(|s| s.task_description.clone()).unwrap_or_default();
+                    let probe_sample = if crate::ai::prompts::is_language_sample(&p.text) {
+                        Some(p.text.clone())
+                    } else {
+                        sample.clone()
+                    };
+                    let prompt = session_prompt(k, &p.text, &p.title, &original, probe_sample.as_deref(), &rc.voice_language);
+                    let (b64, _, _, _) = encode_fixture(&dir.join(&p.image));
+                    router.inspect_frame = None;
+                    let started = Instant::now();
+                    let result = router.send_guidance_request(&prompt, Some(&b64), Some(&summary), |_, _| {}).await;
+                    let total_ms = started.elapsed().as_millis();
+                    let detail = router.take_client_usage();
+                    let (bill_in, bill_out) = router.get_last_usage();
+                    let usd = crate::ai::pricing::estimate_cost(&rc.provider, &rc.model, bill_in, bill_out).unwrap_or(0.0);
+                    spent += usd;
+                    let mut row = serde_json::json!({
+                        "run_id": run_id, "rep": rep, "session": sx.id, "kind": sx.kind,
+                        "battery": rc.battery, "provider": rc.provider, "model": rc.model,
+                        "window": router.conversation_exchanges, "turn": k, "role": "probe",
+                        "distance": p.distance, "text": p.text, "fact": sx.fact, "summary_in": summary,
+                        "total_ms": total_ms, "usage": detail, "est_usd_flat": usd,
+                        "served_model": router.take_served_model(),
+                    });
+                    match result {
+                        Ok(resp) => {
+                            let outcome = probe_outcome(&resp, sx);
+                            outcomes.push((sx.kind.clone(), p.distance, outcome));
+                            println!(
+                                "[s3] {:<22} d={:<2} PROBE {:<8} | summary had it: {} | ${usd:.4} | {:?}",
+                                sx.id,
+                                p.distance,
+                                outcome,
+                                if has_fact(&summary, &sx.expect_any) { "yes" } else { "no " },
+                                told(&resp)
+                            );
+                            row["outcome"] = serde_json::json!(outcome);
+                            row["response"] = serde_json::to_value(&resp).unwrap_or_default();
+                        }
+                        Err(e) => {
+                            println!("[s3] {:<22} d={:<2} PROBE ERROR | {e:#}", sx.id, p.distance);
+                            row["error"] = serde_json::json!(format!("{e:#}"));
+                        }
+                    }
+                    append_line(&out, &row);
+                    router.session_manager.current_session = snapshot;
+                }
+                if k > last_main {
+                    break;
+                }
+                // The main line: turn k as the app would send and record it.
+                let t = &sx.turns[k - 1];
+                if k == 1 || crate::ai::prompts::is_language_sample(&t.text) {
+                    sample = crate::ai::prompts::is_language_sample(&t.text).then(|| t.text.clone());
+                }
+                let original = router
+                    .session_manager
+                    .current_session
+                    .as_ref()
+                    .map(|s| s.task_description.clone())
+                    .unwrap_or_default();
+                let prompt = session_prompt(k, &t.text, &t.title, &original, sample.as_deref(), &rc.voice_language);
+                let (b64, _, _, _) = encode_fixture(&dir.join(&t.image));
+                router.inspect_frame = None;
+                let summary_arg = (k > 1).then(|| summary.clone());
+                let mut attempt = 0;
+                let (result, total_ms) = loop {
+                    let started = Instant::now();
+                    let r = router.send_guidance_request(&prompt, Some(&b64), summary_arg.as_deref(), |_, _| {}).await;
+                    attempt += 1;
+                    if r.is_ok() || attempt == 2 {
+                        break (r, started.elapsed().as_millis());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                };
+                let detail = router.take_client_usage();
+                let (bill_in, bill_out) = router.get_last_usage();
+                let usd = crate::ai::pricing::estimate_cost(&rc.provider, &rc.model, bill_in, bill_out).unwrap_or(0.0);
+                spent += usd;
+                let mut row = serde_json::json!({
+                    "run_id": run_id, "rep": rep, "session": sx.id, "kind": sx.kind,
+                    "battery": rc.battery, "provider": rc.provider, "model": rc.model,
+                    "window": router.conversation_exchanges, "turn": k, "role": "main",
+                    "text": t.text, "summary_in": summary, "total_ms": total_ms,
+                    "usage": detail, "est_usd_flat": usd, "served_model": router.take_served_model(),
+                });
+                match result {
+                    Ok(resp) => {
+                        let mut steps = resp.steps.clone();
+                        crate::ai::types::sanitize_steps(&mut steps);
+                        if let Some(session) = router.session_manager.current_session.as_mut() {
+                            crate::record_exchange(
+                                session,
+                                &t.text,
+                                false,
+                                &resp.goal,
+                                resp.plan_outline.clone(),
+                                resp.plan_completed_count,
+                                &resp.state_summary,
+                                &steps,
+                            );
+                        }
+                        summary = resp.state_summary.clone();
+                        if k >= sx.fact_turn {
+                            trace.push(if has_fact(&summary, &sx.expect_any) { 'F' } else { '.' });
+                        }
+                        row["summary_has_fact"] = serde_json::json!(has_fact(&summary, &sx.expect_any));
+                        row["response"] = serde_json::to_value(&resp).unwrap_or_default();
+                    }
+                    Err(e) => {
+                        println!("[s3] {:<22} turn {k} ERROR twice; session abandoned | {e:#}", sx.id);
+                        row["error"] = serde_json::json!(format!("{e:#}"));
+                        append_line(&out, &row);
+                        break;
+                    }
+                }
+                append_line(&out, &row);
+            }
+            println!("[s3] {:<22} summary held the fact from turn {}: {trace}", sx.id, sx.fact_turn);
+        }
+    }
+    let mut cells: std::collections::BTreeMap<usize, (usize, usize, usize)> = Default::default();
+    for (_, d, o) in &outcomes {
+        let c = cells.entry(*d).or_default();
+        match *o {
+            "recalled" | "carried" => c.0 += 1,
+            "looked" | "asked" => c.1 += 1,
+            "denied" => c.2 += 1,
+            _ => c.2 += 1,
+        }
+    }
+    for (d, (r, a, m)) in cells {
+        println!("[s3] distance {d:>2}: remembered {r}, looked or asked {a}, missed {m}");
+    }
+    println!("[s3] spent ${spent:.4} | results: {}", out.display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,6 +1474,35 @@ mod tests {
 
     // S2: turn 2 goes out the way `guide` sends it, and the expectation rides along only in
     // the H1 arm -- the canned turn 1 carries one in both, as a model with H1 on would have.
+    #[test]
+    fn a_session_probe_is_graded_by_what_the_user_is_told() {
+        let resp = |instruction: &str, needs_input: bool| -> NavigateStepResponse {
+            serde_json::from_value(serde_json::json!({
+                "steps": [{"instruction": instruction, "target_text": ""}],
+                "state_summary": "", "needs_input": needs_input
+            }))
+            .unwrap()
+        };
+        let sx: SessionFixture = serde_json::from_value(serde_json::json!({
+            "id": "t", "kind": "before_edit", "fact": "", "fact_turn": 2,
+            "expect_any": ["Q3 planning"], "distractors": ["Old agenda"], "lookup_any": ["version history"],
+            "turns": [], "probes": []
+        }))
+        .unwrap();
+        assert_eq!(probe_outcome(&resp("Click the title and type Q3 Planning.", false), &sx), "recalled");
+        assert_eq!(probe_outcome(&resp("What was the name before?", true), &sx), "asked");
+        assert_eq!(probe_outcome(&resp("Click the title and type Q3 notes.", false), &sx), "missed");
+        assert_eq!(probe_outcome(&resp("Restore Q3 planning or Old agenda?", true), &sx), "asked", "a list is not recall");
+        assert_eq!(probe_outcome(&resp("Open View, then Version history.", false), &sx), "looked");
+        assert_eq!(probe_outcome(&resp("No share code was shown earlier in our session.", false), &sx), "denied");
+        assert_eq!(probe_outcome(&resp("A share code was not mentioned earlier.", true), &sx), "denied");
+        assert_eq!(probe_outcome(&resp("No share code was displayed earlier in this session.", false), &sx), "denied");
+        let mut later = resp("Click File to find Rename.", false);
+        later.state_summary = "GOAL: rename it back to Q3 planning.".into();
+        assert_eq!(probe_outcome(&later, &sx), "carried", "the name kept for the next step");
+        assert!(has_fact("renamed from 'Q3-planning' to Q3 budget", &sx.expect_any), "punctuation is not the fact");
+    }
+
     #[test]
     fn a_continuation_item_replays_turn_two() {
         let mut f = fx(PassIf::Text);

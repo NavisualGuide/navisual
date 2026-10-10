@@ -39,7 +39,11 @@ param(
     [string]$Variant = '',
     # H1 use B on the S2 fixtures: OCR each after-screen for the text its expectation quotes.
     # Free: no model call.
-    [switch]$UseB
+    [switch]$UseB,
+    # S3: the battery holds multi-turn sessions (session.json), replayed turn by turn.
+    [switch]$Sessions,
+    # S3: the conversation window in exchanges; 0 = the app's own (5).
+    [int]$Window = 0
 )
 
 # Not 'Stop': cargo writes its progress to stderr, and Windows PowerShell 5.1 turns each
@@ -84,9 +88,11 @@ foreach ($t in ($Targets -split ',')) {
     $env:NAVISUAL_EVAL_DRY_RUN = $(if ($DryRun) { '1' } else { '' })
     $env:NAVISUAL_EVAL_OUT = ''
     $env:NAVISUAL_EVAL_VARIANT = $Variant
+    $env:NAVISUAL_EVAL_WINDOW = $(if ($Window -gt 0) { "$Window" } else { '' })
+    $test = $(if ($Sessions) { 'eval::replay_sessions' } else { 'eval::replay_battery' })
     Write-Host "=== $($pair[0]) $($pair[1]) ==="
     # Release build: the downscale is several times slower unoptimised (CLAUDE.md rule 5),
     # and nothing about a debug build is closer to what ships.
-    cargo test --release --manifest-path $manifest --lib eval::replay_battery -- --ignored --nocapture --test-threads=1
+    cargo test --release --manifest-path $manifest --lib $test -- --ignored --nocapture --test-threads=1
     if ($LASTEXITCODE -ne 0) { throw "harness failed for $t (exit $LASTEXITCODE)" }
 }
