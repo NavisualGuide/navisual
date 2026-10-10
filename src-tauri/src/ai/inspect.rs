@@ -28,6 +28,9 @@ use serde_json::{json, Value};
 pub const NAME: &str = "inspect";
 pub const READ_TEXT: &str = "read_text";
 pub const RECALL: &str = "recall";
+pub const UI_TREE: &str = "ui_tree";
+/// Elements `ui_tree` returns at most; the rest are counted.
+const MAX_UI_LINES: usize = 60;
 /// Look-tool calls allowed per answer, both tools together; after the last one the model must
 /// answer with navigate_step.
 pub const MAX_INSPECTS: usize = 2;
@@ -61,6 +64,12 @@ const RECALL_MANY_DESCRIPTION: &str = "Look again at screenshots from earlier tu
 session, exactly as they were sent then. Use it when you need something that was on earlier \
 screens and is neither on the current screen nor in your summary -- including what changed \
 between them. The earlier screens are listed by turn in the message.";
+
+const UI_TREE_DESCRIPTION: &str = "Read the accessibility information of one region of the \
+current screen: each control's role and name, and its state -- on or off, selected, expanded, \
+disabled -- or its value. It is exact where the screenshot is ambiguous: whether a switch is on, \
+whether a button is greyed out, what an icon-only button is called, what a field contains. \
+Coordinates are 0-1000 across and down the screenshot.";
 
 /// Said with every recalled screen: one look is enough if what was needed is written down.
 const RECALL_KEEP_HINT: &str = " If you will need something from it again, put it in keep.";
@@ -156,6 +165,16 @@ pub struct Sources {
     pub earlier: Option<Arc<Vec<EarlierScreen>>>,
     /// Screens one recall may return; 0 or 1 is one, as H6 was measured.
     pub recall_max: usize,
+    /// H3: the accessibility snapshot of the current screen, for `ui_tree`.
+    pub ui: Option<Arc<UiSource>>,
+}
+
+/// An accessibility snapshot and the screen rect `[x, y, w, h]` of the capture it belongs to, so a
+/// region in screenshot thousandths maps onto it.
+#[derive(Debug, Clone)]
+pub struct UiSource {
+    pub nodes: Vec<crate::locator::UiNode>,
+    pub capture: [i32; 4],
 }
 
 impl Sources {
@@ -168,13 +187,16 @@ impl Sources {
         if self.earlier.as_ref().is_some_and(|e| !e.is_empty()) {
             n.push(RECALL);
         }
+        if self.ui.as_ref().is_some_and(|u| !u.nodes.is_empty()) {
+            n.push(UI_TREE);
+        }
         n
     }
 }
 
 /// Whether a function name is one of the look tools (no caption to stream for it).
 pub fn is_look(name: &str) -> bool {
-    [NAME, READ_TEXT, RECALL].contains(&name)
+    [NAME, READ_TEXT, RECALL, UI_TREE].contains(&name)
 }
 
 /// (name, description, parameters) of every tool in `names`. One tool keeps the exact wording H2
@@ -195,6 +217,8 @@ pub fn declarations(mode: Mode, names: &[&'static str], recall_max: usize) -> Ve
         .map(|&n| match n {
             NAME => (n, describe(DESCRIPTION, mode, &limit), parameters()),
             READ_TEXT => (n, describe(READ_TEXT_DESCRIPTION, mode, &limit), parameters()),
+            // A fact about the reduced image is no reason to read the tree: no reduction note.
+            UI_TREE => (n, format!("{UI_TREE_DESCRIPTION}{limit}"), parameters()),
             // A fact about the current frame does not belong on recall: no reduction note.
             _ if recall_max > 1 => (
                 n,
@@ -287,6 +311,15 @@ pub async fn answer(name: &str, sources: &Sources, args: Value) -> (Reply, Optio
             Some(Look { tool: RECALL, region: [0; 4], text: None, turns }),
         );
     }
+    if name == UI_TREE {
+        return match sources.ui.as_ref().and_then(|u| ui_tree(u, &args)) {
+            Some((text, region)) => (
+                Reply::Text(text.clone()),
+                Some(Look { tool: UI_TREE, region, text: Some(text), turns: Vec::new() }),
+            ),
+            None => (Reply::Refused("that region is too small; give a larger one"), None),
+        };
+    }
     let Some(frame) = sources.frame.clone() else {
         return (Reply::Refused("that tool is not available for this screen"), None);
     };
@@ -308,6 +341,94 @@ pub async fn answer(name: &str, sources: &Sources, args: Value) -> (Reply, Optio
         ),
         None => (Reply::Refused("that region is too small; give a larger one"), None),
     }
+}
+
+/// The accessibility elements in the region `args` names, as the model reads them: one line each,
+/// `[x0,y0,x1,y1] Role "name" state...`, boxes in 0-1000 of the screenshot. An element counts when
+/// its centre is in the region and it is not much larger than the region (a pane covering it says
+/// nothing). Top to bottom, then left to right; past `MAX_UI_LINES` the rest are counted.
+pub fn ui_tree(ui: &UiSource, args: &Value) -> Option<(String, [u32; 4])> {
+    let [cx, cy, cw, ch] = ui.capture;
+    if cw <= 0 || ch <= 0 {
+        return None;
+    }
+    let at = |key: &str, n: i32, default: f64| -> i32 {
+        let v = args.get(key).and_then(Value::as_f64).unwrap_or(default);
+        ((v / 1000.0 * n as f64).round() as i32).clamp(0, n)
+    };
+    let (mut x0, mut x1) = (at("x0", cw, 0.0), at("x1", cw, 1000.0));
+    let (mut y0, mut y1) = (at("y0", ch, 0.0), at("y1", ch, 1000.0));
+    if x0 > x1 {
+        std::mem::swap(&mut x0, &mut x1);
+    }
+    if y0 > y1 {
+        std::mem::swap(&mut y0, &mut y1);
+    }
+    if x1 - x0 < 8 || y1 - y0 < 8 {
+        return None;
+    }
+    let (rw, rh) = (x1 - x0, y1 - y0);
+    let k = |v: i32, origin: i32, n: i32| -> i32 { (((v - origin) as f64 / n as f64) * 1000.0).round().clamp(0.0, 1000.0) as i32 };
+    let mut hits: Vec<&crate::locator::UiNode> = ui
+        .nodes
+        .iter()
+        .filter(|n| {
+            let [nx, ny, nw, nh] = n.rect;
+            let (mx, my) = (nx - cx + nw / 2, ny - cy + nh / 2);
+            mx >= x0 && mx <= x1 && my >= y0 && my <= y1 && nw <= rw * 3 / 2 && nh <= rh * 3 / 2
+        })
+        .collect();
+    hits.sort_by_key(|n| (n.rect[1] / 8, n.rect[0]));
+    let lines: Vec<String> = hits
+        .iter()
+        .map(|n| {
+            let [nx, ny, nw, nh] = n.rect;
+            let mut l = format!(
+                "[{},{},{},{}] {}",
+                k(nx, cx, cw),
+                k(ny, cy, ch),
+                k(nx + nw, cx, cw),
+                k(ny + nh, cy, ch),
+                n.role
+            );
+            if !n.name.is_empty() {
+                l.push_str(&format!(" \"{}\"", n.name));
+            }
+            if let Some(t) = &n.toggled {
+                l.push_str(&format!(" {t}"));
+            }
+            if n.selected == Some(true) {
+                l.push_str(" selected");
+            }
+            match n.expanded {
+                Some(true) => l.push_str(" expanded"),
+                Some(false) => l.push_str(" collapsed"),
+                None => {}
+            }
+            if !n.enabled {
+                l.push_str(" disabled");
+            }
+            if let Some(v) = &n.value {
+                if v != &n.name {
+                    l.push_str(&format!(" value=\"{v}\""));
+                }
+            }
+            l
+        })
+        .collect();
+    let text = if lines.is_empty() {
+        "No accessible elements in that region.".to_string()
+    } else if lines.len() > MAX_UI_LINES {
+        format!(
+            "{}\n({} more elements not shown; read a smaller region)",
+            lines[..MAX_UI_LINES].join("\n"),
+            lines.len() - MAX_UI_LINES
+        )
+    } else {
+        lines.join("\n")
+    };
+    let px = |v: i32| -> u32 { v.max(0) as u32 };
+    Some((text, [px(x0), px(y0), px(x1), px(y1)]))
 }
 
 /// The pixel box `args` names ({x0, y0, x1, y1}, 0-1000), or `None` under 16 px on a side.
@@ -476,7 +597,7 @@ mod tests {
             EarlierScreen { turn: 2, jpeg_b64: "AAA".into() },
             EarlierScreen { turn: 5, jpeg_b64: "BBB".into() },
         ];
-        let earlier = Sources { frame: None, earlier: Some(Arc::new(screens)), recall_max: 1 };
+        let earlier = Sources { frame: None, earlier: Some(Arc::new(screens)), recall_max: 1, ui: None };
         assert_eq!(earlier.names(Tools::Zoom), vec![RECALL], "no frame, no zoom");
         let d = declarations(Mode::Note, &[RECALL], 1);
         assert!(d[0].1.contains("earlier turn") && !d[0].1.contains("reduced"), "{}", d[0].1);
@@ -490,12 +611,45 @@ mod tests {
         let (reply, look) = rt.block_on(answer(RECALL, &earlier, json!({"turn": 9})));
         assert!(matches!(reply, Reply::Refused(_)) && look.is_none());
         let many = Sources { recall_max: 3, ..earlier.clone() };
+        assert!(many.ui.is_none());
         let d = declarations(Mode::Choice, &[RECALL], 3);
         assert!(d[0].1.contains("at most 3 turns") && d[0].2["properties"].get("turns").is_some());
         let (reply, look) = rt.block_on(answer(RECALL, &many, json!({"turns": [5, 2, 9]})));
         assert!(matches!(reply, Reply::Images(ref b, ref c) if b.len() == 2 && c.contains("turns 5, 2")));
         assert_eq!(look.unwrap().turns, vec![5, 2], "an unknown turn is skipped");
 
+    }
+
+    #[test]
+    fn ui_tree_reads_a_region_in_screenshot_thousandths() {
+        let node = |role: &str, name: &str, rect: [i32; 4]| crate::locator::UiNode {
+            role: role.into(),
+            name: name.into(),
+            rect,
+            enabled: true,
+            toggled: None,
+            value: None,
+            selected: None,
+            expanded: None,
+        };
+        let mut sw = node("Button", "Transparency effects", [1000, 300, 40, 20]);
+        sw.toggled = Some("on".into());
+        let mut save = node("Button", "Save", [120, 110, 30, 30]);
+        save.enabled = false;
+        let ui = UiSource {
+            // The capture starts at (100, 100) and is 1000 x 500.
+            capture: [100, 100, 1000, 500],
+            nodes: vec![sw, save, node("Pane", "Whole window", [100, 100, 1000, 500])],
+        };
+        let sources = Sources { ui: Some(Arc::new(ui.clone())), ..Sources::default() };
+        assert_eq!(sources.names(Tools::Zoom), vec![UI_TREE]);
+        let (text, region) = ui_tree(&ui, &json!({"x0": 0, "y0": 0, "x1": 200, "y1": 200})).unwrap();
+        assert_eq!(region, [0, 0, 200, 100]);
+        assert_eq!(text, "[20,20,50,80] Button \"Save\" disabled", "the pane is larger than the region");
+        let (text, _) = ui_tree(&ui, &json!({"x0": 900, "y0": 300, "x1": 1000, "y1": 600})).unwrap();
+        assert!(text.contains("Button \"Transparency effects\" on"), "{text}");
+        assert!(!text.contains("100,"), "no pixel of the user's screen: {text}");
+        assert!(ui_tree(&ui, &json!({"x0": 1, "y0": 1, "x1": 2, "y1": 2})).is_none());
     }
 
     #[test]

@@ -81,6 +81,32 @@ pub(crate) fn strip_trailing_ellipsis(target: &str) -> (String, bool) {
 /// sent to the AI (id | role | name | center) so it can *select* instead of grounding;
 /// the id is a per-request index into this snapshot, never a UIA RuntimeId (Decision 2).
 /// A returned id is verified against the live tree before use (`a11y::verify_context_element`).
+/// H3 `ui_tree`: one accessibility element with what a screenshot cannot say for certain. A
+/// snapshot keeps every on-screen element of a window, uncapped -- the tool reads a region of it.
+/// `rect` is `[x, y, w, h]` in screen physical pixels; it never reaches the model as such.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UiNode {
+    pub role: String,
+    #[serde(default)]
+    pub name: String,
+    pub rect: [i32; 4],
+    #[serde(default = "enabled_default")]
+    pub enabled: bool,
+    /// "on" | "off" | "mixed", for an element with a toggle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toggled: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded: Option<bool>,
+}
+
+fn enabled_default() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ContextElement {
     /// Per-request index (1-based, assigned in tree order after filtering).

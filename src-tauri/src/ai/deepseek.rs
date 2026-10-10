@@ -71,6 +71,8 @@ pub struct DeepSeekClient {
     /// H6: earlier screens `recall` can return (OpenAI via Responses only).
     pub(crate) recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
     pub(crate) recall_max: usize,
+    /// H3: the accessibility snapshot `ui_tree` reads, set per request by the router.
+    pub(crate) ui_snapshot: Option<std::sync::Arc<crate::ai::inspect::UiSource>>,
     last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
     /// `response.model` of the last Responses API call: the model that answered.
     last_served: parking_lot::Mutex<Option<String>>,
@@ -111,6 +113,7 @@ impl DeepSeekClient {
             inspect_tools: crate::ai::inspect::Tools::Zoom,
             recall_screens: None,
             recall_max: 1,
+            ui_snapshot: None,
             last_inspects: parking_lot::Mutex::new(Vec::new()),
             last_served: parking_lot::Mutex::new(None),
         })
@@ -265,6 +268,7 @@ impl DeepSeekClient {
             frame: self.inspect_frame.clone(),
             earlier: self.recall_screens.clone(),
             recall_max: self.recall_max,
+            ui: self.ui_snapshot.clone(),
         };
         self.last_inspects.lock().clear();
         let look_names = sources.names(self.inspect_tools);

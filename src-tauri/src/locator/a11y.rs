@@ -1158,6 +1158,139 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
 /// **live** rect, so a control that scrolled/moved since capture resolves to something
 /// else, fails the name check, and the caller falls back to the normal pipeline —
 /// a stale snapshot can never place a pointer ("no pointer beats wrong pointer").
+/// H3 `ui_tree` (harness-plan.md): every on-screen element of a window -- popups first, as
+/// `enumerate_context_elements` roots them -- with role, name, rect, enabled, and toggle state,
+/// value, selection and expansion where the element has them. No cap and no control-type filter:
+/// the tool reads one region of it. An element with neither a name nor a state is left out (a
+/// bare container says nothing). Not for Excel's main window, whose bulk query detonates (see
+/// `BULK_UNSAFE_CLASSES`); that returns an error rather than two minutes of duplicates. Test builds
+/// only until the app reads the tree live for the tool.
+#[cfg(test)]
+pub fn snapshot_ui_tree(hwnd_raw: usize) -> Result<Vec<super::UiNode>, String> {
+    if hwnd_raw == 0 {
+        return Err("no target window".to_string());
+    }
+    let automation = UIAutomation::new().map_err(|e| format!("UIAutomation init: {e}"))?;
+    let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+    let mut roots: Vec<UIElement> = Vec::new();
+    for popup in collect_owned_popups(hwnd) {
+        if let Ok(el) = automation.element_from_handle(popup.into()) {
+            roots.push(el);
+        }
+    }
+    if let Ok(el) = automation.element_from_handle(hwnd.into()) {
+        roots.push(el);
+    }
+    if roots.iter().any(|r| matches!(r.get_classname(), Ok(c) if c == EXCEL_MAIN_WINDOW_CLASS)) {
+        return Err("Excel's main window: a bulk query would detonate".to_string());
+    }
+    // Popups are rooted by PID, and every UWP app's frame belongs to ApplicationFrameHost -- the
+    // first Settings capture came back with Calculator's tree in it. Only what lies inside the
+    // window counts, as `enumerate_context_elements` already filters.
+    let mut win_rect = RECT::default();
+    unsafe {
+        GetWindowRect(hwnd, &mut win_rect).map_err(|e| format!("GetWindowRect: {e}"))?;
+    }
+    let cond = automation.create_true_condition().map_err(|e| format!("condition: {e}"))?;
+    let cache = automation
+        .create_cache_request()
+        .map_err(|e| format!("cache request: {e}"))?;
+    for p in [
+        UIProperty::Name,
+        UIProperty::ControlType,
+        UIProperty::BoundingRectangle,
+        UIProperty::IsOffscreen,
+        UIProperty::IsEnabled,
+        UIProperty::ToggleToggleState,
+        UIProperty::ValueValue,
+        UIProperty::SelectionItemIsSelected,
+        UIProperty::ExpandCollapseExpandCollapseState,
+        UIProperty::IsTogglePatternAvailable,
+        UIProperty::IsValuePatternAvailable,
+        UIProperty::IsSelectionItemPatternAvailable,
+        UIProperty::IsExpandCollapsePatternAvailable,
+    ] {
+        let _ = cache.add_property(p);
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in &roots {
+        let Ok(els) = root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) else {
+            continue;
+        };
+        for el in els {
+            if el.is_cached_offscreen().unwrap_or(false) {
+                continue;
+            }
+            let (Ok(ct), Ok(rect)) = (el.get_cached_control_type(), el.get_cached_bounding_rectangle()) else {
+                continue;
+            };
+            let r = [rect.get_left(), rect.get_top(), rect.get_width(), rect.get_height()];
+            if r[2] < 4 || r[3] < 4 || !rect_is_onscreen(r[0], r[1]) {
+                continue;
+            }
+            if r[0] + r[2] <= win_rect.left || r[0] >= win_rect.right || r[1] + r[3] <= win_rect.top || r[1] >= win_rect.bottom {
+                continue;
+            }
+            let name = el.get_cached_name().map(|n| n.trim().to_string()).unwrap_or_default();
+            // A pattern property read from an element without that pattern comes back as the
+            // property's DEFAULT (toggle "indeterminate", not selected, an empty value) -- the first
+            // capture showed every button "mixed". So each is read only where the element says
+            // it has the pattern.
+            let has = |p| -> bool {
+                el.get_cached_property_value(p).ok().and_then(|v| TryInto::<bool>::try_into(v).ok()).unwrap_or(false)
+            };
+            let int = |p| -> Option<i32> { el.get_cached_property_value(p).ok().and_then(|v| v.try_into().ok()) };
+            let toggled = match int(UIProperty::ToggleToggleState).filter(|_| has(UIProperty::IsTogglePatternAvailable)) {
+                Some(0) => Some("off".to_string()),
+                Some(1) => Some("on".to_string()),
+                Some(2) => Some("mixed".to_string()),
+                _ => None,
+            };
+            let expanded = match int(UIProperty::ExpandCollapseExpandCollapseState)
+                .filter(|_| has(UIProperty::IsExpandCollapsePatternAvailable))
+            {
+                Some(0) => Some(false),
+                Some(1) | Some(2) => Some(true),
+                _ => None,
+            };
+            let selected: Option<bool> = el
+                .get_cached_property_value(UIProperty::SelectionItemIsSelected)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .filter(|_| has(UIProperty::IsSelectionItemPatternAvailable));
+            let value: Option<String> = el
+                .get_cached_property_value(UIProperty::ValueValue)
+                .ok()
+                .filter(|_| has(UIProperty::IsValuePatternAvailable))
+                .and_then(|v| TryInto::<String>::try_into(v).ok())
+                .map(|v| v.trim().chars().take(120).collect::<String>())
+                .filter(|v| !v.is_empty());
+            if name.is_empty() && toggled.is_none() && value.is_none() && selected != Some(true) {
+                continue;
+            }
+            let role = format!("{ct:?}");
+            if !seen.insert((role.clone(), name.clone(), r)) {
+                continue;
+            }
+            out.push(super::UiNode {
+                role,
+                name: name.chars().take(120).collect(),
+                rect: r,
+                enabled: el.is_cached_enabled().unwrap_or(true),
+                toggled,
+                value,
+                selected,
+                expanded,
+            });
+            if out.len() >= 5000 {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn verify_context_element(snap: &super::ContextElement) -> (Option<Rect>, String) {
     let Ok(automation) = UIAutomation::new() else {
         return (None, "UIAutomation init failed".to_string());

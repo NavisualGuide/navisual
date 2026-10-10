@@ -60,6 +60,9 @@ pub struct AiRouter {
     /// H6: earlier screens of this session that `recall` can return. Set by the caller per
     /// request; nothing in the app sets it yet, so only the replay harness offers the tool.
     pub recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
+    /// H3: the accessibility snapshot of the current screen for `ui_tree`. Set by the caller per
+    /// request; nothing in the app sets it yet, so only the replay harness offers the tool.
+    pub ui_snapshot: Option<std::sync::Arc<crate::ai::inspect::UiSource>>,
     /// The window `send_guidance_request` sends, in exchanges: `CONVERSATION_EXCHANGES` in the
     /// app. A field only so the replay harness can run the memory plan's 3 / 5 / 8 comparison
     /// (S3); nothing in the app changes it.
@@ -84,6 +87,7 @@ impl AiRouter {
             last_conversation_turns: 0,
             inspect_frame: None,
             recall_screens: None,
+            ui_snapshot: None,
             conversation_exchanges: CONVERSATION_EXCHANGES,
         };
         router.init_client();
@@ -494,6 +498,7 @@ impl AiRouter {
                 c.inspect_tools = self.config.inspect_tools;
                 c.recall_screens = self.recall_screens.clone();
                 c.recall_max = self.config.recall_max;
+                c.ui_snapshot = self.ui_snapshot.clone();
             }
             Some(ApiClient::OpenAI(c)) => {
                 c.inspect_frame = zoom;
@@ -501,6 +506,7 @@ impl AiRouter {
                 c.inspect_tools = self.config.inspect_tools;
                 c.recall_screens = self.recall_screens.clone();
                 c.recall_max = self.config.recall_max;
+                c.ui_snapshot = self.ui_snapshot.clone();
             }
             _ => {}
         }

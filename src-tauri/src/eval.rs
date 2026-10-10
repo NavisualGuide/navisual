@@ -76,6 +76,10 @@ struct Fixture {
     /// "no list", the case for apps without an accessibility tree or over the 300 cap.
     #[serde(default)]
     elements_block: Option<String>,
+    /// H3: the accessibility snapshot taken with the screenshot (`a11y::snapshot_ui_tree`), a JSON
+    /// file next to `image`. The `ui_tree` variant offers it; every other run ignores it.
+    #[serde(default)]
+    ui_snapshot: Option<String>,
     pass_if: PassIf,
     #[serde(default)]
     target_text_any: Vec<String>,
@@ -190,10 +194,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list", "ui_tree"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list)"
+             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list, ui_tree)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -844,6 +848,59 @@ fn ocr_probe() {
     }
 }
 
+/// H3 fixtures from a real window: `NAVISUAL_CAPTURE_TITLE` (a substring of its title, the
+/// front-most match), `NAVISUAL_CAPTURE_EXCLUDE` (optional), `NAVISUAL_CAPTURE_OUT` (the item
+/// directory). Writes `screen.png` through the app's own capture, `ui.json` from
+/// `a11y::snapshot_ui_tree`, and `item.json` with the production [Screen Elements] block --
+/// empty when the app's own enumeration skips it (over the cap, or no tree) -- and an empty task
+/// for a person to write. No model call.
+#[cfg(windows)]
+#[test]
+#[ignore = "captures a live window; run by name"]
+fn capture_ui_fixture() {
+    let title = std::env::var("NAVISUAL_CAPTURE_TITLE").expect("NAVISUAL_CAPTURE_TITLE");
+    let exclude = std::env::var("NAVISUAL_CAPTURE_EXCLUDE").unwrap_or_default();
+    let out = PathBuf::from(std::env::var("NAVISUAL_CAPTURE_OUT").expect("NAVISUAL_CAPTURE_OUT"));
+    std::fs::create_dir_all(&out).expect("out dir");
+    let hwnd = crate::capture::find_window_by_title(&title, &exclude).expect("no window with that title");
+    let info = crate::capture::get_window_info_for_hwnd(hwnd).expect("window info");
+    let rect = info.rect;
+    let img = crate::capture::capture_region_raw(rect, &[]).expect("capture");
+    img.save(out.join("screen.png")).expect("png");
+    let window_title = crate::capture::get_window_title(hwnd);
+    let (elements_block, sc) = match crate::locator::a11y::enumerate_context_elements(hwnd) {
+        Ok(els) => (crate::ai::prompts::elements_context_block(&els, rect), format!("{} elements", els.len())),
+        Err(e) => (String::new(), e),
+    };
+    let nodes = crate::locator::a11y::snapshot_ui_tree(hwnd).unwrap_or_else(|e| panic!("snapshot: {e}"));
+    std::fs::write(out.join("ui.json"), serde_json::to_string_pretty(&nodes).unwrap()).expect("ui.json");
+    let id = out.file_name().unwrap().to_string_lossy().to_string();
+    let item = serde_json::json!({
+        "id": id,
+        "task": "",
+        "window_title": window_title,
+        "window_rect": [rect.x, rect.y, rect.x + rect.width as i32, rect.y + rect.height as i32],
+        "image": "screen.png",
+        "pass_if": "text_or_bbox",
+        "target_text_any": [],
+        "target_text_none": [],
+        "target_rect": null,
+        "avoid_rect": null,
+        "notes": "",
+        "elements_block": if elements_block.is_empty() { serde_json::Value::Null } else { serde_json::json!(elements_block) },
+        "ui_snapshot": "ui.json",
+    });
+    std::fs::write(out.join("item.json"), serde_json::to_string_pretty(&item).unwrap() + "\n").expect("item.json");
+    println!(
+        "\n[capture] {id}: {}x{} at ({},{}) | {window_title:?} | Screen Elements: {sc} | ui_tree: {} nodes",
+        rect.width,
+        rect.height,
+        rect.x,
+        rect.y,
+        nodes.len()
+    );
+}
+
 /// Run one battery against one provider/model. Configured entirely by environment
 /// variables -- see `tools/run-replay.ps1`, which sets them.
 #[tokio::test]
@@ -916,6 +973,18 @@ async fn replay_battery() {
             let (b64, jpeg_len, w, h) = encode_fixture(&dir.join(&fx.image));
             let prompt = item_prompt(fx, &rc.voice_language, &rc.variant);
             prime_session(&mut router, fx);
+            // H3: the item's accessibility snapshot, mapped onto its capture rect.
+            router.ui_snapshot = match (&fx.ui_snapshot, rc.variant == "ui_tree") {
+                (Some(file), true) => {
+                    let nodes: Vec<crate::locator::UiNode> = serde_json::from_str(
+                        &std::fs::read_to_string(dir.join(file)).expect("ui snapshot"),
+                    )
+                    .expect("ui snapshot json");
+                    let [l, t, r, b] = fx.window_rect;
+                    Some(std::sync::Arc::new(crate::ai::inspect::UiSource { nodes, capture: [l, t, r - l, b - t] }))
+                }
+                _ => None,
+            };
             router.inspect_frame = config_looks(&rc.variant).then(|| {
                 std::sync::Arc::new(
                     image::open(dir.join(&fx.image)).expect("fixture image").to_rgb8(),
@@ -1510,6 +1579,7 @@ mod tests {
             window_rect: [0, 0, 1000, 1000],
             image: "x.png".into(),
             elements_block: None,
+            ui_snapshot: None,
             pass_if,
             target_text_any: vec!["Q3 forecast (draft 2)".into()],
             target_text_none: vec!["Q2 forecast (draft 2)".into()],

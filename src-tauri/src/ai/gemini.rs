@@ -31,6 +31,8 @@ pub struct GeminiClient {
     /// H6: earlier screens `recall` can return, set per request by the router.
     pub(crate) recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
     pub(crate) recall_max: usize,
+    /// H3: the accessibility snapshot `ui_tree` reads, set per request by the router.
+    pub(crate) ui_snapshot: Option<std::sync::Arc<crate::ai::inspect::UiSource>>,
     last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
     /// `modelVersion` of the last response: the model that answered, which is not always the one
     /// named (Google redirected gemini-3.7-flash to 3.8 on 2026-10-09).
@@ -69,6 +71,7 @@ impl GeminiClient {
             inspect_tools: crate::ai::inspect::Tools::Zoom,
             recall_screens: None,
             recall_max: 1,
+            ui_snapshot: None,
             last_inspects: parking_lot::Mutex::new(Vec::new()),
             last_served: parking_lot::Mutex::new(None),
         })
@@ -237,6 +240,7 @@ impl GeminiClient {
             frame: self.inspect_frame.clone(),
             earlier: self.recall_screens.clone(),
             recall_max: self.recall_max,
+            ui: self.ui_snapshot.clone(),
         };
         self.last_inspects.lock().clear();
         let look_names = sources.names(self.inspect_tools);
