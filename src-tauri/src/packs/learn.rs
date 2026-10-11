@@ -16,6 +16,12 @@
 //!   one menu to its neighbour (File, then Publish). Found first time, the model knew it, and a
 //!   note would only cost tokens. A path restarts at such a switch, so the detour never becomes
 //!   part of the note.
+//! - **The user's own way counts** (founder, 2026-10-11). When a step's target was not on screen
+//!   and the user clicked a command of their own instead, that click is kept as a candidate; if
+//!   the next step continues from it -- the user then clicks what that step named, and it is not a
+//!   neighbour of the candidate -- the candidate joins the path. Live: a stale note sent the model
+//!   to a Format menu that does not exist, the user opened View themselves and clicked Word wrap
+//!   when the model then named it, and nothing was learned, because View was nobody's step.
 //! - **Hand edits win.** The file is re-read whenever it changed since the app last read or
 //!   wrote it, before anything is sent or written; a file edited into something that does not
 //!   parse is neither sent nor written until it parses again; a deleted file empties the guide.
@@ -96,6 +102,9 @@ struct Expect {
     exe: String,
     target: String,
     located: bool,
+    /// The target was not on screen: not located, and not in this screen's list. The user's own
+    /// next click may then be the way (`candidate`).
+    missing: bool,
     /// The sent note the target came from, when it came from one.
     from_note: Option<(usize, usize)>,
 }
@@ -127,6 +136,9 @@ pub struct Learned {
     pending_line: Option<(usize, usize, u8)>,
     /// The request and goal of the last prompt, to judge a line's language against.
     last_focus: String,
+    /// The user's own command click after a step whose target was not on screen: joins the path
+    /// if the next guided click continues from it.
+    candidate: Option<Click>,
 }
 
 /// What re-reading a guide's file found.
@@ -341,14 +353,41 @@ impl Learned {
     /// The user's clicks in the guided app since the last call, oldest first. A click on the
     /// control the step named extends the run; anything else ends it.
     pub fn clicks(&mut self, app: &AppKey, clicks: &[Click], today: &str) {
-        let Some(exp) = self.expect.take() else { return };
+        let Some(exp) = self.expect.take() else {
+            self.candidate = None;
+            return;
+        };
         if exp.exe != app.exe {
             self.end_run();
             return;
         }
         match clicks.iter().find(|c| names_match(&c.name, &exp.target)) {
-            Some(c) => self.guided_click(app, c, today),
-            None => self.end_run(),
+            Some(c) => {
+                if let Some(cand) = self.candidate.take() {
+                    // The step continued from the user's own click (it is not the candidate's
+                    // neighbour, and nothing else was clicked between): the click was the way.
+                    let continues = self.run.is_empty()
+                        && (cand.parent.is_empty() || cand.parent != c.parent)
+                        && !names_match(&cand.name, &c.name);
+                    if continues {
+                        log::info!("[guide] '{}': \"{}\" -- the user's own click -- joins the path", app.exe, cand.name);
+                        self.task_clicks.push((cand.parent.clone(), cand.name.clone()));
+                        self.extend_run(app, cand.name, cand.parent, today);
+                    }
+                }
+                self.guided_click(app, c, today)
+            }
+            None => {
+                self.end_run();
+                // The step's target was not there and the user went another way: their last
+                // command click may be the way, if the next step continues from it.
+                if exp.missing {
+                    self.candidate = clicks.iter().rev().find(|c| is_ui_label(&c.role, &c.name, app)).cloned();
+                    if let Some(c) = &self.candidate {
+                        log::info!("[guide] '{}': \"{}\" clicked instead of a missing \"{}\" -- held as a candidate", app.exe, c.name, exp.target);
+                    }
+                }
+            }
         }
     }
 
@@ -410,6 +449,7 @@ impl Learned {
             exe: app.exe.clone(),
             target,
             located,
+            missing,
             from_note: from_note.map(|(g, n, _)| (g, n)),
         });
     }
@@ -502,6 +542,7 @@ impl Learned {
         self.run_parents.clear();
         self.run_note = None;
         self.run_confirmed.clear();
+        self.candidate = None;
     }
 
     fn extend_run(&mut self, app: &AppKey, name: String, parent: String, today: &str) {
@@ -1477,6 +1518,50 @@ mod tests {
         assert!(!dir.join("notepad").exists(), "the file and its emptied folder are gone");
         assert!(l.list().is_empty());
         assert_eq!(l.prompt_block(&app, "x", "s1"), "", "and nothing is sent from memory");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_users_own_way_after_a_missing_target_joins_the_path() {
+        let dir = tmp();
+        let app = notepad();
+        let mut l = with_guide(&dir, STALE); // Word wrap: Format > Word wrap
+        l.prompt_block(&app, "turn on word wrap", "s1");
+        let bar: Vec<String> = ["File", "Edit", "View"].map(String::from).to_vec();
+        // The model follows the stale note; Format is nowhere: the note is withheld.
+        l.step_shown(&app, Some("Format"), false, Some(&bar), "d");
+        assert!(l.guide("notepad").unwrap().notes[0].status.is_withheld());
+        // The user opens View themselves -- nobody's step -- and is held as a candidate.
+        l.clicks(&app, &click("MenuItem", "View", "MenuBar"), "d");
+        // The model continues from it; the user clicks what it named.
+        let menu: Vec<String> = ["File", "Edit", "View", "Zoom", "Status bar", "Word wrap"].map(String::from).to_vec();
+        l.step_shown(&app, Some("Word wrap"), true, Some(&menu), "d");
+        l.clicks(&app, &click("MenuItem", "Word wrap", "menu:View"), "d");
+        let n = &l.guide("notepad").unwrap().notes[0];
+        assert_eq!(n.names, vec!["View", "Word wrap"], "the note moved to the user's way");
+        assert!(matches!(n.status, NoteStatus::Confirmed { count: 1, .. }), "and is in use again: {:?}", n.status);
+        assert!(l.prompt_block(&app, "x", "s1").contains("[Learned notes: write one]"), "and asks for its line");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_detour_from_a_step_that_was_on_screen_is_not_learned() {
+        let dir = tmp();
+        let app = notepad();
+        let mut l = Learned::load(dir.clone());
+        struggle(&mut l, &app);
+        let bar: Vec<String> = ["File", "Edit", "View"].map(String::from).to_vec();
+        // The step named a control that was right there; the user clicked something else.
+        l.step_shown(&app, Some("Edit"), true, Some(&bar), "d");
+        l.clicks(&app, &click("MenuItem", "View", "MenuBar"), "d");
+        guided_in(&mut l, &app, "Word wrap", "menu:View");
+        assert!(l.guide("notepad").is_none(), "the user's detour from a visible step is not the way");
+        // Nor does a candidate survive a step that names nothing.
+        l.step_shown(&app, Some("Format"), false, Some(&bar), "d");
+        l.clicks(&app, &click("MenuItem", "View", "MenuBar"), "d");
+        l.step_shown(&app, None, false, None, "d");
+        guided_in(&mut l, &app, "Word wrap", "menu:View");
+        assert!(l.guide("notepad").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 
