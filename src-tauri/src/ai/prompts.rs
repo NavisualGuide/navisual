@@ -229,6 +229,10 @@ pub const STATE_SUMMARY_FIELD: &str = "Your ONLY memory between turns — earlie
 
 /// The schema description of `keep` (rule 16). No example, by rule 21: an example names a kind of
 /// fact, and that kind is then what the model keeps.
+/// Option B of the learned guide (`packs::learn::request_block` asks for it). Says nothing about
+/// what to write: the request does that, only on the turn a note was written.
+pub const APP_NOTE_FIELD: &str = "Only when the prompt asks for a learned note: that one line. Otherwise omit.";
+
 pub const KEEP_FIELD: &str = "Facts the user may still need after they leave the screen, each copied exactly as it was shown. Kept notes are never rewritten and come back on every later turn: add a fact once, and never repeat one already kept. Omit when there is nothing new.";
 
 /// The system prompt, carrying rule 19 when H1 is on.

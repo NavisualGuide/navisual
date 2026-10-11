@@ -18,8 +18,14 @@
 //! are scanned first, then bundled packs (the Tauri resource `packs/`), so a user pack with
 //! the same `id` shadows a bundled one. `get_active_pack(window_title)` returns the first
 //! pack whose `window_title_pattern` matches — user packs win ties.
+//!
+//! Learned guides live beside the packs, in `<user packs>\learned\<app>\guide.md` ([`guide`] is
+//! the file, [`learn`] keeps them current). A folder without `pack.json` is never a pack, so
+//! `learned\` cannot be mistaken for one.
 
 pub mod addon_install;
+pub mod guide;
+pub mod learn;
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -398,6 +404,17 @@ mod tests {
         assert_eq!(pack.manifest.shortcuts.get("Move").unwrap(), "G");
         // No match → None.
         assert!(reg.get_active_pack("Document1 - Word").is_none());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_learned_folder_is_not_a_pack() {
+        let root = tmp();
+        let dir = root.join("learned").join("notepad");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("guide.md"), "---\napp: Notepad\nexe: notepad\n---\n## Word wrap\nView > Word wrap.\n").unwrap();
+        let reg = PackRegistry::load(Some(&root), None);
+        assert_eq!(reg.len(), 0, "learned\\ has no pack.json");
         fs::remove_dir_all(&root).ok();
     }
 

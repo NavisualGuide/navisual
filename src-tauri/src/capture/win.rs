@@ -360,6 +360,81 @@ fn is_uwp_host(exe_path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The guided app as a learned guide knows it (`packs::learn`): the process's file stem,
+/// lowercase -- the hosted app's for a UWP frame, since every frame belongs to the frame host --
+/// its display name, and that exe's file version. `None` when the window is gone.
+pub fn app_identity(hwnd_raw: usize) -> Option<(String, String, String)> {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    let mut pid: u32 = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if pid == 0 {
+        return None;
+    }
+    let frame_path = exe_path_of_pid(pid);
+    let path = if is_uwp_host(&frame_path) {
+        hosted_pid(hwnd).map(exe_path_of_pid).unwrap_or_else(|| frame_path.clone())
+    } else {
+        frame_path.clone()
+    };
+    let stem = std::path::Path::new(&path).file_stem()?.to_str()?.to_lowercase();
+    if stem.is_empty() {
+        return None;
+    }
+    Some((stem, resolve_app_name(hwnd, &frame_path), file_version(&path)))
+}
+
+/// An exe's file version ("11.2508.38.0"), cached per path; empty when it has none or cannot be
+/// read (a packaged app's folder can refuse it).
+fn file_version(path: &str) -> String {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<parking_lot::Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(v) = cache.lock().get(path) {
+        return v.clone();
+    }
+    let v = read_file_version(path).unwrap_or_default();
+    cache.lock().insert(path.to_string(), v.clone());
+    v
+}
+
+fn read_file_version(path: &str) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    let root: Vec<u16> = "\\".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let size = GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None);
+        if size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        GetFileVersionInfoW(PCWSTR(wide.as_ptr()), None, size, buf.as_mut_ptr() as *mut _).ok()?;
+        let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut len: u32 = 0;
+        if !VerQueryValueW(buf.as_ptr() as *const _, PCWSTR(root.as_ptr()), &mut ptr, &mut len).as_bool()
+            || ptr.is_null()
+            || (len as usize) < mem::size_of::<VS_FIXEDFILEINFO>()
+        {
+            return None;
+        }
+        let info = &*(ptr as *const VS_FIXEDFILEINFO);
+        Some(format!(
+            "{}.{}.{}.{}",
+            info.dwFileVersionMS >> 16,
+            info.dwFileVersionMS & 0xffff,
+            info.dwFileVersionLS >> 16,
+            info.dwFileVersionLS & 0xffff
+        ))
+    }
+}
+
 /// Whether `pid` is the shared UWP frame host, whose windows frame OTHER processes' apps.
 fn pid_is_uwp_host(pid: u32) -> bool {
     pid != 0 && is_uwp_host(&exe_path_of_pid(pid))

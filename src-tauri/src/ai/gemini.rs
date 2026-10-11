@@ -156,6 +156,7 @@ impl GeminiClient {
                     },
                     "plan_completed_count": {"type": "integer", "description": "How many of plan_outline's milestones (counting from the first) are already done — 0 means you're still on the first one, 1 means the first is done and you're on the second, etc. Update it whenever a milestone is finished, and again whenever you revise plan_outline itself (count against the NEW list). Omit to leave the previous count unchanged; meaningless without plan_outline, so omit both together."},
                     "keep": {"type": "array", "items": {"type": "string"}, "description": crate::ai::prompts::KEEP_FIELD},
+                    "app_note": {"type": "string", "description": crate::ai::prompts::APP_NOTE_FIELD},
                     "state_summary": {"type": "string", "description": crate::ai::prompts::STATE_SUMMARY_FIELD},
                     "needs_input": {"type": "boolean"},
                     "suggested_tasks": {
@@ -551,6 +552,7 @@ impl GeminiClient {
                     goal: String::new(),
                     plan_outline: Vec::new(),
             keep: Vec::new(),
+            app_note: String::new(),
                     plan_completed_count: None,
                     steps: vec![crate::ai::types::GuidanceStep {
                         instruction: clean_instruction,

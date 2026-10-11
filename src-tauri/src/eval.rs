@@ -90,6 +90,29 @@ struct Fixture {
     /// Ctrl+V to paste" with no pointer is not. Off by default, so older batteries grade as they did.
     #[serde(default)]
     say_why: bool,
+    /// H7b: a learned guide for the app (`packs::guide`), a file relative to the item directory --
+    /// one per battery, shared by its items. Sent the way the app sends one, unless the variant is
+    /// `no_guide`; `stale_guide` sends `guide_stale` instead, an older edition the app has moved on
+    /// from.
+    #[serde(default)]
+    guide: Option<String>,
+    #[serde(default)]
+    guide_stale: Option<String>,
+    /// L2 step 2: the guide `packs::learn` writes after one guided session per task -- paths
+    /// only, no prose. The `local_guide` variant sends it.
+    #[serde(default)]
+    guide_local: Option<String>,
+    /// The files' text, read by `load_fixtures`.
+    #[serde(skip)]
+    guide_text: Option<String>,
+    #[serde(skip)]
+    guide_stale_text: Option<String>,
+    #[serde(skip)]
+    guide_local_text: Option<String>,
+    /// L2 option B: the request `packs::learn` adds to the prompt right after a note is written,
+    /// asking for the model's `app_note`. The answer is read from the result row.
+    #[serde(default)]
+    learn_request: Option<LearnRequest>,
     pass_if: PassIf,
     #[serde(default)]
     target_text_any: Vec<String>,
@@ -129,6 +152,16 @@ struct Fixture {
     /// screen after the user acted, and the answer graded is the model's reply to it.
     #[serde(default)]
     continuation: Option<Continuation>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LearnRequest {
+    app: String,
+    title: String,
+    path: Vec<String>,
+    /// The note's current line, for a rewrite request.
+    #[serde(default)]
+    line: Option<String>,
 }
 
 /// Turn 1 of an S2 item, canned so both arms of a comparison see the same history and differ
@@ -204,10 +237,11 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list", "ui_tree", "list_states", "list_plain"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list", "ui_tree", "list_states", "list_plain", "no_guide", "stale_guide", "local_guide", "file_guide"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list, ui_tree, list_states, list_plain)"
+             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list, ui_tree, list_states, list_plain, \
+             no_guide, stale_guide, local_guide, file_guide)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -253,8 +287,16 @@ fn load_fixtures(rc: &RunConfig) -> Vec<(PathBuf, Fixture)> {
     dirs.into_iter()
         .map(|d| {
             let text = std::fs::read_to_string(d.join("item.json")).expect("item.json");
-            let fx: Fixture = serde_json::from_str(&text)
+            let mut fx: Fixture = serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("{}: {e}", d.join("item.json").display()));
+            let read = |f: &Option<String>| {
+                f.as_ref().map(|f| {
+                    std::fs::read_to_string(d.join(f)).unwrap_or_else(|e| panic!("{}: {e}", d.join(f).display()))
+                })
+            };
+            fx.guide_text = read(&fx.guide);
+            fx.guide_stale_text = read(&fx.guide_stale);
+            fx.guide_local_text = read(&fx.guide_local);
             (d, fx)
         })
         .filter(|(_, fx)| rc.only.is_empty() || rc.only.iter().any(|o| o == &fx.id))
@@ -288,6 +330,34 @@ fn elements_for<'a>(fx: &'a Fixture, variant: &str) -> &'a str {
     }
 }
 
+/// The learned-guide block an item sends (H7b), through the app's own parser and selection, with
+/// the task as the focus -- `guide` adds the session's goal, which a turn-1 item does not have yet.
+fn guide_for(fx: &Fixture, variant: &str) -> String {
+    // `file_guide`: one guide for the whole run, from a file -- a model's own written lines.
+    let from_file = (variant == "file_guide").then(|| {
+        let f = std::env::var("NAVISUAL_EVAL_GUIDE_FILE").expect("file_guide needs NAVISUAL_EVAL_GUIDE_FILE");
+        std::fs::read_to_string(&f).unwrap_or_else(|e| panic!("{f}: {e}"))
+    });
+    let text = match variant {
+        "no_guide" => None,
+        "stale_guide" => fx.guide_stale_text.as_deref(),
+        "local_guide" => fx.guide_local_text.as_deref(),
+        "file_guide" => from_file.as_deref(),
+        _ => fx.guide_text.as_deref(),
+    };
+    let mut block = text
+        .map(|t| {
+            crate::packs::guide::Guide::parse(t, PathBuf::new())
+                .unwrap_or_else(|| panic!("{}: the guide does not parse", fx.id))
+                .block(&fx.task)
+        })
+        .unwrap_or_default();
+    if let Some(r) = &fx.learn_request {
+        block.push_str(&crate::packs::learn::request_block(&r.app, &r.title, &r.path, r.line.as_deref()));
+    }
+    block
+}
+
 /// The turn-2 prompt `guide` would build after the user acted: the `[User completed: "…"]`
 /// line (with use A's expectation when the variant turns H1 on, exactly as `guide` adds it), the
 /// window context with the click record, and the tail anchors.
@@ -298,7 +368,7 @@ fn continuation_prompt(fx: &Fixture, c: &Continuation, voice_language: &str, var
     let click = c.click.as_ref().map(|[role, name]| crate::last_click::prompt_line(role, name));
     let window_context = crate::window_context_text(
         Some(&capture::format_window_prompt_info(&fx.window_title)),
-        "",
+        &guide_for(fx, variant),
         elements_for(fx, variant),
         crate::os_context_line(),
         None,
@@ -342,8 +412,8 @@ fn item_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
     }
 }
 
-/// The turn-1 prompt `guide` would build for this window: no pack, no app-state channel and
-/// no click record, because a fixture has none of them.
+/// The turn-1 prompt `guide` would build for this window: no authored pack, no app-state channel
+/// and no click record, because a fixture has none of them; a learned guide when it has one.
 fn fixture_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
     let info = match variant {
         // The prompt before 2026-10-07: the title AND the window's frame.
@@ -352,7 +422,7 @@ fn fixture_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
     };
     let window_context = crate::window_context_text(
         Some(&info),
-        "",
+        &guide_for(fx, variant),
         elements_for(fx, variant),
         crate::os_context_line(),
         None,
@@ -1622,6 +1692,13 @@ mod tests {
             elements_block_states: None,
             ui_snapshot: None,
             say_why: false,
+            guide: None,
+            guide_stale: None,
+            guide_local: None,
+            guide_text: None,
+            guide_stale_text: None,
+            guide_local_text: None,
+            learn_request: None,
             pass_if,
             target_text_any: vec!["Q3 forecast (draft 2)".into()],
             target_text_none: vec!["Q2 forecast (draft 2)".into()],

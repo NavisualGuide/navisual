@@ -699,6 +699,11 @@ impl SessionManager {
 
     /// Keep the `keep` most recent sessions; retire the rest.
     ///
+    /// **A retired session goes to the Recycle Bin** (`retire`), not straight to oblivion: the
+    /// bound exists to keep the list short, not to destroy the user's history, and a prune the
+    /// user did not watch happen must be undoable (on 2026-10-11 a test run pruned six real
+    /// sessions; File History is what brought them back).
+    ///
     /// **The first run archives instead of deleting.** Going from an unbounded store to a
     /// bounded one destroys whatever was already there, and export does not exist yet, so
     /// there would be no way to get any of it back. Surplus moves to `archive-<date>/`
@@ -762,17 +767,19 @@ impl SessionManager {
                     }
                     Err(e) => log::warn!("[sessions] could not archive {path:?}: {e}"),
                 },
-                None => match fs::remove_file(&path) {
+                None => match retire(&path) {
                     Ok(()) => {
                         deleted += 1;
                         // Orphaned frames would outlive the transcript with nothing pointing
                         // at them -- invisible disk creep, and the reason prune knows about
                         // this directory at all.
                         if frames.is_dir() {
-                            let _ = fs::remove_dir_all(&frames);
+                            if let Err(e) = retire(&frames) {
+                                log::warn!("[sessions] retired {} but not its frames: {e}", s.id);
+                            }
                         }
                     }
-                    Err(e) => log::warn!("[sessions] could not remove {path:?}: {e}"),
+                    Err(e) => log::warn!("[sessions] could not retire {path:?}: {e}"),
                 },
             }
         }
@@ -786,11 +793,27 @@ impl SessionManager {
             );
         } else if deleted > 0 {
             log::info!(
-                "[sessions] pruned {deleted} of {}, keeping the most recent {keep}",
+                "[sessions] pruned {deleted} of {} to the Recycle Bin, keeping the most recent {keep}",
                 all.len()
             );
         }
         (deleted, archived)
+    }
+}
+
+/// Send a retired session file or frames folder to the Recycle Bin. Tests delete outright, so a
+/// `cargo test` run never fills the developer's Recycle Bin with temp files.
+#[cfg(all(windows, not(test)))]
+fn retire(path: &Path) -> std::io::Result<()> {
+    crate::recycle::to_recycle_bin(path)
+}
+
+#[cfg(any(not(windows), test))]
+fn retire(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
     }
 }
 

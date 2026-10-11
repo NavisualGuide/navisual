@@ -551,6 +551,17 @@ pub fn get_window_info_for_hwnd(_hwnd_raw: usize) -> Option<()> {
     None
 }
 
+/// The guided app's `(exe stem, display name, file version)`, for the learned guide.
+#[cfg(windows)]
+pub fn app_identity(hwnd_raw: usize) -> Option<(String, String, String)> {
+    win::app_identity(hwnd_raw)
+}
+
+#[cfg(not(windows))]
+pub fn app_identity(_hwnd_raw: usize) -> Option<(String, String, String)> {
+    None
+}
+
 /// Item 1: re-export TargetWindowInfo so lib.rs can use capture::TargetWindowInfo.
 #[cfg(windows)]
 pub use win::TargetWindowInfo;

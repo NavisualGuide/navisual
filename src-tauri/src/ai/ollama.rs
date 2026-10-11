@@ -45,6 +45,7 @@ Top-level fields (outside "steps", required):
 
 Optional top-level field:
 - keep: facts the user may still need after they leave the screen, each copied exactly as shown; kept notes come back on every later turn and are never rewritten, so add each once and never repeat one already kept (omit when there is nothing new)
+- app_note: only when the prompt asks for a learned note, that one line; otherwise omit
 - suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence"#;
 
 pub struct OllamaClient {
@@ -251,6 +252,7 @@ impl OllamaClient {
             goal: String::new(),
             plan_outline: Vec::new(),
             keep: Vec::new(),
+            app_note: String::new(),
             plan_completed_count: None,
             steps: vec![GuidanceStep {
                 instruction: text.clone(),
