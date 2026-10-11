@@ -34,6 +34,8 @@ use std::time::Instant;
 /// packed menu/tab strips (short lines) are never falsely rejected.
 const ISOLATION_LINE_FLOOR: usize = 40;
 const ISOLATION_MIN: f32 = 0.4;
+/// A control's label found by OCR on a text-content surface must be its own line, near enough.
+const CONTROL_LABEL_ISOLATION: f32 = 0.9;
 
 #[derive(Debug, Clone, Default)]
 pub struct LocateOptions {
@@ -518,7 +520,11 @@ pub fn locate(
     };
     // (2) Label isolation (image-pixel space, same as `results`).
     let (isolation, line_len) = ocr::isolation_for(&hit.bbox, target_text, &results);
-    let isolation_ok = !(line_len > ISOLATION_LINE_FLOOR && isolation < ISOLATION_MIN);
+    let control_hunt = matches!(
+        opts.role.as_deref(),
+        Some("button" | "tab" | "menuitem" | "checkbox" | "radio" | "combobox" | "slider")
+    );
+    let isolation_ok = isolation_passes(isolation, line_len, control_hunt && matches!(role, RoleHit::Content(_)));
     // (3) nearby_text anchor proximity (soft). A nearby_text identical to the
     // target carries no independent signal (self-anchor) — treat as absent.
     let near_anchor = opts
@@ -742,6 +748,26 @@ fn shares_token(a: &str, b: &str) -> bool {
         return a.chars().filter(|c| super::is_cjk_char(*c)).any(|c| b.contains(c));
     }
     false
+}
+
+/// Whether an OCR match counts as an isolated label.
+///
+/// A line of `ISOLATION_LINE_FLOOR` characters or fewer counts as a label whatever share of it the
+/// word is -- right for a toolbar row or a custom-drawn menu, where a short line holds several
+/// controls. Not for a **control hunt on text content** (UIA says Document, Edit or Text under the
+/// word, and the model asked for a button, tab, menu item, check box, radio, combo box or
+/// slider): there a short line is just a short line of the user's text. Live 2026-10-11, Notepad
+/// showing a file that read "names: Format > Word wrap" (25 characters, the word 0.24 of it):
+/// target menu item "Format" -> pointer on the document text. There the word must be its own
+/// line (`CONTROL_LABEL_ISOLATION`). Measured on the founder's locate log: of the 6 accepted OCR
+/// hits for a control inside Document/Edit, the 4 correct ones -- Chrome page buttons and a combo
+/// box, the whole line each (1.0) -- still pass, and the 2 wrong ones -- Notepad document words at
+/// 0.75 and 0.24 -- do not. Surfaces UIA cannot name (Unknown) keep the short-line rule.
+fn isolation_passes(isolation: f32, line_len: usize, control_hunt_in_content: bool) -> bool {
+    if control_hunt_in_content {
+        return isolation >= CONTROL_LABEL_ISOLATION;
+    }
+    !(line_len > ISOLATION_LINE_FLOOR && isolation < ISOLATION_MIN)
 }
 
 /// UIA role family under the OCR match, for the corroboration decision.
@@ -1338,6 +1364,12 @@ mod tests {
         // non-UIA (Unknown) surface, far from the AI bbox and with no anchor → must REJECT so
         // template matching gets a turn.
         assert!(!corroboration_accept(RoleKind::Unknown, true, true, false, false, false, false));
+        // Isolation for a control hunt on text content: the word must be its own line.
+        assert!(!isolation_passes(0.24, 25, true), "\"Format\" in \"names: Format > Word wrap\"");
+        assert!(!isolation_passes(0.75, 12, true), "\"Word wrap\" inside a document sentence");
+        assert!(isolation_passes(1.0, 11, true), "a web page's button label, alone on its line");
+        assert!(isolation_passes(0.24, 25, false), "any other short line still counts as a label");
+        assert!(!isolation_passes(0.3, 60, false), "and a long line still does not");
         // A fuzzy match that DOES agree spatially is accepted.
         assert!(corroboration_accept(RoleKind::Unknown, true, true, true, false, false, false));
         // Exact/substring (not fuzzy) still passes on isolation alone — no regression.
