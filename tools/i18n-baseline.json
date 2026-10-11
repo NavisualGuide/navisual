@@ -32,7 +32,7 @@
     "src/App.svelte:e.g. deepseek-v4-flash",
     "src/App.svelte:e.g. gemini-3.8-flash",
     "src/App.svelte:e.g. gemma4:e4b",
-    "src/App.svelte:e.g. gpt-5.6-terra",
+    "src/App.svelte:e.g. gpt-6.1-sol",
     "src/App.svelte:e.g. qwen2.5-vl-7b-instruct",
     "src/App.svelte:e.g. qwen3.8-max",
     "src/App.svelte:gemini-2.5-flash",

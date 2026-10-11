@@ -18,7 +18,7 @@ Stop `npm run tauri dev` first: it holds the cargo build lock and this would wai
 .\tools\run-replay.ps1 -Targets "gemini:gemini-3.8-flash" -DryRun
 
 .EXAMPLE
-.\tools\run-replay.ps1 -Targets "openai:gpt-5.6-luna,gemini:gemini-3.8-flash,openai:gpt-5.6-terra" -MaxUsd 0.50
+.\tools\run-replay.ps1 -Targets "openai:gpt-6-luna,gemini:gemini-3.8-flash,openai:gpt-6.1-sol" -MaxUsd 0.50
 
 .EXAMPLE
 .\tools\run-replay.ps1 -Rescore ..\navisual-internal\eval\results\s1-openai-gpt-5.6-luna-20261006-012853.jsonl

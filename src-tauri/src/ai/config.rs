@@ -265,7 +265,7 @@ impl Default for Config {
             ollama_model: "llama3.2-vision".to_string(),
             ollama_timeout_sec: 120,
             openai_api_key: None,
-            openai_model: "gpt-5.6-terra".to_string(),
+            openai_model: "gpt-6.1-sol".to_string(),
             deepseek_api_key: None,
             deepseek_model: "deepseek-v4-flash".to_string(),
             qwen_api_key: None,

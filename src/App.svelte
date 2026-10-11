@@ -1178,7 +1178,7 @@ See the LICENSE file in the root of this repository for complete details.
   // drifted, so every provider's default model opened as Custom.
   const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-5","claude-opus-5"];
   const MODEL_PRESETS_GEMINI    = ["gemini-3.8-flash","gemini-2.5-flash-lite","gemini-3.1-pro-preview","gemini-2.5-flash"];
-  const MODEL_PRESETS_OPENAI    = ["gpt-5.6-terra","gpt-5.6-luna","gpt-5.6-sol"];
+  const MODEL_PRESETS_OPENAI    = ["gpt-6.1-sol","gpt-6-luna","gpt-6-astra"];
   const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp"];
   const MODEL_PRESETS_QWEN      = ["qwen3.8-max","qwen3.7-flash","qwen3.5-omni-plus"];
   // Qwen DashScope OpenAI-compatible endpoints by region. Picking a region in the
@@ -5382,14 +5382,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="openai-model" class="setting-select"
                   value={customOpenAI ? "__custom__" : settingsForm.openai_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customOpenAI = false; settingsForm.openai_model = v; } else { customOpenAI = true; settingsForm.openai_model = ""; } }}>
-                  <option value="gpt-5.6-terra">gpt-5.6-terra {t("pv.qRecommended")}</option>
-                  <option value="gpt-5.6-luna">gpt-5.6-luna {t("pv.qFast")}</option>
-                  <option value="gpt-5.6-sol">gpt-5.6-sol {t("pv.qBest")}</option>
+                  <option value="gpt-6.1-sol">gpt-6.1-sol {t("pv.qRecommended")}</option>
+                  <option value="gpt-6-luna">gpt-6-luna {t("pv.qFast")}</option>
+                  <option value="gpt-6-astra">gpt-6-astra {t("pv.qBest")}</option>
                   <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customOpenAI}
                   <input class="setting-input" type="text" bind:value={settingsForm.openai_model}
-                    placeholder="e.g. gpt-5.6-terra" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. gpt-6.1-sol" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
 
