@@ -1,0 +1,294 @@
+# L1 live harness -- shared helpers. Dot-source: . "$PSScriptRoot\l1-lib.ps1"
+# Pure ASCII (CLAUDE.md rule 12).
+#
+# The driver is a follower, not a person (harness-plan.md, L1): it does what the pointer and the
+# instruction say, through real mouse and keyboard input, and nothing else. Every decision it takes
+# is written to the run log so a failure can be told apart from a driver mistake.
+
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public delegate bool L1EnumProc(IntPtr h, IntPtr l);
+public struct L1Rect { public int Left, Top, Right, Bottom; }
+public static class L1W {
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr v);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(L1EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr h, int i);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out L1Rect r);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hh, bool repaint);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+
+    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION u; }
+
+    // Text as Unicode key events, one character at a time: what a person typing produces.
+    public static void TypeText(string s) {
+        foreach (char c in s) {
+            INPUT[] a = new INPUT[2];
+            a[0].type = 1; a[0].u.ki.wScan = c; a[0].u.ki.dwFlags = 0x0004;
+            a[1].type = 1; a[1].u.ki.wScan = c; a[1].u.ki.dwFlags = 0x0004 | 0x0002;
+            SendInput(2, a, Marshal.SizeOf(typeof(INPUT)));
+            System.Threading.Thread.Sleep(15);
+        }
+    }
+
+    public static string Title(IntPtr h) { var sb = new StringBuilder(512); GetWindowTextW(h, sb, 512); return sb.ToString(); }
+    public static string Class(IntPtr h) { var sb = new StringBuilder(256); GetClassNameW(h, sb, 256); return sb.ToString(); }
+}
+"@ -ErrorAction SilentlyContinue
+
+# Physical pixels, as the locator reports them (LocateResult.bbox: physical, virtual desktop).
+[L1W]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
+
+$global:L1AE = [System.Windows.Automation.AutomationElement]
+$global:L1TS = [System.Windows.Automation.TreeScope]
+$global:L1CT = [System.Windows.Automation.ControlType]
+
+# ---------------------------------------------------------------------------------------------
+# Logging
+
+$global:L1Log = $null
+function Write-L1([string]$msg) {
+    $line = "{0} {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $msg
+    Write-Host $line
+    if ($global:L1Log) { Add-Content -Path $global:L1Log -Value $line -Encoding UTF8 }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Windows
+
+function Get-TopWindows([scriptblock]$Where) {
+    $global:L1Hits = New-Object System.Collections.Generic.List[IntPtr]
+    $cb = [L1EnumProc]{
+        param($h, $l)
+        if ([L1W]::IsWindowVisible($h)) { $global:L1Hits.Add($h) }
+        return $true
+    }
+    [L1W]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+    $out = @()
+    foreach ($h in $global:L1Hits) {
+        $q = [uint32]0
+        [L1W]::GetWindowThreadProcessId($h, [ref]$q) | Out-Null
+        $o = [pscustomobject]@{ Hwnd = $h; Pid = [int]$q; Title = [L1W]::Title($h); Class = [L1W]::Class($h); ExStyle = [L1W]::GetWindowLong($h, -20) }
+        if (-not $Where -or (& $Where $o)) { $out += $o }
+    }
+    return $out
+}
+
+function Get-WindowRect([IntPtr]$h) {
+    $r = New-Object L1Rect
+    [L1W]::GetWindowRect($h, [ref]$r) | Out-Null
+    return $r
+}
+
+# The Navisual panel: the process's visible window that is not click-through (the overlay is).
+function Get-PanelWindow([int]$NavPid) {
+    Get-TopWindows { param($w) $w.Pid -eq $NavPid -and (($w.ExStyle -band 0x20) -eq 0) -and $w.Title -eq 'Navisual' } | Select-Object -First 1
+}
+
+# Bring a window forward the way a person does: a real click on its title bar.
+function Focus-ByTitleBar([IntPtr]$h) {
+    $r = Get-WindowRect $h
+    $x = [int](($r.Left + $r.Right) / 2)
+    $y = $r.Top + 12
+    Click-Point $x $y
+    Start-Sleep -Milliseconds 300
+    if ([L1W]::GetForegroundWindow() -ne $h) {
+        [L1W]::SetForegroundWindow($h) | Out-Null
+        Start-Sleep -Milliseconds 200
+    }
+    return ([L1W]::GetForegroundWindow() -eq $h)
+}
+
+# Ask a window to close (WM_CLOSE): goes to that window only, whatever has focus.
+function Close-Window([IntPtr]$h) { [L1W]::PostMessage($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+
+# ---------------------------------------------------------------------------------------------
+# Mouse and keyboard
+
+function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double) {
+    # Arrive, then settle inside: XAML menu items ignore a click with no hover first (seen live).
+    [L1W]::SetCursorPos($x - 6, $y) | Out-Null
+    Start-Sleep -Milliseconds 120
+    [L1W]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 220
+    $down = 0x2; $up = 0x4
+    if ($Button -eq 'right') { $down = 0x8; $up = 0x10 }
+    $n = 1; if ($Double) { $n = 2 }
+    for ($i = 0; $i -lt $n; $i++) {
+        [L1W]::mouse_event($down, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+        [L1W]::mouse_event($up, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 90
+    }
+}
+
+$global:L1VK = @{
+    'ctrl' = 0x11; 'control' = 0x11; 'alt' = 0x12; 'shift' = 0x10; 'win' = 0x5B; 'windows' = 0x5B;
+    'enter' = 0x0D; 'return' = 0x0D; 'tab' = 0x09; 'esc' = 0x1B; 'escape' = 0x1B; 'space' = 0x20;
+    'delete' = 0x2E; 'del' = 0x2E; 'backspace' = 0x08; 'home' = 0x24; 'end' = 0x23;
+    'up' = 0x26; 'down' = 0x28; 'left' = 0x25; 'right' = 0x27; 'pageup' = 0x21; 'pagedown' = 0x22;
+    'insert' = 0x2D; 'backquote' = 0xC0; '`' = 0xC0; 'minus' = 0xBD; '-' = 0xBD; 'plus' = 0xBB; '=' = 0xBB;
+    '+' = 0xBB; ',' = 0xBC; '.' = 0xBE; '/' = 0xBF; ';' = 0xBA; '[' = 0xDB; ']' = 0xDD
+}
+
+function Get-VkCode([string]$k) {
+    $k = $k.Trim().ToLower() -replace '\s', ''
+    if ($global:L1VK.ContainsKey($k)) { return $global:L1VK[$k] }
+    if ($k -match '^f([0-9]{1,2})$') { return 0x6F + [int]$Matches[1] }
+    if ($k.Length -eq 1 -and $k -match '[a-z0-9]') { return [int][char]$k.ToUpper() }
+    return $null
+}
+
+# "Ctrl+Shift+N", "Alt+F4", "Enter".
+function Send-Combo([string]$combo) {
+    $parts = $combo -split '\+' | Where-Object { $_.Trim() -ne '' }
+    if ($combo.Trim().EndsWith('++')) { $parts += '+' }
+    $codes = @()
+    foreach ($p in $parts) {
+        $c = Get-VkCode $p
+        if ($null -eq $c) { return $false }
+        $codes += [byte]$c
+    }
+    foreach ($c in $codes) { [L1W]::keybd_event($c, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 30 }
+    Start-Sleep -Milliseconds 50
+    [array]::Reverse($codes)
+    foreach ($c in $codes) { [L1W]::keybd_event($c, 0, 2, [IntPtr]::Zero); Start-Sleep -Milliseconds 20 }
+    return $true
+}
+
+function Send-Text([string]$s) { [L1W]::TypeText($s) }
+
+# Mouse wheel over a point: positive notches scroll up, negative down.
+function Scroll-At([int]$x, [int]$y, [int]$notches) {
+    [L1W]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 150
+    $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * [math]::Sign($notches))), 0)
+    for ($i = 0; $i -lt [math]::Abs($notches); $i++) {
+        [L1W]::mouse_event(0x0800, 0, 0, $delta, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
+# UIA
+
+function Find-ByName($root, [string]$name, [string]$type = '') {
+    $c = New-Object System.Windows.Automation.PropertyCondition ($global:L1AE::NameProperty), $name
+    $all = $root.FindAll($global:L1TS::Descendants, $c)
+    foreach ($e in $all) {
+        if (-not $type -or $e.Current.ControlType.ProgrammaticName -eq "ControlType.$type") { return $e }
+    }
+    return $null
+}
+
+function Find-ByType($root, [string]$type) {
+    $c = New-Object System.Windows.Automation.PropertyCondition ($global:L1AE::ControlTypeProperty), ($global:L1CT::$type)
+    return @($root.FindAll($global:L1TS::Descendants, $c))
+}
+
+function Invoke-Element($e) {
+    $e.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+
+# ---------------------------------------------------------------------------------------------
+# The Navisual panel, driven as a person would through its own controls.
+
+function Get-PanelRoot([int]$NavPid) {
+    $w = Get-PanelWindow $NavPid
+    if (-not $w) { return $null }
+    return $global:L1AE::FromHandle($w.Hwnd)
+}
+
+# Type into the task box and press its button ("Guide me", or the follow-up button mid-task).
+function Send-PanelText([int]$NavPid, [string]$text) {
+    $root = Get-PanelRoot $NavPid
+    if (-not $root) { return "no panel" }
+    $box = Find-ByType $root 'Edit' | Select-Object -First 1
+    if (-not $box) { return "no task box" }
+    $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($text)
+    Start-Sleep -Milliseconds 300
+    $btn = Find-ByType $root 'Button' | Where-Object {
+        $n = $_.Current.Name
+        $n -eq 'Guide me' -or $n -like '*Follow up*' -or $n -eq 'Send' -or $n -like 'Reply*'
+    } | Select-Object -First 1
+    if (-not $btn) { return "no send button" }
+    $name = $btn.Current.Name
+    Invoke-Element $btn
+    return "sent via '$name'"
+}
+
+function Start-PanelNewTask([int]$NavPid) {
+    $root = Get-PanelRoot $NavPid
+    if (-not $root) { return "no panel" }
+    $btn = Find-ByType $root 'Button' | Where-Object { $_.Current.Name -match 'New task' } | Select-Object -First 1
+    if (-not $btn) { return "no New task button (already fresh?)" }
+    Invoke-Element $btn
+    Start-Sleep -Milliseconds 500
+    return "new task"
+}
+
+function Send-NextHotkey { Send-Combo 'Ctrl+Backquote' | Out-Null }
+
+# ---------------------------------------------------------------------------------------------
+# The step feed (NAVISUAL_STEP_FEED): one JSON line per response the panel receives.
+
+function Get-FeedLines([string]$path) {
+    if (-not (Test-Path $path)) { return @() }
+    $raw = [System.IO.File]::ReadAllLines($path, [System.Text.Encoding]::UTF8)
+    return @($raw | Where-Object { $_.Trim() -ne '' })
+}
+
+function Wait-FeedLine([string]$path, [int]$afterCount, [int]$timeoutSec) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $lines = @(Get-FeedLines $path)
+        if ($lines.Count -gt $afterCount) {
+            return [pscustomobject]@{ Count = $lines.Count; Item = ($lines[$afterCount] | ConvertFrom-Json) }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $null
+}
+
+# ---------------------------------------------------------------------------------------------
+# What a step asks the follower to do, read from the step alone.
+
+function Get-StepActions($step) {
+    $ins = [string]$step.instruction
+    $a = [ordered]@{ click = $null; button = 'left'; double = $false; text = $null; paste = $null; keys = @(); scroll = 0; unsupported = $null }
+    if ($step.located -and $step.located.bbox) {
+        $b = $step.located.bbox
+        $a.click = @([int]($b.x + $b.width / 2), [int]($b.y + $b.height / 2))
+    }
+    if ($ins -match '(?i)right[- ]click') { $a.button = 'right' }
+    if ($ins -match '(?i)double[- ]click') { $a.double = $true }
+    if ($ins -match '(?i)\bdrag\b') { $a.unsupported = 'drag' }
+    if ($ins -match '(?i)\bscroll\s+(?:back\s+)?(down|up)') { if ($Matches[1] -ieq 'down') { $a.scroll = -5 } else { $a.scroll = 5 } }
+    if ($step.clipboard) { $a.paste = [string]$step.clipboard }
+    elseif ($ins -match '(?i)\b(?:type|enter|write)\s+(?:in\s+)?["\u201C\u2018'']([^"\u201D\u2019'']{1,200})["\u201D\u2019'']') { $a.text = $Matches[1] }
+    # Key combinations named in the instruction: Ctrl+S, Alt+F4, Shift+Enter, and named keys after a verb.
+    $mods = '(?:ctrl|control|alt|shift|win)'
+    $key = '(?:f[0-9]{1,2}|enter|return|tab|esc|escape|delete|del|backspace|home|end|space|up|down|left|right|page ?up|page ?down|[a-z0-9`=\-])'
+    foreach ($m in [regex]::Matches($ins, "(?i)\b$mods(?:\s*\+\s*$mods)*\s*\+\s*$key\b")) { $a.keys += ($m.Value -replace '\s', '') }
+    if ($a.keys.Count -eq 0) {
+        foreach ($m in [regex]::Matches($ins, "(?i)\b(?:press|hit|tap)\s+(?:the\s+)?($key)(?:\s+key)?\b")) { $a.keys += $m.Groups[1].Value }
+    }
+    return [pscustomobject]$a
+}

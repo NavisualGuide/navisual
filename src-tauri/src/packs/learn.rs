@@ -139,6 +139,8 @@ pub struct Learned {
     /// The user's own command click after a step whose target was not on screen: joins the path
     /// if the next guided click continues from it.
     candidate: Option<Click>,
+    /// Switched off (`LEARNED_NOTES=false`): nothing is read, sent or written.
+    off: bool,
 }
 
 /// What re-reading a guide's file found.
@@ -163,8 +165,17 @@ impl Learned {
         Learned { dir, guides, ..Default::default() }
     }
 
+    /// Learned notes switched off: no guide is read, sent or written this run.
+    pub fn disabled(dir: PathBuf) -> Learned {
+        log::info!("[guide] learned notes off (LEARNED_NOTES=false)");
+        Learned { dir, off: true, ..Default::default() }
+    }
+
     /// Every guide with a file, for Settings: re-read where it changed, new files picked up.
     pub fn list(&mut self) -> Vec<GuideInfo> {
+        if self.off {
+            return Vec::new();
+        }
         for g in super::guide::load_dir(&self.dir) {
             if !self.guides.iter().any(|known| known.path == g.path) {
                 self.guides.push(g);
@@ -291,6 +302,9 @@ impl Learned {
     /// went in, and counts a new session against the guide's withheld notes.
     pub fn prompt_block(&mut self, app: &AppKey, focus: &str, session: &str) -> String {
         self.sent.clear();
+        if self.off {
+            return String::new();
+        }
         self.last_focus = focus.to_string();
         let Some(g) = self.find_or_load(app) else { return String::new() };
         if self.fresh(g) == Freshness::Unusable {
@@ -353,6 +367,9 @@ impl Learned {
     /// The user's clicks in the guided app since the last call, oldest first. A click on the
     /// control the step named extends the run; anything else ends it.
     pub fn clicks(&mut self, app: &AppKey, clicks: &[Click], today: &str) {
+        if self.off {
+            return;
+        }
         let Some(exp) = self.expect.take() else {
             self.candidate = None;
             return;
@@ -420,6 +437,9 @@ impl Learned {
     /// [Screen Elements] list captured with this screen -- `None` when there is no fresh list (no
     /// tree, or a local advance whose list predates the menu it is in).
     pub fn step_shown(&mut self, app: &AppKey, target: Option<&str>, located: bool, list: Option<&[String]>, today: &str) {
+        if self.off {
+            return;
+        }
         let Some(target) = target.map(first_segment).filter(|t| !t.is_empty()) else {
             // Nothing to click -- a keystroke, a question, the task done: the path ends here.
             self.end_run();
@@ -485,6 +505,9 @@ impl Learned {
     /// ✗ Wrong on the step on screen. It contradicts the note behind the step only when no
     /// pointer was drawn -- with a pointer, "wrong" is as likely to mean the pointer as the note.
     pub fn wrong(&mut self, app: &AppKey, today: &str) {
+        if self.off {
+            return;
+        }
         if let Some(exp) = self.expect.take() {
             if !exp.located && exp.exe == app.exe {
                 self.task_struggled = true;
@@ -508,6 +531,9 @@ impl Learned {
     /// The model's `app_note` for the request just answered. Kept as the pending note's line when
     /// one was asked for and it passes the content check; otherwise ignored.
     pub fn attach_line(&mut self, app: &AppKey, text: &str, today: &str) {
+        if self.off {
+            return;
+        }
         let Some((g, n, _)) = self.pending_line else { return };
         if text.trim().is_empty() || !self.guides[g].matches(&app.title, Some(&app.exe)) {
             return;
@@ -1583,6 +1609,20 @@ mod tests {
         l.step_shown(&app, None, false, None, "d");
         guided_in(&mut l, &app, "Word wrap", "menu:View");
         assert!(l.guide("notepad").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn switched_off_nothing_is_written_or_sent() {
+        let dir = tmp();
+        let app = notepad();
+        let mut l = Learned::disabled(dir.clone());
+        struggle(&mut l, &app);
+        guided(&mut l, &app, "View");
+        guided(&mut l, &app, "Word wrap");
+        assert_eq!(l.prompt_block(&app, "turn on word wrap", "s1"), "");
+        assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none(), "no guide file");
+        assert!(l.list().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

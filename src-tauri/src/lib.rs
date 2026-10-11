@@ -4158,8 +4158,94 @@ fn cleanup_old_debug_artifacts(app_data_dir: &std::path::Path) {
     }
 }
 
+/// L1 harness: one JSON line per guidance response the panel receives, when
+/// `NAVISUAL_STEP_FEED` names a file. The live driver follows the pointer from it: the step on
+/// screen, where the locator put it (physical pixels, virtual desktop), what it asks to paste,
+/// and whether the model is asking a question. Off unless the variable is set; read once.
+fn step_feed(kind: &str, result: &Result<GuideResponse, String>) {
+    use std::io::Write;
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| {
+        std::env::var_os("NAVISUAL_STEP_FEED").filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
+    }) else {
+        return;
+    };
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    let line = match result {
+        Ok(r) => {
+            let step = r.steps.get(r.step_index);
+            serde_json::json!({
+                "ts_ms": ts_ms,
+                "kind": kind,
+                "ok": r.ok,
+                "request_id": r.request_id,
+                "step_index": r.step_index,
+                "step_count": r.steps.len(),
+                "instruction": step.map(|s| s.instruction.as_str()).unwrap_or(r.instruction.as_str()),
+                "target_text": step.and_then(|s| s.target_text.as_deref()),
+                "target_role": step.and_then(|s| s.target_role.as_ref()).map(|t| format!("{t:?}")),
+                "clipboard": step.and_then(|s| s.clipboard.as_deref()),
+                "checkpoint": step.map(|s| s.checkpoint),
+                "located": r.located,
+                "no_target": r.no_target,
+                "needs_input": r.needs_input,
+                "goal": r.goal,
+                "plan_outline_len": r.plan_outline.len(),
+                "plan_completed_count": r.plan_completed_count,
+                "model": r.model,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "error": r.error,
+            })
+        }
+        Err(e) => serde_json::json!({ "ts_ms": ts_ms, "kind": kind, "ok": false, "error": e }),
+    };
+    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut f) => {
+            let _ = writeln!(f, "{line}");
+        }
+        Err(e) => log::warn!("step feed write failed: {e}"),
+    }
+}
+
 #[tauri::command]
 async fn guide(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task: String,
+    is_reply: bool,
+    advance: Option<String>,
+) -> Result<GuideResponse, String> {
+    let r = guide_inner(app, state, task, is_reply, advance).await;
+    step_feed("guide", &r);
+    r
+}
+
+#[tauri::command]
+async fn next_step(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    step_index: usize,
+) -> Result<GuideResponse, String> {
+    let r = next_step_inner(app, state, step_index).await;
+    step_feed("next", &r);
+    r
+}
+
+#[tauri::command]
+async fn send_correction(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    note: Option<String>,
+    avoid_bboxes: Option<Vec<locator::candidates::AvoidEntry>>,
+    reason: Option<String>,
+) -> Result<GuideResponse, String> {
+    let r = send_correction_inner(app, state, note, avoid_bboxes, reason).await;
+    step_feed("correction", &r);
+    r
+}
+
+async fn guide_inner(
     app: AppHandle,
     state: State<'_, AppState>,
     task: String,
@@ -5283,8 +5369,7 @@ async fn guide(
     })
 }
 
-#[tauri::command]
-async fn next_step(
+async fn next_step_inner(
     app: AppHandle,
     state: State<'_, AppState>,
     step_index: usize,
@@ -5645,8 +5730,7 @@ async fn retry_locate(
     })
 }
 
-#[tauri::command]
-async fn send_correction(
+async fn send_correction_inner(
     app: AppHandle,
     state: State<'_, AppState>,
     note: Option<String>,
@@ -8798,7 +8882,11 @@ pub fn run() {
                 Some(user_packs_dir.as_path()),
                 bundled_packs_dir.as_deref(),
             );
-            let learned = packs::learn::Learned::load(user_packs_dir.join("learned"));
+            let learned = if router.config.learned_notes {
+                packs::learn::Learned::load(user_packs_dir.join("learned"))
+            } else {
+                packs::learn::Learned::disabled(user_packs_dir.join("learned"))
+            };
 
             handle.manage(AppState {
                 ai_router: tokio::sync::Mutex::new(router),
