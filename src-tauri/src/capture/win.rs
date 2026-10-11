@@ -30,7 +30,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
+    EnumChildWindows, EnumWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     IsZoomed,
     SetForegroundWindow, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
@@ -154,7 +154,7 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
     struct State {
         target: HWND,
         our_pid: u32,
-        target_pid: u32,
+        app: SameApp,
         area: Rect,
         reached_target: bool,
         occluders: Vec<Rect>,
@@ -173,7 +173,7 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
         }
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 || pid == st.target_pid {
+        if pid == 0 || st.app.matches(hwnd, pid) {
             return TRUE; // nothing, or the target app itself — not an occluder
         }
         let mut cloaked: u32 = 0;
@@ -214,7 +214,7 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
     let mut st = State {
         target,
         our_pid: std::process::id(),
-        target_pid,
+        app: SameApp::of(target, target_pid),
         area: target_area,
         reached_target: false,
         occluders: Vec::new(),
@@ -358,6 +358,74 @@ fn is_uwp_host(exe_path: &str) -> bool {
         .and_then(|s| s.to_str())
         .map(|s| s.eq_ignore_ascii_case("ApplicationFrameHost"))
         .unwrap_or(false)
+}
+
+/// Whether `pid` is the shared UWP frame host, whose windows frame OTHER processes' apps.
+fn pid_is_uwp_host(pid: u32) -> bool {
+    pid != 0 && is_uwp_host(&exe_path_of_pid(pid))
+}
+
+/// The process of the content a UWP frame hosts: the first child window owned by a different
+/// process (the app's CoreWindow), or `None` -- a suspended frame hosts nothing. Called only for
+/// windows of the frame host, so an ordinary window never pays for the child walk.
+fn hosted_pid(frame: HWND) -> Option<u32> {
+    let mut frame_pid: u32 = 0;
+    unsafe {
+        GetWindowThreadProcessId(frame, Some(&mut frame_pid));
+    }
+    struct Find {
+        frame_pid: u32,
+        found: Option<u32>,
+    }
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let f = &mut *(lparam.0 as *mut Find);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != 0 && pid != f.frame_pid {
+            f.found = Some(pid);
+            return FALSE;
+        }
+        TRUE
+    }
+    let mut find = Find { frame_pid, found: None };
+    unsafe {
+        let _ = EnumChildWindows(Some(frame), Some(cb), LPARAM(&mut find as *mut Find as isize));
+    }
+    find.found
+}
+
+/// The capture's "same application" test -- the window union, the keep-rect mask and the
+/// occlusion check all ask it.
+///
+/// They used to ask "same process?", and for one process that is not the same question: every UWP
+/// app's frame (Calculator, Settings, ...) belongs to the shared ApplicationFrameHost, while each
+/// app's content runs in its own process. Live 2026-10-10, guiding a Calculator widened the capture
+/// to the Settings window beside it and kept its pixels -- the account name and email included. So
+/// for a frame-host target a window is the same app only when it hosts the same app's content;
+/// every other target compares PIDs exactly as before. The host is recognised by its exe, as
+/// `is_uwp_host` already does for the app's display name: it is the OS's frame host, not an app.
+#[derive(Clone, Copy)]
+struct SameApp {
+    pid: u32,
+    /// The target's hosted app process, when the target is a UWP frame.
+    hosted: Option<u32>,
+}
+
+impl SameApp {
+    fn of(target: HWND, pid: u32) -> SameApp {
+        let hosted = if pid_is_uwp_host(pid) { hosted_pid(target) } else { None };
+        SameApp { pid, hosted }
+    }
+
+    fn matches(&self, hwnd: HWND, pid: u32) -> bool {
+        if pid != self.pid {
+            return false;
+        }
+        match self.hosted {
+            None => true,
+            Some(app) => hosted_pid(hwnd) == Some(app),
+        }
+    }
 }
 
 /// Resolve a friendly app display name. Priority:
@@ -1627,7 +1695,7 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
 
     struct State {
         target: HWND,
-        target_pid: u32,
+        app: SameApp,
         our_pid: u32,
         monitor: Rect,
         union: Rect,
@@ -1640,7 +1708,7 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
         }
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid != state.target_pid || pid == state.our_pid {
+        if pid == state.our_pid || !(hwnd == state.target || state.app.matches(hwnd, pid)) {
             return TRUE;
         }
 
@@ -1727,7 +1795,7 @@ pub fn pid_union_rect(target: HWND) -> Option<Rect> {
     let our_pid = std::process::id();
     let mut state = State {
         target,
-        target_pid: pid,
+        app: SameApp::of(target, pid),
         our_pid,
         monitor,
         union: target_rect,
@@ -1965,7 +2033,8 @@ fn keep_rects_inner(
         bbox: Rect,
         our_pid: u32,
         ignore_pids: Vec<u32>,
-        target_pid: u32,
+        target: HWND,
+        app: SameApp,
         covered: Vec<Rect>,
         keep: Vec<Rect>,
         /// Topmost few OTHER-app windows overlapping `bbox`, in z-order, recorded
@@ -2094,7 +2163,8 @@ fn keep_rects_inner(
         // question, so the diagnostic can show what was EXCLUDED as well as what
         // covered the target. A filter that hides its own reasoning is the same
         // shape as the bug this whole path exists to explain.
-        if pid != state.target_pid && state.occluders.len() < 8 {
+        let same_app = hwnd == state.target || state.app.matches(hwnd, pid);
+        if !same_app && state.occluders.len() < 8 {
             if let Some(r_probe) = frame_rect_of(hwnd) {
                 let hit = rect_intersect(&r_probe, &state.bbox);
                 if hit.width > 0 && hit.height > 0 {
@@ -2124,7 +2194,7 @@ fn keep_rects_inner(
         }
 
         // Visible-now = this window's bbox-clipped rect minus everything above it.
-        if pid == state.target_pid {
+        if same_app {
             let visible = rect_subtract_many(r, &state.covered);
             state.keep.extend(visible);
         }
@@ -2136,7 +2206,8 @@ fn keep_rects_inner(
         bbox: *bbox,
         our_pid,
         ignore_pids: ignore_pids.to_vec(),
-        target_pid,
+        target,
+        app: SameApp::of(target, target_pid),
         covered: Vec::new(),
         keep: Vec::new(),
         occluders: Vec::new(),
@@ -2765,5 +2836,28 @@ mod os_version_tests {
             !v.contains("Windows 8 or earlier"),
             "{v} -- that is the shimmed answer GetVersionExW gives; RtlGetVersion must not"
         );
+    }
+}
+
+#[cfg(test)]
+mod union_probe {
+    /// Live probe for the capture's window union: captures the front-most window whose title
+    /// contains NAVISUAL_LIVE_TITLE exactly as a guided re-capture does (`recapture_window_raw`:
+    /// the union, then the keep-rect mask), prints the window's frame against the capture rect and
+    /// writes the image to NAVISUAL_LIVE_OUT.
+    #[test]
+    #[ignore = "captures a live window; run by name"]
+    fn live_capture_union_for_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let out = std::env::var("NAVISUAL_LIVE_OUT").expect("NAVISUAL_LIVE_OUT");
+        let hwnd = super::find_window_by_title(&title, "").expect("no window with that title");
+        let frame = super::frame_rect_of(super::HWND(hwnd as *mut _)).expect("frame");
+        let (img, rect) = crate::capture::recapture_window_raw(hwnd, &[]).expect("capture");
+        img.save(&out).expect("png");
+        println!("\n[live] frame {frame:?}\n[live] capture {rect:?}");
+        // The occlusion check on the whole frame: false when another app's window covers it all.
+        let visible =
+            super::target_visible_in_rect(frame.x, frame.y, frame.width as i32, frame.height as i32, hwnd);
+        println!("[live] target visible in its own frame: {visible}");
     }
 }
