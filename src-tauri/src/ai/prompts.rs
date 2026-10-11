@@ -604,17 +604,37 @@ fn looks_like_english(text: &str) -> bool {
         "the", "you", "your", "how", "what", "make", "using", "use", "with", "this", "that",
         "please", "help", "want", "need", "show", "create", "add", "select", "click", "and",
         "for", "are", "from", "open", "into", "when", "where", "which", "step", "next", "then",
+        "why", "can", "out", "little", "just", "whole", "these", "all",
     ];
-    let mut hits = 0u8;
-    for w in text.split(|c: char| !c.is_ascii_alphabetic()) {
-        if !w.is_empty() && EN.contains(&w.to_ascii_lowercase().as_str()) {
-            hits += 1;
-            if hits >= 2 {
-                return true;
-            }
-        }
+    // Function words of the other Latin-script languages a user is likely to write. Words English
+    // uses too ("a", "do", "die", "per", "come", "no", "as", "on", "in", "van") are left out.
+    const OTHER: &[&str] = &[
+        "el", "la", "los", "las", "de", "del", "que", "en", "y", "por", "para", "con", "una", "un",
+        "es", "esta", "este", "haz", "pulsa", "clic", "como", "mi", "se", "lo", "al", "le", "les",
+        "des", "du", "et", "est", "pour", "avec", "une", "sur", "dans", "ce", "cette", "je", "ne",
+        "pas", "qui", "au", "aux", "cliquez", "ou", "os", "um", "uma", "com", "em", "da", "das",
+        "dos", "na", "nao", "isso", "il", "di", "che", "gli", "della", "questo", "non", "der",
+        "das", "und", "ist", "mit", "ein", "eine", "nicht", "ich", "wie", "auf", "zu", "den",
+        "dem", "sie", "bitte", "het", "een", "dit", "niet", "op", "ik", "o", "abra", "abre",
+        "abrir", "ouvrez", "ouvrir", "apri",
+    ];
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let hits = words.iter().filter(|w| EN.contains(&w.as_str())).count();
+    if hits >= 2 {
+        return true;
     }
-    false
+    // One distinctive word is enough in a request that is plainly no other Latin language: three
+    // or more words, no accented letters, none of the words above. Under the two-word rule alone
+    // "Export this note." got the weak exemplar, and one model answered it in Spanish a quarter
+    // of the time (harness, 2026-10-09). The guard still stops "Haz clic en Open".
+    hits == 1
+        && words.len() >= 3
+        && !text.chars().any(|c| c.is_alphabetic() && !c.is_ascii())
+        && !words.iter().any(|w| OTHER.contains(&w.as_str()))
 }
 
 /// The end-of-prompt LANGUAGE LOCK — applied to EVERY turn's prompt, including turn 1.
@@ -925,6 +945,35 @@ mod tests {
         assert!(!b.contains("the user's language is English"), "{b}");
     }
 
+    // The harness tasks a model answered in Spanish or French, 2026-10-09: each had fewer than
+    // two words from the list and so got the weak exemplar. And the other direction -- a
+    // non-English request quoting one English UI label must not be named English.
+    #[test]
+    fn short_english_requests_are_named_and_quoted_labels_are_not() {
+        use super::looks_like_english;
+        for en in [
+            "Export this note.",
+            "Help!! My whole paragraph just disappeared!!",
+            "Zoom out a little.",
+            "Why can't I export this note?",
+            "Why can’t I export this note?",
+        ] {
+            assert!(looks_like_english(en), "{en}");
+        }
+        for other in [
+            "the",
+            "Haz clic en Open",
+            "Cliquez sur Open puis Export",
+            "Exportar esta nota",
+            "Klik op Open",
+            "Klicken Sie auf Open",
+            "faire un tableau avec ces données",
+            "Abra o menu Open",
+        ] {
+            assert!(!looks_like_english(other), "{other}");
+        }
+    }
+
     #[test]
     fn directive_names_language_from_dominant_script() {
         use super::reply_language_directive;
@@ -959,7 +1008,7 @@ mod tests {
         // The Latin sample must flip us back — NOT stay stuck on the original Chinese request.
         let a = reply_language_directive(Some("please speak English."), "帮我做数据透视表", "auto");
         assert!(!a.contains("Chinese"), "{a}");
-        assert!(a.contains("please speak English."), "{a}");
+        assert!(a.contains("the user's language is English"), "{a}");
     }
 
     #[test]
