@@ -336,6 +336,71 @@ fn find_button_descendant(automation: &UIAutomation, parent: &UIElement) -> Opti
 /// nearest interactive control, then accept only if its role matches the AI's requested family
 /// and its rect is control-sized (≤ 20× the bbox area, on-screen). A bad bbox lands on the
 /// wrong thing / a container and is rejected → no pointer (the safe outcome).
+/// Whether the element the AI-bbox probe resolved may stand for `target` by name.
+///
+/// The probe verifies role and size, which is what lets it find a control whose accessible name
+/// differs from what the model wrote -- an unnamed button, a glyph target such as "..." for "More
+/// options". It is also what let it accept the wrong control whenever the model's box landed on
+/// a neighbour of the same role. So: an element with no name, or a target with no letter or digit
+/// (a glyph), cannot be judged by name and passes; a named element must share a word with the
+/// target -- for text with Chinese, Japanese or Korean in it, which does not separate words with
+/// spaces, one must contain the other once spaces are dropped ("确 定" is "确定").
+///
+/// Measured on the founder's locate log, 2026-10-11: of 20 accepted probes, 4 pointed at the
+/// wrong control -- "OK" -> "End of Quick Access - Screenshots", "云服务器 ECS" -> "轻量应用服务器
+/// SAS…", taskbar "Excel" -> "Word", "Format" -> "File" -- and those 4 are exactly what this
+/// refuses; the 16 others, unnamed buttons and glyphs among them, still pass.
+fn probe_name_agrees(target: &str, resolved: Option<&str>) -> bool {
+    let Some(name) = resolved.map(str::trim).filter(|n| !n.is_empty()) else {
+        return true;
+    };
+    let words = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let target_words = words(target);
+    if target_words.is_empty() {
+        return true;
+    }
+    let name_words = words(name);
+    if target_words.iter().any(|w| name_words.contains(w)) {
+        return true;
+    }
+    let cjk = |s: &str| {
+        s.chars().any(|c| {
+            matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF)
+        })
+    };
+    if cjk(target) || cjk(name) {
+        let squash = |s: &str| s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        let (t, n) = (squash(target), squash(name));
+        return t.chars().count() >= 2 && n.chars().count() >= 2 && (n.contains(&t) || t.contains(&n));
+    }
+    false
+}
+
+/// Refuse a probe hit whose name does not agree with the target, and say so in the trace.
+fn probe_by_name(
+    hit: Option<LocateResult>,
+    probe: &mut BboxProbe,
+    target_text: &str,
+) -> Option<LocateResult> {
+    let hit = hit?;
+    if probe_name_agrees(target_text, probe.resolved_name.as_deref()) {
+        return Some(hit);
+    }
+    probe.accepted = false;
+    probe.detail = format!(
+        "refused: resolved {:?}, which shares no word with {target_text:?} (rule 14)",
+        probe.resolved_name.as_deref().unwrap_or("")
+    );
+    log::info!("[a11y] bbox probe refused: {}", probe.detail);
+    None
+}
+
 fn ai_bbox_probe(
     automation: &UIAutomation,
     ai_bbox: Rect,
@@ -2050,7 +2115,9 @@ pub fn find_element(
         // the scoped A11y shorten).
         if let Some(ai) = opts.ai_bbox {
             if opts.bbox_decisive && !opts.icon_target {
-                let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                let (probe_hit, mut probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                // Anywhere: a named control must agree with the target by name (rule 14).
+                let probe_hit = probe_by_name(probe_hit, &mut probe, target_text);
                 // On a shell surface the probe's role+size verification stops
                 // discriminating: every taskbar button is the same role and the same
                 // size, so a bbox guessed one icon off resolves to a neighbour and looks
@@ -2172,7 +2239,10 @@ pub fn find_element(
     if opts.bbox_decisive {
         if let Some(ai) = opts.ai_bbox {
             if center_outside_expanded(candidates[0].bbox, ai) {
-                let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                let (probe_hit, mut probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                // A name match far away is not to be traded for a control that does not agree
+                // with the target at all (rule 14).
+                let probe_hit = probe_by_name(probe_hit, &mut probe, target_text);
                 trace.bbox_probe = Some(probe);
                 if let Some(hit) = probe_hit {
                     for c in &candidates {
@@ -3233,6 +3303,32 @@ mod incremental_walk_live_tests {
         for n in only_walk.iter().take(15) {
             println!("     {}", clip(n));
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_name_tests {
+    use super::probe_name_agrees;
+
+    /// Every accepted probe in the founder's locate log, 2026-10-11, and the live Notepad case.
+    #[test]
+    fn the_wrong_pointers_in_the_log_are_refused_and_the_rest_pass() {
+        // Wrong control: refused.
+        assert!(!probe_name_agrees("OK", Some("End of Quick Access - Screenshots")));
+        assert!(!probe_name_agrees("云服务器 ECS", Some("轻量应用服务器 SAS 以经济高效的方式实时运行轻量级应用程序")));
+        assert!(!probe_name_agrees("Excel", Some("Word - 1 running window")));
+        assert!(!probe_name_agrees("Format", Some("File")));
+        // Right control: still accepted.
+        assert!(probe_name_agrees("...", Some("More options")), "a glyph cannot be judged by name");
+        assert!(probe_name_agrees(">_", Some("复制 CLI 命令 Claude Code")), "nor can this one");
+        assert!(probe_name_agrees("确定", Some("确 定")), "spaces inside a CJK label");
+        assert!(probe_name_agrees("Printer", None), "an unnamed button is what the probe is for");
+        assert!(probe_name_agrees("Continue", Some("Continue as someone")));
+        assert!(probe_name_agrees("更多", Some("更多 down")));
+        assert!(probe_name_agrees("Excel", Some("Excel - 1 running window")));
+        assert!(probe_name_agrees("Updated+Estimate (1).PDF", Some("Updated+Estimate (1).PDF")));
+        // Short Latin targets are not matched inside longer words.
+        assert!(!probe_name_agrees("OK", Some("Bookmarks")));
     }
 }
 
