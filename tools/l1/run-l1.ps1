@@ -98,6 +98,11 @@ function Get-TargetInfo([string]$work) {
 # shell and every other folder window), else the process's first titled window.
 function Get-TargetWindow($info) {
     if (-not $info) { return $null }
+    if ($info.hwnd) {
+        $hw = [IntPtr][long]$info.hwnd
+        $w = Get-TopWindows { param($x) $x.Hwnd -eq $hw } | Select-Object -First 1
+        if ($w) { return $w }
+    }
     if ($info.title) {
         $t = [string]$info.title
         $w = Get-TopWindows { param($x) $x.Title -like "*$t*" } | Select-Object -First 1
@@ -115,6 +120,7 @@ if ($Solve) {
         $work = Join-Path $runDir "$($task.id)-solve"
         New-Item -ItemType Directory -Force -Path $work | Out-Null
         Write-L1 "=== solve $($task.id)"
+        Protect-OpenWindows
         Write-L1 ("setup: " + (Invoke-TaskScript $task 'setup' $work))
         Start-Sleep -Seconds 2
         Write-L1 ("solve: " + (Invoke-TaskScript $task 'solve' $work))
@@ -184,6 +190,7 @@ function Invoke-L1Run($task, [int]$rep) {
     $work = Join-Path $runDir "$($task.id)-r$rep"
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     Write-L1 "=== $($task.id) r$rep ($Tier)"
+    Protect-OpenWindows
     Write-L1 ("setup: " + (Invoke-TaskScript $task 'setup' $work))
     Start-Sleep -Seconds 2
     $tinfo = Get-TargetInfo $work

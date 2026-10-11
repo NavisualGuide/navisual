@@ -73,22 +73,27 @@ function Write-L1([string]$msg) {
 # ---------------------------------------------------------------------------------------------
 # Windows
 
+# Every visible top-level window, filtered by $Where (called with one window object).
+# The predicate runs in this function's scope chain (PowerShell scriptblocks are not closures), so
+# every local here carries an __l1 prefix: a caller's `$h` once matched this loop's own `$h`, the
+# filter held for every window, and a teardown closed all of the founder's Explorer windows
+# (2026-10-11).
 function Get-TopWindows([scriptblock]$Where) {
     $global:L1Hits = New-Object System.Collections.Generic.List[IntPtr]
-    $cb = [L1EnumProc]{
-        param($h, $l)
-        if ([L1W]::IsWindowVisible($h)) { $global:L1Hits.Add($h) }
+    $__l1cb = [L1EnumProc]{
+        param($__l1hw, $__l1lp)
+        if ([L1W]::IsWindowVisible($__l1hw)) { $global:L1Hits.Add($__l1hw) }
         return $true
     }
-    [L1W]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
-    $out = @()
-    foreach ($h in $global:L1Hits) {
-        $q = [uint32]0
-        [L1W]::GetWindowThreadProcessId($h, [ref]$q) | Out-Null
-        $o = [pscustomobject]@{ Hwnd = $h; Pid = [int]$q; Title = [L1W]::Title($h); Class = [L1W]::Class($h); ExStyle = [L1W]::GetWindowLong($h, -20) }
-        if (-not $Where -or (& $Where $o)) { $out += $o }
+    [L1W]::EnumWindows($__l1cb, [IntPtr]::Zero) | Out-Null
+    $__l1out = @()
+    foreach ($__l1h in $global:L1Hits) {
+        $__l1pid = [uint32]0
+        [L1W]::GetWindowThreadProcessId($__l1h, [ref]$__l1pid) | Out-Null
+        $__l1o = [pscustomobject]@{ Hwnd = $__l1h; Pid = [int]$__l1pid; Title = [L1W]::Title($__l1h); Class = [L1W]::Class($__l1h); ExStyle = [L1W]::GetWindowLong($__l1h, -20) }
+        if (-not $Where -or (& $Where $__l1o)) { $__l1out += $__l1o }
     }
-    return $out
+    return $__l1out
 }
 
 function Get-WindowRect([IntPtr]$h) {
@@ -116,8 +121,30 @@ function Focus-ByTitleBar([IntPtr]$h) {
     return ([L1W]::GetForegroundWindow() -eq $h)
 }
 
+# Windows that were open before a run's setup. Close-Window never touches them, whatever a task's
+# own filter says -- the guard for the 2026-10-11 teardown that closed the founder's windows.
+$global:L1Protected = @()
+function Protect-OpenWindows { $global:L1Protected = @(Get-TopWindows | ForEach-Object { [long]$_.Hwnd }) }
+
 # Ask a window to close (WM_CLOSE): goes to that window only, whatever has focus.
-function Close-Window([IntPtr]$h) { [L1W]::PostMessage($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+function Close-Window([IntPtr]$hwnd) {
+    if ($global:L1Protected -contains [long]$hwnd) {
+        Write-Host "refused to close window $hwnd '$([L1W]::Title($hwnd))': it was open before the run"
+        return
+    }
+    [L1W]::PostMessage($hwnd, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+}
+
+# Close a window until it is gone: Explorer takes WM_CLOSE as "close this tab" when it has two.
+function Close-WindowFully([IntPtr]$hwnd, [int]$tries = 6) {
+    for ($i = 0; $i -lt $tries; $i++) {
+        if (-not (Get-TopWindows { param($x) $x.Hwnd -eq $hwnd })) { return $true }
+        Close-Window $hwnd
+        if ($global:L1Protected -contains [long]$hwnd) { return $false }
+        Start-Sleep -Milliseconds 700
+    }
+    return -not (Get-TopWindows { param($x) $x.Hwnd -eq $hwnd })
+}
 
 # ---------------------------------------------------------------------------------------------
 # Mouse and keyboard
