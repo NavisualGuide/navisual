@@ -637,6 +637,35 @@ See the LICENSE file in the root of this repository for complete details.
   // Ids ticked in the list. Empty means the export button offers everything, which is the
   // common case -- "send me all of them" should not need twenty clicks.
   let selectedSessions = $state<string[]>([]);
+  // H7b: the learned guides, one row per app in Settings. Read again whenever the tab opens --
+  // a guide changes while the app runs, and can be edited by hand.
+  type LearnedGuide = { app: string; exe: string; notes: number; withheld: number };
+  let learnedGuides = $state<LearnedGuide[]>([]);
+  let learnedError = $state<MessageKey | null>(null);
+  async function loadLearnedGuides() {
+    try {
+      learnedGuides = await invoke<LearnedGuide[]>("list_learned_guides");
+    } catch (_) {
+      learnedGuides = [];
+    }
+  }
+  async function openLearnedGuide(exe: string) {
+    learnedError = null;
+    try {
+      await invoke("open_learned_guide", { exe });
+    } catch (_) {
+      learnedError = "sg.learnedNotesOpenFailed";
+    }
+  }
+  async function deleteLearnedGuide(exe: string) {
+    learnedError = null;
+    try {
+      await invoke("delete_learned_guide", { exe });
+    } catch (_) {
+      learnedError = "sg.learnedNotesDeleteFailed";
+    }
+    await loadLearnedGuides();
+  }
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   // "target" = pick what Navisual assists with; "dock" = pick what fills the
@@ -1062,6 +1091,9 @@ See the LICENSE file in the root of this repository for complete details.
   // `is_packaged` command + navisual-internal/docs/msix-store-spike.md.
   let isPackaged = $state(false);
   let settingsTab = $state<SettingsTab>("provider");
+  $effect(() => {
+    if (showSettings && settingsTab === "screen-guide") untrack(() => loadLearnedGuides());
+  });
 
   // Info (About) dialog → Usage tab
   type UsageRow = {
@@ -5601,6 +5633,29 @@ See the LICENSE file in the root of this repository for complete details.
               </p>
             </div>
             <div class="setting-group">
+              <p class="setting-label">{t("sg.learnedNotes")}</p>
+              <p class="setting-hint">{t("sg.learnedNotesHint")}</p>
+              {#if learnedGuides.length === 0}
+                <p class="setting-hint learned-empty">{t("sg.learnedNotesEmpty")}</p>
+              {:else}
+                {#each learnedGuides as g (g.exe)}
+                  <div class="learned-row">
+                    <div class="learned-what">
+                      <span class="learned-app">{g.app}</span>
+                      <span class="learned-count">
+                        {t("sg.learnedNotesCount", { n: g.notes })}{#if g.withheld > 0}{" · "}{t("sg.learnedNotesPaused", { n: g.withheld })}{/if}
+                      </span>
+                    </div>
+                    <button class="key-toggle" onclick={() => openLearnedGuide(g.exe)}>{t("sg.learnedNotesOpen")}</button>
+                    <button class="key-toggle" onclick={() => deleteLearnedGuide(g.exe)}>{t("sg.learnedNotesDelete")}</button>
+                  </div>
+                {/each}
+              {/if}
+              {#if learnedError}
+                <p class="setting-hint learned-error">{t(learnedError)}</p>
+              {/if}
+            </div>
+            <div class="setting-group">
               <p class="setting-label">{t("sg.whatYouType")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.log_request_text} />
@@ -8374,6 +8429,31 @@ See the LICENSE file in the root of this repository for complete details.
     transition: background 120ms ease-out;
   }
   .key-toggle:hover { background: var(--surface-4); color: var(--text-primary); }
+
+  .learned-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+  }
+  .learned-what {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+  .learned-app {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .learned-count { font-size: 11px; color: var(--text-secondary); }
+  .learned-empty { margin-top: 4px; }
+  .learned-error { margin-top: 4px; color: var(--danger, #e5484d); }
 
   .color-row {
     display: flex;

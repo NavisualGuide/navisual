@@ -53,6 +53,7 @@
     "src/App.svelte:⊘ Uncorroborated — no pointer (content text?)"
   ],
   "rust": [
-    "src-tauri/src/lib.rs:A11y only implemented for Windows"
+    "src-tauri/src/lib.rs:A11y only implemented for Windows",
+    "src-tauri/src/locator/a11y.rs:Excel's main window: a bulk query would detonate"
   ]
 }
