@@ -524,6 +524,10 @@ impl Learned {
             log::info!("[guide] '{}': line for \"{}\" refused -- not in the language of the request: {line}", self.guides[g].app, self.guides[g].notes[n].title);
             return;
         }
+        if !adds_something(&line, &self.guides[g].notes[n], &self.guides[g].app) {
+            log::info!("[guide] '{}': line for \"{}\" refused -- it only repeats the path: {line}", self.guides[g].app, self.guides[g].notes[n].title);
+            return;
+        }
         let app_name = self.guides[g].app.clone();
         let note = &mut self.guides[g].notes[n];
         note.body = format!("{}. {line}", note.names.join(" > "));
@@ -782,6 +786,22 @@ fn note_line(note: &GuideNote) -> Option<&str> {
     note.body.strip_prefix(path.as_str()).map(str::trim).filter(|l| !l.is_empty())
 }
 
+/// Whether a line says anything the note does not already: a word beyond its title, its path and
+/// the app's name, prose aside. *"Word wrap: View > Word wrap."* under the path View > Word wrap
+/// says nothing; *"Word wrap may also be called line wrapping"* says what the path cannot.
+fn adds_something(line: &str, note: &GuideNote, app: &str) -> bool {
+    let mut known: Vec<String> = when_for(&note.names);
+    known.extend(when_for(&[note.title.clone(), app.to_string()]));
+    known.extend(words_plain(&note.names.join(" ")));
+    known.extend(words_plain(&format!("{} {app}", note.title)));
+    when_words(line).iter().any(|w| !known.contains(w))
+}
+
+/// Every word of `s`, lowercase, no filtering: what a path or a title is made of.
+fn words_plain(s: &str) -> Vec<String> {
+    s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect()
+}
+
 /// The folder a new guide for `exe` is written to.
 fn folder_for(exe: &str) -> String {
     exe.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
@@ -864,7 +884,8 @@ fn when_words(line: &str) -> Vec<String> {
         "click", "select", "before", "after", "there", "here", "menu", "tab", "option", "setting", "settings",
         "toggle", "toggled", "turn", "enable", "enabled", "you", "your", "its", "are", "when", "where", "what",
         "which", "only", "also", "any", "has", "have", "had", "was", "were", "will", "would", "should", "could",
-        "not", "via", "into", "onto", "just", "now",
+        "not", "via", "into", "onto", "just", "now", "may", "might", "called", "through", "often",
+        "usually", "simply",
     ];
     when_for(&[line.to_string()]).into_iter().filter(|w| !PROSE.contains(&w.as_str())).collect()
 }
@@ -1562,6 +1583,32 @@ mod tests {
         l.step_shown(&app, None, false, None, "d");
         guided_in(&mut l, &app, "Word wrap", "menu:View");
         assert!(l.guide("notepad").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_line_that_only_repeats_the_path_is_refused() {
+        let note = GuideNote {
+            title: "Word wrap".into(),
+            when: Vec::new(),
+            names: vec!["View".into(), "Word wrap".into()],
+            status: NoteStatus::Unconfirmed,
+            body: "View > Word wrap.".into(),
+        };
+        assert!(!adds_something("Word wrap: View > Word wrap.", &note, "Notepad"), "flash, live");
+        assert!(!adds_something("In Notepad, use View > Word wrap.", &note, "Notepad"), "the app's name is not news");
+        assert!(adds_something("Word wrap may also be called line wrapping; turn it on through View > Word wrap.", &note, "Notepad"), "terra, live");
+        assert!(adds_something("Save the file first, then View > Word wrap.", &note, "Notepad"), "a precondition is news");
+
+        let dir = tmp();
+        let app = notepad();
+        let mut l = Learned::load(dir.clone());
+        struggle(&mut l, &app);
+        guided(&mut l, &app, "View");
+        guided(&mut l, &app, "Word wrap");
+        l.prompt_block(&app, "turn on word wrap", "s1");
+        l.attach_line(&app, "Word wrap: View > Word wrap.", "d");
+        assert_eq!(l.guide("notepad").unwrap().notes[0].body, "View > Word wrap.", "the path stands alone");
         std::fs::remove_dir_all(&dir).ok();
     }
 
