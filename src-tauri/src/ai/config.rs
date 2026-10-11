@@ -245,8 +245,9 @@ pub struct Config {
     pub earlier_screens: bool,
     /// Screens one `recall` may return (H6); 1 as measured, more for the higher tier. `RECALL_MAX`.
     pub recall_max: usize,
-    /// States in the [Screen Elements] list (ON / OFF, SELECTED, a box's value). Off until
-    /// measured; `LIST_STATES`.
+    /// States in the [Screen Elements] list (ON / OFF, SELECTED, a box's value). On since the
+    /// 2026-10-10 S1-UI measurement: luna 22 -> 26 of 30 on the already-on items, flash and terra
+    /// at the ceiling, cost unchanged (harness-plan.md, H3). `LIST_STATES=false` turns it off.
     pub list_states: bool,
 }
 
@@ -317,7 +318,7 @@ impl Default for Config {
             inspect_tools: crate::ai::inspect::Tools::Zoom,
             earlier_screens: true,
             recall_max: 1,
-            list_states: false,
+            list_states: true,
         }
     }
 }

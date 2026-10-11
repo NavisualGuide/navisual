@@ -204,10 +204,10 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list", "ui_tree", "list_states"]
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list", "ui_tree", "list_states", "list_plain"]
                 .contains(&variant.as_str()),
             "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
-             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list, ui_tree, list_states)"
+             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list, ui_tree, list_states, list_plain)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -272,11 +272,18 @@ fn encode_fixture(path: &Path) -> (String, usize, u32, u32) {
     (capture::to_base64(&jpeg), len, w, h)
 }
 
-/// The [Screen Elements] block an item sends: with each element's state under `list_states`
-/// (when the fixture has that block), the production block otherwise.
+/// The [Screen Elements] block an item sends. Without a variant it follows the app's own default
+/// (`Config::list_states`, on since 2026-10-10), so "no variant" still means "what the app sends";
+/// `list_plain` sends the block without states, `list_states` the block with them. A fixture
+/// captured before states existed has only the plain block.
 fn elements_for<'a>(fx: &'a Fixture, variant: &str) -> &'a str {
-    match (variant, fx.elements_block_states.as_deref()) {
-        ("list_states", Some(b)) => b,
+    let states = match variant {
+        "list_plain" => false,
+        "list_states" => true,
+        _ => crate::ai::config::Config::default().list_states,
+    };
+    match (states, fx.elements_block_states.as_deref()) {
+        (true, Some(b)) => b,
         _ => fx.elements_block.as_deref().unwrap_or(""),
     }
 }
