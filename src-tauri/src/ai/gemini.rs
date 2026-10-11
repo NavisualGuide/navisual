@@ -207,7 +207,7 @@ impl GeminiClient {
         // request for someone whose only mistake was using a word another provider accepts.
         //
         // `minimal` is NOT a universal Gemini floor. Measured live 2026-09-21 against
-        // gemini-3.7-flash, the shipped default: 400 INVALID_ARGUMENT, "Thinking level
+        // gemini-3.7-flash, then the shipped default: 400 INVALID_ARGUMENT, "Thinking level
         // MINIMAL is not supported for this model." Only the Flash-Lite line accepts it;
         // on Flash and Pro the floor is `low`. So the clamp goes UP, not down -- giving a
         // model more thinking than asked costs a little latency, while asking for a level
@@ -681,8 +681,8 @@ fn log_thinking_once(what: &str) {
 mod tests {
     #[test]
     fn the_api_key_never_rides_in_the_url() {
-        let url = super::stream_url("gemini-3.7-flash");
-        assert!(url.ends_with("/gemini-3.7-flash:streamGenerateContent?alt=sse"), "{url}");
+        let url = super::stream_url("gemini-3.8-flash");
+        assert!(url.ends_with("/gemini-3.8-flash:streamGenerateContent?alt=sse"), "{url}");
         assert!(!url.contains("key"), "{url}");
     }
 }

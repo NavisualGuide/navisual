@@ -443,7 +443,6 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "pv.qRecommendedTextOnly": "（推薦，純文字）",
   "pv.qBestTextOnly": "（品質最好，純文字）",
   "pv.qVisionExp": "（實驗性，看得到畫面）",
-  "pv.qNewest": "（最新 —— 這裡還沒測過）",
   "pv.qMultimodal": "（多模態）",
   "pv.qCheapVision": "（快，最便宜的視覺選擇）",
 
