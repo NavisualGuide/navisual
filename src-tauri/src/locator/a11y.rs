@@ -30,9 +30,9 @@ use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
 use windows::Win32::Foundation::{FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowLongW,
-    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, GW_HWNDNEXT,
-    GW_OWNER, WS_POPUP,
+    EnumChildWindows, EnumWindows, GetAncestor, GetForegroundWindow, GetTopWindow, GetWindow,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GA_ROOTOWNER,
+    GWL_STYLE, GW_HWNDNEXT, GW_OWNER, WS_CAPTION, WS_POPUP,
 };
 
 /// Chromium/Electron windows build their UIA tree lazily; on a 0-candidate first pass
@@ -1646,11 +1646,17 @@ fn collect_owned_popups(target: HWND) -> Vec<HWND> {
         //  - Owned windows (GW_OWNER non-null) — modal dialogs (OK/Cancel, Find, Save As).
         //  - WS_POPUP windows — open menus / dropdowns / combo lists. VLC's Qt menu popups are
         //    WS_POPUP WITHOUT an owner, so the owner check alone missed the open submenu (Speed).
+        // And neither may be ANOTHER window of the same process -- see `is_targets_popup`.
         let owned = GetWindow(hwnd, GW_OWNER)
             .map(|o| !o.0.is_null())
             .unwrap_or(false);
-        let is_popup = (GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_POPUP.0) != 0;
-        if owned || is_popup {
+        let root_owner = GetAncestor(hwnd, GA_ROOTOWNER);
+        let owned_by_target = root_owner.0 as isize == state.target;
+        let owner_visible = owned && IsWindowVisible(root_owner).as_bool();
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let is_popup = style & WS_POPUP.0 != 0;
+        let has_caption = style & WS_CAPTION.0 == WS_CAPTION.0;
+        if is_targets_popup(owned, owned_by_target, owner_visible, is_popup, has_caption) {
             state.hwnds.push(hwnd);
         }
         TRUE
@@ -1665,6 +1671,28 @@ fn collect_owned_popups(target: HWND) -> Vec<HWND> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
     state.hwnds
+}
+
+/// Whether a visible top-level window of the target's process is one of the target's own popups.
+///
+/// Same process is not same window. Every UWP app's frame -- Calculator, Settings -- belongs to
+/// ApplicationFrameHost, and each frame is an **unowned WS_POPUP with a title bar**. Rooting by PID
+/// and popup style made every other UWP frame a "popup" of the target, and the window-rect filter
+/// cannot drop a frame stacked behind the target at the same rect: live 2026-10-10, two Calculators
+/// stacked put the hidden one's 58 elements into [Screen Elements] where the visible one has 52.
+/// `find_element` searches the same roots.
+///
+/// - An owned window (a dialog) belongs to whoever owns it: the target, or an invisible helper
+///   window some apps own their dialogs from. A dialog of another visible window is that window's.
+/// - An unowned popup is a menu, dropdown or combo list (VLC's Qt menus are exactly that) -- unless
+///   it has a title bar, which makes it a window of its own.
+///
+/// Style-based, not identity-based (rule 16): no class or exe name is consulted.
+fn is_targets_popup(owned: bool, owned_by_target: bool, owner_visible: bool, is_popup: bool, has_caption: bool) -> bool {
+    if owned {
+        return owned_by_target || !owner_visible;
+    }
+    is_popup && !has_caption
 }
 
 /// Public entry point. Returns the first element whose accessible name
@@ -3210,6 +3238,34 @@ mod incremental_walk_live_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_popup_is_the_targets_only_when_it_is_a_menu_or_the_targets_dialog() {
+        // (owned, owned_by_target, owner_visible, is_popup, has_caption)
+        assert!(!super::is_targets_popup(false, false, false, true, true), "another UWP frame: unowned popup with a title bar");
+        assert!(super::is_targets_popup(false, false, false, true, false), "a menu or dropdown (VLC's Qt menus are unowned)");
+        assert!(super::is_targets_popup(true, true, true, false, true), "the target's own dialog");
+        assert!(super::is_targets_popup(true, false, false, false, true), "a dialog owned by an invisible helper window");
+        assert!(!super::is_targets_popup(true, false, true, false, true), "another visible window's dialog");
+        assert!(!super::is_targets_popup(false, false, false, false, true), "another plain top-level window");
+    }
+
+    /// Live probe for the popup roots: what [Screen Elements] would carry for the front-most window
+    /// whose title contains NAVISUAL_LIVE_TITLE, and which roots it was gathered from.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_context_list_for_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
+        let roots = super::collect_owned_popups(windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void));
+        let els = super::enumerate_context_elements(hwnd).expect("enumeration");
+        println!(
+            "\n[live] {} popup root(s); {} elements; names: {:?}",
+            roots.len(),
+            els.len(),
+            els.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
     use super::{build_name_regex, norm_dashes, strip_accelerator, walk_name_matches};
     use super::target_has_matchable_name;
 
