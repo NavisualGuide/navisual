@@ -117,6 +117,70 @@ pub fn locate(
     opts: &LocateOptions,
     pre_ocr: Option<(&[u8], Rect)>,
 ) -> Result<(Option<LocateResult>, LocateTrace)> {
+    let (hit, mut trace) = locate_passes(target_text, opts, pre_ocr)?;
+    if let Some(h) = &hit {
+        let text_hit = match trace.final_decision {
+            FinalDecision::HitA11y => h.role == "Text",
+            FinalDecision::HitOcr => !trace
+                .ocr
+                .corroboration
+                .as_ref()
+                .is_some_and(|c| c.snapped_to_uia),
+            _ => false,
+        };
+        let ai = if opts.bbox_decisive { opts.ai_bbox } else { None };
+        if text_hit && is_label_beside_target(&h.bbox, ai, opts.role.as_deref()) {
+            log::info!(
+                "[locate] {target_text:?}: the {} match at {:?} lies outside the model's box {:?} for a {:?}; its label, not the control -- left to the hint",
+                h.role,
+                h.bbox,
+                ai,
+                opts.role
+            );
+            trace.final_decision = FinalDecision::RejectedUncorroborated {
+                detail: format!(
+                    "label beside the target: {} match outside the model's box for a {}",
+                    h.role,
+                    opts.role.as_deref().unwrap_or("control")
+                ),
+            };
+            trace.final_bbox = None;
+            return Ok((None, trace));
+        }
+    }
+    Ok((hit, trace))
+}
+
+/// Whether a text match is the LABEL of the thing the model asked for rather than the thing: its
+/// trusted box marks where, and the matched text lies wholly outside that box. Live 2026-10-12,
+/// Calc's Validity dialog: the Entries box has no UIA element at all, only its label (58x272,
+/// stretched to the row), so Pass 1 pointed at the label on every request while Luna's box sat
+/// on the input (L1 `lo-validation`, 0 of 9; the models called it a textbox 16 times in 20 and
+/// "other" 4). With this the step falls to the hint ring on the model's box.
+///
+/// Not for roles whose text is the control itself -- a button's caption, a checkbox's, a menu
+/// item, a tab, a link, a heading: there the text is the target, and a box beside it is the
+/// model's imprecision. A wrong veto costs a dashed ring at the model's box, near the target; a
+/// wrong accept costs a pointer on the wrong element.
+fn is_label_beside_target(hit: &Rect, ai_bbox: Option<Rect>, role: Option<&str>) -> bool {
+    let Some(ai) = ai_bbox else {
+        return false;
+    };
+    if !matches!(role, None | Some("textbox" | "combobox" | "slider" | "image" | "other")) {
+        return false;
+    }
+    // Wholly apart: no pixel of the text inside the box.
+    hit.x + hit.width as i32 <= ai.x
+        || ai.x + ai.width as i32 <= hit.x
+        || hit.y + hit.height as i32 <= ai.y
+        || ai.y + ai.height as i32 <= hit.y
+}
+
+fn locate_passes(
+    target_text: &str,
+    opts: &LocateOptions,
+    pre_ocr: Option<(&[u8], Rect)>,
+) -> Result<(Option<LocateResult>, LocateTrace)> {
     let started = Instant::now();
     let mut trace = LocateTrace::new(target_text);
     trace.target_role = opts.role.clone();
@@ -1176,6 +1240,28 @@ mod tests {
     // given BBOX region. IN=capture.png; BBOX=x,y,w,h (around the target text); TARGET=word.
     //   $env:IN="vscode_cap.png"; $env:BBOX="450,180,200,150"; $env:TARGET="user";
     //   cargo test --lib region_ocr_live -- --ignored --nocapture
+    fn rr(x: i32, y: i32, w: u32, h: u32) -> Rect {
+        Rect { x, y, width: w, height: h }
+    }
+
+    /// Live 2026-10-12, Calc's Validity dialog: the label "Entries" (58x272) beside the input Luna
+    /// boxed at 645,398 297x272.
+    #[test]
+    fn a_label_outside_the_box_of_an_input_is_not_the_input() {
+        let label = rr(577, 398, 58, 272);
+        let input = Some(rr(645, 398, 297, 272));
+        assert!(super::is_label_beside_target(&label, input, Some("textbox")));
+        assert!(super::is_label_beside_target(&label, input, Some("combobox")));
+        assert!(super::is_label_beside_target(&label, input, None), "no role named");
+        // A button's text, a checkbox's caption, a menu item's belong to the control.
+        for role in ["button", "checkbox", "radio", "menuitem", "tab", "link", "heading"] {
+            assert!(!super::is_label_beside_target(&label, input, Some(role)), "{role}");
+        }
+        // Text inside the box (a typed value) is the input; no trusted box, no judgement.
+        assert!(!super::is_label_beside_target(&rr(660, 410, 40, 16), input, Some("textbox")));
+        assert!(!super::is_label_beside_target(&label, None, Some("textbox")));
+    }
+
     /// Live: the whole pipeline, as the app calls it after a step, for NAVISUAL_LIVE_TARGET in the
     /// window whose title contains NAVISUAL_LIVE_TITLE. NAVISUAL_LIVE_BBOX="x,y,w,h" (physical px)
     /// stands in for the model's box. Prints the trace the debug drawer would show.
@@ -1190,7 +1276,7 @@ mod tests {
             Rect { x: p[0], y: p[1], width: p[2] as u32, height: p[3] as u32 }
         });
         let opts = LocateOptions {
-            role: std::env::var("NAVISUAL_LIVE_ROLE").ok(),
+            role: std::env::var("NAVISUAL_LIVE_ROLE").ok().filter(|r| !r.is_empty()),
             ai_bbox,
             bbox_decisive: true,
             a11y_timeout_ms: 500,

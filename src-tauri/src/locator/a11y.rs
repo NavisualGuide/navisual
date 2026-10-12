@@ -3427,6 +3427,31 @@ mod tests {
         }
     }
 
+    /// Live probe: the accessibility tree of the window whose title contains NAVISUAL_LIVE_TITLE,
+    /// with its popups, through the app's own UIA client -- the managed .NET client a PowerShell
+    /// probe uses sees a different tree in LibreOffice. NAVISUAL_LIVE_REGION="x,y,w,h" keeps only
+    /// what overlaps it.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_ui_tree_for_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
+        let region: Option<Vec<i32>> = std::env::var("NAVISUAL_LIVE_REGION")
+            .ok()
+            .map(|r| r.split(',').map(|s| s.trim().parse().unwrap()).collect());
+        let nodes = super::snapshot_ui_tree(hwnd).expect("tree");
+        println!("\n[live] {} node(s)", nodes.len());
+        for n in nodes {
+            let r = n.rect;
+            if let Some(g) = &region {
+                if r[0] + r[2] <= g[0] || r[0] >= g[0] + g[2] || r[1] + r[3] <= g[1] || r[1] >= g[1] + g[3] {
+                    continue;
+                }
+            }
+            println!("[live]   {} {:?} {:?} value={:?}", n.role, n.name, r, n.value);
+        }
+    }
+
     /// Live probe for Pass 1: where `find_element` lands NAVISUAL_LIVE_TARGET in the window whose
     /// title contains NAVISUAL_LIVE_TITLE -- with a menu open, its item rather than the ribbon
     /// control of the same name.
