@@ -628,6 +628,7 @@ export const en = {
   "panel.guideOnScreen": "Guide me on this screen",
   "panel.pickAnApp": "Pick an app",
   "msg.noTargetWindow": "No app window was open, so there was nothing to look at.",
+  "msg.hotkeyYielded": "This step uses {key}, so Navisual's “{action}” shortcut is off until the next step. The panel's buttons still work.",
   "err.freeTrialExhausted": "Your free requests have been used.",
   "err.insufficientCoins": "Not enough coins for this quality tier. Buy more to continue.",
   "err.streamStalled": "The AI stopped partway through its answer, twice in a row. Please try again.",

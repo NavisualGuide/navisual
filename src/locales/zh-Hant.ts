@@ -606,6 +606,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "panel.guideOnScreen": "在這個螢幕上引導",
   "panel.pickAnApp": "選擇程式",
   "msg.noTargetWindow": "沒有開啟的程式視窗，因此沒有可檢視的內容。",
+  "msg.hotkeyYielded": "這一步要用 {key}，Navisual 的「{action}」快捷鍵先暫停，到下一步恢復。面板上的按鈕照常可用。",
   "err.freeTrialExhausted": "免費次數已用完。",
   "err.insufficientCoins": "金幣不足，無法使用該品質層級。請購買後繼續。",
   "err.streamStalled": "AI 回答到一半停住了，連續兩次。請再試一次。",
