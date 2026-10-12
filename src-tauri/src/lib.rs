@@ -891,12 +891,14 @@ fn locate_for_step(
     if let Some(text) = step.target_text.as_ref().filter(|t| !t.trim().is_empty()) {
         #[cfg(windows)]
         {
-            let (icon_templates, icon_region, icon_authoring_scale) =
+            let (icon_templates, icon_region, icon_authoring_scale, icon_named) =
                 pack_locate_hints(packs, target_hwnd, text);
-            // A pack icon for this target ⇒ a known icon-only element → A11y skips its
-            // expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
-            // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms.
-            let icon_target = !icon_templates.is_empty();
+            // A target that names a pack icon in full ⇒ a known icon-only element → A11y skips
+            // its expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
+            // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms. A target
+            // that is only part of an icon's name ("Add" for add_cube) keeps the template as the
+            // fallback after OCR and is not an icon target (packs::icon_stem_named_by_target).
+            let icon_target = icon_named && !icon_templates.is_empty();
             // S.4 skip condition: an icon target with a pack template never uses
             // selection — the template is already the authority for glyphs.
             let selected_element_id = if icon_target {
@@ -2399,6 +2401,51 @@ mod prompt_assembly_tests {
     }
 }
 
+#[cfg(all(test, windows))]
+mod live_pack_locate_tests {
+    use super::*;
+
+    /// Live: the locate a step gets, pack hints included, for NAVISUAL_LIVE_TARGET in the window
+    /// whose title contains NAVISUAL_LIVE_TITLE. NAVISUAL_LIVE_BBOX="x,y,w,h" (physical px) stands
+    /// in for the model's box; NAVISUAL_LIVE_ROLE for its role.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_locate_with_pack_hints() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let target = std::env::var("NAVISUAL_LIVE_TARGET").expect("NAVISUAL_LIVE_TARGET");
+        let hwnd = capture::find_window_by_title(&title, "").expect("no window with that title");
+        let bundled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packs");
+        let reg = packs::PackRegistry::load(None, Some(bundled.as_path()));
+        let (icons, region, scale, named) = pack_locate_hints(&reg, Some(hwnd), &target);
+        let names: Vec<String> = icons.iter().map(|(n, _)| n.clone()).collect();
+        let icon_target = named && !icons.is_empty();
+        let ai_bbox = std::env::var("NAVISUAL_LIVE_BBOX").ok().map(|b| {
+            let p: Vec<i32> = b.split(',').map(|s| s.trim().parse().unwrap()).collect();
+            capture::Rect { x: p[0], y: p[1], width: p[2] as u32, height: p[3] as u32 }
+        });
+        let opts = locator::orchestrator::LocateOptions {
+            role: std::env::var("NAVISUAL_LIVE_ROLE").ok().filter(|r| !r.is_empty()),
+            ai_bbox,
+            bbox_decisive: true,
+            a11y_timeout_ms: if icon_target { 150 } else { 500 },
+            min_confidence: 0.5,
+            target_hwnd: Some(hwnd),
+            icon_templates: icons,
+            icon_region: region,
+            icon_target,
+            icon_authoring_scale: scale,
+            ..Default::default()
+        };
+        let (hit, trace) = locator::orchestrator::locate(&target, &opts, None).expect("locate");
+        println!(
+            "\n[live] '{target}' candidates={names:?} icon_target={icon_target} -> {:?} via {:?}; region OCR tried: {}",
+            hit.map(|h| (h.bbox, h.role)),
+            trace.final_decision,
+            trace.ocr.region_ocr_attempted
+        );
+    }
+}
+
 #[cfg(test)]
 mod logged_request_tests {
     use super::*;
@@ -3283,28 +3330,34 @@ type IconTemplates = Vec<(String, Vec<u8>)>;
 /// candidate icon crops `(name, bytes)` for Pass-3 template matching, plus the `element_hints`
 /// search region (fractional rect) that makes matching independent of the AI bbox. All empty/
 /// None (the common case) when there's no focused window, no active pack, or no match — so
-/// Pass 3 stays a no-op. Reads icon files lazily here; only reached on a real locate.
+/// Pass 3 stays a no-op. The last value says whether the target names one of those icons in
+/// full, the test for an icon target. Reads icon files lazily here; only reached on a real locate.
 fn pack_locate_hints(
     registry: &packs::PackRegistry,
     hwnd: Option<usize>,
     target_text: &str,
-) -> (IconTemplates, Option<[f32; 4]>, f32) {
+) -> (IconTemplates, Option<[f32; 4]>, f32, bool) {
     let Some(hwnd) = hwnd.filter(|h| *h != 0) else {
-        return (Vec::new(), None, 1.0);
+        return (Vec::new(), None, 1.0, false);
     };
     if registry.is_empty() {
-        return (Vec::new(), None, 1.0);
+        return (Vec::new(), None, 1.0, false);
     }
     let title = capture::get_window_title(hwnd);
     let Some(pack) = registry.get_active_pack(&title) else {
-        return (Vec::new(), None, 1.0);
+        return (Vec::new(), None, 1.0, false);
     };
     let icons = pack
         .candidate_icons(target_text)
         .into_iter()
         .filter_map(|a| std::fs::read(&a.path).ok().map(|bytes| (a.stem.clone(), bytes)))
         .collect();
-    (icons, pack.region_hint_for(target_text), pack.authoring_scale())
+    (
+        icons,
+        pack.region_hint_for(target_text),
+        pack.authoring_scale(),
+        pack.names_an_icon(target_text),
+    )
 }
 
 /// Workstream P (v0.7) — curated starter tasks from the nav-pack matching `hwnd`'s

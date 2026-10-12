@@ -492,13 +492,23 @@ fn tokens(s: &str) -> Vec<String> {
 /// label too ("Annotate" should hit "Annotate Line"'s slot? NO — that would multi-match
 /// every annotate variant; label equality keeps slot matching precise, and the group's
 /// first member carries the plain name).
+///
+/// Against the idname, the target must name the whole tool: its words and the idname's, less
+/// the words that only say where a tool lives (`builtin`, `primitive`), are the same set. A
+/// subset was enough until 2026-10-12, when L1 showed what it costs: the header menu "Add"
+/// matched `builtin.primitive_cube_add` and the pointer went to the Add Cube tool, and
+/// "Cylinder" -- the open Add menu's item -- would have taken the Add Cylinder slot.
 fn member_matches(target: &[String], label: &str, idname: &str) -> bool {
     let label_t = tokens(label);
     if !label_t.is_empty() && label_t == target {
         return true;
     }
-    let id_t = tokens(idname);
-    !id_t.is_empty() && target.iter().all(|t| id_t.contains(t))
+    const WHERE_NOT_WHICH: &[&str] = &["builtin", "primitive"];
+    let set = |v: Vec<String>| -> std::collections::BTreeSet<String> {
+        v.into_iter().filter(|t| !WHERE_NOT_WHICH.contains(&t.as_str())).collect()
+    };
+    let id_t = set(tokens(idname));
+    !id_t.is_empty() && id_t == set(target.to_vec())
 }
 
 /// bpy window-relative bottom-up rect → virtual-desktop screen rect.
@@ -547,7 +557,12 @@ mod tests {
             "Add Cube",
             "builtin.primitive_cube_add"
         ));
-        assert!(member_matches(&t("cube"), "", "builtin.primitive_cube_add"));
+        assert!(member_matches(&t("Add Cylinder"), "", "builtin.primitive_cylinder_add"));
+        // Part of a tool's name is not the tool (L1, 2026-10-12): the header menu "Add", the
+        // Add menu's "Cylinder" item, a bare "cube".
+        assert!(!member_matches(&t("Add"), "Add Cube", "builtin.primitive_cube_add"));
+        assert!(!member_matches(&t("Cylinder"), "Add Cylinder", "builtin.primitive_cylinder_add"));
+        assert!(!member_matches(&t("cube"), "", "builtin.primitive_cube_add"));
         // The raw idname works too.
         assert!(member_matches(&t("builtin.measure"), "Measure", "builtin.measure"));
         // No cross-tool leakage: "Move" must not match Rotate.
