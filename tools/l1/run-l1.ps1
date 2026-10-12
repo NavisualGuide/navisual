@@ -10,7 +10,8 @@ and keyboard input, presses the Next hotkey, and stops at the end state, a cap, 
 cannot follow. One result row per run.
 
 The follower does what the step says and nothing else:
-  - a located target is clicked at its centre (right/double when the instruction says so);
+  - a located target is clicked at its centre (right/double when the instruction says so), and
+    so is the model's box when the dashed hint ring stands in for a missed locate;
   - clipboard text is pasted (rule 11 puts any text to type there, and the app copies it);
   - key combinations named in the instruction are pressed;
   - a question (needs_input) is answered from the task's persona replies;
@@ -231,7 +232,7 @@ function Invoke-L1Run($task, [int]$rep) {
     $maxReq = 15; if ($task.max_requests) { $maxReq = [int]$task.max_requests }
     $maxMin = 8; if ($task.max_minutes) { $maxMin = [double]$task.max_minutes }
     $t0 = Get-Date
-    $requests = 0; $steps = 0; $cantFind = 0; $replies = 0; $errors = 0; $clicks = 0; $misclicked = $false
+    $requests = 0; $steps = 0; $cantFind = 0; $replies = 0; $errors = 0; $clicks = 0; $misclicked = $false; $hintSteps = 0
     $outcome = 'running'; $verdict = $null; $claimedDone = $false
 
     while ($outcome -eq 'running') {
@@ -252,6 +253,13 @@ function Invoke-L1Run($task, [int]$rep) {
             $re = Resend-PanelText $navPid
             if ($re) { Write-L1 "retry: $re" } else { Send-NextHotkey; Write-L1 "retry: Next" }
             continue
+        }
+        # The locator missed and the dashed hint ring stood in, around the model's box. A person
+        # clicks inside the ring, so the follower takes its box as the pointer. The first scored
+        # pass ignored every hint, which made the follower stricter than a person (2026-10-12).
+        if (-not $s.located -and $s.hint_shown -and $s.ai_bbox) {
+            $s | Add-Member -NotePropertyName located -NotePropertyValue ([pscustomobject]@{ bbox = $s.ai_bbox; name = 'hint ring' }) -Force
+            $hintSteps++
         }
         $loc = 'no pointer'
         if ($s.located) { $b = $s.located.bbox; $loc = "pointer ($($b.x),$($b.y) $($b.width)x$($b.height)) '$($s.located.name)'" }
@@ -385,7 +393,7 @@ function Invoke-L1Run($task, [int]$rep) {
         task = $task.id; rep = $rep; tier = $Tier; provider = $cfg.provider; model = $cfg.model; effort = $cfg.effort
         outcome = $outcome; success = [bool]$verdict.success; progress = $verdict.progress; damage = [bool]$verdict.damage; detail = $verdict.detail
         claimed_done = $claimedDone; requests = $requests; steps = $steps; clicks = $clicks; cant_find = $cantFind
-        replies = $replies; errors = $errors; planted_misclick = $misclicked; wall_s = $wall
+        replies = $replies; errors = $errors; planted_misclick = $misclicked; hint_steps = $hintSteps; wall_s = $wall
         input_tokens = $inTok; output_tokens = $outTok; feed_from = $firstFeed; feed_to = $lines.Count
         est_usd = [math]::Round(($inTok * $cfg.usdIn + $outTok * $cfg.usdOut) / 1e6, 5)
         app_commit = $appCommit; exe_time = $exeTime; held_out = [bool]$task.held_out

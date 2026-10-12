@@ -4161,7 +4161,9 @@ fn cleanup_old_debug_artifacts(app_data_dir: &std::path::Path) {
 /// L1 harness: one JSON line per guidance response the panel receives, when
 /// `NAVISUAL_STEP_FEED` names a file. The live driver follows the pointer from it: the step on
 /// screen, where the locator put it (physical pixels, virtual desktop), what it asks to paste,
-/// and whether the model is asking a question. Off unless the variable is set; read once.
+/// and whether the model is asking a question. When the locator missed and the dashed hint ring
+/// stood in, `hint_shown` is set and `ai_bbox` is the box the ring surrounds -- a person clicks
+/// inside the ring, so the driver does too. Off unless the variable is set; read once.
 fn step_feed(kind: &str, result: &Result<GuideResponse, String>) {
     use std::io::Write;
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
@@ -4187,6 +4189,8 @@ fn step_feed(kind: &str, result: &Result<GuideResponse, String>) {
                 "clipboard": step.and_then(|s| s.clipboard.as_deref()),
                 "checkpoint": step.map(|s| s.checkpoint),
                 "located": r.located,
+                "hint_shown": r.hint_shown,
+                "ai_bbox": r.ai_bbox,
                 "no_target": r.no_target,
                 "needs_input": r.needs_input,
                 "goal": r.goal,
