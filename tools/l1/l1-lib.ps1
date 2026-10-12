@@ -13,6 +13,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 public delegate bool L1EnumProc(IntPtr h, IntPtr l);
 public struct L1Rect { public int Left, Top, Right, Bottom; }
+public struct L1Point { public int X, Y; }
 public static class L1W {
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr v);
     [DllImport("user32.dll")] public static extern bool EnumWindows(L1EnumProc cb, IntPtr l);
@@ -26,11 +27,13 @@ public static class L1W {
     [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hh, bool repaint);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out L1Point p);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
     [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
 
     [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
     [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
@@ -52,6 +55,10 @@ public static class L1W {
     public static string Class(IntPtr h) { var sb = new StringBuilder(256); GetClassNameW(h, sb, 256); return sb.ToString(); }
 }
 "@ -ErrorAction SilentlyContinue
+
+# A run that lasts all night must not meet the screen saver, a locked screen or sleep: every task
+# after it would fail on a desktop it cannot see. Held while this process runs; released at exit.
+function Keep-Awake { [L1W]::SetThreadExecutionState([uint32]0x80000003) | Out-Null }
 
 # Physical pixels, as the locator reports them (LocateResult.bbox: physical, virtual desktop).
 [L1W]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
@@ -118,6 +125,9 @@ function Focus-ByTitleBar([IntPtr]$h) {
         [L1W]::SetForegroundWindow($h) | Out-Null
         Start-Sleep -Milliseconds 200
     }
+    # Leave the mouse where a person's rests, over the work area, not on the title bar: Blender sends
+    # a key to the area under the mouse (F3 on the title bar searched nothing, live 2026-10-11).
+    [L1W]::SetCursorPos($x, [int](($r.Top + $r.Bottom) / 2)) | Out-Null
     return ([L1W]::GetForegroundWindow() -eq $h)
 }
 
@@ -150,6 +160,15 @@ function Close-WindowFully([IntPtr]$hwnd, [int]$tries = 6) {
 # Mouse and keyboard
 
 function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double) {
+    # Travel there as a hand does rather than jump: GTK and Paint keep a submenu open only while the
+    # pointer's path stays on its way into it (trial, 2026-10-11: GIMP's Flip Horizontally and
+    # Paint's PNG picture clicks landed on closed menus).
+    $p = New-Object L1Point
+    [L1W]::GetCursorPos([ref]$p) | Out-Null
+    for ($i = 1; $i -le 10; $i++) {
+        [L1W]::SetCursorPos([int]($p.X + ($x - 6 - $p.X) * $i / 10), [int]($p.Y + ($y - $p.Y) * $i / 10)) | Out-Null
+        Start-Sleep -Milliseconds 18
+    }
     # Arrive, then settle inside: XAML menu items ignore a click with no hover first (seen live).
     [L1W]::SetCursorPos($x - 6, $y) | Out-Null
     Start-Sleep -Milliseconds 120
@@ -336,7 +355,12 @@ function Get-StepActions($step) {
     $a = [ordered]@{ click = $null; button = 'left'; double = $false; seq = @(); scroll = 0; scrollOnly = $false; unsupported = $null; clickPos = 0; named = $false }
     if ($step.located -and $step.located.bbox) {
         $b = $step.located.bbox
-        $a.click = @([int]($b.x + $b.width / 2), [int]($b.y + $b.height / 2))
+        $cx = [int]($b.x + $b.width / 2)
+        # A box much wider than tall -- a list row, a long text field -- is aimed at near its label,
+        # as a person does. Its centre can be blank row space: right-clicking an Explorer row there
+        # opened the background menu ten times running (trial, 2026-10-11).
+        if ($b.width -ge 250 -and $b.width -ge 6 * $b.height) { $cx = [int]($b.x + [math]::Min(60, $b.width * 0.2)) }
+        $a.click = @($cx, [int]($b.y + $b.height / 2))
     }
     if ($ins -match '(?i)right[- ]click') { $a.button = 'right' }
     if ($ins -match '(?i)double[- ]click') { $a.double = $true }
@@ -354,8 +378,13 @@ function Get-StepActions($step) {
     $mods = '(?:ctrl|control|alt|shift|win)'
     $key = '(?:f[0-9]{1,2}|enter|return|tab|esc|escape|delete|del|backspace|home|end|space|up|down|left|right|page ?up|page ?down|[a-z0-9`=\-])'
     $combo = '(?<combo>\b' + $mods + '(?:\s*\+\s*' + $mods + ')*\s*\+\s*' + $key + '\b)'
-    $press = '(?<press>\b(?:press|hit|tap)\s+(?:the\s+)?(?<pk>' + $key + ')(?:\s+key)?\b)'
-    $then = '(?<then>\bthen\s+(?:press\s+)?(?<tk>(?-i:[A-Z]))\b)'
+    # "press G, Z, 2, Enter": a run of keys after one verb, each pressed in turn.
+    $press = '(?<press>\b(?:press|hit|tap)\s+(?:the\s+)?(?<pk>' + $key + '(?:\s*(?:,\s*(?:and\s+|then\s+)?|\s+then\s+|\s+and\s+)' + $key + ')*)(?:\s+key)?\b)'
+    # "press G, then Z": a lone capital after "then" is a key. Not "then press G" -- that belongs to
+    # the press run, which would otherwise lose everything after G.
+    # Only where the letter stands alone as a key ("then Z," / "then Z to"): "then I'll guide you"
+    # pressed I inside GIMP's open menu (trial, 2026-10-11). I and A are never read this way.
+    $then = '(?<then>\bthen\s+(?<tk>(?-i:[B-HJ-Z]))(?=\s*(?:,|\.|;|$)|\s+(?:and|then|to)\b))'
     $named = '(?:f[0-9]{1,2}|enter|tab|esc|escape|delete|backspace|home|end|space|page ?up|page ?down)'
     $with = '(?<with>\b(?:with|using)\s+(?:the\s+)?(?<wk>' + $named + ')(?:\s+key)?\b)'
     $type = '(?<type>\b(?:type|enter|paste|write)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
@@ -371,11 +400,18 @@ function Get-StepActions($step) {
                 [void]$seq.Add(@{ kind = 'keys'; value = "Alt+$letters"; pos = $pos })
             } else {
                 [void]$seq.Add(@{ kind = 'keys'; value = 'Alt'; pos = $pos })
-                foreach ($ch in $letters.ToCharArray()) { [void]$seq.Add(@{ kind = 'keys'; value = [string]$ch; pos = $pos }) }
+                $i = 1
+                foreach ($ch in $letters.ToCharArray()) { [void]$seq.Add(@{ kind = 'keys'; value = [string]$ch; pos = $pos + 0.01 * $i }); $i++ }
             }
         }
         elseif ($m.Groups['combo'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = ($m.Groups['combo'].Value -replace '\s', ''); pos = $pos }) }
-        elseif ($m.Groups['press'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = $m.Groups['pk'].Value; pos = $pos }) }
+        elseif ($m.Groups['press'].Success) {
+            $i = 0
+            foreach ($k in ($m.Groups['pk'].Value -split '\s*,\s*(?:and\s+|then\s+)?|\s+then\s+|\s+and\s+')) {
+                # Sort-Object is not stable: keys of one run keep their order by a small step each.
+                if ($k.Trim()) { [void]$seq.Add(@{ kind = 'keys'; value = $k.Trim(); pos = $pos + 0.01 * $i }); $i++ }
+            }
+        }
         elseif ($m.Groups['then'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = $m.Groups['tk'].Value; pos = $pos }) }
         elseif ($m.Groups['with'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = $m.Groups['wk'].Value; pos = $pos }) }
         elseif ($m.Groups['type'].Success) {
@@ -404,6 +440,14 @@ function Get-StepActions($step) {
             [void]$seq.Add(@{ kind = 'paste'; value = [string]$step.clipboard; pos = $pp })
         }
     }
+    # "Replace the text in the File name field with small.png": a person selects what is there first.
+    # Clicked into, the field holds a caret and pasting appends (garden.pngsmall.png, trial).
+    if (@($seq | Where-Object { $_.kind -eq 'paste' }).Count -gt 0 -and
+        $ins -match '(?i)\b(replace|select all|overwrite)\b' -and $ins -match '(?i)\b(field|box|name|value|text)\b' -and
+        @($seq | Where-Object { $_.kind -eq 'keys' -and $_.value -match '(?i)^ctrl\+a$' }).Count -eq 0) {
+        $pt = $seq | Where-Object { $_.kind -eq 'paste' } | Select-Object -First 1
+        [void]$seq.Add(@{ kind = 'keys'; value = 'Ctrl+A'; pos = -1; before = $pt })
+    }
     # "Enter <text> in the Subject field": the text goes into the target, so after the click on it.
     foreach ($t in $seq) {
         if ($t.kind -in 'paste', 'text' -and $t.pos -lt $clickPos) {
@@ -411,6 +455,8 @@ function Get-StepActions($step) {
             if ($between -match '(?i)\b(in|into|to)\s+(the\s+)?[^.;]*$') { $t.pos = $clickPos + 0.5 }
         }
     }
+    # The select-all sits just before the paste it serves, wherever that paste ended up.
+    foreach ($t in $seq) { if ($t.before) { $t.pos = $t.before.pos - 0.001 } }
     $a.seq = @($seq | Sort-Object { $_.pos })
     return [pscustomobject]$a
 }

@@ -35,10 +35,15 @@ param(
     [string]$Exe = '',
     [string]$RunRoot = '',
     [switch]$Solve,
-    [switch]$IncludeHeldOut
+    [switch]$IncludeHeldOut,
+    # Stop before the next run once this tier's estimated spend passes it (list prices, no cache).
+    [double]$MaxUsd = 10.0,
+    # Debugging: save the task window as it is just before each click (the test app only).
+    [switch]$ShotBeforeClick
 )
 
 . "$PSScriptRoot\l1-lib.ps1"
+Keep-Awake
 
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $internal = Join-Path (Split-Path -Parent $repo) 'navisual-internal'
@@ -49,10 +54,13 @@ if (-not $RunRoot) { $RunRoot = Join-Path $env:TEMP 'navisual-l1' }
 New-Item -ItemType Directory -Force -Path $OutDir, $RunRoot | Out-Null
 
 $Roster = @{
-    speed   = @{ provider = 'openai'; model = 'gpt-6-luna';       effort = '' }
-    regular = @{ provider = 'gemini'; model = 'gemini-3.8-flash'; effort = 'low' }
-    smart   = @{ provider = 'openai'; model = 'gpt-6.1-sol';      effort = '' }
+    speed   = @{ provider = 'openai'; model = 'gpt-6-luna';       effort = ''; usdIn = 0.10; usdOut = 0.50 }
+    regular = @{ provider = 'gemini'; model = 'gemini-3.8-flash'; effort = 'low'; usdIn = 0.75; usdOut = 3.75 }
+    smart   = @{ provider = 'openai'; model = 'gpt-6.1-sol';      effort = ''; usdIn = 2.0; usdOut = 10.0 }
 }
+# What produced the run: the app's commit and the build it ran.
+$appCommit = (git -C $repo rev-parse --short HEAD 2>$null)
+$exeTime = ''; if (Test-Path $Exe) { $exeTime = (Get-Item $Exe).LastWriteTime.ToString('s') }
 
 # ---------------------------------------------------------------------------------------------
 # Tasks
@@ -288,6 +296,17 @@ function Invoke-L1Run($task, [int]$rep) {
             }
             if ($a.click) {
                 $x = $a.click[0]; $y = $a.click[1]
+                if ($ShotBeforeClick -and $tw) {
+                    Add-Type -AssemblyName System.Drawing
+                    $r = Get-WindowRect $tw.Hwnd
+                    $bmp = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($r.Bottom - $r.Top)
+                    $g = [System.Drawing.Graphics]::FromImage($bmp)
+                    $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
+                    $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::Magenta), 2
+                    $g.DrawEllipse($pen, $x - $r.Left - 5, $y - $r.Top - 5, 10, 10)
+                    $shot = Join-Path $work ("click-{0:D2}.png" -f ($clicks + 1))
+                    $bmp.Save($shot); $g.Dispose(); $bmp.Dispose()
+                }
                 if ($task.misclick_at -and -not $misclicked -and ($clicks + 1) -eq [int]$task.misclick_at) {
                     $b = $s.located.bbox
                     $x = [int]($b.x + $b.width + 30); $misclicked = $true
@@ -337,17 +356,23 @@ function Invoke-L1Run($task, [int]$rep) {
         claimed_done = $claimedDone; requests = $requests; steps = $steps; clicks = $clicks; cant_find = $cantFind
         replies = $replies; errors = $errors; planted_misclick = $misclicked; wall_s = $wall
         input_tokens = $inTok; output_tokens = $outTok; feed_from = $firstFeed; feed_to = $lines.Count
+        est_usd = [math]::Round(($inTok * $cfg.usdIn + $outTok * $cfg.usdOut) / 1e6, 5)
+        app_commit = $appCommit; exe_time = $exeTime; held_out = [bool]$task.held_out
         run_dir = $runDir; ts = (Get-Date -Format o)
     }
 }
 
 try {
-    foreach ($task in $picked) {
-        for ($rep = 1; $rep -le $Repeat; $rep++) {
+    $spent = 0.0
+    :outer for ($rep = 1; $rep -le $Repeat; $rep++) {
+        foreach ($task in $picked) {
+            if ($spent -ge $MaxUsd) { Write-L1 ("spend cap reached: {0:N2} of {1:N2} USD; stopping" -f $spent, $MaxUsd); break outer }
             $row = Invoke-L1Run $task $rep
+            if ($row.est_usd) { $spent += [double]$row.est_usd }
             Add-Content -Path $resultsFile -Value ($row | ConvertTo-Json -Compress) -Encoding UTF8
         }
     }
+    Write-L1 ("estimated spend this tier: {0:N3} USD" -f $spent)
 } finally {
     Stop-Process -Id $navPid -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 800
