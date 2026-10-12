@@ -1176,6 +1176,34 @@ mod tests {
     // given BBOX region. IN=capture.png; BBOX=x,y,w,h (around the target text); TARGET=word.
     //   $env:IN="vscode_cap.png"; $env:BBOX="450,180,200,150"; $env:TARGET="user";
     //   cargo test --lib region_ocr_live -- --ignored --nocapture
+    /// Live: the whole pipeline, as the app calls it after a step, for NAVISUAL_LIVE_TARGET in the
+    /// window whose title contains NAVISUAL_LIVE_TITLE. NAVISUAL_LIVE_BBOX="x,y,w,h" (physical px)
+    /// stands in for the model's box. Prints the trace the debug drawer would show.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_locate_in_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let target = std::env::var("NAVISUAL_LIVE_TARGET").expect("NAVISUAL_LIVE_TARGET");
+        let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
+        let ai_bbox = std::env::var("NAVISUAL_LIVE_BBOX").ok().map(|b| {
+            let p: Vec<i32> = b.split(',').map(|s| s.trim().parse().unwrap()).collect();
+            Rect { x: p[0], y: p[1], width: p[2] as u32, height: p[3] as u32 }
+        });
+        let opts = LocateOptions {
+            role: std::env::var("NAVISUAL_LIVE_ROLE").ok(),
+            ai_bbox,
+            bbox_decisive: true,
+            a11y_timeout_ms: 500,
+            min_confidence: 0.5,
+            target_hwnd: Some(hwnd),
+            ..Default::default()
+        };
+        let t = std::time::Instant::now();
+        let (hit, trace) = locate(&target, &opts, None).expect("locate");
+        println!("\n[live] '{target}' -> {:?} in {} ms", hit.map(|h| (h.bbox, h.role)), t.elapsed().as_millis());
+        println!("[live] {}", serde_json::to_string(&trace).unwrap_or_default());
+    }
+
     #[test]
     #[ignore]
     fn region_ocr_live() {
@@ -1195,6 +1223,21 @@ mod tests {
         match res {
             Some(r) => eprintln!("FOUND '{}' role={} at {:?} in {ms:.0}ms (bbox region {:?})", r.name, r.role, r.bbox, bbox),
             None => eprintln!("not found in {ms:.0}ms (bbox region {:?})", bbox),
+        }
+        // What OCR read in the window the rescue used (same margins and scale as try_region_ocr).
+        if std::env::var("DUMP").is_ok() {
+            let full = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            let (cx, cy) = (bbox.0 + bbox.2 as i32 / 2, bbox.1 + bbox.3 as i32 / 2);
+            let (hw, hh) = ((bbox.2 as i32 / 2 + 100).min(350), (bbox.3 as i32 / 2 + 70).min(250));
+            let (x0, y0) = ((cx - hw).max(0), (cy - hh).max(0));
+            let (x1, y1) = ((cx + hw).min(w as i32), (cy + hh).min(h as i32));
+            let region = image::imageops::crop_imm(&full, x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32).to_image();
+            let up = image::imageops::resize(&region, region.width() * 3, region.height() * 3, image::imageops::FilterType::Lanczos3);
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(up).write_to(&mut png, image::ImageFormat::Png).unwrap();
+            for r in ocr::run_ocr(png.get_ref()).unwrap() {
+                eprintln!("  ocr '{}' {:?} conf {:.2}", r.text, r.bbox, r.confidence);
+            }
         }
     }
 

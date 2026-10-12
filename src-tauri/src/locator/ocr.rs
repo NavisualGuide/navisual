@@ -251,6 +251,24 @@ pub fn run_ocr(image_bytes: &[u8]) -> Result<Vec<OcrResult>> {
 
 const MAX_LABEL_LEN: usize = 60;
 
+/// Lower-cased text with the glyphs Windows OCR mixes up mapped to one form: zero and o,
+/// one, i and l (Segoe UI draws capital I and lower-case l alike), and a bar read for an l.
+fn confusable_fold(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '0' => 'o',
+            '1' | 'i' | '|' => 'l',
+            c => c,
+        })
+        .collect()
+}
+
+/// The folded target, when folding is safe: two or more characters, at least one a letter.
+fn confusable_fold_target(target_lower: &str) -> Option<String> {
+    let t = strip_punct(target_lower);
+    (t.chars().count() >= 2 && t.chars().any(|c| c.is_alphabetic())).then(|| confusable_fold(&t))
+}
+
 fn strip_punct(s: &str) -> String {
     let start = s
         .char_indices()
@@ -538,6 +556,34 @@ pub fn find_text<'a>(
         outcome.strategy_used = Some("exact".to_string());
         outcome.winner = Some(winner);
         return outcome;
+    }
+
+    // Strategy 1b: exact once the shapes OCR confuses are folded together. Live 2026-10-12,
+    // Excel's Create Table dialog: OCR read its OK button as "0K" and "Table1" as "Tablel";
+    // UIA could not read the dialog at all, so the step had no pointer three times running
+    // (L1 `xl-table-total`). Only for a target of two or more characters with a letter in it --
+    // a lone "O" is a column header and "10" a number, where the fold would invent matches.
+    if let Some(target_folded) = confusable_fold_target(&target_lower) {
+        let folded: Vec<&OcrResult> = candidates
+            .iter()
+            .copied()
+            .filter(|r| confusable_fold(&strip_punct(&r.text).to_ascii_lowercase()) == target_folded)
+            .collect();
+        if let Some(winner) = pick_best(&folded) {
+            for r in &folded {
+                let chosen = std::ptr::eq(*r, winner);
+                outcome.candidates.push(make_candidate(
+                    r,
+                    "exact-folded",
+                    None,
+                    chosen,
+                    if chosen { None } else { Some("not preferred size") },
+                ));
+            }
+            outcome.strategy_used = Some("exact-folded".to_string());
+            outcome.winner = Some(winner);
+            return outcome;
+        }
     }
 
     // Strategy 2: word-boundary substring match (G2).
@@ -906,6 +952,29 @@ mod tests {
         let out = find_text("Save", &results, &opts((1000, 600)));
         assert_eq!(out.strategy_used.as_deref(), Some("exact"));
         assert_eq!(out.winner.unwrap().text, "Save");
+    }
+
+    /// Live 2026-10-12, Excel's Create Table dialog at 3x: "0K" for OK, "Tablel" for Table1.
+    #[test]
+    fn a_misread_zero_or_one_still_matches_a_word() {
+        let results = vec![word("0K", (359, 233, 47, 29)), word("Cancel", (517, 233, 105, 29))];
+        let out = find_text("OK", &results, &opts((700, 500)));
+        assert_eq!(out.strategy_used.as_deref(), Some("exact-folded"));
+        assert_eq!(out.winner.unwrap().text, "0K");
+        let table = [word("Tablel", (0, 83, 100, 29))];
+        let out = find_text("Table1", &table, &opts((700, 500)));
+        assert_eq!(out.winner.unwrap().text, "Tablel");
+    }
+
+    #[test]
+    fn the_fold_never_matches_a_lone_letter_or_a_number() {
+        // Excel's column O header against a cell reading 0; a number against letters.
+        let zero = [word("0", (10, 10, 10, 20))];
+        let out = find_text("O", &zero, &opts((1000, 600)));
+        assert!(out.winner.is_none());
+        let letters = [word("lO", (10, 10, 20, 20))];
+        let out = find_text("10", &letters, &opts((1000, 600)));
+        assert!(out.winner.is_none());
     }
 
     #[test]
