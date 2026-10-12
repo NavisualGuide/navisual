@@ -3447,7 +3447,27 @@ fn blender_addon_status(
 ) -> packs::addon_install::AddonStatus {
     let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
     let version = blender_target_version(hwnd);
-    packs::addon_install::status(dir.as_deref(), version.as_deref())
+    let mut st = packs::addon_install::status(dir.as_deref(), version.as_deref());
+    // The file check cannot see a bridge loaded any other way -- a portable Blender with its
+    // own config folder, a startup script. L1 ran with the bridge answering every query while
+    // the panel offered to install it (2026-10-12). Ask the bridge itself, and count it only
+    // when it runs in the Blender this prompt is about.
+    #[cfg(windows)]
+    if st.needs_action {
+        if let (Some((running, blender)), Some(target)) =
+            (locator::adapters::blender::running_bridge(), st.target_version.as_deref())
+        {
+            let same_blender = blender == target || blender.starts_with(&format!("{target}."));
+            if same_blender && st.pack_version.is_some_and(|pv| running >= pv) {
+                log::info!(
+                    "[addon] bridge v{running} already running in Blender {blender}; no install offer"
+                );
+                st.running_version = Some(running);
+                st.needs_action = false;
+            }
+        }
+    }
+    st
 }
 
 /// Config-folder version ("5.1") of the Blender the prompt is about. Scoping to the

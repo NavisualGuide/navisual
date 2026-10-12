@@ -463,6 +463,15 @@ pub fn app_state_block(hwnd: usize) -> Option<String> {
 }
 
 /// One newline-delimited JSON round trip to the bridge.
+/// The running bridge's `BRIDGE_VERSION` and the Blender version it reports ("3.6.22"), or
+/// `None` when nothing answers on the bridge port.
+pub(crate) fn running_bridge() -> Option<(i64, String)> {
+    let v = bridge_query(r#"{"q":"state"}"#).ok()?;
+    let version = v.get("bridge_version")?.as_i64()?;
+    let blender = v.get("blender").and_then(|b| b.as_str()).unwrap_or_default().to_string();
+    Some((version, blender))
+}
+
 fn bridge_query(payload: &str) -> Result<serde_json::Value> {
     let addr = BRIDGE_ADDR.parse().context("bridge addr")?;
     let mut stream =

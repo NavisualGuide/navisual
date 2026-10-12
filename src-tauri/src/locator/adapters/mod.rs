@@ -20,7 +20,7 @@ use super::LocateResult;
 use anyhow::Result;
 
 #[cfg(windows)]
-mod blender;
+pub(crate) mod blender;
 #[cfg(windows)]
 mod excel;
 #[cfg(windows)]

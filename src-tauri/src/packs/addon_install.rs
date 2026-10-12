@@ -55,6 +55,9 @@ pub struct AddonStatus {
     pub installs: Vec<AddonInstall>,
     /// The target Blender needs a first install or an update.
     pub needs_action: bool,
+    /// `BRIDGE_VERSION` of a bridge already answering for the target Blender, however it was
+    /// loaded. Set by the status command, which then clears `needs_action` when it is current.
+    pub running_version: Option<i64>,
 }
 
 /// Blender's install layout always carries a `<major>.<minor>` resource folder beside
@@ -192,6 +195,7 @@ pub fn status(pack_dir: Option<&Path>, target_version: Option<&str>) -> AddonSta
         target_installed_version,
         installs,
         needs_action,
+        running_version: None,
     }
 }
 
