@@ -1,3 +1,70 @@
+/// Silence after which a stream that has begun its answer counts as stalled. Measured on L1's
+/// first scored pass (2026-10-12, 963 calls):
+/// - 18 of 653 GPT-6 calls began the answer -- first instruction token at 4.3-9.1 s -- and then
+///   sent nothing until the client's 90 s timeout ("error decoding response body"); Gemini, 310
+///   calls, none;
+/// - in every successful call the whole answer, first token to last, took at most 5.6 s, so 20 s
+///   of silence once it has begun is over three times anything a working stream did;
+/// - the slowest successful first token came at 22.7 s. A slow model thinks before it answers,
+///   so the clock does not run until the answer begins: before that only the client's overall
+///   timeout applies, and no slow model is cut off for thinking.
+pub const STREAM_IDLE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The `steps_seen` an `on_chunk` callback receives when everything streamed so far is void: the
+/// request stalled and is being sent again, so the caller drops its partial caption.
+pub const STREAM_RESET: usize = usize::MAX;
+
+/// A stream that went silent mid-answer. Displays as the bare code the panel translates
+/// (`ERROR_CODES` in App.svelte), so it never reaches the screen as English.
+#[derive(Debug)]
+pub struct StreamStalled;
+
+impl std::fmt::Display for StreamStalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stream_stalled")
+    }
+}
+
+impl std::error::Error for StreamStalled {}
+
+/// The stream's next item. Once `answering` -- the answer has begun arriving -- [`STREAM_IDLE`]
+/// of silence is a [`StreamStalled`] rather than a wait for the client's 90 s timeout.
+pub async fn next_or_stall<S>(
+    stream: &mut S,
+    answering: bool,
+    provider: &str,
+) -> anyhow::Result<Option<S::Item>>
+where
+    S: futures_util::Stream + Unpin,
+{
+    next_or_stall_within(stream, answering, provider, STREAM_IDLE).await
+}
+
+async fn next_or_stall_within<S>(
+    stream: &mut S,
+    answering: bool,
+    provider: &str,
+    idle: std::time::Duration,
+) -> anyhow::Result<Option<S::Item>>
+where
+    S: futures_util::Stream + Unpin,
+{
+    use futures_util::StreamExt;
+    if !answering {
+        return Ok(stream.next().await);
+    }
+    match tokio::time::timeout(idle, stream.next()).await {
+        Ok(item) => Ok(item),
+        Err(_) => {
+            log::warn!(
+                "[stream] {provider}: no data for {} ms after the answer began -- stalled",
+                idle.as_millis()
+            );
+            Err(StreamStalled.into())
+        }
+    }
+}
+
 /// Extract the decoded text of the **first** `"instruction"` value from a partial
 /// (still-streaming) JSON string, up to (but not including) its closing quote.
 ///
@@ -93,6 +160,44 @@ pub fn count_streamed_steps(partial_json: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{count_streamed_steps, extract_visible_instruction, instruction_delta};
+
+    /// The stall rule never cuts a model that is still thinking: before the answer begins the
+    /// wait is unbounded here (the client's overall timeout is the only limit). Once it has
+    /// begun, silence past the idle limit is a `StreamStalled`, and a stream that keeps
+    /// sending is never one.
+    #[tokio::test]
+    async fn silence_is_a_stall_only_once_the_answer_has_begun() {
+        use std::time::Duration;
+        let idle = Duration::from_millis(40);
+
+        // Thinking: no data for five idle limits, then the answer arrives.
+        let mut slow = Box::pin(futures_util::stream::once(async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            1
+        }));
+        let got = super::next_or_stall_within(&mut slow, false, "test", idle).await.unwrap();
+        assert_eq!(got, Some(1), "a slow first token is waited for");
+
+        // Answering, then silence: a stall, as the bare code the panel maps.
+        let mut silent = futures_util::stream::pending::<u8>();
+        let err = super::next_or_stall_within(&mut silent, true, "test", idle).await.unwrap_err();
+        assert!(err.is::<super::StreamStalled>());
+        assert_eq!(err.to_string(), "stream_stalled");
+
+        // Answering and still sending, just under the limit each time: never a stall.
+        let mut steady = Box::pin(futures_util::stream::unfold(0u8, |n| async move {
+            if n == 3 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            Some((n, n + 1))
+        }));
+        let mut seen = 0;
+        while let Some(_) = super::next_or_stall_within(&mut steady, true, "test", idle).await.unwrap() {
+            seen += 1;
+        }
+        assert_eq!(seen, 3);
+    }
 
     #[test]
     fn extracts_first_instruction_not_last() {

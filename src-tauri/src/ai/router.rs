@@ -511,54 +511,70 @@ impl AiRouter {
             _ => {}
         }
         // No request URL reaches the screen through an error (redact.rs).
-        let result = match &mut self.client {
-            Some(ApiClient::Anthropic(c)) => {
-                let msgs = build_anthropic(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
-            }
-            Some(ApiClient::Gemini(c)) => {
-                let msgs = build_gemini(user_text, screenshot_b64, state_summary, &conversation);
-                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
-            }
-            Some(ApiClient::Ollama(c)) => {
-                let msgs =
-                    build_ollama(user_text, screenshot_b64, state_summary, &conversation, expect);
-                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
-            }
-            Some(ApiClient::DeepSeek(c)) => {
-                // CONFIRMED 2026-05-24 (reconfirmed 2026-07-09): api.deepseek.com rejects
-                // image_url with HTTP 400 ("unknown variant `image_url`, expected `text`")
-                // for deepseek-v4-flash and deepseek-v4-pro — those two stay on the
-                // text-only builder. DeepSeek's own announcement (news260821) shipped a
-                // THIRD, vision-capable model the same API now accepts images for:
-                // deepseek-v4-flash-vision-exp ("Supports mixed text + image input").
-                // Gated on the exact model string, not the provider, so the two confirmed
-                // text-only models can never accidentally get an image_url they'd 400 on.
-                let msgs = if c.model == "deepseek-v4-flash-vision-exp" {
-                    build_openai(user_text, screenshot_b64, state_summary, &conversation, expect)
-                } else {
-                    build_deepseek(user_text, screenshot_b64, state_summary, &conversation, expect)
-                };
-                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
-            }
-            Some(ApiClient::OpenAI(c)) | Some(ApiClient::Qwen(c)) | Some(ApiClient::Custom(c)) => {
-                // OpenAI (api.openai.com) and Qwen (DashScope) are both OpenAI-compat
-                // vision endpoints — they accept image_url and need the screenshot.
-                let msgs =
-                    build_openai(user_text, screenshot_b64, state_summary, &conversation, expect);
-                c.send_message(msgs, None, &mut on_chunk).await.map_err(redact::request_urls)?
-            }
-            Some(ApiClient::Managed(c)) => {
-                c.ensure_token().await.map_err(redact::request_urls)?;
-                let msgs =
-                    build_managed(user_text, screenshot_b64, state_summary, &conversation, expect);
-                c.send_message(msgs, &mut on_chunk).await.map_err(redact::request_urls)?
-            }
-            None => {
-                bail!(
-                    "No API client configured for provider '{}'",
-                    self.config.api_provider
-                );
+        // A stream that stalls mid-answer is sent once more (streaming::STREAM_IDLE): the
+        // callback is told to drop what it showed, and a second stall reaches the panel as
+        // `stream_stalled`. The stalled attempt's tokens are not counted; it reported none.
+        let mut stalls = 0u8;
+        let result = loop {
+            let sent = match &mut self.client {
+                Some(ApiClient::Anthropic(c)) => {
+                    let msgs = build_anthropic(user_text, screenshot_b64, state_summary, &conversation);
+                    c.send_message(msgs, None, &mut on_chunk).await
+                }
+                Some(ApiClient::Gemini(c)) => {
+                    let msgs = build_gemini(user_text, screenshot_b64, state_summary, &conversation);
+                    c.send_message(msgs, None, &mut on_chunk).await
+                }
+                Some(ApiClient::Ollama(c)) => {
+                    let msgs =
+                        build_ollama(user_text, screenshot_b64, state_summary, &conversation, expect);
+                    c.send_message(msgs, None, &mut on_chunk).await
+                }
+                Some(ApiClient::DeepSeek(c)) => {
+                    // CONFIRMED 2026-05-24 (reconfirmed 2026-07-09): api.deepseek.com rejects
+                    // image_url with HTTP 400 ("unknown variant `image_url`, expected `text`")
+                    // for deepseek-v4-flash and deepseek-v4-pro — those two stay on the
+                    // text-only builder. DeepSeek's own announcement (news260821) shipped a
+                    // THIRD, vision-capable model the same API now accepts images for:
+                    // deepseek-v4-flash-vision-exp ("Supports mixed text + image input").
+                    // Gated on the exact model string, not the provider, so the two confirmed
+                    // text-only models can never accidentally get an image_url they'd 400 on.
+                    let msgs = if c.model == "deepseek-v4-flash-vision-exp" {
+                        build_openai(user_text, screenshot_b64, state_summary, &conversation, expect)
+                    } else {
+                        build_deepseek(user_text, screenshot_b64, state_summary, &conversation, expect)
+                    };
+                    c.send_message(msgs, None, &mut on_chunk).await
+                }
+                Some(ApiClient::OpenAI(c)) | Some(ApiClient::Qwen(c)) | Some(ApiClient::Custom(c)) => {
+                    // OpenAI (api.openai.com) and Qwen (DashScope) are both OpenAI-compat
+                    // vision endpoints — they accept image_url and need the screenshot.
+                    let msgs =
+                        build_openai(user_text, screenshot_b64, state_summary, &conversation, expect);
+                    c.send_message(msgs, None, &mut on_chunk).await
+                }
+                Some(ApiClient::Managed(c)) => {
+                    c.ensure_token().await.map_err(redact::request_urls)?;
+                    let msgs =
+                        build_managed(user_text, screenshot_b64, state_summary, &conversation, expect);
+                    c.send_message(msgs, &mut on_chunk).await
+                }
+                None => {
+                    bail!(
+                        "No API client configured for provider '{}'",
+                        self.config.api_provider
+                    );
+                }
+            };
+            match sent {
+                Err(e) if stalls == 0 && e.is::<crate::ai::streaming::StreamStalled>() => {
+                    stalls += 1;
+                    log::warn!("[stream] stalled mid-answer; sending the request once more");
+                    on_chunk("", crate::ai::streaming::STREAM_RESET);
+                }
+                // No request URL reaches the screen through an error (redact.rs).
+                Err(e) => return Err(redact::request_urls(e)),
+                Ok(v) => break v,
             }
         };
 

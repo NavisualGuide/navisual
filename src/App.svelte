@@ -2919,6 +2919,7 @@ See the LICENSE file in the root of this repository for complete details.
     free_trial_exhausted: "err.freeTrialExhausted",
     insufficient_coins: "err.insufficientCoins",
     export_disabled: "err.exportDisabled",
+    stream_stalled: "err.streamStalled",
   };
   // Nothing was open to guide. Not an error to report -- a scope to offer. One helper so
   // the three callers cannot drift (rule 18); each passes what to re-run afterwards.
@@ -3676,6 +3677,14 @@ See the LICENSE file in the root of this repository for complete details.
         // Live step counter: >1 means later steps are already streaming past —
         // show "Step 1 of ~N" instead of discarding that signal until completion.
         streamStepsSeen = event.payload.steps_seen ?? 0;
+      }
+    });
+    // The request stalled mid-answer and is being sent again: drop the half-streamed text
+    // so the retry's answer does not land after it.
+    listen("stream_reset", () => {
+      if (phase === "thinking" || phase === "guiding") {
+        currentInstruction = "";
+        streamStepsSeen = 0;
       }
     });
 

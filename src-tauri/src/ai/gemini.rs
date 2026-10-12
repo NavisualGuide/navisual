@@ -256,7 +256,6 @@ impl GeminiClient {
         let mut zooms = 0usize;
 
         use eventsource_stream::Eventsource;
-        use futures_util::StreamExt;
 
         let (accumulated_json, raw_text) = loop {
             let zoom_open = !look_names.is_empty() && zooms < crate::ai::inspect::MAX_INSPECTS;
@@ -316,7 +315,13 @@ impl GeminiClient {
             let mut inspect_id: Option<Value> = None;
             let mut inspect_name = String::new();
 
-            while let Some(event_result) = stream.next().await {
+            while let Some(event_result) = crate::ai::streaming::next_or_stall(
+                &mut stream,
+                !accumulated_json.is_empty() || !raw_text.is_empty(),
+                "Gemini",
+            )
+            .await?
+            {
                 let event = event_result?;
 
                 // Gemini sends data events

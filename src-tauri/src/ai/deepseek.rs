@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use futures_util::StreamExt;
 use reqwest::{header, Client};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -380,7 +379,9 @@ impl DeepSeekClient {
         let mut usage_logged = false;
 
         let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
+        while let Some(chunk_result) =
+            crate::ai::streaming::next_or_stall(&mut stream, !r.arguments.is_empty(), &self.name).await?
+        {
             let chunk = chunk_result?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -541,7 +542,9 @@ impl DeepSeekClient {
         let mut line_buf = String::new();
 
         let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
+        while let Some(chunk_result) =
+            crate::ai::streaming::next_or_stall(&mut stream, !accumulated_text.is_empty(), &self.name).await?
+        {
             let chunk = chunk_result?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 

@@ -608,5 +608,6 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "msg.noTargetWindow": "沒有開啟的程式視窗，因此沒有可檢視的內容。",
   "err.freeTrialExhausted": "免費次數已用完。",
   "err.insufficientCoins": "金幣不足，無法使用該品質層級。請購買後繼續。",
+  "err.streamStalled": "AI 回答到一半停住了，連續兩次。請再試一次。",
   "err.exportDisabled": "工作階段匯出已關閉。請在「設定 \u2192 開發者」中開啟。",
 };

@@ -4785,6 +4785,18 @@ async fn guide_inner(
         std::sync::Arc::new(parking_lot::Mutex::new(None));
     let stale_post_setter = stale_post.clone();
     let on_chunk = move |chunk: &str, steps_seen: usize| {
+        // The request stalled mid-answer and is being sent again (streaming::STREAM_RESET):
+        // what streamed so far is void, in the panel and in the caption.
+        if steps_seen == crate::ai::streaming::STREAM_RESET {
+            streamed.clear();
+            let _ = app_clone.emit("stream_reset", ());
+            if let Ok(update) =
+                overlay::make_update(overlay::OverlayKind::Subtitle, None, Some(String::new()))
+            {
+                let _ = overlay::emit_update(&app_clone, update);
+            }
+            return;
+        }
         if !primed {
             primed = true;
             *ttft_setter.lock() = Some(std::time::Instant::now());
@@ -6104,6 +6116,18 @@ async fn send_correction_inner(
         std::sync::Arc::new(parking_lot::Mutex::new(None));
     let stale_post_setter = stale_post.clone();
     let on_chunk = move |chunk: &str, steps_seen: usize| {
+        // The request stalled mid-answer and is being sent again (streaming::STREAM_RESET):
+        // what streamed so far is void, in the panel and in the caption.
+        if steps_seen == crate::ai::streaming::STREAM_RESET {
+            streamed.clear();
+            let _ = app_clone.emit("stream_reset", ());
+            if let Ok(update) =
+                overlay::make_update(overlay::OverlayKind::Subtitle, None, Some(String::new()))
+            {
+                let _ = overlay::emit_update(&app_clone, update);
+            }
+            return;
+        }
         if !primed {
             primed = true;
             *ttft_setter.lock() = Some(std::time::Instant::now());
