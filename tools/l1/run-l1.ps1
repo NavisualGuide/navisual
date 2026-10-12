@@ -247,41 +247,62 @@ function Invoke-L1Run($task, [int]$rep) {
         $a = Get-StepActions $s
         $acted = $false
         $tw = Get-TargetWindow $tinfo
+        $needsTarget = @($a.seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0
         if ($a.unsupported) { Write-L1 "cannot follow: $($a.unsupported)" }
-        elseif ($a.click) {
-            $x = $a.click[0]; $y = $a.click[1]
-            if ($task.misclick_at -and -not $misclicked -and ($clicks + 1) -eq [int]$task.misclick_at) {
-                $b = $s.located.bbox
-                $x = [int]($b.x + $b.width + 30); $misclicked = $true
-                Write-L1 "planted misclick at ($x,$y) instead of the target"
-            }
-            Click-Point $x $y -Button $a.button -Double:$a.double
-            $clicks++; $acted = $true
-            Write-L1 "click ($x,$y) $($a.button)$(if ($a.double) {' double'})"
+        elseif ($a.scrollOnly -and $tw) {
+            if ($a.click) { $sx = $a.click[0]; $sy = $a.click[1] } else { $r = Get-WindowRect $tw.Hwnd; $sx = [int](($r.Left + $r.Right) / 2); $sy = [int](($r.Top + $r.Bottom) / 2) }
+            Scroll-At $sx $sy $a.scroll
+            Write-L1 "scroll $($a.scroll) at ($sx,$sy)"; $acted = $true
         }
-        if (-not $a.unsupported -and -not $a.click -and $a.scroll -ne 0 -and $tw) {
-            $r = Get-WindowRect $tw.Hwnd
-            Scroll-At ([int](($r.Left + $r.Right) / 2)) ([int](($r.Top + $r.Bottom) / 2)) $a.scroll
-            Write-L1 "scroll $($a.scroll) over the app"; $acted = $true
+        elseif ($a.named -and -not $a.click -and ($needsTarget -or $a.seq.Count -eq 0)) {
+            # The step names a control the locator did not find. A follower acts on the pointer, so it
+            # cannot click it or type into it -- pasting at the cursor instead put "20" into the
+            # document text on the first live run (2026-10-11).
+            Write-L1 "target '$($s.target_text)' not located; nothing to act on"
         }
-        if (-not $a.unsupported -and ($a.paste -or $a.text -or $a.keys.Count -gt 0)) {
-            if (-not $a.click -and $tw) {
+        else {
+            $before = @(); $after = @($a.seq)
+            if ($a.click) { $before = @($a.seq | Where-Object { $_.pos -lt $a.clickPos }); $after = @($a.seq | Where-Object { $_.pos -ge $a.clickPos }) }
+            if ($tw -and ($before.Count -gt 0 -or (-not $a.click -and $after.Count -gt 0))) {
                 # Keys go to the foreground window. A dialog of the task app is fine; the panel
                 # (after a typed reply) or anything else is not.
                 $fgH = [L1W]::GetForegroundWindow()
                 $fgPid = [uint32]0
                 [L1W]::GetWindowThreadProcessId($fgH, [ref]$fgPid) | Out-Null
                 if ($fgH -ne $tw.Hwnd -and ($fgPid -ne $targetPid -or $fgPid -eq $navPid)) { Focus-ByTitleBar $tw.Hwnd | Out-Null; Write-L1 "refocused the app" }
+                Start-Sleep -Milliseconds 300
             }
-            Start-Sleep -Milliseconds 400
-            if ($a.paste) { Set-Clipboard -Value $a.paste; Send-Combo 'Ctrl+V' | Out-Null; Write-L1 "paste '$($a.paste)'"; $acted = $true }
-            elseif ($a.text) { Send-Text $a.text; Write-L1 "type '$($a.text)'"; $acted = $true }
-            foreach ($k in $a.keys) { if (Send-Combo $k) { Write-L1 "keys $k"; $acted = $true } else { Write-L1 "keys not understood: $k" } }
+            foreach ($t in $before) {
+                if ($t.kind -eq 'paste') { Set-Clipboard -Value $t.value; Send-Combo 'Ctrl+V' | Out-Null; Write-L1 "paste '$($t.value)'" }
+                elseif ($t.kind -eq 'text') { Send-Text $t.value; Write-L1 "type '$($t.value)'" }
+                elseif (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
+                $acted = $true; Start-Sleep -Milliseconds 250
+            }
+            if ($a.click) {
+                $x = $a.click[0]; $y = $a.click[1]
+                if ($task.misclick_at -and -not $misclicked -and ($clicks + 1) -eq [int]$task.misclick_at) {
+                    $b = $s.located.bbox
+                    $x = [int]($b.x + $b.width + 30); $misclicked = $true
+                    Write-L1 "planted misclick at ($x,$y) instead of the target"
+                }
+                Click-Point $x $y -Button $a.button -Double:$a.double
+                $clicks++; $acted = $true
+                Write-L1 "click ($x,$y) $($a.button)$(if ($a.double) {' double'})"
+                Start-Sleep -Milliseconds 400
+            }
+            foreach ($t in $after) {
+                if ($t.kind -eq 'paste') { Set-Clipboard -Value $t.value; Send-Combo 'Ctrl+V' | Out-Null; Write-L1 "paste '$($t.value)'" }
+                elseif ($t.kind -eq 'text') { Send-Text $t.value; Write-L1 "type '$($t.value)'" }
+                elseif (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
+                $acted = $true; Start-Sleep -Milliseconds 250
+            }
         }
         if (-not $acted) {
             $cantFind++
             if ($cantFind -gt 2) { $outcome = 'stuck'; break }
-            Write-L1 ("persona: can't find " + (Send-PanelText $navPid "I can't find that on my screen."))
+            $say = "I can't find that on my screen."
+            if ($s.target_text) { $say = "I can't find `"$($s.target_text)`" on my screen." }
+            Write-L1 ("persona: '$say' " + (Send-PanelText $navPid $say))
             continue
         }
         $steps++

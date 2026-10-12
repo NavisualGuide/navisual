@@ -299,7 +299,7 @@ function Wait-FeedLine([string]$path, [int]$afterCount, [int]$timeoutSec) {
 
 function Get-StepActions($step) {
     $ins = [string]$step.instruction
-    $a = [ordered]@{ click = $null; button = 'left'; double = $false; text = $null; paste = $null; keys = @(); scroll = 0; unsupported = $null }
+    $a = [ordered]@{ click = $null; button = 'left'; double = $false; seq = @(); scroll = 0; scrollOnly = $false; unsupported = $null; clickPos = 0; named = $false }
     if ($step.located -and $step.located.bbox) {
         $b = $step.located.bbox
         $a.click = @([int]($b.x + $b.width / 2), [int]($b.y + $b.height / 2))
@@ -307,15 +307,70 @@ function Get-StepActions($step) {
     if ($ins -match '(?i)right[- ]click') { $a.button = 'right' }
     if ($ins -match '(?i)double[- ]click') { $a.double = $true }
     if ($ins -match '(?i)\bdrag\b') { $a.unsupported = 'drag' }
-    if ($ins -match '(?i)\bscroll\s+(?:back\s+)?(down|up)') { if ($Matches[1] -ieq 'down') { $a.scroll = -5 } else { $a.scroll = 5 } }
-    if ($step.clipboard) { $a.paste = [string]$step.clipboard }
-    elseif ($ins -match '(?i)\b(?:type|enter|write)\s+(?:in\s+)?["\u201C\u2018'']([^"\u201D\u2019'']{1,200})["\u201D\u2019'']') { $a.text = $Matches[1] }
-    # Key combinations named in the instruction: Ctrl+S, Alt+F4, Shift+Enter, and named keys after a verb.
+    if ($ins -match '(?i)\bscroll\s+(?:[a-z]+\s+){0,2}?(down|up)\b') { if ($Matches[1] -ieq 'down') { $a.scroll = -5 } else { $a.scroll = 5 } }
+    # "Scroll down over the report" with a pointer on the report: the act is the scroll, not a click.
+    if ($a.scroll -ne 0 -and $ins -notmatch '(?i)\b(click|select|choose|tick|double-click)\b') { $a.scrollOnly = $true }
+    # Keys and text, in the order the instruction gives them ("press G, then Z, type 2, press Enter").
     $mods = '(?:ctrl|control|alt|shift|win)'
     $key = '(?:f[0-9]{1,2}|enter|return|tab|esc|escape|delete|del|backspace|home|end|space|up|down|left|right|page ?up|page ?down|[a-z0-9`=\-])'
-    foreach ($m in [regex]::Matches($ins, "(?i)\b$mods(?:\s*\+\s*$mods)*\s*\+\s*$key\b")) { $a.keys += ($m.Value -replace '\s', '') }
-    if ($a.keys.Count -eq 0) {
-        foreach ($m in [regex]::Matches($ins, "(?i)\b(?:press|hit|tap)\s+(?:the\s+)?($key)(?:\s+key)?\b")) { $a.keys += $m.Groups[1].Value }
+    $combo = '(?<combo>\b' + $mods + '(?:\s*\+\s*' + $mods + ')*\s*\+\s*' + $key + '\b)'
+    $press = '(?<press>\b(?:press|hit|tap)\s+(?:the\s+)?(?<pk>' + $key + ')(?:\s+key)?\b)'
+    $then = '(?<then>\bthen\s+(?:press\s+)?(?<tk>(?-i:[A-Z]))\b)'
+    $named = '(?:f[0-9]{1,2}|enter|tab|esc|escape|delete|backspace|home|end|space|page ?up|page ?down)'
+    $with = '(?<with>\b(?:with|using)\s+(?:the\s+)?(?<wk>' + $named + ')(?:\s+key)?\b)'
+    $type = '(?<type>\b(?:type|enter|paste|write)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
+    # Ribbon key tips, "Alt+JH" or "Alt, J, H": Alt alone, then each letter in turn.
+    $tips = '(?<tips>\balt\s*(?:\+|,)\s*(?<tl>[a-z0-9](?:\s*,\s*[a-z0-9]|[a-z0-9]){1,3})\b)'
+    $seq = New-Object System.Collections.ArrayList
+    foreach ($m in [regex]::Matches($ins, '(?i)' + $tips + '|' + $combo + '|' + $press + '|' + $then + '|' + $with + '|' + $type)) {
+        $pos = $m.Index
+        if ($m.Groups['tips'].Success) {
+            $letters = ($m.Groups['tl'].Value -replace '[\s,]', '')
+            if ($letters -match '(?i)^(f[0-9]{1,2}|tab|esc|enter|space|home|end|up|down|del)$') {
+                # Alt+F4, Alt+Tab: a chord, not key tips.
+                [void]$seq.Add(@{ kind = 'keys'; value = "Alt+$letters"; pos = $pos })
+            } else {
+                [void]$seq.Add(@{ kind = 'keys'; value = 'Alt'; pos = $pos })
+                foreach ($ch in $letters.ToCharArray()) { [void]$seq.Add(@{ kind = 'keys'; value = [string]$ch; pos = $pos }) }
+            }
+        }
+        elseif ($m.Groups['combo'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = ($m.Groups['combo'].Value -replace '\s', ''); pos = $pos }) }
+        elseif ($m.Groups['press'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = $m.Groups['pk'].Value; pos = $pos }) }
+        elseif ($m.Groups['then'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = $m.Groups['tk'].Value; pos = $pos }) }
+        elseif ($m.Groups['with'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = $m.Groups['wk'].Value; pos = $pos }) }
+        elseif ($m.Groups['type'].Success) {
+            $t = $m.Groups['tq'].Value; if (-not $t) { $t = $m.Groups['tn'].Value }
+            [void]$seq.Add(@{ kind = 'text'; value = $t; pos = $pos })
+        }
     }
+    # Where the click falls among them: where the instruction names the target, else at its first
+    # click verb, else first. "Select the title with Home, then Shift+End. Click the Font Size box,
+    # replace its value with 20" -- the keys come before the click (live, 2026-10-11).
+    $clickPos = 0
+    $tt = [string]$step.target_text
+    if ($tt -and $ins.IndexOf($tt, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $clickPos = $ins.IndexOf($tt, [System.StringComparison]::OrdinalIgnoreCase) }
+    elseif ($ins -match '(?i)\b(click|select|choose|tick|open|double-click|right-click)\b') { $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) }
+    $a.clickPos = $clickPos
+    $a.named = [bool]$tt
+    # Rule 11 puts any text to type on the clipboard: the first "type ..." pastes it; with no such
+    # verb, the clipboard is pasted right after the click.
+    if ($step.clipboard) {
+        $first = $null
+        foreach ($t in $seq) { if ($t.kind -eq 'text') { $first = $t; break } }
+        if ($first) { $first.kind = 'paste'; $first.value = [string]$step.clipboard }
+        else {
+            $pp = $clickPos + 1
+            if ($ins -match '(?i)\b(paste|type)\b') { $pp = $ins.IndexOf($Matches[1], [System.StringComparison]::OrdinalIgnoreCase) }
+            [void]$seq.Add(@{ kind = 'paste'; value = [string]$step.clipboard; pos = $pp })
+        }
+    }
+    # "Enter <text> in the Subject field": the text goes into the target, so after the click on it.
+    foreach ($t in $seq) {
+        if ($t.kind -in 'paste', 'text' -and $t.pos -lt $clickPos) {
+            $between = $ins.Substring($t.pos, $clickPos - $t.pos)
+            if ($between -match '(?i)\b(in|into|to)\s+(the\s+)?[^.;]*$') { $t.pos = $clickPos + 0.5 }
+        }
+    }
+    $a.seq = @($seq | Sort-Object { $_.pos })
     return [pscustomobject]$a
 }
