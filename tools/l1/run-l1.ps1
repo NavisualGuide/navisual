@@ -288,7 +288,7 @@ function Invoke-L1Run($task, [int]$rep) {
             Scroll-At $sx $sy $a.scroll
             Write-L1 "scroll $($a.scroll) at ($sx,$sy)"; $acted = $true
         }
-        elseif ($a.named -and -not $a.click -and -not $a.pointerOnly -and ($needsTarget -or $a.seq.Count -eq 0)) {
+        elseif (($a.named -or $a.clickWithoutPointer) -and -not $a.click -and -not $a.pointerOnly -and ($needsTarget -or $a.seq.Count -eq 0)) {
             # The step names a control the locator did not find. A follower acts on the pointer, so it
             # cannot click it or type into it -- pasting at the cursor instead put "20" into the
             # document text on the first live run (2026-10-11).

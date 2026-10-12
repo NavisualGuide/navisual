@@ -494,6 +494,10 @@ function Get-StepActions($step) {
     $intoTarget = (@($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0) -and $tt -and ($ins.IndexOf($tt, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
     $keysOrText = @($seq).Count -gt 0
     if ($a.click -and -not $verb -and -not $intoTarget -and $keysOrText) { $a.click = $null; $a.pointerOnly = $true }
+    # The opposite case: the step says to click something and there is no pointer at all. Text meant
+    # for that thing must not go wherever focus happens to be ("Click in the blank rectangle to the
+    # right of Entries, then paste" with no pointer pasted Yes/No into the focused control, trial).
+    $a.clickWithoutPointer = (-not $step.located) -and $verb
     # The select-all sits just before the paste it serves, wherever that paste ended up.
     foreach ($t in $seq) { if ($t.before) { $t.pos = $t.before.pos - 0.001 } }
     $a.seq = @($seq | Sort-Object { $_.pos })
