@@ -336,9 +336,9 @@ function Invoke-L1Run($task, [int]$rep) {
                     $x = [int]($b.x + $b.width + 30); $misclicked = $true
                     Write-L1 "planted misclick at ($x,$y) instead of the target"
                 }
-                Click-Point $x $y -Button $a.button -Double:$a.double
+                Click-Point $x $y -Button $a.button -Double:$a.double -Modifier ([string]$a.clickMod)
                 $clicks++; $acted = $true
-                Write-L1 "click ($x,$y) $($a.button)$(if ($a.double) {' double'})"
+                Write-L1 "click ($x,$y) $($a.button)$(if ($a.double) {' double'})$(if ($a.clickMod) {" with $($a.clickMod)"})"
                 Start-Sleep -Milliseconds 400
             }
             foreach ($t in $after) {

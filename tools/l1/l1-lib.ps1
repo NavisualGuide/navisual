@@ -159,7 +159,9 @@ function Close-WindowFully([IntPtr]$hwnd, [int]$tries = 6) {
 # ---------------------------------------------------------------------------------------------
 # Mouse and keyboard
 
-function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double) {
+function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double, [string]$Modifier = '') {
+    $modVk = 0
+    if ($Modifier -eq 'ctrl') { $modVk = 0x11 } elseif ($Modifier -eq 'shift') { $modVk = 0x10 }
     # Travel there as a hand does rather than jump: GTK and Paint keep a submenu open only while the
     # pointer's path stays on its way into it (trial, 2026-10-11: GIMP's Flip Horizontally and
     # Paint's PNG picture clicks landed on closed menus).
@@ -177,12 +179,14 @@ function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double
     $down = 0x2; $up = 0x4
     if ($Button -eq 'right') { $down = 0x8; $up = 0x10 }
     $n = 1; if ($Double) { $n = 2 }
+    if ($modVk) { [L1W]::keybd_event([byte]$modVk, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 60 }
     for ($i = 0; $i -lt $n; $i++) {
         [L1W]::mouse_event($down, 0, 0, 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 60
         [L1W]::mouse_event($up, 0, 0, 0, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 90
     }
+    if ($modVk) { Start-Sleep -Milliseconds 60; [L1W]::keybd_event([byte]$modVk, 0, 2, [IntPtr]::Zero) }
 }
 
 $global:L1VK = @{
@@ -413,7 +417,7 @@ function Get-StepActions($step) {
     $key = '(?:f[0-9]{1,2}|enter|return|tab|esc|escape|delete|del|backspace|home|end|space|up|down|left|right|page ?up|page ?down|[a-z0-9`=\-])'
     $combo = '(?<combo>\b' + $mods + '(?:\s*\+\s*' + $mods + ')*\s*\+\s*' + $key + '\b)'
     # "press G, Z, 2, Enter": a run of keys after one verb, each pressed in turn.
-    $press = '(?<press>\b(?:press|hit|tap)\s+(?:the\s+)?(?<pk>' + $key + '(?:\s*(?:,\s*(?:and\s+|then\s+)?|\s+then\s+|\s+and\s+)' + $key + ')*)(?:\s+key)?\b)'
+    $press = '(?<press>\b(?:press|presses|pressing|hit|tap)\s+(?:the\s+)?(?<pk>' + $key + '(?:\s*(?:,\s*(?:and\s+|then\s+)?|\s+then\s+|\s+and\s+)' + $key + ')*)(?:\s+key)?\b)'
     # "press G, then Z": a lone capital after "then" is a key. Not "then press G" -- that belongs to
     # the press run, which would otherwise lose everything after G.
     # Only where the letter stands alone as a key ("then Z," / "then Z to"): "then I'll guide you"
@@ -422,13 +426,23 @@ function Get-StepActions($step) {
     $named = '(?:f[0-9]{1,2}|enter|tab|esc|escape|delete|backspace|home|end|space|page ?up|page ?down)'
     $with = '(?<with>\b(?:with|using)\s+(?:the\s+)?(?<wk>' + $named + ')(?:\s+key)?\b)'
     $type = '(?<type>\b(?:type|enter|paste|write)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
+    # "hold Shift and press End", "hold down Ctrl while you press A": one chord. (Read as two keys,
+    # Shift+End once became Home, End -- nothing selected, and the model asked again, 2026-10-12.)
+    $hold = '(?<hold>\bhold(?:ing)?\s+(?:down\s+)?(?<hm>shift|ctrl|control|alt)\s*,?\s+(?:and|then|while\s+you)?\s*(?:press(?:ing)?|hit|tap)\s+(?:the\s+)?(?<hk>' + $key + '))'
     # Ribbon key tips, "Alt+JH" or "Alt, J, H": Alt alone, then each letter in turn.
     # Key tips are capitals: "Alt+JH" as a run, or single letters after "Alt," joined by commas, "then"
     # or "and" ("Press Alt, then J and H"). Lower-case runs are words: "Alt, then" once pressed T, H, E, N.
     $tips = '(?<tips>\balt\s*\+\s*(?<tl>(?-i:[A-Z0-9]{2,4}))\b|\balt\s*,\s*(?:then\s+)?(?<tl>(?-i:[A-Z0-9])(?:\s*(?:,\s*(?:then\s+|and\s+)?|,?\s+then\s+|,?\s+and\s+)(?-i:[A-Z0-9])){1,3})\b)'
     $seq = New-Object System.Collections.ArrayList
-    foreach ($m in [regex]::Matches($ins, '(?i)' + $tips + '|' + $combo + '|' + $press + '|' + $then + '|' + $with + '|' + $type)) {
+    # "replace 14 with 20": the text after "with" is what to type.
+    $repl = '(?<repl>\breplace\b[^.]{0,60}?\bwith\s+(?:["\u201C\u2018''](?<rq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<rn>-?[0-9]+(?:\.[0-9]+)?)\b))'
+    foreach ($m in [regex]::Matches($ins, '(?i)' + $hold + '|' + $tips + '|' + $combo + '|' + $press + '|' + $then + '|' + $with + '|' + $repl + '|' + $type)) {
         $pos = $m.Index
+        if ($m.Groups['hold'].Success) { [void]$seq.Add(@{ kind = 'keys'; value = ($m.Groups['hm'].Value + '+' + $m.Groups['hk'].Value); pos = $pos }); continue }
+        if ($m.Groups['repl'].Success) {
+            $t = $m.Groups['rq'].Value; if (-not $t) { $t = $m.Groups['rn'].Value }
+            [void]$seq.Add(@{ kind = 'text'; value = $t; pos = $pos + $m.Value.Length - $t.Length }); continue
+        }
         if ($m.Groups['tips'].Success) {
             $letters = ($m.Groups['tl'].Value -replace '(?i)[\s,]|\bthen\b|\band\b', '')
             if ($letters -match '(?i)^(f[0-9]{1,2}|tab|esc|enter|space|home|end|up|down|del)$') {
@@ -460,7 +474,10 @@ function Get-StepActions($step) {
     # replace its value with 20" -- the keys come before the click (live, 2026-10-11).
     $clickPos = 0
     $tt = [string]$step.target_text
-    if ($tt -and $ins.IndexOf($tt, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $clickPos = $ins.IndexOf($tt, [System.StringComparison]::OrdinalIgnoreCase) }
+    $ttWords = @(($tt -split '[^A-Za-z0-9]+') | Where-Object { $_ })
+    $ttRe = $null
+    if ($ttWords.Count -gt 0) { $ttRe = '(?i)\b' + (($ttWords | ForEach-Object { [regex]::Escape($_) }) -join '\W+') + '\b' }
+    if ($ttRe -and $ins -match $ttRe) { $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) }
     elseif ($ins -match '(?i)\b(click|select|choose|tick|open|double-click|right-click)\b') { $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) }
     $a.clickPos = $clickPos
     $a.named = [bool]$tt
@@ -481,10 +498,11 @@ function Get-StepActions($step) {
     }
     # "Replace the text in the File name field with small.png": a person selects what is there first.
     # Clicked into, the field holds a caret and pasting appends (garden.pngsmall.png, trial).
-    if (@($seq | Where-Object { $_.kind -eq 'paste' }).Count -gt 0 -and
+    $clickedHere = [bool]$step.located
+    if ($clickedHere -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0 -and
         $ins -match '(?i)\b(replace|select all|overwrite)\b' -and $ins -match '(?i)\b(field|box|name|value|text)\b' -and
         @($seq | Where-Object { $_.kind -eq 'keys' -and $_.value -match '(?i)^ctrl\+a$' }).Count -eq 0) {
-        $pt = $seq | Where-Object { $_.kind -eq 'paste' } | Select-Object -First 1
+        $pt = $seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { $_.pos } | Select-Object -First 1
         [void]$seq.Add(@{ kind = 'keys'; value = 'Ctrl+A'; pos = -1; before = $pt })
     }
     # "Enter <text> in the Subject field": the text goes into the target, so after the click on it.
@@ -512,16 +530,36 @@ function Get-StepActions($step) {
     # Ctrl+A to select all three" with the pointer on one file got a click after the select-all, and
     # the selection was gone (trial, 2026-10-11). "to select" is a purpose, not an order.
     $verb = $ins -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|point to)\b'
+    # Text to type while the pointer is on an input: a person puts it where the pointer is. ("Press
+    # Ctrl+A, paste 20, then press Enter" with the pointer on Font Size: not clicking there let the
+    # select-all take the whole document, 2026-10-12.) Not for a pointer on anything else: Blender's
+    # "type 2" after G, Z with the pointer on the Cylinder row is input to the move, not to the row.
+    $inputTarget = ([string]$step.target_role -in 'Textbox', 'Combobox') -or ($tt -match '(?i)\b(box|field|size|search|name)\b')
+    $typesHere = @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0
     # Typing into the control pointed at: "in/into the <target>" or "the <target> box/field". Merely
     # naming it is not enough -- "The cylinder is already added. Press G, then Z, type 2" clicked the
     # Cylinder row, and Blender then sent the keys to the outliner (trial, 2026-10-11).
+    # Compared as words only -- case, spaces, hyphens and punctuation aside: "the font-size box" is
+    # the target "Font Size" (missed once, and the paste meant for it replaced the document).
     $intoTarget = $false
     if ($tt -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0) {
-        $e = [regex]::Escape($tt)
-        $intoTarget = ($ins -match "(?i)\b(?:in|into|to)\s+(?:the\s+)?(?:empty\s+|blank\s+|focused\s+)?$e") -or ($ins -match "(?i)$e\W{0,3}\s+(?:box|field)\b")
+        $nIns = ' ' + (($ins.ToLower() -replace '[^a-z0-9]+', ' ').Trim()) + ' '
+        $nT = (($tt.ToLower() -replace '[^a-z0-9]+', ' ').Trim())
+        if ($nT) {
+            $e = [regex]::Escape($nT)
+            $intoTarget = ($nIns -match " (?:in|into|to|use|using) (?:the )?(?:empty |blank |focused )?$e ") -or ($nIns -match " $e (?:box|field|area) ")
+        }
     }
     $keysOrText = @($seq).Count -gt 0
-    if ($a.click -and -not $verb -and -not $intoTarget -and $keysOrText) { $a.click = $null; $a.pointerOnly = $true }
+    if ($a.click -and -not $verb -and -not $intoTarget -and -not ($typesHere -and $inputTarget) -and $keysOrText) { $a.click = $null; $a.pointerOnly = $true }
+    # A select-all the follower added is for the field it clicks. With no click it would select
+    # whatever has focus -- a whole document, once (2026-10-12) -- so it goes.
+    if (-not $a.click) { foreach ($t in @($seq | Where-Object { $_.before })) { [void]$seq.Remove($t) } }
+    # "hold Ctrl and click", "Ctrl+click", "Shift-click": the click goes with the modifier held.
+    $a.clickMod = $null
+    if ($ins -match '(?i)\bhold(?:ing)?\s+(?:down\s+)?(shift|ctrl|control)\b[^.]{0,30}?\bclick' -or $ins -match '(?i)\b(shift|ctrl|control)[- +]click') {
+        $a.clickMod = $Matches[1].ToLower() -replace 'control', 'ctrl'
+    }
     # The opposite case: the step says to click something and there is no pointer at all. Text meant
     # for that thing must not go wherever focus happens to be ("Click in the blank rectangle to the
     # right of Entries, then paste" with no pointer pasted Yes/No into the focused control, trial).
