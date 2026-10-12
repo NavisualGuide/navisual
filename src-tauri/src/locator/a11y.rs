@@ -32,7 +32,7 @@ use windows::Win32::Foundation::{FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetAncestor, GetForegroundWindow, GetTopWindow, GetWindow,
     GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GA_ROOTOWNER,
-    GWL_STYLE, GW_HWNDNEXT, GW_OWNER, WS_CAPTION, WS_POPUP,
+    GWL_STYLE, GW_CHILD, GW_HWNDNEXT, GW_OWNER, WS_CAPTION, WS_POPUP,
 };
 
 /// Chromium/Electron windows build their UIA tree lazily; on a 0-candidate first pass
@@ -957,9 +957,7 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let mut roots: Vec<UIElement> = Vec::new();
     unsafe {
         for popup in collect_owned_popups(hwnd) {
-            if let Ok(el) = automation.element_from_handle(popup.into()) {
-                roots.push(el);
-            }
+            roots.extend(popup_root_elements(&automation, popup));
         }
         if IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
             if let Ok(el) = automation.element_from_handle(hwnd.into()) {
@@ -1251,9 +1249,7 @@ pub fn snapshot_ui_tree(hwnd_raw: usize) -> Result<Vec<super::UiNode>, String> {
     let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
     let mut roots: Vec<UIElement> = Vec::new();
     for popup in collect_owned_popups(hwnd) {
-        if let Ok(el) = automation.element_from_handle(popup.into()) {
-            roots.push(el);
-        }
+        roots.extend(unsafe { popup_root_elements(&automation, popup) });
     }
     if let Ok(el) = automation.element_from_handle(hwnd.into()) {
         roots.push(el);
@@ -1760,6 +1756,56 @@ fn is_targets_popup(owned: bool, owned_by_target: bool, owner_visible: bool, is_
     is_popup && !has_caption
 }
 
+/// Roles ranked below a same-named control: they hold controls and are not what a step asks the
+/// user to click. Wider than `is_container_role`, which removes a candidate outright; this only
+/// orders. A List, Tree or Table stays out: those are targets in their own right ("the Entries box").
+fn ranks_as_container(role: &str) -> bool {
+    matches!(
+        role,
+        "Menu" | "MenuBar" | "ToolBar" | "Pane" | "Window" | "Group" | "Tab" | "StatusBar" | "TitleBar"
+    )
+}
+
+/// The UIA roots for one popup window: its own element, or -- when that element is empty -- the
+/// elements of its visible child windows.
+///
+/// Office's menus and galleries are an empty shell. The popup is a top-level window whose own
+/// element has no children; the items sit on a child window, and UIA parents that child under
+/// the ribbon control that opened the menu. Live 2026-10-12, Excel's open Freeze Panes menu: the
+/// popup's element had 0 descendants and its child window 5 (the three items). The main window's
+/// walk stops one level short of them (13 deep against `SCROLLBAR_SCAN_DEPTH`), so neither root
+/// carried the menu. [Screen Elements] listed only the ribbon button that opened it, the model
+/// asked for that button by id, and each click closed the menu (L1 `xl-freeze`, 1 of 9).
+///
+/// Structural, not by class (rule 16): any popup whose element is empty is read through its
+/// child windows. One `GetFirstChild` per popup; a popup with content keeps its own root.
+unsafe fn popup_root_elements(automation: &UIAutomation, popup: HWND) -> Vec<UIElement> {
+    let Ok(el) = automation.element_from_handle(popup.into()) else {
+        return Vec::new();
+    };
+    let empty = automation
+        .get_raw_view_walker()
+        .map(|w| w.get_first_child(&el).is_err())
+        .unwrap_or(false);
+    if !empty {
+        return vec![el];
+    }
+    let mut roots = Vec::new();
+    let mut child = GetWindow(popup, GW_CHILD).ok();
+    while let Some(c) = child.filter(|c| !c.0.is_null()) {
+        if IsWindowVisible(c).as_bool() {
+            if let Ok(ce) = automation.element_from_handle(c.into()) {
+                roots.push(ce);
+            }
+        }
+        child = GetWindow(c, GW_HWNDNEXT).ok();
+    }
+    if roots.is_empty() {
+        roots.push(el); // nothing better: keep the shell, as before
+    }
+    roots
+}
+
 /// Public entry point. Returns the first element whose accessible name
 /// satisfies the anchored regex and whose role matches (when specified),
 /// plus a trace recording every candidate considered.
@@ -1837,10 +1883,9 @@ pub fn find_element(
             // added as explicit search roots; the main window's subtree walk
             // does not reach them.
             for popup in collect_owned_popups(hwnd) {
-                if let Ok(el) = automation.element_from_handle(popup.into()) {
-                    roots.push(el);
-                    popup_root_count += 1;
-                }
+                let els = popup_root_elements(&automation, popup);
+                popup_root_count += els.len();
+                roots.extend(els);
             }
             if !hwnd.0.is_null() && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
                 if let Ok(el) = automation.element_from_handle(hwnd.into()) {
@@ -2191,7 +2236,10 @@ pub fn find_element(
     // menubar menu, must not outrank the exact "Layers" the target asked for; live
     // Krita wrong-pointer 2026-07-13), then AI-bbox proximity. Both bboxes are
     // already in virtual-desktop physical pixels. The sort is stable, so without a
-    // role or bbox the original pass order is preserved.
+    // role or bbox the original pass order is preserved. Before proximity, a control
+    // outranks a container that carries the same name: Office's open menu is a Menu
+    // named after the button that opened it, around an item of that name, and pass
+    // order put the whole menu first (live 2026-10-12, "Freeze Panes").
     let winner_anchored;
     {
         let desired_role = desired_ct.map(|ct| format!("{ct:?}"));
@@ -2208,6 +2256,7 @@ pub fn find_element(
             a_role_miss
                 .cmp(&b_role_miss)
                 .then_with(|| b_anch.cmp(a_anch)) // anchored (true) first
+                .then_with(|| ranks_as_container(&a.role).cmp(&ranks_as_container(&b.role)))
                 .then_with(|| {
                     let Some((tx, ty)) = ai_center else {
                         return std::cmp::Ordering::Equal;
@@ -3353,13 +3402,51 @@ mod tests {
         let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
         let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
         let roots = super::collect_owned_popups(windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void));
+        let automation = uiautomation::UIAutomation::new().expect("UIAutomation");
+        let elements: usize = roots.iter().map(|&p| unsafe { super::popup_root_elements(&automation, p) }.len()).sum();
         let els = super::enumerate_context_elements(hwnd).expect("enumeration");
         println!(
-            "\n[live] {} popup root(s); {} elements; names: {:?}",
+            "\n[live] {} popup window(s) as {} UIA root(s); {} elements; names: {:?}",
             roots.len(),
+            elements,
             els.len(),
             els.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
         );
+    }
+
+    /// The roles `find_element` compares are `format!("{ct:?}")`; a renamed variant would make
+    /// the container tiebreak silently match nothing.
+    #[test]
+    fn container_roles_are_spelled_as_the_ranking_formats_them() {
+        use uiautomation::controls::ControlType as C;
+        for ct in [C::Menu, C::MenuBar, C::ToolBar, C::Pane, C::Window, C::Group, C::Tab, C::StatusBar, C::TitleBar] {
+            assert!(super::ranks_as_container(&format!("{ct:?}")), "{ct:?}");
+        }
+        for ct in [C::MenuItem, C::ListItem, C::Button, C::List, C::Tree, C::Table, C::Edit, C::Text] {
+            assert!(!super::ranks_as_container(&format!("{ct:?}")), "{ct:?}");
+        }
+    }
+
+    /// Live probe for Pass 1: where `find_element` lands NAVISUAL_LIVE_TARGET in the window whose
+    /// title contains NAVISUAL_LIVE_TITLE -- with a menu open, its item rather than the ribbon
+    /// control of the same name.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_find_element_in_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let target = std::env::var("NAVISUAL_LIVE_TARGET").expect("NAVISUAL_LIVE_TARGET");
+        let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
+        let opts = crate::locator::orchestrator::LocateOptions {
+            target_hwnd: Some(hwnd),
+            a11y_timeout_ms: 8000,
+            ..Default::default()
+        };
+        let (hit, trace) = super::find_element(&target, &opts).expect("find_element");
+        println!("\n[live] '{target}' -> {:?}", hit.map(|h| (h.bbox, h.role)));
+        println!("[live] {} root(s); candidates:", trace.search_roots_count);
+        for c in &trace.candidates {
+            println!("[live]   {} '{}' {:?} selected={} {:?}", c.role, c.name, c.bbox, c.selected, c.reject_reason);
+        }
     }
 
     use super::{build_name_regex, norm_dashes, strip_accelerator, walk_name_matches};
