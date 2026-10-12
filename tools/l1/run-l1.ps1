@@ -195,9 +195,13 @@ Write-L1 "Navisual up (pid $navPid)"
 # reads it and presses "I understand -- continue" before any task; so does the run. (Until
 # 2026-10-11 the follower typed behind it, a state no user is in. The button only sets a flag in
 # the panel's own storage, inside the isolated folder.)
-$root = Get-PanelRoot $navPid
+# The notice renders a few seconds after the window: wait for it, up to 20 s.
 $ack = $null
-if ($root) { $ack = Find-ByType $root 'Button' | Where-Object { $_.Current.Name -like 'I understand*' } | Select-Object -First 1 }
+for ($i = 0; $i -lt 20 -and -not $ack; $i++) {
+    $root = Get-PanelRoot $navPid
+    if ($root) { $ack = Find-ByType $root 'Button' | Where-Object { $_.Current.Name -like 'I understand*' } | Select-Object -First 1 }
+    if (-not $ack) { Start-Sleep -Seconds 1 }
+}
 if ($ack) { Invoke-Element $ack; Start-Sleep -Milliseconds 800; Write-L1 "privacy notice acknowledged" } else { Write-L1 "no privacy notice showing" }
 
 # ---------------------------------------------------------------------------------------------
@@ -384,7 +388,16 @@ try {
                 while (Test-Path $pauseFile) { Start-Sleep -Seconds 5 }
                 Write-L1 "resumed"
             }
-            $row = Invoke-L1Run $task $rep
+            # One run's harness failure is recorded and the pass goes on; it never ends the tier.
+            try { $row = Invoke-L1Run $task $rep }
+            catch {
+                Write-L1 "harness error in $($task.id) r${rep}: $($_.Exception.Message)"
+                $w = Join-Path $runDir "$($task.id)-r$rep"
+                try { Write-L1 ("teardown: " + (Invoke-TaskScript $task 'teardown' $w)) } catch { }
+                $row = [ordered]@{ task = $task.id; rep = $rep; tier = $Tier; provider = $cfg.provider; model = $cfg.model
+                    outcome = 'harness_error'; success = $false; detail = $_.Exception.Message; held_out = [bool]$task.held_out
+                    app_commit = $appCommit; exe_time = $exeTime; run_dir = $runDir; ts = (Get-Date -Format o) }
+            }
             if ($row.est_usd) { $spent += [double]$row.est_usd }
             Add-Content -Path $resultsFile -Value ($row | ConvertTo-Json -Compress) -Encoding UTF8
         }

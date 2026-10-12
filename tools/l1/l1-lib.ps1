@@ -329,10 +329,24 @@ function Send-NextHotkey { Send-Combo 'Ctrl+Backquote' | Out-Null }
 # ---------------------------------------------------------------------------------------------
 # The step feed (NAVISUAL_STEP_FEED): one JSON line per response the panel receives.
 
+# The app appends to the feed while this reads it. Open it shared and retry: a plain ReadAllLines
+# hit the writer's handle mid-append and the exception ended a whole tier of the scored pass
+# (2026-10-11, after 10 of 45 runs). A partial last line is left for the next read.
 function Get-FeedLines([string]$path) {
     if (-not (Test-Path $path)) { return @() }
-    $raw = [System.IO.File]::ReadAllLines($path, [System.Text.Encoding]::UTF8)
-    return @($raw | Where-Object { $_.Trim() -ne '' })
+    for ($i = 0; $i -lt 10; $i++) {
+        try {
+            $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite, Delete')
+            try {
+                $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+                $text = $sr.ReadToEnd()
+            } finally { $fs.Dispose() }
+            $lines = @($text -split "`r?`n" | Where-Object { $_.Trim() -ne '' })
+            if ($lines.Count -gt 0 -and -not $text.EndsWith("`n")) { $lines = @($lines | Select-Object -First ($lines.Count - 1)) }
+            return $lines
+        } catch { Start-Sleep -Milliseconds 100 }
+    }
+    return @()
 }
 
 function Wait-FeedLine([string]$path, [int]$afterCount, [int]$timeoutSec) {
