@@ -367,6 +367,15 @@ try {
     :outer for ($rep = 1; $rep -le $Repeat; $rep++) {
         foreach ($task in $picked) {
             if ($spent -ge $MaxUsd) { Write-L1 ("spend cap reached: {0:N2} of {1:N2} USD; stopping" -f $spent, $MaxUsd); break outer }
+            # Pause between runs while a PAUSE file sits in the run root: the founder may need the
+            # machine. Each run snapshots open windows at its start, so anything opened meanwhile
+            # is protected from teardown.
+            $pauseFile = Join-Path $RunRoot 'PAUSE'
+            if (Test-Path $pauseFile) {
+                Write-L1 "paused ($pauseFile present)"
+                while (Test-Path $pauseFile) { Start-Sleep -Seconds 5 }
+                Write-L1 "resumed"
+            }
             $row = Invoke-L1Run $task $rep
             if ($row.est_usd) { $spent += [double]$row.est_usd }
             Add-Content -Path $resultsFile -Value ($row | ConvertTo-Json -Compress) -Encoding UTF8
