@@ -306,7 +306,7 @@ function Send-PanelText([int]$NavPid, [string]$text) {
     Start-Sleep -Milliseconds 300
     $btn = Find-ByType $root 'Button' | Where-Object {
         $n = $_.Current.Name
-        $n -eq 'Guide me' -or $n -like '*Follow up*' -or $n -eq 'Send' -or $n -like 'Reply*'
+        $n -eq 'Guide me' -or $n -like '*Follow up*' -or $n -like '*Send answer*' -or $n -like '*Send' -or $n -like 'Reply*'
     } | Select-Object -First 1
     if (-not $btn) { return "no send button" }
     $name = $btn.Current.Name
@@ -376,8 +376,9 @@ function Get-StepActions($step) {
         if ($b.width -ge 250 -and $b.width -ge 6 * $b.height) { $cx = [int]($b.x + [math]::Min(60, $b.width * 0.2)) }
         $a.click = @($cx, [int]($b.y + $b.height / 2))
     }
-    if ($ins -match '(?i)right[- ]click') { $a.button = 'right' }
-    if ($ins -match '(?i)double[- ]click') { $a.double = $true }
+    # As verbs only: "in the open right-click menu, point to Compress to..." is not a right-click.
+    if ($ins -match '(?i)\bright[- ]click(?!\s+menu)\b') { $a.button = 'right' }
+    if ($ins -match '(?i)\bdouble[- ]click\b(?!\s+(?:on\s+)?(?:it|the\s+\w+)\s+to\s+rename)') { $a.double = $true }
     # A drag across one target (selecting its text) runs from its left edge to its right; a drag from
     # one thing onto another needs two points the step does not give, so the follower cannot do it.
     $a.dragAcross = $false
@@ -451,6 +452,9 @@ function Get-StepActions($step) {
         else {
             $pp = $clickPos + 1
             if ($ins -match '(?i)\b(paste|type)\b') { $pp = $ins.IndexOf($Matches[1], [System.StringComparison]::OrdinalIgnoreCase) }
+            # "press Ctrl+A, and replace it with colour": the text goes where "with" stands, after the
+            # keys before it (pasting first, then selecting, was the trial's order).
+            elseif ($ins -match '(?i)\breplace\b[^.]*?\bwith\b') { $pp = $Matches[0].Length + $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) - 4 }
             [void]$seq.Add(@{ kind = 'paste'; value = [string]$step.clipboard; pos = $pp })
         }
     }
@@ -469,6 +473,27 @@ function Get-StepActions($step) {
             if ($between -match '(?i)\b(in|into|to)\s+(the\s+)?[^.;]*$') { $t.pos = $clickPos + 0.5 }
         }
     }
+    # Text for a field the step does not point at is not the follower's to type: "enter colour in the
+    # Find box, then enter color in the Replace box" with the pointer on Find put both words into
+    # Find (trial, 2026-10-11). A later text that names a different box or field is skipped.
+    $a.skipped = @()
+    $texts = @($seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { $_.pos })
+    for ($k = 1; $k -lt $texts.Count; $k++) {
+        $tail = $ins.Substring([math]::Min([int]$texts[$k].pos, $ins.Length))
+        if ($tail.Length -gt 90) { $tail = $tail.Substring(0, 90) }
+        if ($tail -match '(?i)\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b' -and (-not $tt -or $Matches[1] -notmatch [regex]::Escape($tt))) {
+            $a.skipped += "$($texts[$k].value) (for the $($Matches[1]) field)"
+            [void]$seq.Remove($texts[$k])
+        }
+    }
+    # A pointer is not an order to click. Click when the instruction asks for one, when it types into
+    # the control it points at, or when it is only keys-free pointing ("Turn on Word wrap"). "Now press
+    # Ctrl+A to select all three" with the pointer on one file got a click after the select-all, and
+    # the selection was gone (trial, 2026-10-11). "to select" is a purpose, not an order.
+    $verb = $ins -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|point to)\b'
+    $intoTarget = (@($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0) -and $tt -and ($ins.IndexOf($tt, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+    $keysOrText = @($seq).Count -gt 0
+    if ($a.click -and -not $verb -and -not $intoTarget -and $keysOrText) { $a.click = $null; $a.pointerOnly = $true }
     # The select-all sits just before the paste it serves, wherever that paste ended up.
     foreach ($t in $seq) { if ($t.before) { $t.pos = $t.before.pos - 0.001 } }
     $a.seq = @($seq | Sort-Object { $_.pos })

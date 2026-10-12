@@ -253,6 +253,10 @@ function Invoke-L1Run($task, [int]$rep) {
 
         if ($s.needs_input) {
             $reply = $task.default_reply
+            # Questions about what the user did or sees get the follower's honest answer: it did what
+            # the step said, at the pointer, and it only knows where the pointer is.
+            if ($s.instruction -match '(?i)\b(did you|have you|were you able)\b') { $reply = 'Yes, I did what the last step said, where the pointer was.' }
+            elseif ($s.instruction -match '(?i)\b(do you see|can you see|is there|are there|which .* do you see)\b') { $reply = "I'm not sure. Please point to it." }
             foreach ($p in @($task.persona)) { if ($p -and $s.instruction -match $p.match) { $reply = $p.reply; break } }
             if (-not $reply) { $reply = 'Whatever is usual is fine.' }
             $replies++
@@ -270,6 +274,8 @@ function Invoke-L1Run($task, [int]$rep) {
         $acted = $false
         $tw = Get-TargetWindow $tinfo
         $needsTarget = @($a.seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0
+        foreach ($sk in @($a.skipped)) { Write-L1 "skipped text $sk -- no pointer on that field" }
+        if ($a.pointerOnly) { Write-L1 "pointer shown, but the step asks for no click" }
         if ($a.unsupported) { Write-L1 "cannot follow: $($a.unsupported)" }
         elseif ($a.dragAcross) {
             $b = $s.located.bbox
@@ -282,7 +288,7 @@ function Invoke-L1Run($task, [int]$rep) {
             Scroll-At $sx $sy $a.scroll
             Write-L1 "scroll $($a.scroll) at ($sx,$sy)"; $acted = $true
         }
-        elseif ($a.named -and -not $a.click -and ($needsTarget -or $a.seq.Count -eq 0)) {
+        elseif ($a.named -and -not $a.click -and -not $a.pointerOnly -and ($needsTarget -or $a.seq.Count -eq 0)) {
             # The step names a control the locator did not find. A follower acts on the pointer, so it
             # cannot click it or type into it -- pasting at the cursor instead put "20" into the
             # document text on the first live run (2026-10-11).
