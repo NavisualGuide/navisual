@@ -412,12 +412,14 @@ function Get-StepActions($step) {
     $with = '(?<with>\b(?:with|using)\s+(?:the\s+)?(?<wk>' + $named + ')(?:\s+key)?\b)'
     $type = '(?<type>\b(?:type|enter|paste|write)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
     # Ribbon key tips, "Alt+JH" or "Alt, J, H": Alt alone, then each letter in turn.
-    $tips = '(?<tips>\balt\s*(?:\+|,)\s*(?<tl>[a-z0-9](?:\s*,\s*[a-z0-9]|[a-z0-9]){1,3})\b)'
+    # Key tips are capitals: "Alt+JH" as a run, or single letters after "Alt," joined by commas, "then"
+    # or "and" ("Press Alt, then J and H"). Lower-case runs are words: "Alt, then" once pressed T, H, E, N.
+    $tips = '(?<tips>\balt\s*\+\s*(?<tl>(?-i:[A-Z0-9]{2,4}))\b|\balt\s*,\s*(?:then\s+)?(?<tl>(?-i:[A-Z0-9])(?:\s*(?:,\s*(?:then\s+|and\s+)?|,?\s+then\s+|,?\s+and\s+)(?-i:[A-Z0-9])){1,3})\b)'
     $seq = New-Object System.Collections.ArrayList
     foreach ($m in [regex]::Matches($ins, '(?i)' + $tips + '|' + $combo + '|' + $press + '|' + $then + '|' + $with + '|' + $type)) {
         $pos = $m.Index
         if ($m.Groups['tips'].Success) {
-            $letters = ($m.Groups['tl'].Value -replace '[\s,]', '')
+            $letters = ($m.Groups['tl'].Value -replace '(?i)[\s,]|\bthen\b|\band\b', '')
             if ($letters -match '(?i)^(f[0-9]{1,2}|tab|esc|enter|space|home|end|up|down|del)$') {
                 # Alt+F4, Alt+Tab: a chord, not key tips.
                 [void]$seq.Add(@{ kind = 'keys'; value = "Alt+$letters"; pos = $pos })
