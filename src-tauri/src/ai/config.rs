@@ -249,6 +249,10 @@ pub struct Config {
     /// 2026-10-10 S1-UI measurement: luna 22 -> 26 of 30 on the already-on items, flash and terra
     /// at the ceiling, cost unchanged (harness-plan.md, H3). `LIST_STATES=false` turns it off.
     pub list_states: bool,
+    /// Learned notes (H7b), read and written. On; `LEARNED_NOTES=false` switches the whole
+    /// mechanism off. For L1, which measures the product without them: they are local code,
+    /// the same on every tier, and measured on their own (founder, 2026-10-11).
+    pub learned_notes: bool,
 }
 
 impl Default for Config {
@@ -319,6 +323,7 @@ impl Default for Config {
             earlier_screens: true,
             recall_max: 1,
             list_states: true,
+            learned_notes: true,
         }
     }
 }
@@ -613,6 +618,9 @@ impl Config {
         }
         if let Ok(v) = env::var("LIST_STATES") {
             config.list_states = truthy(&v);
+        }
+        if let Ok(v) = env::var("LEARNED_NOTES") {
+            config.learned_notes = truthy(&v);
         }
         if let Ok(v) = env::var("RECALL_MAX") {
             config.recall_max = v.trim().parse().unwrap_or(1).clamp(1, 4);
