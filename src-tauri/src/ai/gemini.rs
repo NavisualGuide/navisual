@@ -315,9 +315,10 @@ impl GeminiClient {
             let mut inspect_id: Option<Value> = None;
             let mut inspect_name = String::new();
 
+            let mut progress = crate::ai::streaming::AnswerProgress::default();
             while let Some(event_result) = crate::ai::streaming::next_or_stall(
                 &mut stream,
-                !accumulated_json.is_empty() || !raw_text.is_empty(),
+                progress.update(accumulated_json.len() + raw_text.len()),
                 "Gemini",
             )
             .await?

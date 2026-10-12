@@ -379,8 +379,9 @@ impl DeepSeekClient {
         let mut usage_logged = false;
 
         let mut stream = response.bytes_stream();
+        let mut progress = crate::ai::streaming::AnswerProgress::default();
         while let Some(chunk_result) =
-            crate::ai::streaming::next_or_stall(&mut stream, !r.arguments.is_empty(), &self.name).await?
+            crate::ai::streaming::next_or_stall(&mut stream, progress.update(r.arguments.len()), &self.name).await?
         {
             let chunk = chunk_result?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -542,8 +543,9 @@ impl DeepSeekClient {
         let mut line_buf = String::new();
 
         let mut stream = response.bytes_stream();
+        let mut progress = crate::ai::streaming::AnswerProgress::default();
         while let Some(chunk_result) =
-            crate::ai::streaming::next_or_stall(&mut stream, !accumulated_text.is_empty(), &self.name).await?
+            crate::ai::streaming::next_or_stall(&mut stream, progress.update(accumulated_text.len()), &self.name).await?
         {
             let chunk = chunk_result?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));

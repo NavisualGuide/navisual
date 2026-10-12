@@ -180,8 +180,9 @@ impl AnthropicClient {
         let mut in_instruction = false;
         let mut emitted_instruction_len = 0;
 
+        let mut progress = crate::ai::streaming::AnswerProgress::default();
         while let Some(event_result) =
-            crate::ai::streaming::next_or_stall(&mut stream, !accumulated_json.is_empty(), "Anthropic").await?
+            crate::ai::streaming::next_or_stall(&mut stream, progress.update(accumulated_json.len()), "Anthropic").await?
         {
             let event = event_result?;
             if event.event == "content_block_delta" {

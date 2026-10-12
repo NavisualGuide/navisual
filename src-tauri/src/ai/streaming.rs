@@ -1,5 +1,5 @@
-/// Silence after which a stream that has begun its answer counts as stalled. Measured on L1's
-/// first scored pass (2026-10-12, 963 calls):
+/// How long an answer that has begun may go without growing before the stream counts as
+/// stalled. Measured on L1's first scored pass (2026-10-12, 963 calls):
 /// - 18 of 653 GPT-6 calls began the answer -- first instruction token at 4.3-9.1 s -- and then
 ///   sent nothing until the client's 90 s timeout ("error decoding response body"); Gemini, 310
 ///   calls, none;
@@ -8,7 +8,32 @@
 /// - the slowest successful first token came at 22.7 s. A slow model thinks before it answers,
 ///   so the clock does not run until the answer begins: before that only the client's overall
 ///   timeout applies, and no slow model is cut off for thinking.
+///
+/// The clock measures the ANSWER, not the bytes. The first version timed silence, and on the
+/// verification run the same day a stall began 5.5 s in and still ran to 90 s with no
+/// `[stream]` line: bytes kept arriving -- keep-alives or other events -- while the answer
+/// stopped growing, so silence never came.
 pub const STREAM_IDLE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// When the answer last grew, for [`next_or_stall`]. Each client reports its answer's length
+/// (tool-call arguments, or answer text) before every wait.
+#[derive(Debug, Default)]
+pub struct AnswerProgress {
+    len: usize,
+    grew_at: Option<std::time::Instant>,
+}
+
+impl AnswerProgress {
+    /// Record the answer's current length and return when it last grew -- `None` until it has
+    /// begun, which leaves the wait unbounded.
+    pub fn update(&mut self, len: usize) -> Option<std::time::Instant> {
+        if len > self.len {
+            self.len = len;
+            self.grew_at = Some(std::time::Instant::now());
+        }
+        self.grew_at
+    }
+}
 
 /// The `steps_seen` an `on_chunk` callback receives when everything streamed so far is void: the
 /// request stalled and is being sent again, so the caller drops its partial caption.
@@ -27,22 +52,23 @@ impl std::fmt::Display for StreamStalled {
 
 impl std::error::Error for StreamStalled {}
 
-/// The stream's next item. Once `answering` -- the answer has begun arriving -- [`STREAM_IDLE`]
-/// of silence is a [`StreamStalled`] rather than a wait for the client's 90 s timeout.
+/// The stream's next item. Once the answer has begun (`grew_at` from [`AnswerProgress`]),
+/// [`STREAM_IDLE`] without it growing is a [`StreamStalled`] rather than a wait for the
+/// client's 90 s timeout -- whether the stream went silent or kept sending something else.
 pub async fn next_or_stall<S>(
     stream: &mut S,
-    answering: bool,
+    grew_at: Option<std::time::Instant>,
     provider: &str,
 ) -> anyhow::Result<Option<S::Item>>
 where
     S: futures_util::Stream + Unpin,
 {
-    next_or_stall_within(stream, answering, provider, STREAM_IDLE).await
+    next_or_stall_within(stream, grew_at, provider, STREAM_IDLE).await
 }
 
 async fn next_or_stall_within<S>(
     stream: &mut S,
-    answering: bool,
+    grew_at: Option<std::time::Instant>,
     provider: &str,
     idle: std::time::Duration,
 ) -> anyhow::Result<Option<S::Item>>
@@ -50,18 +76,25 @@ where
     S: futures_util::Stream + Unpin,
 {
     use futures_util::StreamExt;
-    if !answering {
+    let Some(grew_at) = grew_at else {
         return Ok(stream.next().await);
+    };
+    let stalled = || {
+        log::warn!(
+            "[stream] {provider}: the answer has not grown for {} ms -- stalled",
+            idle.as_millis()
+        );
+        Err(StreamStalled.into())
+    };
+    // Checked before polling: a stream that keeps sending keep-alives always has an item ready,
+    // and a timeout polls its future first, so a ready item would win every time.
+    let left = idle.saturating_sub(grew_at.elapsed());
+    if left.is_zero() {
+        return stalled();
     }
-    match tokio::time::timeout(idle, stream.next()).await {
+    match tokio::time::timeout(left, stream.next()).await {
         Ok(item) => Ok(item),
-        Err(_) => {
-            log::warn!(
-                "[stream] {provider}: no data for {} ms after the answer began -- stalled",
-                idle.as_millis()
-            );
-            Err(StreamStalled.into())
-        }
+        Err(_) => stalled(),
     }
 }
 
@@ -163,11 +196,11 @@ mod tests {
 
     /// The stall rule never cuts a model that is still thinking: before the answer begins the
     /// wait is unbounded here (the client's overall timeout is the only limit). Once it has
-    /// begun, silence past the idle limit is a `StreamStalled`, and a stream that keeps
-    /// sending is never one.
+    /// begun, the idle limit without growth is a `StreamStalled` -- silent or not -- and an
+    /// answer that keeps growing is never one.
     #[tokio::test]
-    async fn silence_is_a_stall_only_once_the_answer_has_begun() {
-        use std::time::Duration;
+    async fn a_stall_is_an_answer_that_stopped_growing() {
+        use std::time::{Duration, Instant};
         let idle = Duration::from_millis(40);
 
         // Thinking: no data for five idle limits, then the answer arrives.
@@ -175,16 +208,26 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
             1
         }));
-        let got = super::next_or_stall_within(&mut slow, false, "test", idle).await.unwrap();
+        let got = super::next_or_stall_within(&mut slow, None, "test", idle).await.unwrap();
         assert_eq!(got, Some(1), "a slow first token is waited for");
 
         // Answering, then silence: a stall, as the bare code the panel maps.
         let mut silent = futures_util::stream::pending::<u8>();
-        let err = super::next_or_stall_within(&mut silent, true, "test", idle).await.unwrap_err();
+        let err = super::next_or_stall_within(&mut silent, Some(Instant::now()), "test", idle)
+            .await
+            .unwrap_err();
         assert!(err.is::<super::StreamStalled>());
         assert_eq!(err.to_string(), "stream_stalled");
 
-        // Answering and still sending, just under the limit each time: never a stall.
+        // Answering, then keep-alives: an item is always ready, the answer is not growing.
+        let mut keepalive = futures_util::stream::repeat(0u8);
+        let long_ago = Instant::now() - Duration::from_millis(100);
+        let err = super::next_or_stall_within(&mut keepalive, Some(long_ago), "test", idle)
+            .await
+            .unwrap_err();
+        assert!(err.is::<super::StreamStalled>(), "bytes without growth are a stall");
+
+        // An answer that grows a little with every chunk, each just under the limit: never.
         let mut steady = Box::pin(futures_util::stream::unfold(0u8, |n| async move {
             if n == 3 {
                 return None;
@@ -192,8 +235,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
             Some((n, n + 1))
         }));
+        let mut progress = super::AnswerProgress::default();
+        let mut answer = 0usize;
         let mut seen = 0;
-        while let Some(_) = super::next_or_stall_within(&mut steady, true, "test", idle).await.unwrap() {
+        while let Some(_) = super::next_or_stall_within(&mut steady, progress.update(answer), "test", idle)
+            .await
+            .unwrap()
+        {
+            answer += 10;
             seen += 1;
         }
         assert_eq!(seen, 3);
