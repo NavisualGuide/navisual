@@ -167,9 +167,25 @@ function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double
     # Paint's PNG picture clicks landed on closed menus).
     $p = New-Object L1Point
     [L1W]::GetCursorPos([ref]$p) | Out-Null
-    for ($i = 1; $i -le 10; $i++) {
-        [L1W]::SetCursorPos([int]($p.X + ($x - 6 - $p.X) * $i / 10), [int]($p.Y + ($y - $p.Y) * $i / 10)) | Out-Null
-        Start-Sleep -Milliseconds 18
+    # Two legs, as a hand moves through menus. Far to the side means a submenu cascading from the
+    # row the pointer is on: along that row first, then down inside it. A diagonal from Blender's
+    # Mesh to Cylinder crossed Curve, Surface and Metaball and switched the submenu on the way, so
+    # the click missed in two of three runs (verification run, 2026-10-12). Otherwise -- a menu
+    # bar or ribbon button into its dropdown -- down first, then across; across first there would
+    # hover the next menu title (GIMP's Image -> Transform).
+    $tx = $x - 6
+    $dx = $tx - $p.X; $dy = $y - $p.Y
+    if ([math]::Abs($dx) -gt 100 -and [math]::Abs($dy) -gt 8) { $mid = @($tx, $p.Y) }
+    elseif ([math]::Abs($dx) -gt 8 -and [math]::Abs($dy) -gt 8) { $mid = @($p.X, $y) }
+    else { $mid = $null }
+    $legs = @()
+    if ($mid) { $legs += , @($p.X, $p.Y, $mid[0], $mid[1]); $legs += , @($mid[0], $mid[1], $tx, $y) }
+    else { $legs += , @($p.X, $p.Y, $tx, $y) }
+    foreach ($leg in $legs) {
+        for ($i = 1; $i -le 8; $i++) {
+            [L1W]::SetCursorPos([int]($leg[0] + ($leg[2] - $leg[0]) * $i / 8), [int]($leg[1] + ($leg[3] - $leg[1]) * $i / 8)) | Out-Null
+            Start-Sleep -Milliseconds 18
+        }
     }
     # Arrive, then settle inside: XAML menu items ignore a click with no hover first (seen live).
     [L1W]::SetCursorPos($x - 6, $y) | Out-Null
@@ -456,7 +472,9 @@ function Get-StepActions($step) {
     if ($a.scroll -ne 0 -and $ins -notmatch '(?i)\b(click|select|choose|tick|double-click)\b') { $a.scrollOnly = $true }
     # Keys and text, in the order the instruction gives them ("press G, then Z, type 2, press Enter").
     $mods = '(?:ctrl|control|alt|shift|win)'
-    $key = '(?:f[0-9]{1,2}|enter|return|tab|esc|escape|delete|del|backspace|home|end|space|up|down|left|right|page ?up|page ?down|[a-z0-9`=\-])'
+    # "enter" before quoted text is typing: "press F3, enter "Add Cylinder", then press Enter" read
+    # it as the Enter key, lost the text's place, and pasted before F3 (verification run, 2026-10-12).
+    $key = '(?:f[0-9]{1,2}|enter(?!\s*["\u201C\u2018''])|return|tab|esc|escape|delete|del|backspace|home|end|space|up|down|left|right|page ?up|page ?down|[a-z0-9`=\-])'
     $combo = '(?<combo>\b' + $mods + '(?:\s*\+\s*' + $mods + ')*\s*\+\s*' + $key + '\b)'
     # "press G, Z, 2, Enter": a run of keys after one verb, each pressed in turn.
     $press = '(?<press>\b(?:press|presses|pressing|hit|tap)\s+(?:the\s+)?(?<pk>' + $key + '(?:\s*(?:,\s*(?:and\s+|then\s+)?|\s+then\s+|\s+and\s+)' + $key + ')*)(?:\s+key)?\b)'
@@ -464,7 +482,9 @@ function Get-StepActions($step) {
     # the press run, which would otherwise lose everything after G.
     # Only where the letter stands alone as a key ("then Z," / "then Z to"): "then I'll guide you"
     # pressed I inside GIMP's open menu (trial, 2026-10-11). I and A are never read this way.
-    $then = '(?<then>\bthen\s+(?<tk>(?-i:[B-HJ-Z]))(?=\s*(?:,|\.|;|$)|\s+(?:and|then|to)\b))'
+    # Named keys after "then" count too: "Press Ctrl+Home, then Home and Shift+End" lost Home
+    # (verification run). Standing alone only -- "then Home tab" is the ribbon tab.
+    $then = '(?<then>\bthen\s+(?<tk>(?-i:[B-HJ-Z])|home|end|enter|tab|esc|space|delete|backspace)(?=\s*(?:,|\.|;|$)|\s+(?:and|then|to)\b))'
     $named = '(?:f[0-9]{1,2}|enter|tab|esc|escape|delete|backspace|home|end|space|page ?up|page ?down)'
     $with = '(?<with>\b(?:with|using)\s+(?:the\s+)?(?<wk>' + $named + ')(?:\s+key)?\b)'
     $type = '(?<type>\b(?:type|enter|paste|write)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
@@ -571,7 +591,9 @@ function Get-StepActions($step) {
     # the control it points at, or when it is only keys-free pointing ("Turn on Word wrap"). "Now press
     # Ctrl+A to select all three" with the pointer on one file got a click after the select-all, and
     # the selection was gone (trial, 2026-10-11). "to select" is a purpose, not an order.
-    $verb = $ins -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|point to)\b'
+    # "Focus that button and press Space" is a click first (verification run: the Space went to
+    # the document instead).
+    $verb = $ins -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|point to|focus)\b'
     # Text to type while the pointer is on an input: a person puts it where the pointer is. ("Press
     # Ctrl+A, paste 20, then press Enter" with the pointer on Font Size: not clicking there let the
     # select-all take the whole document, 2026-10-12.) Not for a pointer on anything else: Blender's
@@ -606,6 +628,14 @@ function Get-StepActions($step) {
     # for that thing must not go wherever focus happens to be ("Click in the blank rectangle to the
     # right of Entries, then paste" with no pointer pasted Yes/No into the focused control, trial).
     $a.clickWithoutPointer = (-not $step.located) -and $verb
+    # Except a click on an area of the app rather than a control: "Click the 3D View", "Click an empty
+    # area of the 3D Viewport", "Click the large grid area in the middle". There is nothing to point at,
+    # and a person clicks there anyway. Refusing it left Blender stuck in two runs (verification run).
+    $a.areaClick = $null
+    if ($a.clickWithoutPointer -and -not $tt -and $ins -match '(?i)\b(?:click|tap)\b[^.;]{0,50}?\b(3d\s*view(?:port)?|viewport|canvas|grid area|work(?:ing)? area|drawing area|(?:empty|blank|open)\s+(?:area|space|spot|part)|middle of the (?:window|screen|view))') {
+        if ($Matches[1] -match '(?i)empty|blank|open') { $a.areaClick = 'empty' } else { $a.areaClick = 'middle' }
+        $a.clickWithoutPointer = $false
+    }
     # The select-all sits just before the paste it serves, wherever that paste ended up.
     foreach ($t in $seq) { if ($t.before) { $t.pos = $t.before.pos - 0.001 } }
     $a.seq = @($seq | Sort-Object { $_.pos })
