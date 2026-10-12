@@ -121,6 +121,7 @@ if ($Solve) {
         New-Item -ItemType Directory -Force -Path $work | Out-Null
         Write-L1 "=== solve $($task.id)"
         Protect-OpenWindows
+        $global:L1TextMode = 'unicode'; if ($task.text_input -eq 'keys') { $global:L1TextMode = 'keys' }
         Write-L1 ("setup: " + (Invoke-TaskScript $task 'setup' $work))
         Start-Sleep -Seconds 2
         Write-L1 ("solve: " + (Invoke-TaskScript $task 'solve' $work))
@@ -191,6 +192,7 @@ function Invoke-L1Run($task, [int]$rep) {
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     Write-L1 "=== $($task.id) r$rep ($Tier)"
     Protect-OpenWindows
+    $global:L1TextMode = 'unicode'; if ($task.text_input -eq 'keys') { $global:L1TextMode = 'keys' }
     Write-L1 ("setup: " + (Invoke-TaskScript $task 'setup' $work))
     Start-Sleep -Seconds 2
     $tinfo = Get-TargetInfo $work
@@ -249,6 +251,12 @@ function Invoke-L1Run($task, [int]$rep) {
         $tw = Get-TargetWindow $tinfo
         $needsTarget = @($a.seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0
         if ($a.unsupported) { Write-L1 "cannot follow: $($a.unsupported)" }
+        elseif ($a.dragAcross) {
+            $b = $s.located.bbox
+            $cy = [int]($b.y + $b.height / 2)
+            Drag-Between ([int]$b.x + 2) $cy ([int]($b.x + $b.width) - 2) $cy
+            Write-L1 "drag across '$($s.located.name)' ($($b.x)..$($b.x + $b.width), $cy)"; $acted = $true
+        }
         elseif ($a.scrollOnly -and $tw) {
             if ($a.click) { $sx = $a.click[0]; $sy = $a.click[1] } else { $r = Get-WindowRect $tw.Hwnd; $sx = [int](($r.Left + $r.Right) / 2); $sy = [int](($r.Top + $r.Bottom) / 2) }
             Scroll-At $sx $sy $a.scroll
@@ -301,7 +309,8 @@ function Invoke-L1Run($task, [int]$rep) {
             $cantFind++
             if ($cantFind -gt 2) { $outcome = 'stuck'; break }
             $say = "I can't find that on my screen."
-            if ($s.target_text) { $say = "I can't find `"$($s.target_text)`" on my screen." }
+            if ($a.unsupported) { $say = "I can't do that with the mouse. Is there another way?" }
+            elseif ($s.target_text) { $say = "I can't find `"$($s.target_text)`" on my screen." }
             Write-L1 ("persona: '$say' " + (Send-PanelText $navPid $say))
             continue
         }

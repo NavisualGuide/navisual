@@ -193,14 +193,48 @@ function Send-Combo([string]$combo) {
         if ($null -eq $c) { return $false }
         $codes += [byte]$c
     }
-    foreach ($c in $codes) { [L1W]::keybd_event($c, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 30 }
+    # Navigation keys are extended keys. Sent without the flag they are the numeric keypad's, and
+    # with Num Lock on, Shift+End then moves instead of selecting (live, 2026-10-11: the model kept
+    # asking for a selection that never appeared).
+    $ext = @(0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B)
+    foreach ($c in $codes) { $f = 0; if ($ext -contains $c) { $f = 1 }; [L1W]::keybd_event($c, 0, $f, [IntPtr]::Zero); Start-Sleep -Milliseconds 30 }
     Start-Sleep -Milliseconds 50
     [array]::Reverse($codes)
-    foreach ($c in $codes) { [L1W]::keybd_event($c, 0, 2, [IntPtr]::Zero); Start-Sleep -Milliseconds 20 }
+    foreach ($c in $codes) { $f = 2; if ($ext -contains $c) { $f = 3 }; [L1W]::keybd_event($c, 0, $f, [IntPtr]::Zero); Start-Sleep -Milliseconds 20 }
     return $true
 }
 
-function Send-Text([string]$s) { [L1W]::TypeText($s) }
+# Text goes in as Unicode key events by default: they pass an input method untouched, where virtual
+# keys would land in a Chinese IME's composition. Blender (GHOST) ignores Unicode events, so a task
+# can ask for virtual keys instead ("text_input": "keys" in task.json).
+$global:L1TextMode = 'unicode'
+function Send-Text([string]$s) {
+    if ($global:L1TextMode -ne 'keys') { [L1W]::TypeText($s); return }
+    foreach ($ch in $s.ToCharArray()) {
+        $c = [string]$ch
+        if ($c -cmatch '[A-Z]') { Send-Combo "Shift+$c" | Out-Null }
+        elseif ($c -match '[a-z0-9]') { Send-Combo $c | Out-Null }
+        elseif ($c -eq ' ') { Send-Combo 'Space' | Out-Null }
+        elseif ($c -eq '.') { [L1W]::keybd_event(0xBE, 0, 0, [IntPtr]::Zero); [L1W]::keybd_event(0xBE, 0, 2, [IntPtr]::Zero) }
+        elseif ($c -eq '-') { [L1W]::keybd_event(0xBD, 0, 0, [IntPtr]::Zero); [L1W]::keybd_event(0xBD, 0, 2, [IntPtr]::Zero) }
+        else { [L1W]::TypeText($c) }
+        Start-Sleep -Milliseconds 25
+    }
+}
+
+# Press, move, release: a person dragging across text or along a slider.
+function Drag-Between([int]$x0, [int]$y0, [int]$x1, [int]$y1) {
+    [L1W]::SetCursorPos($x0, $y0) | Out-Null
+    Start-Sleep -Milliseconds 200
+    [L1W]::mouse_event(0x2, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 120
+    for ($i = 1; $i -le 12; $i++) {
+        [L1W]::SetCursorPos([int]($x0 + ($x1 - $x0) * $i / 12), [int]($y0 + ($y1 - $y0) * $i / 12)) | Out-Null
+        Start-Sleep -Milliseconds 30
+    }
+    Start-Sleep -Milliseconds 120
+    [L1W]::mouse_event(0x4, 0, 0, 0, [IntPtr]::Zero)
+}
 
 # Mouse wheel over a point: positive notches scroll up, negative down.
 function Scroll-At([int]$x, [int]$y, [int]$notches) {
@@ -306,7 +340,13 @@ function Get-StepActions($step) {
     }
     if ($ins -match '(?i)right[- ]click') { $a.button = 'right' }
     if ($ins -match '(?i)double[- ]click') { $a.double = $true }
-    if ($ins -match '(?i)\bdrag\b') { $a.unsupported = 'drag' }
+    # A drag across one target (selecting its text) runs from its left edge to its right; a drag from
+    # one thing onto another needs two points the step does not give, so the follower cannot do it.
+    $a.dragAcross = $false
+    if ($ins -match '(?i)\bdrag\b') {
+        if ($ins -match '(?i)\bdrag\s+(?:your\s+mouse\s+|the\s+(?:mouse|pointer)\s+)?(?:across|over|through)\b|\bdrag\s+to\s+select\b|\bselect\b.*\bby\s+dragging\b' -and $step.located) { $a.dragAcross = $true }
+        else { $a.unsupported = 'drag between two places' }
+    }
     if ($ins -match '(?i)\bscroll\s+(?:[a-z]+\s+){0,2}?(down|up)\b') { if ($Matches[1] -ieq 'down') { $a.scroll = -5 } else { $a.scroll = 5 } }
     # "Scroll down over the report" with a pointer on the report: the act is the scroll, not a click.
     if ($a.scroll -ne 0 -and $ins -notmatch '(?i)\b(click|select|choose|tick|double-click)\b') { $a.scrollOnly = $true }
