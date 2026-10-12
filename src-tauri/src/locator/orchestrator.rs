@@ -1428,6 +1428,7 @@ mod tests {
                 rect: bbox_stub(),
                 enabled: true,
                 state: None,
+                in_popup: false,
             },
             ContextElement {
                 id: 2,
@@ -1436,6 +1437,7 @@ mod tests {
                 rect: bbox_stub(),
                 enabled: true,
                 state: None,
+                in_popup: false,
             },
         ];
         // Fabricated id → not in snapshot.

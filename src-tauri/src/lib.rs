@@ -1693,6 +1693,7 @@ mod context_cache_tests {
             },
             enabled: true,
             state: None,
+            in_popup: false,
         }
     }
 

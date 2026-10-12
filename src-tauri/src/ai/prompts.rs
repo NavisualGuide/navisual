@@ -403,6 +403,10 @@ pub fn elements_context_block_with(
              | value=\"...\" a box's current value.\n",
         );
     }
+    // Only when something is in a popup, so a list without one stays byte-identical.
+    if elements.iter().any(|e| e.in_popup) {
+        block.push_str("| POPUP marks an element of the open menu, list or dialog in front of the window.\n");
+    }
     block.push_str("id | role | name | center x,y (0-1000)\n");
     for el in elements {
         let cx = ((el.rect.x - capture_rect.x) as f64 + el.rect.width as f64 / 2.0)
@@ -427,6 +431,10 @@ pub fn elements_context_block_with(
             (cy.round() as i64).clamp(0, 1000),
             if el.enabled { "" } else { " | DISABLED" },
         ));
+        if el.in_popup {
+            block.pop();
+            block.push_str(" | POPUP\n");
+        }
         if states {
             if let Some(st) = &el.state {
                 // Before the newline just written.
@@ -780,6 +788,7 @@ mod tests {
             },
             enabled,
             state: None,
+            in_popup: false,
         }
     }
 
@@ -799,6 +808,22 @@ mod tests {
         assert!(with.contains("2 | combobox | \"Choose your mode\" | 210,210 | value=\"Dark\"
 "), "{with}");
         assert!(with.contains("| ON or | OFF is a switch"), "the legend says what the markers mean");
+    }
+
+    /// L1, 2026-10-12: Excel's open Freeze Panes menu and the ribbon button that opened it carry
+    /// the same name; only the marker tells them apart.
+    #[test]
+    fn elements_block_marks_what_is_in_a_popup_and_only_then_explains_it() {
+        let rect = crate::capture::Rect { x: 0, y: 0, width: 1000, height: 1000 };
+        let mut item = ctx_el(1, "Freeze Panes", "ListItem", 100, 300, 300, 50);
+        item.in_popup = true;
+        let button = ctx_el(2, "Freeze Panes", "MenuItem", 100, 200, 100, 20);
+        let block = super::elements_context_block(&[item, button.clone()], rect);
+        assert!(block.contains("1 | listitem | \"Freeze Panes\" | 250,325 | POPUP\n"), "{block}");
+        assert!(block.contains("2 | menuitem | \"Freeze Panes\" | 150,210\n"), "{block}");
+        assert!(block.contains("| POPUP marks an element of the open menu"), "{block}");
+        let plain = super::elements_context_block(&[button], rect);
+        assert!(!plain.contains("POPUP"), "no popup, no marker and no legend:\n{plain}");
     }
 
     #[test]

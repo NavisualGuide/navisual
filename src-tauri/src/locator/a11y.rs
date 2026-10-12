@@ -959,6 +959,10 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
         for popup in collect_owned_popups(hwnd) {
             roots.extend(popup_root_elements(&automation, popup));
         }
+    }
+    // The leading roots are popups; what they yield is marked `in_popup`.
+    let popup_roots = roots.len();
+    unsafe {
         if IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
             if let Ok(el) = automation.element_from_handle(hwnd.into()) {
                 roots.push(el);
@@ -1039,12 +1043,12 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     // Both gathers yield the SAME 12 context control types through the SAME filter below, so
     // merging is safe by construction and the union is never worse than either half.
     let gather_started = Instant::now();
-    let mut candidates: Vec<UIElement> = Vec::new();
+    let mut candidates: Vec<(UIElement, bool)> = Vec::new();
     if !bulk_detonates {
-        for root in &roots {
+        for (i, root) in roots.iter().enumerate() {
             // A dead popup root must not kill the main window's list.
             if let Ok(els) = root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
-                candidates.extend(els);
+                candidates.extend(els.into_iter().map(|e| (e, i < popup_roots)));
             }
         }
     }
@@ -1074,6 +1078,7 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let mut total_qualifying: usize = 0;
     type SeenKey = (String, (i32, i32, u32, u32));
     let apply_filter = |el: &UIElement,
+                        in_popup: bool,
                         out: &mut Vec<super::ContextElement>,
                         seen: &mut std::collections::HashSet<SeenKey>,
                         total_qualifying: &mut usize| {
@@ -1140,11 +1145,12 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                 // from a valid target (the worse error of the two).
                 enabled: el.is_cached_enabled().unwrap_or(true),
                 state: cached_state(el, ct),
+                in_popup,
             });
         }
     };
-    for el in &candidates {
-        apply_filter(el, &mut out, &mut seen, &mut total_qualifying);
+    for (el, in_popup) in &candidates {
+        apply_filter(el, *in_popup, &mut out, &mut seen, &mut total_qualifying);
     }
 
     // Guard 2 of 2: run the materialising walk — either because bulk never ran, or because what
@@ -1179,7 +1185,8 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
             // pass precisely when the bulk pass was slow, and the caller's wait is bounded by
             // the outer timeout regardless (an over-budget completion still banks its result).
             let deadline = Instant::now() + Duration::from_millis(budget_ms as u64);
-            for root in &roots {
+            for (i, root) in roots.iter().enumerate() {
+                let in_popup = i < popup_roots;
                 // grid_cond: None DISABLES the ExcelGrid flat-Descendants escape hatch here
                 // (audit 2026-07-13, confirmed by `excel_enum_histogram_live` against a live
                 // 209-cell CSV). That hatch is a raw Descendants query on the ExcelGrid pane and
@@ -1200,7 +1207,7 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                     deadline,
                     &mut |el, _class_name| {
                         if matches!(el.get_cached_control_type(), Ok(ct) if is_context_ct(ct)) {
-                            apply_filter(el, &mut out, &mut seen, &mut total_qualifying);
+                            apply_filter(el, in_popup, &mut out, &mut seen, &mut total_qualifying);
                         }
                     },
                 );
