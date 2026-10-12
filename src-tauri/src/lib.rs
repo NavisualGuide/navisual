@@ -358,6 +358,18 @@ mod context_cache {
         Some((c.elements.clone(), c.sig.clone(), age.as_secs(), c.cost_ms))
     }
 
+    /// Whether the user clicked in the guided app after this window's list was taken. A click
+    /// can flip a control's state while hardly moving a pixel: L1, 2026-10-12, Word's "Link to
+    /// Previous" was switched off, five cells changed, and the cached list -- 11 s old -- told
+    /// the model it was still ON, three runs in a row.
+    pub(super) fn clicked_since_capture(hwnd: usize) -> bool {
+        let m = map().lock();
+        match (m.get(&hwnd), crate::last_click::last_click_at()) {
+            (Some(c), Some(at)) => at > c.captured_at,
+            _ => false,
+        }
+    }
+
     /// Drop a window's entry — the UI is known to have moved (a step was executed, the window
     /// was resized, the structure changed).
     pub(super) fn invalidate(hwnd: usize) {
@@ -513,12 +525,23 @@ fn context_cache_take_on_timeout(hwnd: usize) -> Option<Vec<locator::ContextElem
         );
         return None;
     }
+    let mut elements = (*elements).clone();
+    // A click since the list was taken may have changed what the states say. The positions
+    // are still worth serving after a timeout; a state that may be wrong is not -- none at all
+    // tells the model to look, a stale one tells it the opposite of the screen.
+    let stale_states = context_cache::clicked_since_capture(hwnd);
+    if stale_states {
+        for e in &mut elements {
+            e.state = None;
+        }
+    }
     log::info!(
-        "[context] timeout fallback served: {} elements, {age_secs}s old, {moved} cells moved | {}",
+        "[context] timeout fallback served: {} elements, {age_secs}s old, {moved} cells moved{} | {}",
         elements.len(),
+        if stale_states { ", states dropped (clicked since)" } else { "" },
         context_diag(hwnd)
     );
-    Some((*elements).clone())
+    Some(elements)
 }
 
 #[cfg(not(windows))]
@@ -562,6 +585,15 @@ fn context_cache_take_if_valid(hwnd: usize) -> Option<Vec<locator::ContextElemen
             context_diag(hwnd)
         );
         context_cache::invalidate(hwnd);
+        return None;
+    }
+    // Kept, not invalidated: if the fresh enumeration times out, the fallback still serves the
+    // positions, without the states.
+    if context_cache::clicked_since_capture(hwnd) {
+        log::info!(
+            "[context] cache refused: the user clicked in the app after this list was taken ({moved} cells moved), re-enumerating | {}",
+            context_diag(hwnd)
+        );
         return None;
     }
     log::info!(
@@ -1738,6 +1770,26 @@ mod context_cache_tests {
         context_cache::store(hwnd, smaller, None, 900);
         let (els, _, _, _) = context_cache::peek(hwnd).expect("entry kept");
         assert_eq!(els.len(), 60, "a >=half-size read is a legitimate replacement");
+        context_cache::invalidate(hwnd);
+    }
+
+    #[test]
+    fn a_click_after_the_list_was_taken_makes_it_stale() {
+        let _guard = serial();
+        // L1, 2026-10-12: Word's "Link to Previous" switched off by a click that moved five
+        // cells, and the cached list still said ON.
+        let hwnd = live_hwnd();
+        context_cache::invalidate(hwnd);
+        let before = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        context_cache::store(hwnd, vec![el(1, "Link to Previous")], Some(vec![0u8; SIG_LEN]), 900);
+        crate::last_click::set_last_click_at_for_test(None);
+        assert!(!context_cache::clicked_since_capture(hwnd), "no click at all");
+        crate::last_click::set_last_click_at_for_test(Some(before));
+        assert!(!context_cache::clicked_since_capture(hwnd), "a click before the list was taken");
+        crate::last_click::set_last_click_at_for_test(Some(std::time::Instant::now()));
+        assert!(context_cache::clicked_since_capture(hwnd), "a click after it");
+        crate::last_click::set_last_click_at_for_test(None);
         context_cache::invalidate(hwnd);
     }
 

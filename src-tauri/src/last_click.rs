@@ -74,6 +74,24 @@ mod imp {
     /// so nothing is ever recorded until a session explicitly arms it.
     static TARGET_PID: AtomicU32 = AtomicU32::new(0);
     static NEXT_GEN: AtomicU64 = AtomicU64::new(1);
+    /// When the latest click in the guided app happened. Unlike `LAST`, never consumed by
+    /// `take`: the element-list cache asks it whether the user acted after a list was taken.
+    static LAST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+    fn last_at() -> &'static Mutex<Option<Instant>> {
+        LAST_AT.get_or_init(|| Mutex::new(None))
+    }
+
+    /// When the latest click inside the guided app happened, if there has been one.
+    pub fn last_click_at() -> Option<Instant> {
+        *last_at().lock()
+    }
+
+    /// Tests stand in for the hook, which needs a real click.
+    #[cfg(test)]
+    pub fn set_last_click_at_for_test(at: Option<Instant>) {
+        *last_at().lock() = at;
+    }
 
     fn slot() -> &'static Mutex<Option<Click>> {
         LAST.get_or_init(|| Mutex::new(None))
@@ -98,12 +116,14 @@ mod imp {
             // Target changed — a click recorded against the old app must not be reported
             // as if it happened in the new one.
             *slot().lock() = None;
+            *last_at().lock() = None;
             history().lock().clear();
         }
     }
 
     pub fn clear() {
         *slot().lock() = None;
+        *last_at().lock() = None;
         history().lock().clear();
     }
 
@@ -129,11 +149,13 @@ mod imp {
                     GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
                     if pid == target {
                         let gen = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
+                        let now = Instant::now();
                         *slot().lock() = Some(Click {
                             resolved: None,
-                            at: Instant::now(),
+                            at: now,
                             gen,
                         });
+                        *last_at().lock() = Some(now);
                         std::thread::spawn(move || resolve_and_store(pt.x, pt.y, gen));
                     }
                 }
@@ -404,7 +426,9 @@ pub struct Resolved {
 }
 
 #[cfg(windows)]
-pub use imp::{clear, describe, history_after, install, set_target_pid, take};
+pub use imp::{clear, describe, history_after, install, last_click_at, set_target_pid, take};
+#[cfg(all(test, windows))]
+pub use imp::set_last_click_at_for_test;
 
 #[cfg(not(windows))]
 pub fn install() {}
@@ -423,4 +447,8 @@ pub fn take(_max_age: std::time::Duration) -> Option<String> {
 #[cfg(not(windows))]
 pub fn history_after(_gen: u64) -> Vec<Resolved> {
     Vec::new()
+}
+#[cfg(not(windows))]
+pub fn last_click_at() -> Option<std::time::Instant> {
+    None
 }
