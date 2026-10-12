@@ -304,6 +304,12 @@ function Invoke-L1Run($task, [int]$rep) {
                 $fgPid = [uint32]0
                 [L1W]::GetWindowThreadProcessId($fgH, [ref]$fgPid) | Out-Null
                 if ($fgH -ne $tw.Hwnd -and ($fgPid -ne $targetPid -or $fgPid -eq $navPid)) { Focus-ByTitleBar $tw.Hwnd | Out-Null; Write-L1 "refocused the app" }
+                elseif (-not $a.click) {
+                    # Keys with no click: the hand rests over the middle of the app. Blender sends a
+                    # key to the area under the mouse, and the last click may have left it elsewhere.
+                    $r = Get-WindowRect $tw.Hwnd
+                    [L1W]::SetCursorPos([int](($r.Left + $r.Right) / 2), [int](($r.Top + $r.Bottom) / 2)) | Out-Null
+                }
                 Start-Sleep -Milliseconds 300
             }
             foreach ($t in $before) {

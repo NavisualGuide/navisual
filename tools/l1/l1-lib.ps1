@@ -386,7 +386,15 @@ function Get-StepActions($step) {
         if ($ins -match '(?i)\bdrag\s+(?:your\s+mouse\s+|the\s+(?:mouse|pointer)\s+)?(?:across|over|through)\b|\bdrag\s+to\s+select\b|\bselect\b.*\bby\s+dragging\b' -and $step.located) { $a.dragAcross = $true }
         else { $a.unsupported = 'drag between two places' }
     }
-    if ($ins -match '(?i)\bscroll\s+(?:[a-z]+\s+){0,2}?(down|up)\b') { if ($Matches[1] -ieq 'down') { $a.scroll = -5 } else { $a.scroll = 5 } }
+    # "Scroll down", "scroll farther down", "scroll all the way down", "scroll to the bottom". The
+    # founder watched "all the way down" go unread: only two words were allowed between.
+    $dir = 0
+    if ($ins -match '(?i)\bscroll\b(?:\s+[a-z]+){0,6}?\s+(down|up)\b') { if ($Matches[1] -ieq 'down') { $dir = -1 } else { $dir = 1 } }
+    elseif ($ins -match '(?i)\bscroll\b(?:\s+[a-z]+){0,4}?\s+to\s+(?:the|its)\s+(bottom|end|top)\b') { if ($Matches[1] -ieq 'top') { $dir = 1 } else { $dir = -1 } }
+    if ($dir -ne 0) {
+        $far = $ins -match '(?i)\b(all the way|to (the|its) (bottom|end|top)|until\b.{0,60}\b(bottom|end|footer|last))'
+        $a.scroll = $dir * $(if ($far) { 15 } else { 8 })
+    }
     # "Scroll down over the report" with a pointer on the report: the act is the scroll, not a click.
     if ($a.scroll -ne 0 -and $ins -notmatch '(?i)\b(click|select|choose|tick|double-click)\b') { $a.scrollOnly = $true }
     # Keys and text, in the order the instruction gives them ("press G, then Z, type 2, press Enter").
@@ -491,7 +499,14 @@ function Get-StepActions($step) {
     # Ctrl+A to select all three" with the pointer on one file got a click after the select-all, and
     # the selection was gone (trial, 2026-10-11). "to select" is a purpose, not an order.
     $verb = $ins -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|point to)\b'
-    $intoTarget = (@($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0) -and $tt -and ($ins.IndexOf($tt, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+    # Typing into the control pointed at: "in/into the <target>" or "the <target> box/field". Merely
+    # naming it is not enough -- "The cylinder is already added. Press G, then Z, type 2" clicked the
+    # Cylinder row, and Blender then sent the keys to the outliner (trial, 2026-10-11).
+    $intoTarget = $false
+    if ($tt -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0) {
+        $e = [regex]::Escape($tt)
+        $intoTarget = ($ins -match "(?i)\b(?:in|into|to)\s+(?:the\s+)?(?:empty\s+|blank\s+|focused\s+)?$e") -or ($ins -match "(?i)$e\W{0,3}\s+(?:box|field)\b")
+    }
     $keysOrText = @($seq).Count -gt 0
     if ($a.click -and -not $verb -and -not $intoTarget -and $keysOrText) { $a.click = $null; $a.pointerOnly = $true }
     # The opposite case: the step says to click something and there is no pointer at all. Text meant
