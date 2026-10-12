@@ -191,6 +191,14 @@ while (-not (Get-PanelWindow $navPid) -and (Get-Date) -lt $deadline) { Start-Sle
 if (-not (Get-PanelWindow $navPid)) { Stop-Process -Id $navPid -Force; throw "Navisual panel did not appear" }
 Start-Sleep -Seconds 4
 Write-L1 "Navisual up (pid $navPid)"
+# A fresh data folder means a first run, and the first-run privacy notice covers the panel. A user
+# reads it and presses "I understand -- continue" before any task; so does the run. (Until
+# 2026-10-11 the follower typed behind it, a state no user is in. The button only sets a flag in
+# the panel's own storage, inside the isolated folder.)
+$root = Get-PanelRoot $navPid
+$ack = $null
+if ($root) { $ack = Find-ByType $root 'Button' | Where-Object { $_.Current.Name -like 'I understand*' } | Select-Object -First 1 }
+if ($ack) { Invoke-Element $ack; Start-Sleep -Milliseconds 800; Write-L1 "privacy notice acknowledged" } else { Write-L1 "no privacy notice showing" }
 
 # ---------------------------------------------------------------------------------------------
 # One run.
