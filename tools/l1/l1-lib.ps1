@@ -341,6 +341,48 @@ function Start-PanelNewTask([int]$NavPid) {
 
 function Send-NextHotkey { Send-Combo 'Ctrl+Backquote' | Out-Null }
 
+# Press the panel's send button again, leaving the text the panel put back after a failed request.
+function Resend-PanelText([int]$NavPid) {
+    $root = Get-PanelRoot $NavPid
+    if (-not $root) { return "no panel" }
+    $box = Find-ByType $root 'Edit' | Select-Object -First 1
+    $text = ''
+    try { $text = $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { }
+    if (-not $text) { return "" }
+    $btn = Find-ByType $root 'Button' | Where-Object {
+        $n = $_.Current.Name
+        $n -eq 'Guide me' -or $n -like '*Follow up*' -or $n -like '*Send answer*' -or $n -like '*Send'
+    } | Select-Object -First 1
+    if (-not $btn) { return "" }
+    Invoke-Element $btn
+    return "resent via '$($btn.Current.Name)'"
+}
+
+# Injected input goes nowhere while the foreground belongs to a window that cannot take it. Seen
+# 2026-10-12: a hidden GameInputServiceWindow (GameInputSvc.exe) held the foreground after the scored
+# pass; every key and click was dropped, the Next hotkey never fired, and no method short of a
+# person touching the machine took the foreground back. The tell is an invisible foreground window.
+function Test-InputBlocked {
+    $h = [L1W]::GetForegroundWindow()
+    if ($h -eq [IntPtr]::Zero) { return 'no foreground window' }
+    if (-not [L1W]::IsWindowVisible($h)) { return "foreground held by an invisible window [$([L1W]::Class($h))]" }
+    return $null
+}
+
+# Wait (logging every 5 minutes) until input can reach the desktop again.
+function Wait-InputUnblocked([int]$pollSec = 30) {
+    $why = Test-InputBlocked
+    if (-not $why) { return }
+    Write-L1 "input blocked: $why -- waiting for someone to use the mouse or keyboard"
+    $t0 = Get-Date; $last = $t0
+    while ($why) {
+        Start-Sleep -Seconds $pollSec
+        $why = Test-InputBlocked
+        if ($why -and ((Get-Date) - $last).TotalMinutes -ge 5) { Write-L1 "still blocked: $why"; $last = Get-Date }
+    }
+    Write-L1 ("input unblocked after {0:N0} min" -f ((Get-Date) - $t0).TotalMinutes)
+}
+
 # ---------------------------------------------------------------------------------------------
 # The step feed (NAVISUAL_STEP_FEED): one JSON line per response the panel receives.
 

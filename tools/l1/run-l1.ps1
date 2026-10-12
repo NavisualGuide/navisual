@@ -221,6 +221,7 @@ function Invoke-L1Run($task, [int]$rep) {
     if (-not $tw) { Write-L1 "no target window"; return [ordered]@{ task = $task.id; rep = $rep; outcome = 'setup_failed' } }
     Write-L1 ("start-state: " + ((Get-Verdict $task $work) | ConvertTo-Json -Compress))
 
+    Wait-InputUnblocked
     Write-L1 ("panel: " + (Start-PanelNewTask $navPid))
     Focus-ByTitleBar $tw.Hwnd | Out-Null
     $feedCount = @(Get-FeedLines $feed).Count
@@ -243,8 +244,13 @@ function Invoke-L1Run($task, [int]$rep) {
         if (-not $s.ok -or $s.error) {
             $errors++
             Write-L1 "$tag error: $($s.error)"
-            if ($errors -ge 2) { $outcome = 'error'; break }
-            Send-NextHotkey
+            if ($errors -ge 3) { $outcome = 'error'; break }
+            # The panel puts the request's text back in its box after a failure; a person presses its
+            # button again. Next is disabled when the very first request failed, so pressing it
+            # waited out the timeout instead (two scored runs, 2026-10-12).
+            Start-Sleep -Seconds 3
+            $re = Resend-PanelText $navPid
+            if ($re) { Write-L1 "retry: $re" } else { Send-NextHotkey; Write-L1 "retry: Next" }
             continue
         }
         $loc = 'no pointer'
@@ -270,6 +276,7 @@ function Invoke-L1Run($task, [int]$rep) {
             break
         }
 
+        Wait-InputUnblocked
         $a = Get-StepActions $s
         $acted = $false
         $tw = Get-TargetWindow $tinfo
