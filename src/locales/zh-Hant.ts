@@ -535,7 +535,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "done.clicked": "\u2713 你點了 {what}",
   "done.autopilot": "\u2713 自動推進到下一步",
   "done.alreadyDone": "\u2713 你標記為已完成",
-  "done.pressedNext": "\u2713 你按了「下一步」",
+  "done.pressedNext": "\u2713 你進入了下一步",
   "done.completed": "\u2713 已完成",
 
   "prov.managedPaid": "託管（{tier}）",
