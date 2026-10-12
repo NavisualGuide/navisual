@@ -2589,6 +2589,9 @@ See the LICENSE file in the root of this repository for complete details.
     sessionGoal = "";
     sessionPlanOutline = [];
     sessionPlanCompletedCount = 0;
+    // The Wrong picker belongs to the step on screen. Left open, it turned the next task's
+    // text into a "wrong" report against no session ("no active session"; L1, 2026-10-12).
+    wrongPickerOpen = false;
     cancelRequest();
     // Reset Rust-side session state including target_hwnd so the next Guide me
     // call re-discovers the foreground window instead of reusing a stale target.
@@ -3416,6 +3419,9 @@ See the LICENSE file in the root of this repository for complete details.
   // "wrong" report (logged as wrong_other) rather than a normal follow-up.
   function submitTask() {
     lastRequestFailed = false;
+    // Only a step being guided can be wrong; any other way out of guiding must not leave the
+    // picker deciding what the next text means.
+    if (wrongPickerOpen && phase !== "guiding") wrongPickerOpen = false;
     if (wrongPickerOpen && task.trim()) submitWrong("wrong_other");
     else guide();
   }
