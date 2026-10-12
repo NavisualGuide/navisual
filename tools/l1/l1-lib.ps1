@@ -58,7 +58,7 @@ public static class L1W {
 
 # A run that lasts all night must not meet the screen saver, a locked screen or sleep: every task
 # after it would fail on a desktop it cannot see. Held while this process runs; released at exit.
-function Keep-Awake { [L1W]::SetThreadExecutionState([uint32]0x80000003) | Out-Null }
+function Keep-Awake { [L1W]::SetThreadExecutionState([uint32]2147483651) | Out-Null }
 
 # Physical pixels, as the locator reports them (LocateResult.bbox: physical, virtual desktop).
 [L1W]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
