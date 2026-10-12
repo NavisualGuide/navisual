@@ -1149,7 +1149,7 @@ See the LICENSE file in the root of this repository for complete details.
     subtitle_enabled: true, auto_advance: false, autopilot_min_cells: 16,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
     ui_language: "system",
-    hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
+    hotkey_next: "Ctrl+Backquote", hotkey_wrong: "",
     hotkey_pause: "", hotkey_icon: "Ctrl+Shift+Backquote", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
     debug_diagnostics_enabled: false,
@@ -4380,7 +4380,7 @@ See the LICENSE file in the root of this repository for complete details.
         {#if phase === "guiding"}
           <div class="wrong-footer">
             {#if !wrongPickerOpen}
-              <button class="wrong-btn" onclick={openWrongPicker} title={t("panel.wrongTitle", { hotkey: prettyHotkey(settingsForm.hotkey_wrong) })}>{t("panel.wrong")}</button>
+              <button class="wrong-btn" onclick={openWrongPicker} title={settingsForm.hotkey_wrong ? t("panel.wrongTitle", { hotkey: prettyHotkey(settingsForm.hotkey_wrong) }) : t("panel.wrongTitleNoKey")}>{t("panel.wrong")}</button>
             {:else}
               <div class="reason-row">
                 <span class="reason-prompt">{t("wrong.prompt")}</span>

@@ -143,6 +143,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "panel.nextTitle": "下一步（{hotkey}）",
   "panel.wrong": "\u2717 这步不对",
   "panel.wrongTitle": "这条指引不对（{hotkey}）",
+  "panel.wrongTitleNoKey": "这条指引不对",
   "panel.autopilotOn": "\u23f8 自动推进",
   "panel.autopilotOff": "\u2708 自动推进",
   "panel.autopilotOnTitle": "自动推进已开启 —— 点击关闭",

@@ -144,6 +144,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "panel.nextTitle": "下一步（{hotkey}）",
   "panel.wrong": "\u2717 這步不對",
   "panel.wrongTitle": "這條指引不對（{hotkey}）",
+  "panel.wrongTitleNoKey": "這條指引不對",
   "panel.autopilotOn": "\u23f8 自動推進",
   "panel.autopilotOff": "\u2708 自動推進",
   "panel.autopilotOnTitle": "自動推進已開啟 —— 點擊關閉",

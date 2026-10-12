@@ -296,7 +296,13 @@ impl Default for Config {
             voice_language: "auto".to_string(),
             ui_language: "system".to_string(),
             hotkey_next:  "Ctrl+Backquote".to_string(),
-            hotkey_wrong: "Ctrl+KeyE".to_string(),
+            // Unset since 2026-10-12, by the founder's decision. Ctrl+E is Word's Center,
+            // Excel's Flash Fill and the browser's search box; L1 had the model tell the user
+            // to press it in Word and the keypress opened the Wrong picker. Any other key would
+            // collide somewhere too: the ✗ button is always on the panel, and a user who wants
+            // a key sets one. Like HOTKEY_ICON below, this reaches installs whose .env does not
+            // already name the key.
+            hotkey_wrong: String::new(),
             hotkey_pause: String::new(),
             // Ctrl+~ advances a step; its Shift sibling collapses and restores the
             // panel. Left unset since v0.5.17, which removed the Ctrl+Q / Ctrl+S

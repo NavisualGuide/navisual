@@ -151,6 +151,7 @@ export const en = {
   "panel.nextTitle": "Next step ({hotkey})",
   "panel.wrong": "\u2717 This is wrong",
   "panel.wrongTitle": "This guidance is wrong ({hotkey})",
+  "panel.wrongTitleNoKey": "This guidance is wrong",
   "panel.autopilotOn": "\u23f8 Autopilot",
   "panel.autopilotOff": "\u2708 Autopilot",
   "panel.autopilotOnTitle": "Autopilot on \u2014 click to turn off",
