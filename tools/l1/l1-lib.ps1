@@ -317,11 +317,22 @@ function Send-PanelText([int]$NavPid, [string]$text) {
 function Start-PanelNewTask([int]$NavPid) {
     $root = Get-PanelRoot $NavPid
     if (-not $root) { return "no panel" }
+    # Close the Wrong picker if it is open. Ctrl+E is Navisual's Wrong hotkey and Word's Center: a
+    # model told the follower to press it, the picker opened, and the next task's text went out as a
+    # "wrong_other" report against no session (2026-10-12). "+ New task" leaves the picker open, so
+    # a person starting over closes it first -- so does the follower.
+    $picker = $false
+    foreach ($b in (Find-ByType $root 'Button')) { if ($b.Current.Name -in "Wrong spot", "Can't find it") { $picker = $true; break } }
+    $closed = ''
+    if ($picker) {
+        $x = Find-ByType $root 'Button' | Where-Object { $_.Current.Name -eq 'Cancel' } | Select-Object -First 1
+        if ($x) { Invoke-Element $x; Start-Sleep -Milliseconds 400; $closed = 'Wrong picker closed; ' }
+    }
     $btn = Find-ByType $root 'Button' | Where-Object { $_.Current.Name -match 'New task' } | Select-Object -First 1
-    if (-not $btn) { return "no New task button (already fresh?)" }
+    if (-not $btn) { return "${closed}no New task button (already fresh?)" }
     Invoke-Element $btn
     Start-Sleep -Milliseconds 500
-    return "new task"
+    return "${closed}new task"
 }
 
 function Send-NextHotkey { Send-Combo 'Ctrl+Backquote' | Out-Null }
