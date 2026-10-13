@@ -54,4 +54,35 @@ Check 'drag from X through the end of Y' ("drag=$($a.dragAcross) unsupported=$($
 $a = Step 'Drag the file onto the Archive folder.' -tt 'report.csv' -Located
 Check 'a drag between two places stays unsupported' ("drag=$($a.dragAcross) unsupported=$($a.unsupported)") 'drag=False unsupported=drag between two places'
 
+# Step 3 review (2026-10-13).
+$a = Step 'Enter "colour" in the Find field, then click the Replace field below and enter "color."' -tt 'Find' -clip 'colour' -Located
+Check 'a field named before the text' ((Seq $a) + ' | skipped ' + ($a.skipped -join ',')) 'keys:Ctrl+A > paste:colour | skipped color. (for the Replace field)'
+$a = Step 'Press Home to move the insertion point to the start of the "1. Introduction" heading.' -tt '1. Introduction' -Located
+Check 'the insertion point is not point to' ("click=$([bool]$a.click) " + (Seq $a)) 'click=False keys:Home'
+$a = Step 'Point to "Bottom of Page," then press Right to open its gallery.' -tt 'Bottom of Page' -Located
+Check 'point to is still a click' ("click=$([bool]$a.click) " + (Seq $a)) 'click=True keys:Right'
+$a = Step 'Click Center in the Paragraph group, then replace the value in the Font Size box with 20 and press Enter.' -tt 'Center' -clip '20' -Located -role 'Button'
+Check 'text for another box, pointer on a button' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=True seq='
+$a = Step 'Paste Yes and No on separate lines in the large Entries box, then click "OK" at the bottom to apply the drop-down to all nine cells.' -tt 'OK' -clip "Yes`nNo" -Located -role 'Button'
+Check 'text for another box, then click OK' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=True seq='
+$a = Step 'Replace the highlighted archive name with q3-sales, leaving the.zip ending in place, then press Enter.' -tt 'sales-august.zip' -clip 'q3-sales' -Located -role 'Textbox'
+Check 'typing over a highlight' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=False seq=paste:q3-sales > keys:Enter'
+$a = Step 'Replace the selected filename with q3-sales, keeping the.zip extension, then press Enter.' -tt 'sales-august.zip' -clip 'q3-sales' -Located -role 'Textbox'
+Check 'keeping the extension' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=False seq=paste:q3-sales > keys:Enter'
+# Must not change.
+$a = Step 'Replace the text in the File name field with small.png.' -tt 'File name:' -clip 'small.png' -Located -role 'Textbox'
+Check 'replace in a named field' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=True seq=keys:Ctrl+A > paste:small.png'
+$a = Step 'The title is selected. In the Font Size box near the top, replace 14 with 20 and press Enter.' -tt 'Font Size' -clip '20' -Located -role 'Combobox'
+Check 'the title is selected is not a highlight to type over' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=True seq=keys:Ctrl+A > paste:20 > keys:Enter'
+$a = Step 'Select "Start at", enter 1 in the number box, then click OK.' -tt 'Start at' -clip '1' -Located -role 'Radio'
+Check 'a radio still takes the text after it' (Seq $a) 'paste:1'
+$a = Step 'Enter "Budget" in the Subject field, then press Tab.' -tt 'Subject' -clip 'Budget' -Located -role 'Textbox'
+Check 'in the target field moves the text after the click' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=True seq=paste:Budget > keys:Tab'
+$a = Step 'The Total Row checkbox is still off, so the last click didn''t enable it. Press Esc to close the Quick Analysis popup first.' -tt 'Quick Analysis' -Located -role 'Button'
+Check 'the last click is not a click' ("click=$([bool]$a.click) " + (Seq $a)) 'click=False keys:Esc'
+$a = Step 'The toolbar click did not start renaming. With the selected archive, press F2, then press Enter.' -tt 'q3-sales.zip.zip' -Located -role 'Other'
+Check 'the toolbar click is not a click' ("click=$([bool]$a.click) " + (Seq $a)) 'click=False keys:F2 > keys:Enter'
+$a = Step 'That click missed. Click the Total Row box, then press Space.' -tt 'Total Row' -Located -role 'Checkbox'
+Check 'a click verb after a click noun' ("click=$([bool]$a.click) " + (Seq $a)) 'click=True keys:Space'
+
 if ($fail) { "$fail FAILED"; exit 1 } else { "all ok" }

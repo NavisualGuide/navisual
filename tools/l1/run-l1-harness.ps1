@@ -9,6 +9,7 @@ carrying its harness value.
 
     .\tools\l1\run-l1-harness.ps1 -Tier speed -Repeat 3
     .\tools\l1\run-l1-harness.ps1 -Tier regular -Repeat 3 -OutName harness-flash-20261013
+    .\tools\l1\run-l1-harness.ps1 -Tasks 'ex-zip,np-replace' -OutName harness-luna-20261013-rerun
 
 Pure ASCII.
 #>
@@ -17,7 +18,9 @@ param(
     [int]$Repeat = 3,
     [string]$OutName = ('harness-' + (Get-Date -Format 'yyyyMMdd')),
     # Per run-l1.ps1 invocation, i.e. per arm per repetition.
-    [double]$MaxUsdPerRun = 2.0
+    [double]$MaxUsdPerRun = 2.0,
+    # Comma-separated task ids, or all. A subset re-runs tasks on both arms after a follower fix.
+    [string]$Tasks = 'all'
 )
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $out = Join-Path (Split-Path -Parent $repo) "navisual-internal\eval\results\l1\$OutName"
@@ -27,7 +30,7 @@ for ($r = 1; $r -le $Repeat; $r++) {
     if ($r % 2 -eq 0) { $arms = @('off', 'on') }
     foreach ($arm in $arms) {
         Write-Host "##### repetition $r of $Repeat -- harness $arm"
-        & (Join-Path $PSScriptRoot 'run-l1.ps1') -Tier $Tier -Tasks all -Repeat 1 -Harness $arm -OutDir $out -MaxUsd $MaxUsdPerRun
+        & (Join-Path $PSScriptRoot 'run-l1.ps1') -Tier $Tier -Tasks $Tasks -Repeat 1 -Harness $arm -OutDir $out -MaxUsd $MaxUsdPerRun
     }
 }
 Write-Host "##### done: $out"

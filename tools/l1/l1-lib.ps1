@@ -565,8 +565,13 @@ function Get-StepActions($step) {
     }
     # "Replace the text in the File name field with small.png": a person selects what is there first.
     # Clicked into, the field holds a caret and pasting appends (garden.pngsmall.png, trial).
+    # Typing over what is already highlighted: "Replace the highlighted archive name with q3-sales,
+    # leaving the .zip ending in place". A person types. Clicking into Explorer's rename box drops the
+    # highlight, and a select-all takes the extension too (step 3, ex-zip, 3 runs on 2026-10-12:
+    # q3-sales.zip.zip, or an extension-change warning).
+    $overSelection = ($ins -match '(?i)\breplace\s+the\s+highlighted\b') -or ($ins -match '(?i)\b(?:leav|keep)\w*\b[^.]{0,30}?(?:\.[a-z0-9]{2,4}\b|\b(?:extension|ending|suffix)\b)')
     $clickedHere = [bool]$step.located
-    if ($clickedHere -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0 -and
+    if ($clickedHere -and -not $overSelection -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0 -and
         $ins -match '(?i)\b(replace|select all|overwrite)\b' -and $ins -match '(?i)\b(field|box|name|value|text)\b' -and
         @($seq | Where-Object { $_.kind -eq 'keys' -and $_.value -match '(?i)^ctrl\+a$' }).Count -eq 0) {
         $pt = $seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { $_.pos } | Select-Object -First 1
@@ -576,20 +581,55 @@ function Get-StepActions($step) {
     foreach ($t in $seq) {
         if ($t.kind -in 'paste', 'text' -and $t.pos -lt $clickPos) {
             $between = $ins.Substring($t.pos, $clickPos - $t.pos)
-            if ($between -match '(?i)\b(in|into|to)\s+(the\s+)?[^.;]*$') { $t.pos = $clickPos + 0.5 }
+            # Not across a comma or a "then": "Paste Yes and No in the large Entries box, then click OK"
+            # pasted after OK had closed the dialog (step 3, lo-validation, 2026-10-12).
+            if ($between -match '(?i)\b(in|into|to)\s+(the\s+)?(?:(?!\bthen\b)[^.;,])*$') { $t.pos = $clickPos + 0.5 }
         }
     }
     # Text for a field the step does not point at is not the follower's to type: "enter colour in the
     # Find box, then enter color in the Replace box" with the pointer on Find put both words into
     # Find (trial, 2026-10-11). A later text that names a different box or field is skipped.
     $a.skipped = @()
-    $texts = @($seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { $_.pos })
-    for ($k = 1; $k -lt $texts.Count; $k++) {
-        $tail = $ins.Substring([math]::Min([int]$texts[$k].pos, $ins.Length))
+    $texts = @($seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { [double]$_.pos })
+    # A control that never takes typed text -- a button, a menu item, a tab -- cannot be where the
+    # step's text goes, so with the pointer on one the first text is judged too. "Click Center ...,
+    # then replace the value in the Font Size box with 20 and press Enter" clicked Center, selected
+    # all and pasted 20 over the document (step 3, word-recover, 2026-10-12).
+    $noTextTarget = $tt -and ([string]$step.target_role -in 'Button', 'Menuitem', 'Tab', 'Link', 'Checkbox')
+    $k0 = 1
+    if ($noTextTarget) { $k0 = 0 }
+    $dropped = @()
+    for ($k = $k0; $k -lt $texts.Count; $k++) {
+        $at = [math]::Min([int][math]::Floor([double]$texts[$k].pos), $ins.Length)
+        $tail = $ins.Substring($at)
         if ($tail.Length -gt 90) { $tail = $tail.Substring(0, 90) }
-        if ($tail -match '(?i)\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b' -and (-not $tt -or $Matches[1] -notmatch [regex]::Escape($tt))) {
-            $a.skipped += "$($texts[$k].value) (for the $($Matches[1]) field)"
+        # The field can also be named BEFORE the text: "Enter "colour" in the Find field, then click
+        # the Replace field below and enter "color."" typed both words into Find (step 3, 2026-10-12;
+        # Replace all then emptied the note's colour words). What lies between the previous text (or
+        # the click) and this one is where such a field is named.
+        if ($k -gt 0) { $from = [int][math]::Floor([double]$texts[$k - 1].pos) + 1 } else { $from = [int]$clickPos + 1 }
+        $between = ''
+        if ($at -gt $from) { $between = $ins.Substring($from, $at - $from) }
+        $field = $null
+        if ($tail -match '(?i)\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
+        elseif ($between -match '(?i)\b(?:click|select|go to|move to|tab to)\s+(?:in\s+|into\s+|on\s+)?the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
+        elseif ($k -eq 0 -and $between -match '(?i)^.*\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
+        if ($field -and (-not $tt -or $field -notmatch [regex]::Escape($tt))) {
+            $a.skipped += "$($texts[$k].value) (for the $field field)"
+            $dropped += $texts[$k]
             [void]$seq.Remove($texts[$k])
+        }
+    }
+    # What goes with a skipped text goes too: the select-all the follower added for it, and the keys
+    # that finish it ("... with 20 and press Enter" would press Enter on the selected title) -- up to
+    # the next text the follower does type.
+    foreach ($d in $dropped) {
+        $next = @($texts | Where-Object { $dropped -notcontains $_ -and [double]$_.pos -gt [double]$d.pos } | Select-Object -First 1)
+        $end = [double]::MaxValue
+        if ($next.Count) { $end = [double]$next[0].pos }
+        foreach ($t in @($seq | Where-Object { ($_.before -and [object]::ReferenceEquals($_.before, $d)) -or ($_.kind -eq 'keys' -and [double]$_.pos -gt [double]$d.pos -and [double]$_.pos -lt $end) })) {
+            $a.skipped += "key $($t.value) (with it)"
+            [void]$seq.Remove($t)
         }
     }
     # A pointer is not an order to click. Click when the instruction asks for one, when it types into
@@ -598,7 +638,15 @@ function Get-StepActions($step) {
     # the selection was gone (trial, 2026-10-11). "to select" is a purpose, not an order.
     # "Focus that button and press Space" is a click first (verification run: the Space went to
     # the document instead).
-    $verb = $ins -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|point to|focus)\b'
+    # "the insertion point to" is not "point to": "Press Home to move the insertion point to the start
+    # of the 1. Introduction heading" pressed Home and then clicked mid-heading, and the section break
+    # that followed split the heading in two (step 3, word-pagenum, 2 of 3 runs on 2026-10-12).
+    # A click the step talks about is not one it asks for: "The Total Row checkbox is still off, so
+    # the last click didn't enable it. Press Esc to close the Quick Analysis popup" pressed Esc and then
+    # clicked the popup's button, opening it again (step 3, xl-table-total, 2026-10-12). Also "your
+    # click", "the toolbar click", "the latest click".
+    $insVerb = $ins -replace '(?i)\b(?:the|that|this|your|my|a|last|latest|previous|earlier|first|second)\s+(?:[\w-]+\s+)?click(?:s|ed)?\b(?!\s+(?:on|in|at|the|it)\b)', ' '
+    $verb = $insVerb -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|(?<!\binsertion\s)point to|focus)\b'
     # Text to type while the pointer is on an input: a person puts it where the pointer is. ("Press
     # Ctrl+A, paste 20, then press Enter" with the pointer on Font Size: not clicking there let the
     # select-all take the whole document, 2026-10-12.) Not for a pointer on anything else: Blender's
@@ -621,6 +669,7 @@ function Get-StepActions($step) {
     }
     $keysOrText = @($seq).Count -gt 0
     if ($a.click -and -not $verb -and -not $intoTarget -and -not ($typesHere -and $inputTarget) -and $keysOrText) { $a.click = $null; $a.pointerOnly = $true }
+    if ($a.click -and -not $verb -and $overSelection -and $typesHere) { $a.click = $null; $a.pointerOnly = $true }
     # A select-all the follower added is for the field it clicks. With no click it would select
     # whatever has focus -- a whole document, once (2026-10-12) -- so it goes.
     if (-not $a.click) { foreach ($t in @($seq | Where-Object { $_.before })) { [void]$seq.Remove($t) } }
