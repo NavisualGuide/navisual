@@ -512,7 +512,9 @@ function Get-StepActions($step) {
     $then = '(?<then>\bthen\s+(?<tk>(?-i:[B-HJ-Z])|home|end|enter|tab|esc|space|delete|backspace)(?=\s*(?:,|\.|;|$)|\s+(?:and|then|to)\b))'
     $named = '(?:f[0-9]{1,2}|enter|tab|esc|escape|delete|backspace|home|end|space|page ?up|page ?down)'
     $with = '(?<with>\b(?:with|using)\s+(?:the\s+)?(?<wk>' + $named + ')(?:\s+key)?\b)'
-    $type = '(?<type>\b(?:type|enter|paste|write)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
+    # "press F3, search "Add Cylinder," and press Enter" pasted before F3: "search" did not place
+    # its text (v6, blender-cylinder; the run passed anyway).
+    $type = '(?<type>\b(?:type|enter|paste|write|search(?:\s+for)?)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
     # "hold Shift and press End", "hold down Ctrl while you press A": one chord. (Read as two keys,
     # Shift+End once became Home, End -- nothing selected, and the model asked again, 2026-10-12.)
     $hold = '(?<hold>\bhold(?:ing)?\s+(?:down\s+)?(?<hm>shift|ctrl|control|alt)\s*,?\s+(?:and|then|while\s+you)?\s*(?:press(?:ing)?|hit|tap)\s+(?:the\s+)?(?<hk>' + $key + '))'
@@ -564,7 +566,20 @@ function Get-StepActions($step) {
     $ttWords = @(($tt -split '[^A-Za-z0-9]+') | Where-Object { $_ })
     $ttRe = $null
     if ($ttWords.Count -gt 0) { $ttRe = '(?i)\b' + (($ttWords | ForEach-Object { [regex]::Escape($_) }) -join '\W+') + '\b' }
-    if ($ttRe -and $ins -match $ttRe) { $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) }
+    if ($ttRe -and $ins -match $ttRe) {
+        $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase)
+        # The click goes with its verb when keys or text lie between the verb and the name: "Click
+        # the visible page number in the cover's footer and press Delete. This removes the number
+        # from section 1" named the target "1" only after the Delete, and the follower pressed Delete
+        # before clicking (v6, word-pagenum, 2026-10-13). "Select the title with Home, then
+        # Shift+End. Click the Font Size box" keeps its keys first: nothing lies between its last
+        # verb and the name.
+        $vm = [regex]::Matches($ins.Substring(0, $clickPos), '(?i)\b(?:click|double-click|right-click|select|choose|tick|open)\b')
+        if ($vm.Count -gt 0) {
+            $v = $vm[$vm.Count - 1].Index
+            if (@($seq | Where-Object { [double]$_.pos -gt $v -and [double]$_.pos -lt $clickPos }).Count -gt 0) { $clickPos = $v }
+        }
+    }
     elseif ($ins -match '(?i)\b(click|select|choose|tick|open|double-click|right-click)\b') { $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) }
     $a.clickPos = $clickPos
     $a.named = [bool]$tt
@@ -579,7 +594,9 @@ function Get-StepActions($step) {
             if ($ins -match '(?i)\b(paste|type)\b') { $pp = $ins.IndexOf($Matches[1], [System.StringComparison]::OrdinalIgnoreCase) }
             # "press Ctrl+A, and replace it with colour": the text goes where "with" stands, after the
             # keys before it (pasting first, then selecting, was the trial's order).
-            elseif ($ins -match '(?i)\breplace\b[^.]*?\bwith\b') { $pp = $Matches[0].Length + $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) - 4 }
+            # Across a period that does not end a sentence: "replace only the name before ".zip" with
+            # q3-sales" was missed, and the paste went before the F2 that opens the box (v6, ex-zip).
+            elseif ($ins -match '(?i)\breplace\b(?:(?!\.\s)[^;])*?\bwith\b') { $pp = $Matches[0].Length + $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) - 4 }
             [void]$seq.Add(@{ kind = 'paste'; value = [string]$step.clipboard; pos = $pp })
         }
     }
@@ -627,7 +644,11 @@ function Get-StepActions($step) {
         # the Replace field below and enter "color."" typed both words into Find (step 3, 2026-10-12;
         # Replace all then emptied the note's colour words). What lies between the previous text (or
         # the click) and this one is where such a field is named.
-        if ($k -gt 0) { $from = [int][math]::Floor([double]$texts[$k - 1].pos) + 1 } else { $from = [int]$clickPos + 1 }
+        # Before the click, from the start: "Click the large blank Entries box, paste Yes and No on
+        # separate lines, then click OK" with the pointer on OK pasted wherever focus was (v6).
+        if ($k -gt 0) { $from = [int][math]::Floor([double]$texts[$k - 1].pos) + 1 }
+        elseif ($at -lt $clickPos) { $from = 0 }
+        else { $from = [int]$clickPos + 1 }
         $between = ''
         if ($at -gt $from) { $between = $ins.Substring($from, $at - $from) }
         $field = $null
@@ -709,6 +730,17 @@ function Get-StepActions($step) {
     if ($a.clickWithoutPointer -and -not $tt -and $ins -match '(?i)\b(?:click|tap)\b[^.;]{0,50}?\b(3d\s*view(?:port)?|viewport|canvas|grid area|work(?:ing)? area|drawing area|(?:empty|blank|open)\s+(?:area|space|spot|part)|middle of the (?:window|screen|view))') {
         if ($Matches[1] -match '(?i)empty|blank|open') { $a.areaClick = 'empty' } else { $a.areaClick = 'middle' }
         $a.clickWithoutPointer = $false
+    }
+    # Keys and text after a click the follower cannot make belong to what it would have clicked:
+    # "Double-click the small 1 in the footer, then press Delete" with no pointer pressed Delete into
+    # the document (v6, word-pagenum, 2026-10-13). Without them the step is one it cannot follow, and
+    # the model hears so. A hover needs no pointer: with no click the hand rests over the app ("Hover
+    # over the 3D Viewport, press F3" is keys for the viewport).
+    if ($a.clickWithoutPointer -and $insVerb -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|focus)\b') {
+        foreach ($t in @($seq | Where-Object { [double]$_.pos -gt $clickPos })) {
+            $a.skipped += "$($t.value) (after a click with no pointer)"
+            [void]$seq.Remove($t)
+        }
     }
     # The select-all sits just before the paste it serves, wherever that paste ended up.
     foreach ($t in $seq) { if ($t.before) { $t.pos = $t.before.pos - 0.001 } }

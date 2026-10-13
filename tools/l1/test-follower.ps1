@@ -84,5 +84,19 @@ $a = Step 'The toolbar click did not start renaming. With the selected archive, 
 Check 'the toolbar click is not a click' ("click=$([bool]$a.click) " + (Seq $a)) 'click=False keys:F2 > keys:Enter'
 $a = Step 'That click missed. Click the Total Row box, then press Space.' -tt 'Total Row' -Located -role 'Checkbox'
 Check 'a click verb after a click noun' ("click=$([bool]$a.click) " + (Seq $a)) 'click=True keys:Space'
+# Clean run v6 (2026-10-13).
+$a = Step 'The extension warning was cancelled, so the archive is still named sales-august.zip. Press F2, replace only the name before ".zip" with q3-sales, keep ".zip," then press Enter.' -tt 'sales-august.zip' -clip 'q3-sales' -Located -role 'Other'
+Check 'replace ... with across .zip' ("click=$([bool]$a.click) " + (Seq $a)) 'click=False keys:F2 > paste:q3-sales > keys:Enter'
+$a = Step 'Click the visible page number in the cover''s footer and press Delete. This removes the number from section 1, including the contents page.' -tt '1' -Located -role 'Other'
+Check 'the click goes with its verb' ("click=$([bool]$a.click) clickPos=$($a.clickPos) " + (Seq $a)) 'click=True clickPos=0 keys:Delete'
+$a = Step 'Select the title with Home, then Shift+End. Click the Font Size box, replace its value with 20.' -tt 'Font Size' -clip '20' -Located -role 'Combobox'
+$before = @($a.seq | Where-Object { $_.pos -lt $a.clickPos } | ForEach-Object { $_.value }) -join ','
+Check 'keys before the last verb stay first' "before=$before" 'before=Home,Shift+End'
+$a = Step 'Double-click the small 1 in the footer at the bottom of the upper page, then press Delete to remove numbering from the cover and contents section.'
+Check 'nothing after a click with no pointer' ("cwp=$($a.clickWithoutPointer) seq=" + (Seq $a)) 'cwp=True seq='
+$a = Step 'Click the large blank Entries box, paste "Yes" and "No" on separate lines, then click "OK" at the bottom.' -tt 'OK' -clip "Yes`nNo" -Located -role 'Button'
+Check 'text named before the click, pointer on a button' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=True seq='
+$a = Step 'Hover over the 3D Viewport, press F3, search "Add Cylinder," and press Enter.' -clip 'Add Cylinder'
+Check 'a hover with no pointer keeps its keys' ("seq=" + (Seq $a)) 'seq=keys:F3 > paste:Add Cylinder > keys:Enter'
 
 if ($fail) { "$fail FAILED"; exit 1 } else { "all ok" }
