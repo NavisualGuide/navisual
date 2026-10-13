@@ -76,6 +76,7 @@ impl AiRouter {
         session_manager: SessionManager,
         managed_session_path: Option<PathBuf>,
     ) -> Self {
+        crate::ai::prompts::set_screen_first_rules(config.screen_first_rules);
         let mut router = Self {
             config: config.clone(),
             cost_tracker,

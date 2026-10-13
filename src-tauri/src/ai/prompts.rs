@@ -237,17 +237,55 @@ pub const KEEP_FIELD: &str = "Facts the user may still need after they leave the
 
 /// The system prompt, carrying rule 19 when H1 is on.
 pub fn system_prompt(expected_result: bool) -> std::borrow::Cow<'static, str> {
+    let base: std::borrow::Cow<'static, str> = if screen_first_rules() {
+        std::borrow::Cow::Borrowed(SYSTEM_PROMPT)
+    } else {
+        std::borrow::Cow::Owned(with_rules_2_3_of_v0736(SYSTEM_PROMPT))
+    };
     if !expected_result {
-        return std::borrow::Cow::Borrowed(SYSTEM_PROMPT);
+        return base;
     }
     // Asserted by `h1_system_prompt_gets_rule_19_before_the_tail`.
-    let at = SYSTEM_PROMPT.rfind(PROMPT_TAIL).unwrap_or(SYSTEM_PROMPT.len());
-    std::borrow::Cow::Owned(format!(
-        "{}\n{}{}",
-        &SYSTEM_PROMPT[..at],
-        EXPECTED_RESULT_RULE,
-        &SYSTEM_PROMPT[at..]
-    ))
+    let at = base.rfind(PROMPT_TAIL).unwrap_or(base.len());
+    std::borrow::Cow::Owned(format!("{}\n{}{}", &base[..at], EXPECTED_RESULT_RULE, &base[at..]))
+}
+
+/// Rules 2 and 3 exactly as v0.7.36 shipped them, before "the screen outranks the Next" (v0.7.37):
+/// trust a confirmation and advance. Kept only so the harness can be measured on and off
+/// (`SCREEN_FIRST_RULES=false`, L1 step 3); the product always runs the current rules.
+const RULES_2_3_V0736: &str = "2. If the screen shows the user completed the step, acknowledge and advance. If
+   the screen shows something unexpected, describe what you see and suggest how
+   to recover.
+3. TRUST CONFIRMATIONS; NEVER REPEAT: if the user says they completed a step
+   (\"done\", \"yes\", \"I did it\", \"ok\"), TRUST them and advance — many actions
+   (placing a cursor, focusing a field, selecting text) leave no visible trace
+   in a screenshot. If you are about to give the exact same instruction as the
+   immediately preceding step, STOP: either (a) advance assuming the action
+   succeeded, or (b) ask a short yes/no question (\"Did you click at the end of
+   that line?\"). NEVER issue the identical instruction twice in a row.
+";
+
+const RULE_2_START: &str = "2. If the screen shows the user completed the step";
+const RULE_4_START: &str = "4. If you need clarification";
+
+static SCREEN_FIRST_RULES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set once from `Config::screen_first_rules` when the router is built.
+pub fn set_screen_first_rules(on: bool) {
+    SCREEN_FIRST_RULES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn screen_first_rules() -> bool {
+    SCREEN_FIRST_RULES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `prompt` with its rules 2-3 swapped for v0.7.36's. Unchanged if either anchor is missing; the
+/// test `rules_2_3_switch_back_to_v0736` fails first if an edit moves them.
+fn with_rules_2_3_of_v0736(prompt: &str) -> String {
+    match (prompt.find(RULE_2_START), prompt.find(RULE_4_START)) {
+        (Some(a), Some(b)) if a < b => format!("{}{}{}", &prompt[..a], RULES_2_3_V0736, &prompt[b..]),
+        _ => prompt.to_string(),
+    }
 }
 
 /// A prompted-JSON format instruction, with the `expected_result` line added after the
@@ -760,6 +798,22 @@ mod tests {
         assert!(line.contains("remains authoritative for layout"));
     }
     use std::collections::BTreeMap;
+
+    /// The harness off switch for rules 2-3 (L1 step 3): the v0.7.36 text in, the current text out,
+    /// everything else byte-identical.
+    #[test]
+    fn rules_2_3_switch_back_to_v0736() {
+        let old = super::with_rules_2_3_of_v0736(super::SYSTEM_PROMPT);
+        assert!(old.contains("3. TRUST CONFIRMATIONS; NEVER REPEAT:"), "the old rule 3 is in");
+        assert!(!old.contains("the screen outranks the confirmation"), "the new rule 3 is out");
+        assert!(!old.contains("make your FIRST step undo it"), "the new rule 2 is out");
+        let cut = |p: &str| -> (String, String) {
+            let a = p.find(super::RULE_2_START).unwrap();
+            let b = p.find(super::RULE_4_START).unwrap();
+            (p[..a].to_string(), p[b..].to_string())
+        };
+        assert_eq!(cut(&old), cut(super::SYSTEM_PROMPT), "only rules 2-3 change");
+    }
 
     fn ctx_el(id: u32, name: &str, role: &str, x: i32, y: i32, w: u32, h: u32) -> crate::locator::ContextElement {
         ctx_el_state(id, name, role, x, y, w, h, true)

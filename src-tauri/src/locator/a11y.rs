@@ -1245,9 +1245,8 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
 /// value, selection and expansion where the element has them. No cap and no control-type filter:
 /// the tool reads one region of it. An element with neither a name nor a state is left out (a
 /// bare container says nothing). Not for Excel's main window, whose bulk query detonates (see
-/// `BULK_UNSAFE_CLASSES`); that returns an error rather than two minutes of duplicates. Test builds
-/// only until the app reads the tree live for the tool.
-#[cfg(test)]
+/// `BULK_UNSAFE_CLASSES`); that returns an error rather than two minutes of duplicates. Read live
+/// for the tool when `UI_TREE` is on (`set_look_sources` in lib.rs).
 pub fn snapshot_ui_tree(hwnd_raw: usize) -> Result<Vec<super::UiNode>, String> {
     if hwnd_raw == 0 {
         return Err("no target window".to_string());

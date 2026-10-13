@@ -2988,6 +2988,77 @@ fn compose_reply_prompt(
     )
 }
 
+/// Whether this request offers `recall` (H6): its switch is on and the session has kept a screen.
+fn recall_offered(router: &ai::router::AiRouter) -> bool {
+    router.config.recall
+        && router
+            .session_manager
+            .current_session
+            .as_ref()
+            .is_some_and(|s| !s.recall_screens.is_empty())
+}
+
+/// What the look tools may look at for this request -- H2 zoom and H4 read_text on the native
+/// frame, H6 recall on the earlier screens, H3 ui_tree on the accessibility tree -- each only
+/// when its switch is on (`INSPECT`, `RECALL`, `UI_TREE`). The replay harness had them all; the
+/// app had none until L1 step 3 needed the harness measured live (2026-10-12). Every field is
+/// set on every request: a value left from the last one would offer a tool its switch no longer
+/// allows, or a screen that has gone.
+async fn set_look_sources(
+    router: &mut ai::router::AiRouter,
+    hwnd: Option<usize>,
+    capture_rect: Option<capture::Rect>,
+    ocr_png: Option<&[u8]>,
+) {
+    router.inspect_frame = if router.config.inspect != ai::inspect::Mode::Off {
+        ocr_png
+            .and_then(|png| image::load_from_memory(png).ok())
+            .map(|img| std::sync::Arc::new(img.to_rgb8()))
+    } else {
+        None
+    };
+    router.recall_screens = if recall_offered(router) {
+        router
+            .session_manager
+            .current_session
+            .as_ref()
+            .map(|s| std::sync::Arc::new(s.recall_screens.clone()))
+    } else {
+        None
+    };
+    router.ui_snapshot = None;
+    #[cfg(windows)]
+    if router.config.ui_tree {
+        if let (Some(h), Some(r)) = (hwnd, capture_rect) {
+            let read = tokio::time::timeout(
+                std::time::Duration::from_millis(2000),
+                tokio::task::spawn_blocking(move || locator::a11y::snapshot_ui_tree(h)),
+            )
+            .await;
+            match read {
+                Ok(Ok(Ok(nodes))) => {
+                    router.ui_snapshot = Some(std::sync::Arc::new(ai::inspect::UiSource {
+                        nodes,
+                        capture: [r.x, r.y, r.width as i32, r.height as i32],
+                    }))
+                }
+                Ok(Ok(Err(why))) => log::info!("[looks] ui_tree unavailable: {why}"),
+                _ => log::info!("[looks] ui_tree read timed out or failed; not offered this turn"),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (hwnd, capture_rect);
+    if router.inspect_frame.is_some() || router.recall_screens.is_some() || router.ui_snapshot.is_some() {
+        log::info!(
+            "[looks] offered this request: frame={} recall_screens={} ui_tree_nodes={}",
+            router.inspect_frame.as_ref().map(|f| format!("{}x{}", f.width(), f.height())).unwrap_or_else(|| "-".into()),
+            router.recall_screens.as_ref().map(|s| s.len()).unwrap_or(0),
+            router.ui_snapshot.as_ref().map(|u| u.nodes.len()).unwrap_or(0)
+        );
+    }
+}
+
 /// The window context with the session's memory after it: the kept notes, then the list of
 /// earlier screens when that is on. Each only when it has anything in it. One function for
 /// `guide`, `send_correction` and the replay harness.
@@ -4881,7 +4952,7 @@ async fn guide_inner(
         window_context,
         router.session_manager.current_session.as_ref(),
         router.config.earlier_screens,
-        false,
+        recall_offered(&router),
     );
 
 
@@ -5003,6 +5074,14 @@ async fn guide_inner(
     // Session-sticky language sample — the user's last substantial message. The directive treats
     // it as the language authority, so it survives the machine turns that carry no language signal.
     let reply_sample = state.guidance.lock().reply_lang_sample.clone();
+
+    set_look_sources(
+        &mut router,
+        new_hwnd_opt,
+        capture_rect_opt,
+        pre_ocr.as_ref().map(|(png, _)| png.as_slice()),
+    )
+    .await;
 
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let expect = router.config.expected_result;
@@ -5274,6 +5353,7 @@ async fn guide_inner(
         None
     };
 
+    let remember_screens = router.config.recall;
     if let Some(session) = &mut router.session_manager.current_session {
         record_exchange(
             session,
@@ -5287,6 +5367,9 @@ async fn guide_inner(
             new_hwnd_opt.map(capture::get_window_title),
             &response.keep,
         );
+        if remember_screens {
+            session.remember_screen(screenshot_b64.clone());
+        }
         // Searches back for the user turn, so it lands there though the assistant's is newer.
         session.set_last_user_turn_facts(clicked.clone(), advance.clone(), frame.clone());
         router.session_manager.save_session(None);
@@ -6190,7 +6273,7 @@ async fn send_correction_inner(
         window_context,
         router.session_manager.current_session.as_ref(),
         router.config.earlier_screens,
-        false,
+        recall_offered(&router),
     );
 
     // Same language + goal anchor as guide()'s continuation turns — a correction is a
@@ -6289,6 +6372,14 @@ async fn send_correction_inner(
             let _ = overlay::emit_update(&app_clone, update);
         }
     };
+
+    set_look_sources(
+        &mut router,
+        new_hwnd,
+        new_capture_rect,
+        pre_ocr.as_ref().map(|(png, _)| png.as_slice()),
+    )
+    .await;
 
     let timing_provider = router.config.api_provider.clone();
     let ai_started = std::time::Instant::now();
@@ -6407,6 +6498,7 @@ async fn send_correction_inner(
     let provider = router.config.api_provider.clone();
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
+    let remember_screens = router.config.recall;
     if let Some(session) = &mut router.session_manager.current_session {
         // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
         // the field leaves the stored goal alone rather than wiping it — the failure mode here
@@ -6444,6 +6536,9 @@ async fn send_correction_inner(
         // same rule, finally applied on this path. The context blocks describe the screen
         // at the moment of THAT correction and are stale by the next turn anyway.
         session.add_turn("correction", user_text_owned.clone(), None);
+        if remember_screens {
+            session.remember_screen(screenshot_b64.clone());
+        }
         // No `clicked` / `advanced_by`: a correction is the user saying the last step was
         // wrong, which is neither a click in the guided app nor something that advanced the
         // step. The frame is the part worth keeping.
