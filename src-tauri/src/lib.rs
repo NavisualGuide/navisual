@@ -7,6 +7,7 @@
 mod ai;
 mod capture;
 mod credvault;
+mod held_keys;
 mod jsonl_log;
 mod last_click;
 mod recycle;
@@ -3197,6 +3198,14 @@ fn app_state_snapshot(hwnd: Option<usize>) -> Option<String> {
     Some(block)
 }
 
+/// Two optional prompt lines as one, either or both absent.
+fn join_lines(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{a}{b}")),
+        (a, b) => a.or(b),
+    }
+}
+
 /// How stale a recorded click may be and still be worth telling the AI about. Long enough to
 /// cover a user reading an instruction and acting on it; short enough that a click from a
 /// previous, abandoned line of work is never presented as "what they just did".
@@ -3506,6 +3515,14 @@ fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
         let _ = (state, hwnd);
         Vec::new()
     }
+}
+
+/// Of the key combos a step names, the ones another program holds for itself (`held_keys`). The
+/// panel passes what it does not hold itself; what this finds is told to the user there and to the
+/// model on the next request.
+#[tauri::command]
+fn combos_held_elsewhere(combos: Vec<String>) -> Vec<String> {
+    held_keys::probe(&combos)
 }
 
 /// Deployment status of the pack-shipped Blender add-on (the script-channel bridge):
@@ -4939,6 +4956,8 @@ async fn guide_inner(
     // What the user actually did since the last turn, as a resolved control. Also (re)arms
     // the click hook for the app being guided — see `last_click` for the privacy contract.
     let click_line = last_click_snapshot(new_hwnd_opt);
+    // A key the last step named that another program holds: the model is told once.
+    let click_line = join_lines(click_line, held_keys::take_note());
     let window_context = window_context_text(
         info.as_deref(),
         &pack_context,
@@ -6261,13 +6280,14 @@ async fn send_correction_inner(
     let os_line = os_context_line();
     // L1 app state — same as guide()'s capture path.
     let app_state_text = app_state_snapshot(new_hwnd);
+    let keys_line = held_keys::take_note();
     let window_context = window_context_text(
         info.as_deref(),
         &pack_context,
         &elements_block,
         os_line,
         app_state_text.as_deref(),
-        None,
+        keys_line.as_deref(),
     );
     let window_context = with_session_memory(
         window_context,
@@ -9192,6 +9212,7 @@ pub fn run() {
             get_shared_app_info,
             get_pack_starters,
             blender_addon_status,
+            combos_held_elsewhere,
             install_blender_addon,
             speak,
             get_settings,

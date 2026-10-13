@@ -72,6 +72,18 @@ export function combosInText(text: string): Set<string> {
   return out;
 }
 
+/** A canonical combo as people write it: "alt+f9" -> "Alt+F9", "ctrl+backquote" -> "Ctrl+`". */
+export function comboLabel(combo: string): string {
+  return combo
+    .split("+")
+    .map((p) => {
+      if (p === "backquote") return "`";
+      if (/^f[0-9]{1,2}$/.test(p)) return p.toUpperCase();
+      return p.charAt(0).toUpperCase() + p.slice(1);
+    })
+    .join("+");
+}
+
 export function prettyHotkey(accel: string): string {
   if (!accel) return "";
   return accel

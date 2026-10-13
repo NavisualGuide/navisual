@@ -14,7 +14,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
   import HotkeyInput from "./HotkeyInput.svelte";
-  import { prettyHotkey, acceleratorCombo, combosInText } from "./lib/hotkey";
+  import { prettyHotkey, acceleratorCombo, combosInText, comboLabel } from "./lib/hotkey";
   import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
   import { providerName } from "./lib/providers";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
@@ -2480,6 +2480,7 @@ See the LICENSE file in the root of this repository for complete details.
   const heldHotkeys = new Set<string>();
   let hotkeyChain: Promise<unknown> = Promise.resolve();
   let lastYieldNote = "";
+  let lastHeldProbe = "";
 
   function queueHotkeys<T>(work: () => Promise<T>): Promise<T> {
     const run = hotkeyChain.then(work);
@@ -2488,7 +2489,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Which hotkeys should be held now, and which a step on screen has claimed.
-  function wantedHotkeys(): { want: HotkeyEntry[]; yielded: HotkeyEntry[] } {
+  function wantedHotkeys(): { want: HotkeyEntry[]; yielded: HotkeyEntry[]; claimed: Set<string> } {
     const guiding =
       phase === "guiding" || phase === "needs_input" || (phase === "thinking" && steps.length > 0);
     const claimed = guiding ? combosInText(steps[stepIndex]?.instruction ?? "") : new Set<string>();
@@ -2499,12 +2500,27 @@ See the LICENSE file in the root of this repository for complete details.
       if (claimed.has(acceleratorCombo(e.key))) yielded.push(e);
       else want.push(e);
     }
-    return { want, yielded };
+    return { want, yielded, claimed };
   }
 
   $effect(() => {
-    const { want, yielded } = wantedHotkeys();
+    const { want, yielded, claimed } = wantedHotkeys();
     untrack(() => {
+      // A combo the step names that another program holds never reaches the app: NVIDIA's overlay
+      // took Word's Alt+F9 for its Record dialog in L1 (2026-10-12). Navisual cannot release
+      // another program's key, but it can find out and say so; the backend also tells the model
+      // on the next request. Not Navisual's own keys (released above), not Win+ (Windows' own).
+      const own = new Set(hotkeyEntries.filter((e) => e.key).map((e) => acceleratorCombo(e.key)));
+      const toProbe = [...claimed].filter((c) => !own.has(c) && !c.split("+").includes("win"));
+      const probeNote = `${stepIndex}|${steps[stepIndex]?.instruction ?? ""}|${toProbe.join(",")}`;
+      if (toProbe.length > 0 && probeNote !== lastHeldProbe) {
+        lastHeldProbe = probeNote;
+        invoke<string[]>("combos_held_elsewhere", { combos: toProbe })
+          .then((held) => {
+            for (const c of held) addToHistory("system", t("msg.hotkeyHeldElsewhere", { key: comboLabel(c) }));
+          })
+          .catch((err) => console.warn("hotkey check failed:", err));
+      }
       // Say so once per step: the key now goes to the app, and the panel's button still works.
       const note = `${stepIndex}|${steps[stepIndex]?.instruction ?? ""}|${yielded.map((e) => e.key).join(",")}`;
       if (yielded.length > 0 && note !== lastYieldNote) {

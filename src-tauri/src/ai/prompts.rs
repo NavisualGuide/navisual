@@ -515,6 +515,19 @@ pub fn os_context(os: &str) -> String {
     )
 }
 
+/// `[Keyboard]`: key combos a step named that another program on this computer holds for itself,
+/// found by `held_keys::probe`. In L1 step 3 NVIDIA's overlay took Word's Alt+F9 and opened its
+/// Record dialog; the screenshot cannot show who receives a key. The line says what to avoid, not
+/// which route to take instead (rule 21: an example route is read as a preference).
+pub fn held_keys_note(keys: &[String]) -> String {
+    let list = keys.join(", ");
+    format!(
+        "
+[Keyboard] Another program on this computer holds {list} for itself, so pressing it never reaches the app. Do not ask for {list} again; if a step needs what it does in the app, give a way that does not use it.
+"
+    )
+}
+
 pub fn goal_anchor(task_description: &str) -> String {
     let t = task_description.trim();
     if t.is_empty() {

@@ -606,6 +606,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "panel.guideOnScreen": "在这块屏幕上引导",
   "panel.pickAnApp": "选择程序",
   "msg.noTargetWindow": "没有打开的程序窗口，因此没有可查看的内容。",
+  "msg.hotkeyHeldElsewhere": "{key} 已被这台电脑上的另一个程序占用（比如游戏叠加层或录屏软件），按下去可能会打开那个程序，而不是完成这一步。会告诉 AI。",
   "msg.hotkeyYielded": "这一步要用 {key}，Navisual 的“{action}”快捷键先暂停，到下一步恢复。面板上的按钮照常可用。",
   "err.freeTrialExhausted": "免费次数已用完。",
   "err.insufficientCoins": "金币不足，无法使用该质量档位。请购买后继续。",
