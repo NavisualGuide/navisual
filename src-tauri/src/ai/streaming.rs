@@ -20,7 +20,10 @@ pub const STREAM_IDLE: std::time::Duration = std::time::Duration::from_secs(20);
 /// and two that did not, still growing when the client's 90 s timeout cut them, at 25,125 and
 /// 94,841 chars of tool arguments in about 12,000 deltas each. The stall rule rightly leaves an
 /// answer that keeps growing alone, so these ran the full 90 s. Seven times the longest real
-/// answer ends them in a few seconds. This covers the streaming (BYOK) clients, which send no
+/// answer ends them sooner, not quickly: a runaway streams only 220-1,000 chars a second, so on
+/// L1's clean run (2026-10-13) four were cut at 16, 21, 45 and 73 s, and each retry answered
+/// within 5 s. A lower cap would cut sooner; it waits on answer lengths from the other tiers'
+/// models. This covers the streaming (BYOK) clients, which send no
 /// output cap. The managed client does not stream: there the relay caps OpenAI's output
 /// (`max_completion_tokens` 1024) and sends Gemini none, since its thinking counts against it.
 pub const MAX_ANSWER_CHARS: usize = 16_000;
