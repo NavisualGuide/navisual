@@ -40,7 +40,15 @@ param(
     # Stop before the next run once this tier's estimated spend passes it (list prices, no cache).
     [double]$MaxUsd = 10.0,
     # Debugging: save the task window as it is just before each click (the test app only).
-    [switch]$ShotBeforeClick
+    [switch]$ShotBeforeClick,
+    # The harness switches, for L1 step 3 (harness-plan.md). 'default' is the product as it
+    # ships: screen-first rules, the list of earlier screens and states in the list on; H1 and
+    # the look tools off. 'on' turns every switch on (H1, zoom and read_text, recall, ui_tree
+    # too); 'off' turns every one off, with rules 2-3 back to v0.7.36's.
+    [ValidateSet('default', 'on', 'off')] [string]$Harness = 'default',
+    # Learned notes carry what one run learned into the later runs of the same tier, so repeated
+    # runs stop being independent; off unless asked for, even with -Harness on.
+    [switch]$LearnedNotes
 )
 
 . "$PSScriptRoot\l1-lib.ps1"
@@ -170,6 +178,14 @@ $set = [ordered]@{
     HOTKEY_NEXT = 'Ctrl+Backquote'
 }
 if ($cfg.provider -eq 'openai') { $set['OPENAI_MODEL'] = $cfg.model } else { $set['GEMINI_MODEL'] = $cfg.model }
+$harnessSets = @{
+    default = [ordered]@{ SCREEN_FIRST_RULES = 'true'; EARLIER_SCREENS = 'true'; LIST_STATES = 'true'; EXPECTED_RESULT = 'false'; INSPECT = ''; INSPECT_TOOLS = 'zoom'; RECALL = 'false'; UI_TREE = 'false' }
+    on      = [ordered]@{ SCREEN_FIRST_RULES = 'true'; EARLIER_SCREENS = 'true'; LIST_STATES = 'true'; EXPECTED_RESULT = 'true'; INSPECT = 'choice'; INSPECT_TOOLS = 'both'; RECALL = 'true'; UI_TREE = 'true' }
+    off     = [ordered]@{ SCREEN_FIRST_RULES = 'false'; EARLIER_SCREENS = 'false'; LIST_STATES = 'false'; EXPECTED_RESULT = 'false'; INSPECT = ''; INSPECT_TOOLS = 'zoom'; RECALL = 'false'; UI_TREE = 'false' }
+}
+$hs = $harnessSets[$Harness]
+foreach ($k in $hs.Keys) { $set[$k] = $hs[$k] }
+$set['LEARNED_NOTES'] = $(if ($LearnedNotes) { 'true' } else { 'false' })
 $out = New-Object System.Collections.Generic.List[string]
 $seen = @{}
 foreach ($l in $envLines) {
@@ -182,7 +198,7 @@ foreach ($k in $set.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($set[$k])") } }
 $feed = Join-Path $runDir 'feed.jsonl'
 $env:NAVISUAL_DATA_DIR = $data
 $env:NAVISUAL_STEP_FEED = $feed
-Write-L1 "tier $Tier -> $($cfg.provider) $($cfg.model) effort='$($cfg.effort)'; data $data"
+Write-L1 "tier $Tier -> $($cfg.provider) $($cfg.model) effort='$($cfg.effort)'; harness $Harness, learned notes $([bool]$LearnedNotes); data $data"
 $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path -Parent $Exe)
 $env:NAVISUAL_DATA_DIR = ''
 $env:NAVISUAL_STEP_FEED = ''
@@ -436,6 +452,7 @@ function Invoke-L1Run($task, [int]$rep) {
         input_tokens = $inTok; output_tokens = $outTok; feed_from = $firstFeed; feed_to = $lines.Count
         est_usd = [math]::Round(($inTok * $cfg.usdIn + $outTok * $cfg.usdOut) / 1e6, 5)
         app_commit = $appCommit; exe_time = $exeTime; held_out = [bool]$task.held_out
+        harness = $Harness; learned_notes = [bool]$LearnedNotes
         run_dir = $runDir; ts = (Get-Date -Format o)
     }
 }
