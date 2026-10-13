@@ -77,6 +77,15 @@ impl AiRouter {
         managed_session_path: Option<PathBuf>,
     ) -> Self {
         crate::ai::prompts::set_screen_first_rules(config.screen_first_rules);
+        // The system prompt is not in the prompt log, so this is the only sign of which rules ran.
+        log::info!(
+            "[prompt] rules 2-3: {}",
+            if config.screen_first_rules {
+                "screen-first (v0.7.37)"
+            } else {
+                "trust confirmations (v0.7.36, SCREEN_FIRST_RULES=false)"
+            }
+        );
         let mut router = Self {
             config: config.clone(),
             cost_tracker,

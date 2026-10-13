@@ -245,6 +245,10 @@ impl GeminiClient {
         };
         self.last_inspects.lock().clear();
         let look_names = sources.names(self.inspect_tools);
+        if !look_names.is_empty() {
+            // Says the tools reached the request; an "[inspect]" line follows each one the model calls.
+            log::info!("[looks] gemini declared: {}", look_names.join(", "));
+        }
         let mut declared = vec![tool_schema.clone()];
         for (name, description, parameters) in
             crate::ai::inspect::declarations(self.inspect_mode, &look_names, self.recall_max)

@@ -279,6 +279,10 @@ impl DeepSeekClient {
             declared.push(json!({"type": "function", "name": name,
                                  "description": description, "parameters": parameters}));
         }
+        if !look_names.is_empty() {
+            // Says the tools reached the request; an "[inspect]" line follows each one the model calls.
+            log::info!("[looks] {} declared: {}", self.name, look_names.join(", "));
+        }
         let mut total = UsageDetail::default();
         let mut zooms = 0usize;
         let mut follow_up: Option<(String, Value)> = None;
