@@ -33,6 +33,11 @@ impl AnswerProgress {
         }
         self.grew_at
     }
+
+    /// When the answer last grew, without recording anything.
+    pub fn grew_at(&self) -> Option<std::time::Instant> {
+        self.grew_at
+    }
 }
 
 /// The `steps_seen` an `on_chunk` callback receives when everything streamed so far is void: the
