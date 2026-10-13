@@ -610,5 +610,6 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "err.freeTrialExhausted": "免费次数已用完。",
   "err.insufficientCoins": "金币不足，无法使用该质量档位。请购买后继续。",
   "err.streamStalled": "AI 回答到一半停住了，连续两次。请再试一次。",
+  "err.streamRunaway": "AI 的回答长得反常，远超任何一步所需，连续两次。请再试一次。",
   "err.exportDisabled": "会话导出已关闭。请在「设置 \u2192 开发者」中开启。",
 };

@@ -633,6 +633,7 @@ export const en = {
   "err.freeTrialExhausted": "Your free requests have been used.",
   "err.insufficientCoins": "Not enough coins for this quality tier. Buy more to continue.",
   "err.streamStalled": "The AI stopped partway through its answer, twice in a row. Please try again.",
+  "err.streamRunaway": "The AI's answer ran on far past any real step, twice in a row. Please try again.",
   "err.exportDisabled": "Session export is off. Turn it on in Settings \u2192 Developer.",
 };
 

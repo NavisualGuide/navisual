@@ -15,6 +15,16 @@
 /// stopped growing, so silence never came.
 pub const STREAM_IDLE: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// The longest answer a stream may carry before it counts as a runaway. Measured on L1, 2026-10-12
+/// and 13: 1,358 answers that parsed, median 1,129 chars, 99th percentile 1,764, longest 2,263 --
+/// and two that did not, still growing when the client's 90 s timeout cut them, at 25,125 and
+/// 94,841 chars of tool arguments in about 12,000 deltas each. The stall rule rightly leaves an
+/// answer that keeps growing alone, so these ran the full 90 s. Seven times the longest real
+/// answer ends them in a few seconds. This covers the streaming (BYOK) clients, which send no
+/// output cap. The managed client does not stream: there the relay caps OpenAI's output
+/// (`max_completion_tokens` 1024) and sends Gemini none, since its thinking counts against it.
+pub const MAX_ANSWER_CHARS: usize = 16_000;
+
 /// When the answer last grew, for [`next_or_stall`]. Each client reports its answer's length
 /// (tool-call arguments, or answer text) before every wait.
 #[derive(Debug, Default)]
@@ -23,15 +33,22 @@ pub struct AnswerProgress {
     grew_at: Option<std::time::Instant>,
 }
 
+/// What [`AnswerProgress::update`] hands [`next_or_stall`]: how long the answer is, and when it
+/// last grew -- `None` until it has begun, which leaves the wait unbounded.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnswerState {
+    pub len: usize,
+    pub grew_at: Option<std::time::Instant>,
+}
+
 impl AnswerProgress {
-    /// Record the answer's current length and return when it last grew -- `None` until it has
-    /// begun, which leaves the wait unbounded.
-    pub fn update(&mut self, len: usize) -> Option<std::time::Instant> {
+    /// Record the answer's current length.
+    pub fn update(&mut self, len: usize) -> AnswerState {
         if len > self.len {
             self.len = len;
             self.grew_at = Some(std::time::Instant::now());
         }
-        self.grew_at
+        AnswerState { len: self.len, grew_at: self.grew_at }
     }
 
     /// When the answer last grew, without recording anything.
@@ -57,18 +74,39 @@ impl std::fmt::Display for StreamStalled {
 
 impl std::error::Error for StreamStalled {}
 
+/// An answer past [`MAX_ANSWER_CHARS`]: the model is repeating itself, not answering. Displays as
+/// the bare code the panel translates.
+#[derive(Debug)]
+pub struct StreamRunaway;
+
+impl std::fmt::Display for StreamRunaway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stream_runaway")
+    }
+}
+
+impl std::error::Error for StreamRunaway {}
+
 /// The stream's next item. Once the answer has begun (`grew_at` from [`AnswerProgress`]),
 /// [`STREAM_IDLE`] without it growing is a [`StreamStalled`] rather than a wait for the
-/// client's 90 s timeout -- whether the stream went silent or kept sending something else.
+/// client's 90 s timeout -- whether the stream went silent or kept sending something else. An
+/// answer past [`MAX_ANSWER_CHARS`] is a [`StreamRunaway`], however fast it grows.
 pub async fn next_or_stall<S>(
     stream: &mut S,
-    grew_at: Option<std::time::Instant>,
+    answer: AnswerState,
     provider: &str,
 ) -> anyhow::Result<Option<S::Item>>
 where
     S: futures_util::Stream + Unpin,
 {
-    next_or_stall_within(stream, grew_at, provider, STREAM_IDLE).await
+    if answer.len > MAX_ANSWER_CHARS {
+        log::warn!(
+            "[stream] {provider}: the answer passed {MAX_ANSWER_CHARS} chars ({} so far) -- a runaway",
+            answer.len
+        );
+        return Err(StreamRunaway.into());
+    }
+    next_or_stall_within(stream, answer.grew_at, provider, STREAM_IDLE).await
 }
 
 async fn next_or_stall_within<S>(
@@ -243,7 +281,7 @@ mod tests {
         let mut progress = super::AnswerProgress::default();
         let mut answer = 0usize;
         let mut seen = 0;
-        while let Some(_) = super::next_or_stall_within(&mut steady, progress.update(answer), "test", idle)
+        while let Some(_) = super::next_or_stall_within(&mut steady, progress.update(answer).grew_at, "test", idle)
             .await
             .unwrap()
         {
@@ -251,6 +289,23 @@ mod tests {
             seen += 1;
         }
         assert_eq!(seen, 3);
+    }
+
+    /// A runaway is cut by length, however fast it grows; an answer at the limit is not one.
+    #[tokio::test]
+    async fn a_runaway_is_an_answer_past_any_real_step() {
+        use super::{next_or_stall, AnswerState, StreamRunaway, MAX_ANSWER_CHARS};
+        let now = Some(std::time::Instant::now());
+        let mut fast = futures_util::stream::repeat(0u8);
+        let err = next_or_stall(&mut fast, AnswerState { len: MAX_ANSWER_CHARS + 1, grew_at: now }, "test")
+            .await
+            .unwrap_err();
+        assert!(err.is::<StreamRunaway>());
+        assert_eq!(err.to_string(), "stream_runaway");
+        let got = next_or_stall(&mut fast, AnswerState { len: MAX_ANSWER_CHARS, grew_at: now }, "test")
+            .await
+            .unwrap();
+        assert_eq!(got, Some(0));
     }
 
     #[test]

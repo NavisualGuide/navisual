@@ -2995,6 +2995,7 @@ See the LICENSE file in the root of this repository for complete details.
     insufficient_coins: "err.insufficientCoins",
     export_disabled: "err.exportDisabled",
     stream_stalled: "err.streamStalled",
+    stream_runaway: "err.streamRunaway",
   };
   // Nothing was open to guide. Not an error to report -- a scope to offer. One helper so
   // the three callers cannot drift (rule 18); each passes what to re-run afterwards.

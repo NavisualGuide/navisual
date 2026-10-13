@@ -521,9 +521,11 @@ impl AiRouter {
             _ => {}
         }
         // No request URL reaches the screen through an error (redact.rs).
-        // A stream that stalls mid-answer is sent once more (streaming::STREAM_IDLE): the
-        // callback is told to drop what it showed, and a second stall reaches the panel as
-        // `stream_stalled`. The stalled attempt's tokens are not counted; it reported none.
+        // A stream that stalls mid-answer (streaming::STREAM_IDLE) or runs away
+        // (streaming::MAX_ANSWER_CHARS) is sent once more: the callback is told to drop what it
+        // showed, and a second failure reaches the panel as `stream_stalled` or `stream_runaway`.
+        // The failed attempt's tokens are not counted; it reported none, though a runaway's were
+        // billed.
         let mut stalls = 0u8;
         let result = loop {
             let sent = match &mut self.client {
@@ -577,9 +579,13 @@ impl AiRouter {
                 }
             };
             match sent {
-                Err(e) if stalls == 0 && e.is::<crate::ai::streaming::StreamStalled>() => {
+                Err(e)
+                    if stalls == 0
+                        && (e.is::<crate::ai::streaming::StreamStalled>()
+                            || e.is::<crate::ai::streaming::StreamRunaway>()) =>
+                {
                     stalls += 1;
-                    log::warn!("[stream] stalled mid-answer; sending the request once more");
+                    log::warn!("[stream] {e} mid-answer; sending the request once more");
                     on_chunk("", crate::ai::streaming::STREAM_RESET);
                 }
                 // No request URL reaches the screen through an error (redact.rs).
