@@ -332,7 +332,7 @@ function Invoke-L1Run($task, [int]$rep) {
             Write-L1 "click ($ax,$ay) in the app's $($a.areaClick) area -- the step names no control"
             Start-Sleep -Milliseconds 400
             foreach ($t in @($a.seq)) {
-                if ($t.kind -eq 'paste') { Set-Clipboard -Value $t.value; Send-Combo 'Ctrl+V' | Out-Null; Write-L1 "paste '$($t.value)'" }
+                if ($t.kind -eq 'paste') { if (Paste-Text $t.value) { Write-L1 "paste '$($t.value)'" } else { Write-L1 "paste '$($t.value)' -- the clipboard would not take it" } }
                 elseif ($t.kind -eq 'text') { Send-Text $t.value; Write-L1 "type '$($t.value)'" }
                 elseif (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
                 Start-Sleep -Milliseconds 250
@@ -368,7 +368,7 @@ function Invoke-L1Run($task, [int]$rep) {
                 Start-Sleep -Milliseconds 300
             }
             foreach ($t in $before) {
-                if ($t.kind -eq 'paste') { Set-Clipboard -Value $t.value; Send-Combo 'Ctrl+V' | Out-Null; Write-L1 "paste '$($t.value)'" }
+                if ($t.kind -eq 'paste') { if (Paste-Text $t.value) { Write-L1 "paste '$($t.value)'" } else { Write-L1 "paste '$($t.value)' -- the clipboard would not take it" } }
                 elseif ($t.kind -eq 'text') { Send-Text $t.value; Write-L1 "type '$($t.value)'" }
                 elseif (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
                 $acted = $true; Start-Sleep -Milliseconds 250
@@ -401,7 +401,7 @@ function Invoke-L1Run($task, [int]$rep) {
                 Start-Sleep -Milliseconds 400
             }
             foreach ($t in $after) {
-                if ($t.kind -eq 'paste') { Set-Clipboard -Value $t.value; Send-Combo 'Ctrl+V' | Out-Null; Write-L1 "paste '$($t.value)'" }
+                if ($t.kind -eq 'paste') { if (Paste-Text $t.value) { Write-L1 "paste '$($t.value)'" } else { Write-L1 "paste '$($t.value)' -- the clipboard would not take it" } }
                 elseif ($t.kind -eq 'text') { Send-Text $t.value; Write-L1 "type '$($t.value)'" }
                 elseif (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
                 $acted = $true; Start-Sleep -Milliseconds 250

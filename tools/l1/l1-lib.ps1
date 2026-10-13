@@ -243,6 +243,26 @@ function Send-Combo([string]$combo) {
     return $true
 }
 
+# Put text on the clipboard and paste it, once the clipboard has settled. Clipboard listeners
+# (Windows clipboard history, PowerToys) open the clipboard to read every change, and a paste that
+# lands meanwhile finds it locked and inserts nothing, with no error anywhere: Explorer's rename box
+# took Ctrl+V straight after Set-Clipboard 0 times in 10, and 4 in 4 after 400 ms (2026-10-13). In
+# step 3 that ate renames in ex-zip and the Replace text in np-replace. Set-Clipboard itself fails
+# now and then ("Requested Clipboard operation did not succeed"), and a read can lag a write.
+function Paste-Text([string]$text) {
+    $want = $text -replace "`r`n", "`n"
+    $took = $false
+    for ($k = 0; $k -lt 5 -and -not $took; $k++) {
+        try { Set-Clipboard -Value $text -ErrorAction Stop } catch { Start-Sleep -Milliseconds 150; continue }
+        Start-Sleep -Milliseconds 400
+        $got = $null
+        try { $got = Get-Clipboard -Raw -ErrorAction Stop } catch { }
+        if ($null -ne $got -and ($got -replace "`r`n", "`n").TrimEnd("`n") -eq $want.TrimEnd("`n")) { $took = $true }
+    }
+    Send-Combo 'Ctrl+V' | Out-Null
+    return $took
+}
+
 # Text goes in as Unicode key events by default: they pass an input method untouched, where virtual
 # keys would land in a Chinese IME's composition. Blender (GHOST) ignores Unicode events, so a task
 # can ask for virtual keys instead ("text_input": "keys" in task.json).
