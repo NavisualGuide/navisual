@@ -47,4 +47,11 @@ Check 'named control, no pointer: no area click' ("area=$($a.areaClick) cwp=$($a
 $a = Step 'Press Alt, then J and H.'
 Check 'key tips' (Seq $a) 'keys:Alt > keys:J > keys:H'
 
+$a = Step 'Triple-click directly on "Quarterly update" to select its paragraph.' -tt 'Quarterly update' -Located
+Check 'triple-click' ("triple=$($a.triple) double=$($a.double) click=$([bool]$a.click)") 'triple=True double=False click=True'
+$a = Step 'Drag from just before "Quarterly" through the end of "update" to select both words.' -tt 'Quarterly update' -Located
+Check 'drag from X through the end of Y' ("drag=$($a.dragAcross) unsupported=$($a.unsupported)") 'drag=True unsupported='
+$a = Step 'Drag the file onto the Archive folder.' -tt 'report.csv' -Located
+Check 'a drag between two places stays unsupported' ("drag=$($a.dragAcross) unsupported=$($a.unsupported)") 'drag=False unsupported=drag between two places'
+
 if ($fail) { "$fail FAILED"; exit 1 } else { "all ok" }

@@ -159,7 +159,7 @@ function Close-WindowFully([IntPtr]$hwnd, [int]$tries = 6) {
 # ---------------------------------------------------------------------------------------------
 # Mouse and keyboard
 
-function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double, [string]$Modifier = '') {
+function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double, [string]$Modifier = '', [switch]$Triple) {
     $modVk = 0
     if ($Modifier -eq 'ctrl') { $modVk = 0x11 } elseif ($Modifier -eq 'shift') { $modVk = 0x10 }
     # Travel there as a hand does rather than jump: GTK and Paint keep a submenu open only while the
@@ -194,7 +194,7 @@ function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double
     Start-Sleep -Milliseconds 220
     $down = 0x2; $up = 0x4
     if ($Button -eq 'right') { $down = 0x8; $up = 0x10 }
-    $n = 1; if ($Double) { $n = 2 }
+    $n = 1; if ($Double) { $n = 2 }; if ($Triple) { $n = 3 }
     if ($modVk) { [L1W]::keybd_event([byte]$modVk, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 60 }
     for ($i = 0; $i -lt $n; $i++) {
         [L1W]::mouse_event($down, 0, 0, 0, [IntPtr]::Zero)
@@ -452,11 +452,16 @@ function Get-StepActions($step) {
     # As verbs only: "in the open right-click menu, point to Compress to..." is not a right-click.
     if ($ins -match '(?i)\bright[- ]click(?!\s+menu)\b') { $a.button = 'right' }
     if ($ins -match '(?i)\bdouble[- ]click\b(?!\s+(?:on\s+)?(?:it|the\s+\w+)\s+to\s+rename)') { $a.double = $true }
+    # "Triple-click the title to select its paragraph" got one click (verification run 2, 2026-10-12).
+    $a.triple = $ins -match '(?i)\btriple[- ]click'
+    if ($a.triple) { $a.double = $false }
     # A drag across one target (selecting its text) runs from its left edge to its right; a drag from
     # one thing onto another needs two points the step does not give, so the follower cannot do it.
     $a.dragAcross = $false
     if ($ins -match '(?i)\bdrag\b') {
-        if ($ins -match '(?i)\bdrag\s+(?:your\s+mouse\s+|the\s+(?:mouse|pointer)\s+)?(?:across|over|through)\b|\bdrag\s+to\s+select\b|\bselect\b.*\bby\s+dragging\b' -and $step.located) { $a.dragAcross = $true }
+        # "Drag from just before "Quarterly" through the end of "update"" is the same drag across one
+        # target (verification run 2: refused as two places).
+        if ($ins -match '(?i)\bdrag\s+(?:your\s+mouse\s+|the\s+(?:mouse|pointer)\s+)?(?:across|over|through)\b|\bdrag\s+to\s+select\b|\bselect\b.*\bby\s+dragging\b|\bdrag\s+from\b[^.]{0,60}?\b(?:through|to)\s+the\s+end\b' -and $step.located) { $a.dragAcross = $true }
         else { $a.unsupported = 'drag between two places' }
     }
     # "Scroll down", "scroll farther down", "scroll all the way down", "scroll to the bottom". The

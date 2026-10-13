@@ -379,9 +379,9 @@ function Invoke-L1Run($task, [int]$rep) {
                     # 2026-10-12). A person who missed types where focus is; the select-all goes.
                     $after = @($after | Where-Object { -not $_.before })
                 }
-                Click-Point $x $y -Button $a.button -Double:$a.double -Modifier ([string]$a.clickMod)
+                Click-Point $x $y -Button $a.button -Double:$a.double -Triple:([bool]$a.triple) -Modifier ([string]$a.clickMod)
                 $clicks++; $acted = $true
-                Write-L1 "click ($x,$y) $($a.button)$(if ($a.double) {' double'})$(if ($a.clickMod) {" with $($a.clickMod)"})"
+                Write-L1 "click ($x,$y) $($a.button)$(if ($a.double) {' double'})$(if ($a.triple) {' triple'})$(if ($a.clickMod) {" with $($a.clickMod)"})"
                 Start-Sleep -Milliseconds 400
             }
             foreach ($t in $after) {
