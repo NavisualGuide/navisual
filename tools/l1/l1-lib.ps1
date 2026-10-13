@@ -716,8 +716,13 @@ function Get-StepActions($step) {
     if (-not $a.click) { foreach ($t in @($seq | Where-Object { $_.before })) { [void]$seq.Remove($t) } }
     # "hold Ctrl and click", "Ctrl+click", "Shift-click": the click goes with the modifier held.
     $a.clickMod = $null
-    if ($ins -match '(?i)\bhold(?:ing)?\s+(?:down\s+)?(shift|ctrl|control)\b[^.]{0,30}?\bclick' -or $ins -match '(?i)\b(shift|ctrl|control)[- +]click') {
-        $a.clickMod = $Matches[1].ToLower() -replace 'control', 'ctrl'
+    $mm = [regex]::Match($ins, '(?i)\bhold(?:ing)?\s+(?:down\s+)?(shift|ctrl|control)\b[^.]{0,30}?\bclick')
+    if (-not $mm.Success) { $mm = [regex]::Match($ins, '(?i)\b(shift|ctrl|control)[- +]click') }
+    # Only for a click named after it: "Click sales-august.csv, then hold Ctrl while clicking
+    # sales-july.csv and sales-september.csv" with the pointer on August Ctrl-clicked August, which
+    # toggled it instead of making it the only selection (v7, ex-zip, 2026-10-13).
+    if ($mm.Success -and -not ($a.named -and $clickPos -lt $mm.Index)) {
+        $a.clickMod = $mm.Groups[1].Value.ToLower() -replace 'control', 'ctrl'
     }
     # The opposite case: the step says to click something and there is no pointer at all. Text meant
     # for that thing must not go wherever focus happens to be ("Click in the blank rectangle to the

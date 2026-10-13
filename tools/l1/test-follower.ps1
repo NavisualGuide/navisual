@@ -98,5 +98,11 @@ $a = Step 'Click the large blank Entries box, paste "Yes" and "No" on separate l
 Check 'text named before the click, pointer on a button' ("click=$([bool]$a.click) seq=" + (Seq $a)) 'click=True seq='
 $a = Step 'Hover over the 3D Viewport, press F3, search "Add Cylinder," and press Enter.' -clip 'Add Cylinder'
 Check 'a hover with no pointer keeps its keys' ("seq=" + (Seq $a)) 'seq=keys:F3 > paste:Add Cylinder > keys:Enter'
+$a = Step 'Click sales-august.csv, then hold Ctrl while clicking sales-july.csv and sales-september.csv to select only the three spreadsheets.' -tt 'sales-august.csv' -Located -role 'Other'
+Check 'a modifier for the later clicks only' "mod=$($a.clickMod)" 'mod='
+$a = Step 'Hold Ctrl and click sales-july.csv, then sales-september.csv.' -tt 'sales-july.csv' -Located -role 'Other'
+Check 'hold Ctrl and click the target' "mod=$($a.clickMod)" 'mod=ctrl'
+$a = Step 'Ctrl+click sales-july.csv to add it.' -tt 'sales-july.csv' -Located -role 'Other'
+Check 'Ctrl+click the target' "mod=$($a.clickMod)" 'mod=ctrl'
 
 if ($fail) { "$fail FAILED"; exit 1 } else { "all ok" }
