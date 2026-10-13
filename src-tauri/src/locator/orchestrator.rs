@@ -576,7 +576,7 @@ fn locate_passes(
     // (1) UIA role hit-test — primary; works native AND primed-Electron.
     // On an interactive hit it also hands back the control's bounding rect, used below to
     // snap the pointer off the OCR text span onto the whole clickable control.
-    let (role, role_rect) = hit_test::verify_role(cx, cy);
+    let (role, role_rect) = hit_test::verify_role_bounded(cx, cy, hit_test::ROLE_CHECK_BUDGET);
     let (uia_control_type, uia_interactive) = match &role {
         RoleHit::Interactive(ct) => (Some(ct.clone()), true),
         RoleHit::Content(ct) => (Some(ct.clone()), false),
@@ -613,6 +613,19 @@ fn locate_passes(
         })
         .unwrap_or(false);
     let near_ai_bbox = near_ai_bbox_raw && opts.bbox_decisive;
+    // (4b) ...and its disagreement as a vote AGAINST. GIMP's Save Image dialog, step 3 of L1
+    // (2026-10-12): the model boxed the Save button at the lower right; OCR's only exact "Save" was
+    // in the dialog's title, 1,270 px away, isolated enough to pass, and the follower clicked the
+    // title seven times. Across every L1 locate log (426 OCR hits) the rule below rejects 12: GIMP's
+    // title "Save" x7 and a Word body "2" far from the footer number -- wrong; Blender's outliner
+    // "Cylinder" x3 with the box on the 3D object -- either selects it; one GIMP "Cancel" unknown.
+    // The hits it leaves alone sit inside a wide box (a row, a field) with an anchor.
+    let ai_bbox_disagrees = opts.bbox_decisive
+        && !near_anchor
+        && !near_ai_bbox_raw
+        && ai_bbox_img
+            .map(|ab| outside_ai_bbox(hit.bbox, ab, img_w, img_h))
+            .unwrap_or(false);
 
     // A fuzzy (approximate) OCR match is a guess about WHICH word — so it must NOT win on
     // isolation alone; it needs spatial agreement (the nearby-text anchor or a trusted AI
@@ -647,7 +660,7 @@ fn locate_passes(
         near_ai_bbox,
         opts.icon_target,
         content_role_requested,
-    );
+    ) && !(ai_bbox_disagrees && role_kind != RoleKind::Interactive);
     ocr_trace.corroboration = Some(Corroboration {
         uia_control_type,
         uia_interactive,
@@ -657,6 +670,7 @@ fn locate_passes(
         near_anchor,
         near_ai_bbox: near_ai_bbox_raw,
         bbox_decisive: opts.bbox_decisive,
+        ai_bbox_disagrees,
         accepted: accept,
         snapped_to_uia: false,
     });
@@ -692,7 +706,7 @@ fn locate_passes(
         trace.ocr = ocr_trace;
         trace.final_decision = FinalDecision::RejectedUncorroborated {
             detail: format!(
-                "uia={role_label} fuzzy={is_fuzzy} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox}"
+                "uia={role_label} fuzzy={is_fuzzy} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox} ai_bbox_disagrees={ai_bbox_disagrees}"
             ),
         };
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
@@ -832,6 +846,17 @@ fn isolation_passes(isolation: f32, line_len: usize, control_hunt_in_content: bo
         return isolation >= CONTROL_LABEL_ISOLATION;
     }
     !(line_len > ISOLATION_LINE_FLOOR && isolation < ISOLATION_MIN)
+}
+
+/// The hit's centre lies outside the AI box grown by 5% of the image diagonal: a wide box (a list
+/// row, a text field) whose label sits at one end still contains its hit.
+fn outside_ai_bbox(hit: (i32, i32, u32, u32), ab: (i32, i32, u32, u32), img_w: u32, img_h: u32) -> bool {
+    let margin = ((img_w as f32).powi(2) + (img_h as f32).powi(2)).sqrt() * 0.05;
+    let cx = hit.0 as f32 + hit.2 as f32 / 2.0;
+    let cy = hit.1 as f32 + hit.3 as f32 / 2.0;
+    let (x0, y0) = (ab.0 as f32 - margin, ab.1 as f32 - margin);
+    let (x1, y1) = (ab.0 as f32 + ab.2 as f32 + margin, ab.1 as f32 + ab.3 as f32 + margin);
+    !(x0..=x1).contains(&cx) || !(y0..=y1).contains(&cy)
 }
 
 /// UIA role family under the OCR match, for the corroboration decision.
@@ -1512,6 +1537,19 @@ mod tests {
         assert!(corroboration_accept(RoleKind::Interactive, true, false, false, false, false, false));
         // Nothing corroborates a non-fuzzy Unknown match with no isolation → reject.
         assert!(!corroboration_accept(RoleKind::Unknown, false, false, false, false, false, false));
+    }
+
+    #[test]
+    fn a_hit_outside_the_ai_box_is_outside_it() {
+        use super::outside_ai_bbox;
+        // GIMP, step 3 of L1: the title's "Save" against the box on the Save button.
+        assert!(outside_ai_bbox((313, 11, 24, 9), (1236, 836, 87, 39), 1400, 900));
+        // Chrome: "Hardware" at the left end of the row the model boxed.
+        assert!(!outside_ai_bbox((294, 461, 59, 10), (281, 458, 709, 17), 1250, 860));
+        // GIMP's Name field: the file name at the start of the boxed field.
+        assert!(!outside_ai_bbox((73, 53, 37, 12), (63, 40, 1354, 40), 1400, 900));
+        // Just past the box but within the margin still counts as inside.
+        assert!(!outside_ai_bbox((400, 100, 20, 10), (300, 100, 60, 20), 1250, 860));
     }
 
     #[test]

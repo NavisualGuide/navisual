@@ -130,6 +130,41 @@ pub fn verify_role(cx: i32, cy: i32) -> (RoleHit, Option<Rect>) {
     (RoleHit::Unknown, None)
 }
 
+/// How long [`verify_role_bounded`] waits for the role under a point.
+pub const ROLE_CHECK_BUDGET: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// A role check that outlived its budget and is still running.
+static ROLE_CHECK_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// [`verify_role`] on its own thread, waited for at most `budget`. With Excel's Create Table dialog
+/// in an error state, `ElementFromPoint` blocked for 104 s and 132 s on two locates in a row (L1
+/// step 3, 2026-10-13), and the task ran out of time waiting for pointers. A role that cannot be
+/// read in time is `Unknown`, which the corroboration gate already handles. A COM call cannot be
+/// cancelled (rule 9), so the abandoned check finishes on its thread, and while it runs no other
+/// one is started: the next locate gets `Unknown` at once instead of queueing behind it.
+pub fn verify_role_bounded(cx: i32, cy: i32, budget: std::time::Duration) -> (RoleHit, Option<Rect>) {
+    use std::sync::atomic::Ordering;
+    if ROLE_CHECK_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        log::info!("[locate] role check at ({cx},{cy}) skipped: an earlier one is still running");
+        return (RoleHit::Unknown, None);
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(verify_role(cx, cy));
+        ROLE_CHECK_IN_FLIGHT.store(false, Ordering::Release);
+    });
+    match rx.recv_timeout(budget) {
+        Ok(v) => v,
+        Err(_) => {
+            log::warn!(
+                "[locate] role check at ({cx},{cy}) took over {} ms; treated as unknown",
+                budget.as_millis()
+            );
+            (RoleHit::Unknown, None)
+        }
+    }
+}
+
 /// Read a UIA element's on-screen bounding rectangle as a virtual-desktop `Rect`.
 /// Mirrors `a11y::element_to_result`'s guards: rejects zero-area and off-screen
 /// (minimised windows report ~-32000) rects.
