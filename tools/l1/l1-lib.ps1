@@ -680,7 +680,12 @@ function Get-StepActions($step) {
         if ($tail -match '(?i)\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
         elseif ($between -match '(?i)\b(?:click|select|go to|move to|tab to)\s+(?:in\s+|into\s+|on\s+)?the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
         elseif ($k -eq 0 -and $between -match '(?i)^.*\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
-        if ($field -and (-not $tt -or $field -notmatch [regex]::Escape($tt))) {
+        # Unless the step says the field already has the keyboard: "Paste GLD-58172 into the focused
+        # membership number field, then click Confirm" -- a person types and then clicks. Skipping it
+        # submitted an empty field twice, and once the page's leftover error made the model give up on
+        # the right number (Luna, round 2, 2026-10-14).
+        $focusedField = $field -and ($field -match '(?i)\b(focused|active|current)\b' -or $ins -match '(?i)\b(?:the cursor is (?:already )?in|already (?:has|have) (?:the )?(?:focus|cursor)|is (?:already )?focused)\b')
+        if ($field -and -not $focusedField -and (-not $tt -or $field -notmatch [regex]::Escape($tt))) {
             $a.skipped += "$($texts[$k].value) (for the $field field)"
             $dropped += $texts[$k]
             [void]$seq.Remove($texts[$k])

@@ -124,5 +124,8 @@ Check 'a dialog name box named by its content is set' ("click=$([bool]$a.click) 
 $a = Step 'Type flipped.png into the Name box at the top.' -tt 'arrow.png' -clip 'flipped.png' -Located -role 'Textbox'
 $before = @($a.seq | Where-Object { $_.pos -lt $a.clickPos } | ForEach-Object { $_.value }) -join ','
 Check 'the select-all comes after the click it serves' ("before-click=[$before] " + (Seq $a)) 'before-click=[] keys:Ctrl+A > paste:flipped.png'
+$a = Step 'Paste GLD-58172 into the focused membership number field, then click "Confirm," the green button below it.' -tt 'Confirm' -clip 'GLD-58172' -Located -role 'Button'
+$before = @($a.seq | Where-Object { $_.pos -lt $a.clickPos } | ForEach-Object { "$($_.kind):$($_.value)" }) -join ','
+Check 'text for the focused field is typed before the click' ("click=$([bool]$a.click) before-click=[$before]") 'click=True before-click=[paste:GLD-58172]'
 
 if ($fail) { "$fail FAILED"; exit 1 } else { "all ok" }
