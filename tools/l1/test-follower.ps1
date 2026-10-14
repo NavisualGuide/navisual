@@ -121,5 +121,8 @@ $a = Step 'Click cell B2 and type 4800.' -tt 'B2' -Located -role 'Dataitem'
 Check 'a cell is not an input box' (Seq $a) 'text:4800'
 $a = Step 'Type flipped.png into the Name text box at the top.' -tt 'arrow.png' -clip 'flipped.png' -Located -role 'Textbox'
 Check 'a dialog name box named by its content is set' ("click=$([bool]$a.click) " + (Seq $a)) 'click=True keys:Ctrl+A > paste:flipped.png'
+$a = Step 'Type flipped.png into the Name box at the top.' -tt 'arrow.png' -clip 'flipped.png' -Located -role 'Textbox'
+$before = @($a.seq | Where-Object { $_.pos -lt $a.clickPos } | ForEach-Object { $_.value }) -join ','
+Check 'the select-all comes after the click it serves' ("before-click=[$before] " + (Seq $a)) 'before-click=[] keys:Ctrl+A > paste:flipped.png'
 
 if ($fail) { "$fail FAILED"; exit 1 } else { "all ok" }

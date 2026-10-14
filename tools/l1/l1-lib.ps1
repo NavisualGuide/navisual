@@ -772,8 +772,16 @@ function Get-StepActions($step) {
             [void]$seq.Remove($t)
         }
     }
-    # The select-all sits just before the paste it serves, wherever that paste ended up.
-    foreach ($t in $seq) { if ($t.before) { $t.pos = $t.before.pos - 0.001 } }
+    # The select-all sits just before the paste it serves, wherever that paste ended up -- and never
+    # before the click it is for. With the target unnamed in the step the click sits at 0, and so did
+    # the text: "Type flipped.png into the Name box" (target "arrow.png") ran Ctrl+A, click, paste, the
+    # click dropped the selection, and the paste appended -- arrow.pngflipped.png, 3 of 4 runs of one
+    # round-2 arm (2026-10-14). A paste at or after the click moves just past it, its select-all with it.
+    foreach ($t in $seq) {
+        if (-not $t.before) { continue }
+        if ($a.click -and [double]$t.before.pos -ge $clickPos -and [double]$t.before.pos -lt $clickPos + 0.002) { $t.before.pos = $clickPos + 0.002 }
+        $t.pos = [double]$t.before.pos - 0.001
+    }
     $a.seq = @($seq | Sort-Object { $_.pos })
     return [pscustomobject]$a
 }
