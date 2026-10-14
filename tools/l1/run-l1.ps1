@@ -52,7 +52,11 @@ param(
     # One switch changed from the -Harness set, as KEY=VALUE (an .env key): an arm that differs from
     # the shipped configuration by one component. Not "$Set": this script has a $set, and PowerShell
     # names are case-insensitive (CLAUDE.md rule 12).
-    [string[]]$Override = @()
+    [string[]]$Override = @(),
+    # A person follows the steps instead of the follower: setup, Navisual started with the same model
+    # and switches, the task sent; then the terminal waits for Enter, verifies and tears down. For
+    # reproducing a run by hand (the founder, 2026-10-14).
+    [switch]$Manual
 )
 
 . "$PSScriptRoot\l1-lib.ps1"
@@ -62,6 +66,7 @@ $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $internal = Join-Path (Split-Path -Parent $repo) 'navisual-internal'
 if (-not $TaskRoot) { $TaskRoot = Join-Path $internal 'eval\l1\tasks' }
 if (-not $OutDir) { $OutDir = Join-Path $internal 'eval\results\l1' }
+if ($Manual -and -not $PSBoundParameters.ContainsKey('OutDir')) { $OutDir = Join-Path $internal 'eval\results\l1\manual' }
 if (-not $Exe) { $Exe = Join-Path $repo 'src-tauri\target\release\navisual-backend.exe' }
 if (-not $RunRoot) { $RunRoot = Join-Path $env:TEMP 'navisual-l1' }
 New-Item -ItemType Directory -Force -Path $OutDir, $RunRoot | Out-Null
@@ -261,6 +266,29 @@ function Invoke-L1Run($task, [int]$rep) {
 
     $maxReq = 15; if ($task.max_requests) { $maxReq = [int]$task.max_requests }
     $maxMin = 8; if ($task.max_minutes) { $maxMin = [double]$task.max_minutes }
+
+    if ($Manual) {
+        Write-Host ""
+        Write-Host "=== Manual run: follow Navisual's steps yourself in the task window. ==="
+        Write-Host "Task sent: $($task.instruction)"
+        if ($task.silent_fail) {
+            $nth = 1; if ($task.silent_fail.nth) { $nth = [int]$task.silent_fail.nth }
+            Write-Host "Silent failure to plant: the $nth-th time a step points at a target matching '$($task.silent_fail.target)', press Esc INSTEAD of doing it, then press Next as if you had done it."
+        }
+        if ($task.misclick_at) { Write-Host "Misclick to plant: on click number $($task.misclick_at), click about 30 px to the RIGHT of the pointer instead." }
+        foreach ($p in @($task.persona)) { if ($p) { Write-Host "If Navisual asks something matching $($p.match), answer: $($p.reply)" } }
+        Write-Host "Any other question: $($task.default_reply)"
+        Write-Host "Cap: $maxReq requests or $maxMin minutes, as in the automated runs."
+        [void](Read-Host "Press Enter here when you are done, or have given up")
+        $verdict = Get-Verdict $task $work
+        Write-L1 ("manual end: success={0} progress={1} damage={2} {3}" -f $verdict.success, $verdict.progress, $verdict.damage, $verdict.detail)
+        Write-L1 ("teardown: " + (Invoke-TaskScript $task 'teardown' $work))
+        return [ordered]@{
+            task = $task.id; rep = $rep; mode = 'manual'; tier = $Tier; provider = $cfg.provider; model = $cfg.model
+            success = [bool]$verdict.success; progress = $verdict.progress; damage = [bool]$verdict.damage; detail = $verdict.detail
+            harness = $Harness; overrides = ($Override -join ';'); run_dir = $runDir; ts = (Get-Date -Format o)
+        }
+    }
     $t0 = Get-Date
     $requests = 0; $steps = 0; $cantFind = 0; $replies = 0; $errors = 0; $clicks = 0; $misclicked = $false; $hintSteps = 0
     $silentSeen = 0; $silentFired = $false; $replyRun = 0
