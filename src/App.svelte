@@ -5840,7 +5840,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <input type="checkbox" bind:checked={settingsForm.debug_log_files_enabled} />
                 <span>Append every locate and every prompt to <code>locate_log.jsonl</code> / <code>prompt_log.jsonl</code></span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Text only, in %LOCALAPPDATA%\com.navisual.app\. One switch for both: a locate trace without the prompt that caused it answers half a question, and the <code>toolsnalyze-*.ps1</code> scripts read both.</p>
+              <p class="stub-hint" style="margin-top:4px">Text only, in %LOCALAPPDATA%\com.navisual.app\. One switch for both: a locate trace without the prompt that caused it answers half a question, and the <code>tools\analyze-*.ps1</code> scripts read both.</p>
 
               <label class="toggle-row" style="margin-top:10px">
                 <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
