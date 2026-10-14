@@ -20,17 +20,25 @@ param(
     # Per run-l1.ps1 invocation, i.e. per arm per repetition.
     [double]$MaxUsdPerRun = 2.0,
     # Comma-separated task ids, or all. A subset re-runs tasks on both arms after a follower fix.
-    [string]$Tasks = 'all'
+    [string]$Tasks = 'all',
+    # The arms, each "harness[;KEY=VALUE...]": "default", "default;SCREEN_FIRST_RULES=false",
+    # "default;EXPECTED_RESULT=true". Rotated one place every repetition, so no arm always runs
+    # first. Empty: on and off, as in step 3.
+    [string[]]$Arms = @()
 )
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $out = Join-Path (Split-Path -Parent $repo) "navisual-internal\eval\results\l1\$OutName"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
+if ($Arms.Count -eq 0) { $Arms = @('on', 'off') }
 for ($r = 1; $r -le $Repeat; $r++) {
-    $arms = @('on', 'off')
-    if ($r % 2 -eq 0) { $arms = @('off', 'on') }
-    foreach ($arm in $arms) {
-        Write-Host "##### repetition $r of $Repeat -- harness $arm"
-        & (Join-Path $PSScriptRoot 'run-l1.ps1') -Tier $Tier -Tasks $Tasks -Repeat 1 -Harness $arm -OutDir $out -MaxUsd $MaxUsdPerRun
+    $shift = ($r - 1) % $Arms.Count
+    $order = @($Arms[$shift..($Arms.Count - 1)]) + @(if ($shift -gt 0) { $Arms[0..($shift - 1)] })
+    foreach ($arm in $order) {
+        $parts = @($arm -split ';' | Where-Object { $_.Trim() })
+        $h = $parts[0].Trim()
+        $ov = @(); if ($parts.Count -gt 1) { $ov = @($parts[1..($parts.Count - 1)] | ForEach-Object { $_.Trim() }) }
+        Write-Host "##### repetition $r of $Repeat -- arm $arm"
+        & (Join-Path $PSScriptRoot 'run-l1.ps1') -Tier $Tier -Tasks $Tasks -Repeat 1 -Harness $h -Override $ov -OutDir $out -MaxUsd $MaxUsdPerRun
     }
 }
 Write-Host "##### done: $out"

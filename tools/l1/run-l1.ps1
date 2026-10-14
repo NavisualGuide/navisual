@@ -48,7 +48,11 @@ param(
     [ValidateSet('default', 'on', 'off')] [string]$Harness = 'default',
     # Learned notes carry what one run learned into the later runs of the same tier, so repeated
     # runs stop being independent; off unless asked for, even with -Harness on.
-    [switch]$LearnedNotes
+    [switch]$LearnedNotes,
+    # One switch changed from the -Harness set, as KEY=VALUE (an .env key): an arm that differs from
+    # the shipped configuration by one component. Not "$Set": this script has a $set, and PowerShell
+    # names are case-insensitive (CLAUDE.md rule 12).
+    [string[]]$Override = @()
 )
 
 . "$PSScriptRoot\l1-lib.ps1"
@@ -95,6 +99,8 @@ if ($Solve) { $resultsFile = Join-Path $OutDir "l1-solve-$stamp.jsonl" }
 
 function Invoke-TaskScript($task, [string]$name, [string]$work) {
     $p = Join-Path $task.dir "$name.ps1"
+    # A variant ("base": "np-replace") runs its base task's scripts for whatever it does not carry.
+    if (-not (Test-Path $p) -and $task.base) { $p = Join-Path (Join-Path (Split-Path -Parent $task.dir) $task.base) "$name.ps1" }
     if (-not (Test-Path $p)) { return $null }
     $out = & $p -Work $work 2>&1 | Out-String
     return $out.Trim()
@@ -186,6 +192,10 @@ $harnessSets = @{
 $hs = $harnessSets[$Harness]
 foreach ($k in $hs.Keys) { $set[$k] = $hs[$k] }
 $set['LEARNED_NOTES'] = $(if ($LearnedNotes) { 'true' } else { 'false' })
+foreach ($o in $Override) {
+    $kv = $o -split '=', 2
+    if ($kv.Count -eq 2 -and $kv[0].Trim()) { $set[$kv[0].Trim()] = $kv[1].Trim() }
+}
 $out = New-Object System.Collections.Generic.List[string]
 $seen = @{}
 foreach ($l in $envLines) {
@@ -198,7 +208,7 @@ foreach ($k in $set.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($set[$k])") } }
 $feed = Join-Path $runDir 'feed.jsonl'
 $env:NAVISUAL_DATA_DIR = $data
 $env:NAVISUAL_STEP_FEED = $feed
-Write-L1 "tier $Tier -> $($cfg.provider) $($cfg.model) effort='$($cfg.effort)'; harness $Harness, learned notes $([bool]$LearnedNotes); data $data"
+Write-L1 "tier $Tier -> $($cfg.provider) $($cfg.model) effort='$($cfg.effort)'; harness $Harness, overrides '$($Override -join ';')', learned notes $([bool]$LearnedNotes); data $data"
 $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path -Parent $Exe)
 $env:NAVISUAL_DATA_DIR = ''
 $env:NAVISUAL_STEP_FEED = ''
@@ -249,6 +259,7 @@ function Invoke-L1Run($task, [int]$rep) {
     $maxMin = 8; if ($task.max_minutes) { $maxMin = [double]$task.max_minutes }
     $t0 = Get-Date
     $requests = 0; $steps = 0; $cantFind = 0; $replies = 0; $errors = 0; $clicks = 0; $misclicked = $false; $hintSteps = 0
+    $silentSeen = 0; $silentFired = $false
     $outcome = 'running'; $verdict = $null; $claimedDone = $false
 
     while ($outcome -eq 'running') {
@@ -307,7 +318,27 @@ function Invoke-L1Run($task, [int]$rep) {
         $needsTarget = @($a.seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0
         foreach ($sk in @($a.skipped)) { Write-L1 "skipped text $sk -- no pointer on that field" }
         if ($a.pointerOnly) { Write-L1 "pointer shown, but the step asks for no click" }
-        if ($a.unsupported) { Write-L1 "cannot follow: $($a.unsupported)" }
+        # A planted silent failure ("silent_fail": { "target": regex, "nth": N } in task.json): on the
+        # N-th step whose target matches, the follower presses Esc instead of acting and reports the
+        # step done, as a user whose click did not register would. Menus and dialogs close; nothing
+        # changes. It tests whether the model looks at the screen (rules 2-3) or trusts the Next.
+        $silentNow = $false
+        if ($task.silent_fail -and -not $silentFired -and $s.target_text -and [string]$s.target_text -match [string]$task.silent_fail.target) {
+            $silentSeen++
+            $nth = 1; if ($task.silent_fail.nth) { $nth = [int]$task.silent_fail.nth }
+            if ($silentSeen -ge $nth) { $silentNow = $true }
+        }
+        if ($silentNow) {
+            if ($tw) {
+                $fgH = [L1W]::GetForegroundWindow(); $fgPid = 0
+                [L1W]::GetWindowThreadProcessId($fgH, [ref]$fgPid) | Out-Null
+                if ($fgH -ne $tw.Hwnd -and ($fgPid -ne $targetPid -or $fgPid -eq $navPid)) { Focus-ByTitleBar $tw.Hwnd | Out-Null; Write-L1 "refocused the app" }
+            }
+            Send-Combo 'Esc' | Out-Null
+            Write-L1 "planted silent failure: Esc instead of acting on '$($s.target_text)'"
+            $silentFired = $true; $acted = $true
+        }
+        elseif ($a.unsupported) { Write-L1 "cannot follow: $($a.unsupported)" }
         elseif ($a.dragAcross) {
             # Keys the step gives before the drag go first: "Undo the last alignment change with
             # Ctrl+Z, then drag across ..." dragged and never undid (verification run, 2026-10-12).
@@ -452,7 +483,8 @@ function Invoke-L1Run($task, [int]$rep) {
         input_tokens = $inTok; output_tokens = $outTok; feed_from = $firstFeed; feed_to = $lines.Count
         est_usd = [math]::Round(($inTok * $cfg.usdIn + $outTok * $cfg.usdOut) / 1e6, 5)
         app_commit = $appCommit; exe_time = $exeTime; held_out = [bool]$task.held_out
-        harness = $Harness; learned_notes = [bool]$LearnedNotes
+        harness = $Harness; learned_notes = [bool]$LearnedNotes; overrides = ($Override -join ';')
+        silent_fired = $silentFired; base = [string]$task.base
         run_dir = $runDir; ts = (Get-Date -Format o)
     }
 }
