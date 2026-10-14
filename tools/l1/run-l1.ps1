@@ -83,9 +83,13 @@ $picked = @()
 foreach ($d in $all) {
     $t = Get-Content (Join-Path $d.FullName 'task.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $t | Add-Member -NotePropertyName dir -NotePropertyValue $d.FullName
-    if ($Tasks -ne 'all') {
+    # "group:round2" picks a group's tasks; "all" is the core battery, without held-out tasks (unless
+    # asked) and without grouped ones -- the round-2 tasks once slipped into a baseline (2026-10-13).
+    if ($Tasks -like 'group:*') {
+        if ([string]$t.group -ne $Tasks.Substring(6)) { continue }
+    } elseif ($Tasks -ne 'all') {
         if (($Tasks -split ',' | ForEach-Object { $_.Trim() }) -notcontains $t.id) { continue }
-    } elseif ($t.held_out -and -not $IncludeHeldOut) { continue }
+    } elseif (($t.held_out -and -not $IncludeHeldOut) -or $t.group) { continue }
     $picked += $t
 }
 if ($picked.Count -eq 0) { throw "No tasks matched '$Tasks' under $TaskRoot" }
@@ -259,7 +263,7 @@ function Invoke-L1Run($task, [int]$rep) {
     $maxMin = 8; if ($task.max_minutes) { $maxMin = [double]$task.max_minutes }
     $t0 = Get-Date
     $requests = 0; $steps = 0; $cantFind = 0; $replies = 0; $errors = 0; $clicks = 0; $misclicked = $false; $hintSteps = 0
-    $silentSeen = 0; $silentFired = $false
+    $silentSeen = 0; $silentFired = $false; $replyRun = 0
     $outcome = 'running'; $verdict = $null; $claimedDone = $false
 
     while ($outcome -eq 'running') {
@@ -301,7 +305,15 @@ function Invoke-L1Run($task, [int]$rep) {
             foreach ($p in @($task.persona)) { if ($p -and $s.instruction -match $p.match) { $reply = $p.reply; break } }
             if (-not $reply) { $reply = 'Whatever is usual is fine.' }
             $replies++
+            $replyRun++
             Write-L1 ("persona: '$reply' " + (Send-PanelText $navPid $reply))
+            # A question answered is still a request, so the caps hold here too; and four questions in a
+            # row with nothing done between them is a run that will not end. Without this, flash asked
+            # "go back to Account, or close the browser?" and got the same canned answer 53 times in
+            # 4.5 minutes (web-verify, 2026-10-14) -- the caps were only checked after an action.
+            if ($requests -ge $maxReq) { $outcome = 'cap_requests'; break }
+            if (((Get-Date) - $t0).TotalMinutes -ge $maxMin) { $outcome = 'cap_time'; break }
+            if ($replyRun -ge 4) { $outcome = 'stuck'; Write-L1 "four questions in a row, nothing done between them; stopping"; break }
             continue
         }
         if ($s.step_count -eq 0) {
@@ -459,6 +471,7 @@ function Invoke-L1Run($task, [int]$rep) {
             continue
         }
         $steps++
+        $replyRun = 0
         Start-Sleep -Milliseconds 1500
         $verdict = Get-Verdict $task $work
         if ($verdict.success) { $outcome = 'success'; break }
