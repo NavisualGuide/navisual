@@ -245,6 +245,10 @@ impl GeminiClient {
         };
         self.last_inspects.lock().clear();
         let look_names = sources.names(self.inspect_tools);
+        if !look_names.is_empty() {
+            // Says the tools reached the request; an "[inspect]" line follows each one the model calls.
+            log::info!("[looks] gemini declared: {}", look_names.join(", "));
+        }
         let mut declared = vec![tool_schema.clone()];
         for (name, description, parameters) in
             crate::ai::inspect::declarations(self.inspect_mode, &look_names, self.recall_max)
@@ -256,7 +260,6 @@ impl GeminiClient {
         let mut zooms = 0usize;
 
         use eventsource_stream::Eventsource;
-        use futures_util::StreamExt;
 
         let (accumulated_json, raw_text) = loop {
             let zoom_open = !look_names.is_empty() && zooms < crate::ai::inspect::MAX_INSPECTS;
@@ -316,7 +319,14 @@ impl GeminiClient {
             let mut inspect_id: Option<Value> = None;
             let mut inspect_name = String::new();
 
-            while let Some(event_result) = stream.next().await {
+            let mut progress = crate::ai::streaming::AnswerProgress::default();
+            while let Some(event_result) = crate::ai::streaming::next_or_stall(
+                &mut stream,
+                progress.update(accumulated_json.len() + raw_text.len()),
+                "Gemini",
+            )
+            .await?
+            {
                 let event = event_result?;
 
                 // Gemini sends data events

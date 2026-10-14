@@ -130,6 +130,11 @@ pub struct ContextElement {
     /// for the current choice, `value="..."` for a combo box or slider -- several joined by " | ".
     /// Read only where the element has the pattern. Rendered only with `Config::list_states`.
     pub state: Option<String>,
+    /// Gathered from a popup root -- an open menu, list or dialog in front of the window -- not
+    /// from the window behind it. Rendered as `| POPUP`. Office names an open menu's first item
+    /// after the button that opened it, so the list carried two "Freeze Panes" with nothing to
+    /// tell them apart, and the model picked the ribbon button's id (L1, 2026-10-12).
+    pub in_popup: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

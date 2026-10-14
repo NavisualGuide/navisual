@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use futures_util::StreamExt;
 use reqwest::{header, Client};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -280,6 +279,10 @@ impl DeepSeekClient {
             declared.push(json!({"type": "function", "name": name,
                                  "description": description, "parameters": parameters}));
         }
+        if !look_names.is_empty() {
+            // Says the tools reached the request; an "[inspect]" line follows each one the model calls.
+            log::info!("[looks] {} declared: {}", self.name, look_names.join(", "));
+        }
         let mut total = UsageDetail::default();
         let mut zooms = 0usize;
         let mut follow_up: Option<(String, Value)> = None;
@@ -380,8 +383,31 @@ impl DeepSeekClient {
         let mut usage_logged = false;
 
         let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
+        let mut progress = crate::ai::streaming::AnswerProgress::default();
+        // What the stream did, for the one line logged if it fails. Two "stalls" on the
+        // verification runs (2026-10-12) ran the full 90 s with the answer begun and no stall
+        // line, so either the answer kept growing (a runaway) or the wait was elsewhere; this
+        // says which.
+        let mut diag = StreamDiag::new();
+        loop {
+            let next = crate::ai::streaming::next_or_stall(&mut stream, progress.update(r.arguments.len()), &self.name).await;
+            let chunk_result = match next {
+                Ok(Some(c)) => c,
+                Ok(None) => break,
+                Err(e) => {
+                    diag.log_failure(&self.name, &e, r.arguments.len(), &progress);
+                    return Err(e);
+                }
+            };
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    let e = anyhow::Error::from(e);
+                    diag.log_failure(&self.name, &e, r.arguments.len(), &progress);
+                    return Err(e);
+                }
+            };
+            diag.bytes += chunk.len();
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(nl) = line_buf.find('\n') {
@@ -401,6 +427,7 @@ impl DeepSeekClient {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                diag.event(data["type"].as_str().unwrap_or("?"));
 
                 match data["type"].as_str() {
                     Some("response.created") => {
@@ -541,7 +568,10 @@ impl DeepSeekClient {
         let mut line_buf = String::new();
 
         let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
+        let mut progress = crate::ai::streaming::AnswerProgress::default();
+        while let Some(chunk_result) =
+            crate::ai::streaming::next_or_stall(&mut stream, progress.update(accumulated_text.len()), &self.name).await?
+        {
             let chunk = chunk_result?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -733,6 +763,51 @@ impl DeepSeekClient {
 /// fresh session with no prior assistant turn, so this never surfaced until
 /// real multi-turn history hit it live. Mirror the relay's fix here too —
 /// keep the two in sync.
+/// Counts kept while a Responses stream runs, logged in one line only if it fails.
+struct StreamDiag {
+    started: std::time::Instant,
+    bytes: usize,
+    events: std::collections::BTreeMap<String, u32>,
+    last_event: String,
+}
+
+impl StreamDiag {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            bytes: 0,
+            events: std::collections::BTreeMap::new(),
+            last_event: String::new(),
+        }
+    }
+
+    fn event(&mut self, kind: &str) {
+        *self.events.entry(kind.to_string()).or_default() += 1;
+        self.last_event = kind.to_string();
+    }
+
+    fn log_failure(
+        &self,
+        provider: &str,
+        err: &anyhow::Error,
+        answer_chars: usize,
+        progress: &crate::ai::streaming::AnswerProgress,
+    ) {
+        let grew = progress
+            .grew_at()
+            .map(|t| format!("{} ms ago", t.elapsed().as_millis()))
+            .unwrap_or_else(|| "never".to_string());
+        log::warn!(
+            "[stream] {provider} failed after {} ms: {err}; answer {answer_chars} chars, last grew {grew}; \
+             {} bytes; events {:?}; last event {:?}",
+            self.started.elapsed().as_millis(),
+            self.bytes,
+            self.events,
+            self.last_event
+        );
+    }
+}
+
 /// One `/v1/responses` round: which function the model called, its arguments, and what to
 /// continue from.
 #[derive(Default)]

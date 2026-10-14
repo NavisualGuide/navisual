@@ -159,7 +159,7 @@ function Close-WindowFully([IntPtr]$hwnd, [int]$tries = 6) {
 # ---------------------------------------------------------------------------------------------
 # Mouse and keyboard
 
-function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double, [string]$Modifier = '') {
+function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double, [string]$Modifier = '', [switch]$Triple) {
     $modVk = 0
     if ($Modifier -eq 'ctrl') { $modVk = 0x11 } elseif ($Modifier -eq 'shift') { $modVk = 0x10 }
     # Travel there as a hand does rather than jump: GTK and Paint keep a submenu open only while the
@@ -167,9 +167,25 @@ function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double
     # Paint's PNG picture clicks landed on closed menus).
     $p = New-Object L1Point
     [L1W]::GetCursorPos([ref]$p) | Out-Null
-    for ($i = 1; $i -le 10; $i++) {
-        [L1W]::SetCursorPos([int]($p.X + ($x - 6 - $p.X) * $i / 10), [int]($p.Y + ($y - $p.Y) * $i / 10)) | Out-Null
-        Start-Sleep -Milliseconds 18
+    # Two legs, as a hand moves through menus. Far to the side means a submenu cascading from the
+    # row the pointer is on: along that row first, then down inside it. A diagonal from Blender's
+    # Mesh to Cylinder crossed Curve, Surface and Metaball and switched the submenu on the way, so
+    # the click missed in two of three runs (verification run, 2026-10-12). Otherwise -- a menu
+    # bar or ribbon button into its dropdown -- down first, then across; across first there would
+    # hover the next menu title (GIMP's Image -> Transform).
+    $tx = $x - 6
+    $dx = $tx - $p.X; $dy = $y - $p.Y
+    if ([math]::Abs($dx) -gt 100 -and [math]::Abs($dy) -gt 8) { $mid = @($tx, $p.Y) }
+    elseif ([math]::Abs($dx) -gt 8 -and [math]::Abs($dy) -gt 8) { $mid = @($p.X, $y) }
+    else { $mid = $null }
+    $legs = @()
+    if ($mid) { $legs += , @($p.X, $p.Y, $mid[0], $mid[1]); $legs += , @($mid[0], $mid[1], $tx, $y) }
+    else { $legs += , @($p.X, $p.Y, $tx, $y) }
+    foreach ($leg in $legs) {
+        for ($i = 1; $i -le 8; $i++) {
+            [L1W]::SetCursorPos([int]($leg[0] + ($leg[2] - $leg[0]) * $i / 8), [int]($leg[1] + ($leg[3] - $leg[1]) * $i / 8)) | Out-Null
+            Start-Sleep -Milliseconds 18
+        }
     }
     # Arrive, then settle inside: XAML menu items ignore a click with no hover first (seen live).
     [L1W]::SetCursorPos($x - 6, $y) | Out-Null
@@ -178,7 +194,7 @@ function Click-Point([int]$x, [int]$y, [string]$Button = 'left', [switch]$Double
     Start-Sleep -Milliseconds 220
     $down = 0x2; $up = 0x4
     if ($Button -eq 'right') { $down = 0x8; $up = 0x10 }
-    $n = 1; if ($Double) { $n = 2 }
+    $n = 1; if ($Double) { $n = 2 }; if ($Triple) { $n = 3 }
     if ($modVk) { [L1W]::keybd_event([byte]$modVk, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 60 }
     for ($i = 0; $i -lt $n; $i++) {
         [L1W]::mouse_event($down, 0, 0, 0, [IntPtr]::Zero)
@@ -225,6 +241,26 @@ function Send-Combo([string]$combo) {
     [array]::Reverse($codes)
     foreach ($c in $codes) { $f = 2; if ($ext -contains $c) { $f = 3 }; [L1W]::keybd_event($c, 0, $f, [IntPtr]::Zero); Start-Sleep -Milliseconds 20 }
     return $true
+}
+
+# Put text on the clipboard and paste it, once the clipboard has settled. Clipboard listeners
+# (Windows clipboard history, PowerToys) open the clipboard to read every change, and a paste that
+# lands meanwhile finds it locked and inserts nothing, with no error anywhere: Explorer's rename box
+# took Ctrl+V straight after Set-Clipboard 0 times in 10, and 4 in 4 after 400 ms (2026-10-13). In
+# step 3 that ate renames in ex-zip and the Replace text in np-replace. Set-Clipboard itself fails
+# now and then ("Requested Clipboard operation did not succeed"), and a read can lag a write.
+function Paste-Text([string]$text) {
+    $want = $text -replace "`r`n", "`n"
+    $took = $false
+    for ($k = 0; $k -lt 5 -and -not $took; $k++) {
+        try { Set-Clipboard -Value $text -ErrorAction Stop } catch { Start-Sleep -Milliseconds 150; continue }
+        Start-Sleep -Milliseconds 400
+        $got = $null
+        try { $got = Get-Clipboard -Raw -ErrorAction Stop } catch { }
+        if ($null -ne $got -and ($got -replace "`r`n", "`n").TrimEnd("`n") -eq $want.TrimEnd("`n")) { $took = $true }
+    }
+    Send-Combo 'Ctrl+V' | Out-Null
+    return $took
 }
 
 # Text goes in as Unicode key events by default: they pass an input method untouched, where virtual
@@ -436,11 +472,16 @@ function Get-StepActions($step) {
     # As verbs only: "in the open right-click menu, point to Compress to..." is not a right-click.
     if ($ins -match '(?i)\bright[- ]click(?!\s+menu)\b') { $a.button = 'right' }
     if ($ins -match '(?i)\bdouble[- ]click\b(?!\s+(?:on\s+)?(?:it|the\s+\w+)\s+to\s+rename)') { $a.double = $true }
+    # "Triple-click the title to select its paragraph" got one click (verification run 2, 2026-10-12).
+    $a.triple = $ins -match '(?i)\btriple[- ]click'
+    if ($a.triple) { $a.double = $false }
     # A drag across one target (selecting its text) runs from its left edge to its right; a drag from
     # one thing onto another needs two points the step does not give, so the follower cannot do it.
     $a.dragAcross = $false
     if ($ins -match '(?i)\bdrag\b') {
-        if ($ins -match '(?i)\bdrag\s+(?:your\s+mouse\s+|the\s+(?:mouse|pointer)\s+)?(?:across|over|through)\b|\bdrag\s+to\s+select\b|\bselect\b.*\bby\s+dragging\b' -and $step.located) { $a.dragAcross = $true }
+        # "Drag from just before "Quarterly" through the end of "update"" is the same drag across one
+        # target (verification run 2: refused as two places).
+        if ($ins -match '(?i)\bdrag\s+(?:your\s+mouse\s+|the\s+(?:mouse|pointer)\s+)?(?:across|over|through)\b|\bdrag\s+to\s+select\b|\bselect\b.*\bby\s+dragging\b|\bdrag\s+from\b[^.]{0,60}?\b(?:through|to)\s+the\s+end\b' -and $step.located) { $a.dragAcross = $true }
         else { $a.unsupported = 'drag between two places' }
     }
     # "Scroll down", "scroll farther down", "scroll all the way down", "scroll to the bottom". The
@@ -456,7 +497,9 @@ function Get-StepActions($step) {
     if ($a.scroll -ne 0 -and $ins -notmatch '(?i)\b(click|select|choose|tick|double-click)\b') { $a.scrollOnly = $true }
     # Keys and text, in the order the instruction gives them ("press G, then Z, type 2, press Enter").
     $mods = '(?:ctrl|control|alt|shift|win)'
-    $key = '(?:f[0-9]{1,2}|enter|return|tab|esc|escape|delete|del|backspace|home|end|space|up|down|left|right|page ?up|page ?down|[a-z0-9`=\-])'
+    # "enter" before quoted text is typing: "press F3, enter "Add Cylinder", then press Enter" read
+    # it as the Enter key, lost the text's place, and pasted before F3 (verification run, 2026-10-12).
+    $key = '(?:f[0-9]{1,2}|enter(?!\s*["\u201C\u2018''])|return|tab|esc|escape|delete|del|backspace|home|end|space|up|down|left|right|page ?up|page ?down|[a-z0-9`=\-])'
     $combo = '(?<combo>\b' + $mods + '(?:\s*\+\s*' + $mods + ')*\s*\+\s*' + $key + '\b)'
     # "press G, Z, 2, Enter": a run of keys after one verb, each pressed in turn.
     $press = '(?<press>\b(?:press|presses|pressing|hit|tap)\s+(?:the\s+)?(?<pk>' + $key + '(?:\s*(?:,\s*(?:and\s+|then\s+)?|\s+then\s+|\s+and\s+)' + $key + ')*)(?:\s+key)?\b)'
@@ -464,10 +507,14 @@ function Get-StepActions($step) {
     # the press run, which would otherwise lose everything after G.
     # Only where the letter stands alone as a key ("then Z," / "then Z to"): "then I'll guide you"
     # pressed I inside GIMP's open menu (trial, 2026-10-11). I and A are never read this way.
-    $then = '(?<then>\bthen\s+(?<tk>(?-i:[B-HJ-Z]))(?=\s*(?:,|\.|;|$)|\s+(?:and|then|to)\b))'
+    # Named keys after "then" count too: "Press Ctrl+Home, then Home and Shift+End" lost Home
+    # (verification run). Standing alone only -- "then Home tab" is the ribbon tab.
+    $then = '(?<then>\bthen\s+(?<tk>(?-i:[B-HJ-Z])|home|end|enter|tab|esc|space|delete|backspace)(?=\s*(?:,|\.|;|$)|\s+(?:and|then|to)\b))'
     $named = '(?:f[0-9]{1,2}|enter|tab|esc|escape|delete|backspace|home|end|space|page ?up|page ?down)'
     $with = '(?<with>\b(?:with|using)\s+(?:the\s+)?(?<wk>' + $named + ')(?:\s+key)?\b)'
-    $type = '(?<type>\b(?:type|enter|paste|write)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
+    # "press F3, search "Add Cylinder," and press Enter" pasted before F3: "search" did not place
+    # its text (v6, blender-cylinder; the run passed anyway).
+    $type = '(?<type>\b(?:type|enter|paste|write|search(?:\s+for)?)\s+(?:[a-z]+\s+){0,4}?(?:["\u201C\u2018''](?<tq>[^"\u201D\u2019'']{1,200})["\u201D\u2019'']|(?<tn>-?[0-9]+(?:\.[0-9]+)?)\b))'
     # "hold Shift and press End", "hold down Ctrl while you press A": one chord. (Read as two keys,
     # Shift+End once became Home, End -- nothing selected, and the model asked again, 2026-10-12.)
     $hold = '(?<hold>\bhold(?:ing)?\s+(?:down\s+)?(?<hm>shift|ctrl|control|alt)\s*,?\s+(?:and|then|while\s+you)?\s*(?:press(?:ing)?|hit|tap)\s+(?:the\s+)?(?<hk>' + $key + '))'
@@ -519,7 +566,20 @@ function Get-StepActions($step) {
     $ttWords = @(($tt -split '[^A-Za-z0-9]+') | Where-Object { $_ })
     $ttRe = $null
     if ($ttWords.Count -gt 0) { $ttRe = '(?i)\b' + (($ttWords | ForEach-Object { [regex]::Escape($_) }) -join '\W+') + '\b' }
-    if ($ttRe -and $ins -match $ttRe) { $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) }
+    if ($ttRe -and $ins -match $ttRe) {
+        $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase)
+        # The click goes with its verb when keys or text lie between the verb and the name: "Click
+        # the visible page number in the cover's footer and press Delete. This removes the number
+        # from section 1" named the target "1" only after the Delete, and the follower pressed Delete
+        # before clicking (v6, word-pagenum, 2026-10-13). "Select the title with Home, then
+        # Shift+End. Click the Font Size box" keeps its keys first: nothing lies between its last
+        # verb and the name.
+        $vm = [regex]::Matches($ins.Substring(0, $clickPos), '(?i)\b(?:click|double-click|right-click|select|choose|tick|open)\b')
+        if ($vm.Count -gt 0) {
+            $v = $vm[$vm.Count - 1].Index
+            if (@($seq | Where-Object { [double]$_.pos -gt $v -and [double]$_.pos -lt $clickPos }).Count -gt 0) { $clickPos = $v }
+        }
+    }
     elseif ($ins -match '(?i)\b(click|select|choose|tick|open|double-click|right-click)\b') { $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) }
     $a.clickPos = $clickPos
     $a.named = [bool]$tt
@@ -534,14 +594,21 @@ function Get-StepActions($step) {
             if ($ins -match '(?i)\b(paste|type)\b') { $pp = $ins.IndexOf($Matches[1], [System.StringComparison]::OrdinalIgnoreCase) }
             # "press Ctrl+A, and replace it with colour": the text goes where "with" stands, after the
             # keys before it (pasting first, then selecting, was the trial's order).
-            elseif ($ins -match '(?i)\breplace\b[^.]*?\bwith\b') { $pp = $Matches[0].Length + $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) - 4 }
+            # Across a period that does not end a sentence: "replace only the name before ".zip" with
+            # q3-sales" was missed, and the paste went before the F2 that opens the box (v6, ex-zip).
+            elseif ($ins -match '(?i)\breplace\b(?:(?!\.\s)[^;])*?\bwith\b') { $pp = $Matches[0].Length + $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) - 4 }
             [void]$seq.Add(@{ kind = 'paste'; value = [string]$step.clipboard; pos = $pp })
         }
     }
     # "Replace the text in the File name field with small.png": a person selects what is there first.
     # Clicked into, the field holds a caret and pasting appends (garden.pngsmall.png, trial).
+    # Typing over what is already highlighted: "Replace the highlighted archive name with q3-sales,
+    # leaving the .zip ending in place". A person types. Clicking into Explorer's rename box drops the
+    # highlight, and a select-all takes the extension too (step 3, ex-zip, 3 runs on 2026-10-12:
+    # q3-sales.zip.zip, or an extension-change warning).
+    $overSelection = ($ins -match '(?i)\breplace\s+the\s+highlighted\b') -or ($ins -match '(?i)\b(?:leav|keep)\w*\b[^.]{0,30}?(?:\.[a-z0-9]{2,4}\b|\b(?:extension|ending|suffix)\b)')
     $clickedHere = [bool]$step.located
-    if ($clickedHere -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0 -and
+    if ($clickedHere -and -not $overSelection -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0 -and
         $ins -match '(?i)\b(replace|select all|overwrite)\b' -and $ins -match '(?i)\b(field|box|name|value|text)\b' -and
         @($seq | Where-Object { $_.kind -eq 'keys' -and $_.value -match '(?i)^ctrl\+a$' }).Count -eq 0) {
         $pt = $seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { $_.pos } | Select-Object -First 1
@@ -551,27 +618,76 @@ function Get-StepActions($step) {
     foreach ($t in $seq) {
         if ($t.kind -in 'paste', 'text' -and $t.pos -lt $clickPos) {
             $between = $ins.Substring($t.pos, $clickPos - $t.pos)
-            if ($between -match '(?i)\b(in|into|to)\s+(the\s+)?[^.;]*$') { $t.pos = $clickPos + 0.5 }
+            # Not across a comma or a "then": "Paste Yes and No in the large Entries box, then click OK"
+            # pasted after OK had closed the dialog (step 3, lo-validation, 2026-10-12).
+            if ($between -match '(?i)\b(in|into|to)\s+(the\s+)?(?:(?!\bthen\b)[^.;,])*$') { $t.pos = $clickPos + 0.5 }
         }
     }
     # Text for a field the step does not point at is not the follower's to type: "enter colour in the
     # Find box, then enter color in the Replace box" with the pointer on Find put both words into
     # Find (trial, 2026-10-11). A later text that names a different box or field is skipped.
     $a.skipped = @()
-    $texts = @($seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { $_.pos })
-    for ($k = 1; $k -lt $texts.Count; $k++) {
-        $tail = $ins.Substring([math]::Min([int]$texts[$k].pos, $ins.Length))
+    $texts = @($seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { [double]$_.pos })
+    # A control that never takes typed text -- a button, a menu item, a tab -- cannot be where the
+    # step's text goes, so with the pointer on one the first text is judged too. "Click Center ...,
+    # then replace the value in the Font Size box with 20 and press Enter" clicked Center, selected
+    # all and pasted 20 over the document (step 3, word-recover, 2026-10-12).
+    $noTextTarget = $tt -and ([string]$step.target_role -in 'Button', 'Menuitem', 'Tab', 'Link', 'Checkbox')
+    $k0 = 1
+    if ($noTextTarget) { $k0 = 0 }
+    $dropped = @()
+    for ($k = $k0; $k -lt $texts.Count; $k++) {
+        $at = [math]::Min([int][math]::Floor([double]$texts[$k].pos), $ins.Length)
+        $tail = $ins.Substring($at)
         if ($tail.Length -gt 90) { $tail = $tail.Substring(0, 90) }
-        if ($tail -match '(?i)\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b' -and (-not $tt -or $Matches[1] -notmatch [regex]::Escape($tt))) {
-            $a.skipped += "$($texts[$k].value) (for the $($Matches[1]) field)"
+        # The field can also be named BEFORE the text: "Enter "colour" in the Find field, then click
+        # the Replace field below and enter "color."" typed both words into Find (step 3, 2026-10-12;
+        # Replace all then emptied the note's colour words). What lies between the previous text (or
+        # the click) and this one is where such a field is named.
+        # Before the click, from the start: "Click the large blank Entries box, paste Yes and No on
+        # separate lines, then click OK" with the pointer on OK pasted wherever focus was (v6).
+        if ($k -gt 0) { $from = [int][math]::Floor([double]$texts[$k - 1].pos) + 1 }
+        elseif ($at -lt $clickPos) { $from = 0 }
+        else { $from = [int]$clickPos + 1 }
+        $between = ''
+        if ($at -gt $from) { $between = $ins.Substring($from, $at - $from) }
+        $field = $null
+        if ($tail -match '(?i)\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
+        elseif ($between -match '(?i)\b(?:click|select|go to|move to|tab to)\s+(?:in\s+|into\s+|on\s+)?the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
+        elseif ($k -eq 0 -and $between -match '(?i)^.*\b(?:in|into)\s+the\s+(.{1,40}?)\s+(?:box|field)\b') { $field = $Matches[1] }
+        if ($field -and (-not $tt -or $field -notmatch [regex]::Escape($tt))) {
+            $a.skipped += "$($texts[$k].value) (for the $field field)"
+            $dropped += $texts[$k]
             [void]$seq.Remove($texts[$k])
+        }
+    }
+    # What goes with a skipped text goes too: the select-all the follower added for it, and the keys
+    # that finish it ("... with 20 and press Enter" would press Enter on the selected title) -- up to
+    # the next text the follower does type.
+    foreach ($d in $dropped) {
+        $next = @($texts | Where-Object { $dropped -notcontains $_ -and [double]$_.pos -gt [double]$d.pos } | Select-Object -First 1)
+        $end = [double]::MaxValue
+        if ($next.Count) { $end = [double]$next[0].pos }
+        foreach ($t in @($seq | Where-Object { ($_.before -and [object]::ReferenceEquals($_.before, $d)) -or ($_.kind -eq 'keys' -and [double]$_.pos -gt [double]$d.pos -and [double]$_.pos -lt $end) })) {
+            $a.skipped += "key $($t.value) (with it)"
+            [void]$seq.Remove($t)
         }
     }
     # A pointer is not an order to click. Click when the instruction asks for one, when it types into
     # the control it points at, or when it is only keys-free pointing ("Turn on Word wrap"). "Now press
     # Ctrl+A to select all three" with the pointer on one file got a click after the select-all, and
     # the selection was gone (trial, 2026-10-11). "to select" is a purpose, not an order.
-    $verb = $ins -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|point to)\b'
+    # "Focus that button and press Space" is a click first (verification run: the Space went to
+    # the document instead).
+    # "the insertion point to" is not "point to": "Press Home to move the insertion point to the start
+    # of the 1. Introduction heading" pressed Home and then clicked mid-heading, and the section break
+    # that followed split the heading in two (step 3, word-pagenum, 2 of 3 runs on 2026-10-12).
+    # A click the step talks about is not one it asks for: "The Total Row checkbox is still off, so
+    # the last click didn't enable it. Press Esc to close the Quick Analysis popup" pressed Esc and then
+    # clicked the popup's button, opening it again (step 3, xl-table-total, 2026-10-12). Also "your
+    # click", "the toolbar click", "the latest click".
+    $insVerb = $ins -replace '(?i)\b(?:the|that|this|your|my|a|last|latest|previous|earlier|first|second)\s+(?:[\w-]+\s+)?click(?:s|ed)?\b(?!\s+(?:on|in|at|the|it)\b)', ' '
+    $verb = $insVerb -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|hover|(?<!\binsertion\s)point to|focus)\b'
     # Text to type while the pointer is on an input: a person puts it where the pointer is. ("Press
     # Ctrl+A, paste 20, then press Enter" with the pointer on Font Size: not clicking there let the
     # select-all take the whole document, 2026-10-12.) Not for a pointer on anything else: Blender's
@@ -594,18 +710,43 @@ function Get-StepActions($step) {
     }
     $keysOrText = @($seq).Count -gt 0
     if ($a.click -and -not $verb -and -not $intoTarget -and -not ($typesHere -and $inputTarget) -and $keysOrText) { $a.click = $null; $a.pointerOnly = $true }
+    if ($a.click -and -not $verb -and $overSelection -and $typesHere) { $a.click = $null; $a.pointerOnly = $true }
     # A select-all the follower added is for the field it clicks. With no click it would select
     # whatever has focus -- a whole document, once (2026-10-12) -- so it goes.
     if (-not $a.click) { foreach ($t in @($seq | Where-Object { $_.before })) { [void]$seq.Remove($t) } }
     # "hold Ctrl and click", "Ctrl+click", "Shift-click": the click goes with the modifier held.
     $a.clickMod = $null
-    if ($ins -match '(?i)\bhold(?:ing)?\s+(?:down\s+)?(shift|ctrl|control)\b[^.]{0,30}?\bclick' -or $ins -match '(?i)\b(shift|ctrl|control)[- +]click') {
-        $a.clickMod = $Matches[1].ToLower() -replace 'control', 'ctrl'
+    $mm = [regex]::Match($ins, '(?i)\bhold(?:ing)?\s+(?:down\s+)?(shift|ctrl|control)\b[^.]{0,30}?\bclick')
+    if (-not $mm.Success) { $mm = [regex]::Match($ins, '(?i)\b(shift|ctrl|control)[- +]click') }
+    # Only for a click named after it: "Click sales-august.csv, then hold Ctrl while clicking
+    # sales-july.csv and sales-september.csv" with the pointer on August Ctrl-clicked August, which
+    # toggled it instead of making it the only selection (v7, ex-zip, 2026-10-13).
+    if ($mm.Success -and -not ($a.named -and $clickPos -lt $mm.Index)) {
+        $a.clickMod = $mm.Groups[1].Value.ToLower() -replace 'control', 'ctrl'
     }
     # The opposite case: the step says to click something and there is no pointer at all. Text meant
     # for that thing must not go wherever focus happens to be ("Click in the blank rectangle to the
     # right of Entries, then paste" with no pointer pasted Yes/No into the focused control, trial).
     $a.clickWithoutPointer = (-not $step.located) -and $verb
+    # Except a click on an area of the app rather than a control: "Click the 3D View", "Click an empty
+    # area of the 3D Viewport", "Click the large grid area in the middle". There is nothing to point at,
+    # and a person clicks there anyway. Refusing it left Blender stuck in two runs (verification run).
+    $a.areaClick = $null
+    if ($a.clickWithoutPointer -and -not $tt -and $ins -match '(?i)\b(?:click|tap)\b[^.;]{0,50}?\b(3d\s*view(?:port)?|viewport|canvas|grid area|work(?:ing)? area|drawing area|(?:empty|blank|open)\s+(?:area|space|spot|part)|middle of the (?:window|screen|view))') {
+        if ($Matches[1] -match '(?i)empty|blank|open') { $a.areaClick = 'empty' } else { $a.areaClick = 'middle' }
+        $a.clickWithoutPointer = $false
+    }
+    # Keys and text after a click the follower cannot make belong to what it would have clicked:
+    # "Double-click the small 1 in the footer, then press Delete" with no pointer pressed Delete into
+    # the document (v6, word-pagenum, 2026-10-13). Without them the step is one it cannot follow, and
+    # the model hears so. A hover needs no pointer: with no click the hand rests over the app ("Hover
+    # over the 3D Viewport, press F3" is keys for the viewport).
+    if ($a.clickWithoutPointer -and $insVerb -match '(?i)(?<!\bto\s)\b(click|tap|double-click|right-click|choose|open|tick|untick|check|uncheck|pick|select|focus)\b') {
+        foreach ($t in @($seq | Where-Object { [double]$_.pos -gt $clickPos })) {
+            $a.skipped += "$($t.value) (after a click with no pointer)"
+            [void]$seq.Remove($t)
+        }
+    }
     # The select-all sits just before the paste it serves, wherever that paste ended up.
     foreach ($t in $seq) { if ($t.before) { $t.pos = $t.before.pos - 0.001 } }
     $a.seq = @($seq | Sort-Object { $_.pos })

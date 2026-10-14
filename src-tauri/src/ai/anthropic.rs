@@ -169,7 +169,6 @@ impl AnthropicClient {
         }
 
         use eventsource_stream::Eventsource;
-        use futures_util::StreamExt;
 
         let mut stream = response.bytes_stream().eventsource();
 
@@ -181,7 +180,10 @@ impl AnthropicClient {
         let mut in_instruction = false;
         let mut emitted_instruction_len = 0;
 
-        while let Some(event_result) = stream.next().await {
+        let mut progress = crate::ai::streaming::AnswerProgress::default();
+        while let Some(event_result) =
+            crate::ai::streaming::next_or_stall(&mut stream, progress.update(accumulated_json.len()), "Anthropic").await?
+        {
             let event = event_result?;
             if event.event == "content_block_delta" {
                 let data: Value = serde_json::from_str(&event.data).unwrap_or_default();

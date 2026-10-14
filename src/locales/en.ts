@@ -151,6 +151,7 @@ export const en = {
   "panel.nextTitle": "Next step ({hotkey})",
   "panel.wrong": "\u2717 This is wrong",
   "panel.wrongTitle": "This guidance is wrong ({hotkey})",
+  "panel.wrongTitleNoKey": "This guidance is wrong",
   "panel.autopilotOn": "\u23f8 Autopilot",
   "panel.autopilotOff": "\u2708 Autopilot",
   "panel.autopilotOnTitle": "Autopilot on \u2014 click to turn off",
@@ -628,8 +629,12 @@ export const en = {
   "panel.guideOnScreen": "Guide me on this screen",
   "panel.pickAnApp": "Pick an app",
   "msg.noTargetWindow": "No app window was open, so there was nothing to look at.",
+  "msg.hotkeyHeldElsewhere": "{key} belongs to another program on this computer (a game overlay or a screen recorder, for example), so pressing it may open that program instead of doing this step. The AI will be told.",
+  "msg.hotkeyYielded": "This step uses {key}, so Navisual's “{action}” shortcut is off until the next step. The panel's buttons still work.",
   "err.freeTrialExhausted": "Your free requests have been used.",
   "err.insufficientCoins": "Not enough coins for this quality tier. Buy more to continue.",
+  "err.streamStalled": "The AI stopped partway through its answer, twice in a row. Please try again.",
+  "err.streamRunaway": "The AI's answer ran on far past any real step, twice in a row. Please try again.",
   "err.exportDisabled": "Session export is off. Turn it on in Settings \u2192 Developer.",
 };
 

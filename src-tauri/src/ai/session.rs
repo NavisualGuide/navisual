@@ -35,6 +35,8 @@ const MAX_PINNED_TURNS: usize = 5;
 /// Earlier turns the list of earlier screens names at most, most recent kept. Each line is about
 /// 20 tokens; past this the oldest are counted rather than listed.
 const MAX_EARLIER_SCREENS: usize = 40;
+/// Screenshots kept in memory for `recall` (H6), newest last.
+const MAX_RECALL_SCREENS: usize = 12;
 /// What the user said, cut to this many characters per line of that list.
 const EARLIER_SAID_CHARS: usize = 80;
 /// Kept notes held at most; past this the oldest goes. About 15 tokens each.
@@ -199,6 +201,11 @@ pub struct Session {
     /// before this existed load with none.
     #[serde(default)]
     pub kept: Vec<KeptNote>,
+    /// The screenshot each user turn sent, for `recall` (H6) when its switch is on (`RECALL`).
+    /// Memory only -- never serialised, so a stored or reopened session carries none -- and only
+    /// the newest `MAX_RECALL_SCREENS`. Every one of them already went to the provider on its turn.
+    #[serde(skip)]
+    pub recall_screens: Vec<crate::ai::inspect::EarlierScreen>,
 }
 
 /// One kept fact and the turn it was kept on.
@@ -230,7 +237,25 @@ impl Session {
             started_at: now.clone(),
             last_active_at: now,
             kept: Vec::new(),
+            recall_screens: Vec::new(),
         }
+    }
+
+    /// Keep the screenshot the latest user turn sent, numbered as `earlier_screens` numbers that
+    /// turn, so `recall(turn)` finds the screen the list names.
+    pub fn remember_screen(&mut self, jpeg_b64: String) {
+        let turn = self
+            .conversation
+            .iter()
+            .filter(|t| matches!(t.role.as_str(), "user" | "correction"))
+            .count();
+        if turn == 0 || jpeg_b64.is_empty() {
+            return;
+        }
+        self.recall_screens.retain(|s| s.turn != turn);
+        self.recall_screens.push(crate::ai::inspect::EarlierScreen { turn, jpeg_b64 });
+        let excess = self.recall_screens.len().saturating_sub(MAX_RECALL_SCREENS);
+        self.recall_screens.drain(..excess);
     }
 
     pub fn add_turn(&mut self, role: &str, content: String, screenshot_hash: Option<String>) {
@@ -964,6 +989,31 @@ mod tests {
         );
         assert!(!dir.join("frames").join("evil.png").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `recall(turn)` must find the screen the list of earlier screens numbers that way, and only
+    /// the newest screens stay in memory.
+    #[test]
+    fn remembered_screens_carry_the_turn_number_the_list_shows() {
+        let mut s = Session::new("t".into());
+        s.remember_screen("before any turn".into());
+        assert!(s.recall_screens.is_empty(), "no user turn yet, nothing to number it with");
+        s.add_turn("user", "open the file".into(), None);
+        s.remember_screen("shot1".into());
+        s.add_turn("assistant", "click File".into(), None);
+        s.add_turn("correction", "that was wrong".into(), None);
+        s.remember_screen("shot2".into());
+        let turns: Vec<(usize, &str)> = s.recall_screens.iter().map(|e| (e.turn, e.jpeg_b64.as_str())).collect();
+        assert_eq!(turns, vec![(1, "shot1"), (2, "shot2")]);
+        assert!(s.earlier_screens(true).contains("turn 2: \"that was wrong\""), "{}", s.earlier_screens(true));
+        for i in 0..20 {
+            s.add_turn("user", format!("Next {i}"), None);
+            s.remember_screen(format!("shot{}", i + 3));
+        }
+        assert_eq!(s.recall_screens.len(), super::MAX_RECALL_SCREENS);
+        assert_eq!(s.recall_screens.last().unwrap().turn, 22, "the newest kept");
+        let stored = serde_json::to_string(&s).unwrap();
+        assert!(!stored.contains("shot22"), "screens are never written with the session");
     }
 
     #[test]

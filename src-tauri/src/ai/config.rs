@@ -253,6 +253,17 @@ pub struct Config {
     /// mechanism off. For L1, which measures the product without them: they are local code,
     /// the same on every tier, and measured on their own (founder, 2026-10-11).
     pub learned_notes: bool,
+    /// Rules 2-3 of the system prompt as v0.7.37 made them ("the screen outranks the Next"). On;
+    /// `SCREEN_FIRST_RULES=false` puts back v0.7.36's "trust confirmations", for measuring the
+    /// harness on and off (L1 step 3) -- never a user option.
+    pub screen_first_rules: bool,
+    /// H6 `recall` in the live app: the screenshots of earlier turns, kept in memory, offered as a
+    /// tool. Off; `RECALL=true`, BYOK only (the relay cannot carry a multi-call round), for L1
+    /// step 3. Shipping it needs privacy.html and SDD §1.1 first (harness-plan.md).
+    pub recall: bool,
+    /// H3 `ui_tree` in the live app: the target's accessibility tree, read once per request and
+    /// offered as a tool. Off; `UI_TREE=true`, for L1 step 3.
+    pub ui_tree: bool,
 }
 
 impl Default for Config {
@@ -296,7 +307,13 @@ impl Default for Config {
             voice_language: "auto".to_string(),
             ui_language: "system".to_string(),
             hotkey_next:  "Ctrl+Backquote".to_string(),
-            hotkey_wrong: "Ctrl+KeyE".to_string(),
+            // Unset since 2026-10-12, by the founder's decision. Ctrl+E is Word's Center,
+            // Excel's Flash Fill and the browser's search box; L1 had the model tell the user
+            // to press it in Word and the keypress opened the Wrong picker. Any other key would
+            // collide somewhere too: the ✗ button is always on the panel, and a user who wants
+            // a key sets one. Like HOTKEY_ICON below, this reaches installs whose .env does not
+            // already name the key.
+            hotkey_wrong: String::new(),
             hotkey_pause: String::new(),
             // Ctrl+~ advances a step; its Shift sibling collapses and restores the
             // panel. Left unset since v0.5.17, which removed the Ctrl+Q / Ctrl+S
@@ -324,6 +341,9 @@ impl Default for Config {
             recall_max: 1,
             list_states: true,
             learned_notes: true,
+            screen_first_rules: true,
+            recall: false,
+            ui_tree: false,
         }
     }
 }
@@ -621,6 +641,15 @@ impl Config {
         }
         if let Ok(v) = env::var("LEARNED_NOTES") {
             config.learned_notes = truthy(&v);
+        }
+        if let Ok(v) = env::var("SCREEN_FIRST_RULES") {
+            config.screen_first_rules = truthy(&v);
+        }
+        if let Ok(v) = env::var("RECALL") {
+            config.recall = truthy(&v);
+        }
+        if let Ok(v) = env::var("UI_TREE") {
+            config.ui_tree = truthy(&v);
         }
         if let Ok(v) = env::var("RECALL_MAX") {
             config.recall_max = v.trim().parse().unwrap_or(1).clamp(1, 4);

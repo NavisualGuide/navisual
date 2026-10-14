@@ -7,14 +7,14 @@ See the LICENSE file in the root of this repository for complete details.
   import { onMount, onDestroy, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
-  import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
+  import { register, unregister, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
   import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
   import { LogicalSize, LogicalPosition, PhysicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
   import { listen, emitTo } from "@tauri-apps/api/event";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
   import HotkeyInput from "./HotkeyInput.svelte";
-  import { prettyHotkey } from "./lib/hotkey";
+  import { prettyHotkey, acceleratorCombo, combosInText, comboLabel } from "./lib/hotkey";
   import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
   import { providerName } from "./lib/providers";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
@@ -1149,7 +1149,7 @@ See the LICENSE file in the root of this repository for complete details.
     subtitle_enabled: true, auto_advance: false, autopilot_min_cells: 16,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
     ui_language: "system",
-    hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
+    hotkey_next: "Ctrl+Backquote", hotkey_wrong: "",
     hotkey_pause: "", hotkey_icon: "Ctrl+Shift+Backquote", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
     debug_diagnostics_enabled: false,
@@ -2464,26 +2464,117 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  // Re-register global shortcuts. Called on mount and after settings change.
+  // ── Global hotkeys: held only while needed, released for a step that uses them ──────────
+  // A global hotkey takes its keys from every app. Registered at launch, Ctrl+E (Wrong) was
+  // gone from Word (Center), Excel (Flash Fill) and the browser (search box) for as long as
+  // Navisual ran. So Next and Wrong exist only while a step is being guided, and any hotkey a
+  // step tells the user to press is released while that step is on screen (L1, 2026-10-12:
+  // Luna said "press Ctrl+E" in Word, and the keypress opened the Wrong picker instead).
+  type HotkeyRole = "next" | "wrong" | "pause" | "icon" | "talk";
+  type HotkeyEntry = { role: HotkeyRole; key: string; guidance: boolean; handler: () => void };
+  const HOTKEY_LABEL: Record<HotkeyRole, MessageKey> = {
+    next: "hk.next", wrong: "hk.wrong", pause: "hk.pause", icon: "hk.icon", talk: "hk.talk",
+  };
+  let hotkeyEntries = $state<HotkeyEntry[]>([]);
+  // What is registered right now. Every register/unregister runs on one chain, in order.
+  const heldHotkeys = new Set<string>();
+  let hotkeyChain: Promise<unknown> = Promise.resolve();
+  let lastYieldNote = "";
+  let lastHeldProbe = "";
+
+  function queueHotkeys<T>(work: () => Promise<T>): Promise<T> {
+    const run = hotkeyChain.then(work);
+    hotkeyChain = run.catch(() => {});
+    return run;
+  }
+
+  // Which hotkeys should be held now, and which a step on screen has claimed.
+  function wantedHotkeys(): { want: HotkeyEntry[]; yielded: HotkeyEntry[]; claimed: Set<string> } {
+    const guiding =
+      phase === "guiding" || phase === "needs_input" || (phase === "thinking" && steps.length > 0);
+    const claimed = guiding ? combosInText(steps[stepIndex]?.instruction ?? "") : new Set<string>();
+    const want: HotkeyEntry[] = [];
+    const yielded: HotkeyEntry[] = [];
+    for (const e of hotkeyEntries) {
+      if (!e.key || (e.guidance && !guiding)) continue;
+      if (claimed.has(acceleratorCombo(e.key))) yielded.push(e);
+      else want.push(e);
+    }
+    return { want, yielded, claimed };
+  }
+
+  $effect(() => {
+    const { want, yielded, claimed } = wantedHotkeys();
+    untrack(() => {
+      // A combo the step names that another program holds never reaches the app: NVIDIA's overlay
+      // took Word's Alt+F9 for its Record dialog in L1 (2026-10-12). Navisual cannot release
+      // another program's key, but it can find out and say so; the backend also tells the model
+      // on the next request. Not Navisual's own keys (released above), not Win+ (Windows' own).
+      const own = new Set(hotkeyEntries.filter((e) => e.key).map((e) => acceleratorCombo(e.key)));
+      const toProbe = [...claimed].filter((c) => !own.has(c) && !c.split("+").includes("win"));
+      const probeNote = `${stepIndex}|${steps[stepIndex]?.instruction ?? ""}|${toProbe.join(",")}`;
+      if (toProbe.length > 0 && probeNote !== lastHeldProbe) {
+        lastHeldProbe = probeNote;
+        invoke<string[]>("combos_held_elsewhere", { combos: toProbe })
+          .then((held) => {
+            for (const c of held) addToHistory("system", t("msg.hotkeyHeldElsewhere", { key: comboLabel(c) }));
+          })
+          .catch((err) => console.warn("hotkey check failed:", err));
+      }
+      // Say so once per step: the key now goes to the app, and the panel's button still works.
+      const note = `${stepIndex}|${steps[stepIndex]?.instruction ?? ""}|${yielded.map((e) => e.key).join(",")}`;
+      if (yielded.length > 0 && note !== lastYieldNote) {
+        lastYieldNote = note;
+        for (const e of yielded) {
+          addToHistory("system", t("msg.hotkeyYielded", { key: prettyHotkey(e.key), action: t(HOTKEY_LABEL[e.role]) }));
+        }
+      }
+      const wantKeys = new Map(want.map((e) => [e.key, e]));
+      queueHotkeys(async () => {
+        for (const k of [...heldHotkeys]) {
+          if (!wantKeys.has(k)) {
+            // Needs global-shortcut:allow-unregister; without it this failed silently and every
+            // key stayed held (first live check, 2026-10-12).
+            try { await unregister(k); heldHotkeys.delete(k); }
+            catch (err) { console.warn("shortcut release failed:", k, err); }
+          }
+        }
+        for (const [k, e] of wantKeys) {
+          if (heldHotkeys.has(k)) continue;
+          try { await register(k, e.handler); heldHotkeys.add(k); }
+          catch (err) { console.warn("shortcut failed:", k, err); }
+        }
+      });
+    });
+  });
+
+  // Re-register global shortcuts. Called on mount and after settings change. Every key is
+  // registered once here so Settings can report one another program holds; the effect above
+  // then releases whatever is not needed at this moment.
   async function registerShortcuts(hk: Pick<SettingsPayload, "hotkey_next"|"hotkey_wrong"|"hotkey_pause"|"hotkey_icon"|"hotkey_talk">) {
-    await unregisterAll().catch(() => {});
     function debounced(fn: () => void, ms = 350): () => void {
       let last = 0;
       return () => { const now = Date.now(); if (now - last < ms) return; last = now; fn(); };
     }
-    const pairs: Array<[string, () => void]> = [
-      [hk.hotkey_next,  debounced(() => { if (!actionDisabled) nextStep(); })],
-      [hk.hotkey_wrong, debounced(() => { if (!actionDisabled) openWrongPicker(); })],
-      [hk.hotkey_pause, debounced(() => cancelRequest())],
-      [hk.hotkey_icon,  debounced(() => { if (iconMode) expandToPanel(); else collapseToIcon(); })],
-      [hk.hotkey_talk,  debounced(() => { if (settingsForm.voice_input_enabled) toggleVoiceInput(); })],
+    const entries: HotkeyEntry[] = [
+      { role: "next",  key: hk.hotkey_next,  guidance: true,  handler: debounced(() => { if (!actionDisabled) nextStep(); }) },
+      { role: "wrong", key: hk.hotkey_wrong, guidance: true,  handler: debounced(() => { if (!actionDisabled) openWrongPicker(); }) },
+      { role: "pause", key: hk.hotkey_pause, guidance: false, handler: debounced(() => cancelRequest()) },
+      { role: "icon",  key: hk.hotkey_icon,  guidance: false, handler: debounced(() => { if (iconMode) expandToPanel(); else collapseToIcon(); }) },
+      { role: "talk",  key: hk.hotkey_talk,  guidance: false, handler: debounced(() => { if (settingsForm.voice_input_enabled) toggleVoiceInput(); }) },
     ];
-    const errors: string[] = [];
-    for (const [key, handler] of pairs) {
-      if (!key) continue;
-      try { await register(key, handler); }
-      catch (e) { errors.push(`${key}: ${e}`); console.warn("shortcut failed:", key, e); }
-    }
+    const errors = await queueHotkeys(async () => {
+      await unregisterAll().catch(() => {});
+      heldHotkeys.clear();
+      const errs: string[] = [];
+      for (const e of entries) {
+        if (!e.key) continue;
+        try { await register(e.key, e.handler); heldHotkeys.add(e.key); }
+        catch (err) { errs.push(`${e.key}: ${err}`); console.warn("shortcut failed:", e.key, err); }
+      }
+      return errs;
+    });
+    hotkeyEntries = entries;
     return errors;
   }
 
@@ -2589,6 +2680,9 @@ See the LICENSE file in the root of this repository for complete details.
     sessionGoal = "";
     sessionPlanOutline = [];
     sessionPlanCompletedCount = 0;
+    // The Wrong picker belongs to the step on screen. Left open, it turned the next task's
+    // text into a "wrong" report against no session ("no active session"; L1, 2026-10-12).
+    wrongPickerOpen = false;
     cancelRequest();
     // Reset Rust-side session state including target_hwnd so the next Guide me
     // call re-discovers the foreground window instead of reusing a stale target.
@@ -2916,6 +3010,8 @@ See the LICENSE file in the root of this repository for complete details.
     free_trial_exhausted: "err.freeTrialExhausted",
     insufficient_coins: "err.insufficientCoins",
     export_disabled: "err.exportDisabled",
+    stream_stalled: "err.streamStalled",
+    stream_runaway: "err.streamRunaway",
   };
   // Nothing was open to guide. Not an error to report -- a scope to offer. One helper so
   // the three callers cannot drift (rule 18); each passes what to re-run afterwards.
@@ -3416,6 +3512,9 @@ See the LICENSE file in the root of this repository for complete details.
   // "wrong" report (logged as wrong_other) rather than a normal follow-up.
   function submitTask() {
     lastRequestFailed = false;
+    // Only a step being guided can be wrong; any other way out of guiding must not leave the
+    // picker deciding what the next text means.
+    if (wrongPickerOpen && phase !== "guiding") wrongPickerOpen = false;
     if (wrongPickerOpen && task.trim()) submitWrong("wrong_other");
     else guide();
   }
@@ -3670,6 +3769,14 @@ See the LICENSE file in the root of this repository for complete details.
         // Live step counter: >1 means later steps are already streaming past —
         // show "Step 1 of ~N" instead of discarding that signal until completion.
         streamStepsSeen = event.payload.steps_seen ?? 0;
+      }
+    });
+    // The request stalled mid-answer and is being sent again: drop the half-streamed text
+    // so the retry's answer does not land after it.
+    listen("stream_reset", () => {
+      if (phase === "thinking" || phase === "guiding") {
+        currentInstruction = "";
+        streamStepsSeen = 0;
       }
     });
 
@@ -4290,7 +4397,7 @@ See the LICENSE file in the root of this repository for complete details.
         {#if phase === "guiding"}
           <div class="wrong-footer">
             {#if !wrongPickerOpen}
-              <button class="wrong-btn" onclick={openWrongPicker} title={t("panel.wrongTitle", { hotkey: prettyHotkey(settingsForm.hotkey_wrong) })}>{t("panel.wrong")}</button>
+              <button class="wrong-btn" onclick={openWrongPicker} title={settingsForm.hotkey_wrong ? t("panel.wrongTitle", { hotkey: prettyHotkey(settingsForm.hotkey_wrong) }) : t("panel.wrongTitleNoKey")}>{t("panel.wrong")}</button>
             {:else}
               <div class="reason-row">
                 <span class="reason-prompt">{t("wrong.prompt")}</span>

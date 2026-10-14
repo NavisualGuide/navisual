@@ -10,7 +10,8 @@ and keyboard input, presses the Next hotkey, and stops at the end state, a cap, 
 cannot follow. One result row per run.
 
 The follower does what the step says and nothing else:
-  - a located target is clicked at its centre (right/double when the instruction says so);
+  - a located target is clicked at its centre (right/double when the instruction says so), and
+    so is the model's box when the dashed hint ring stands in for a missed locate;
   - clipboard text is pasted (rule 11 puts any text to type there, and the app copies it);
   - key combinations named in the instruction are pressed;
   - a question (needs_input) is answered from the task's persona replies;
@@ -39,7 +40,15 @@ param(
     # Stop before the next run once this tier's estimated spend passes it (list prices, no cache).
     [double]$MaxUsd = 10.0,
     # Debugging: save the task window as it is just before each click (the test app only).
-    [switch]$ShotBeforeClick
+    [switch]$ShotBeforeClick,
+    # The harness switches, for L1 step 3 (harness-plan.md). 'default' is the product as it
+    # ships: screen-first rules, the list of earlier screens and states in the list on; H1 and
+    # the look tools off. 'on' turns every switch on (H1, zoom and read_text, recall, ui_tree
+    # too); 'off' turns every one off, with rules 2-3 back to v0.7.36's.
+    [ValidateSet('default', 'on', 'off')] [string]$Harness = 'default',
+    # Learned notes carry what one run learned into the later runs of the same tier, so repeated
+    # runs stop being independent; off unless asked for, even with -Harness on.
+    [switch]$LearnedNotes
 )
 
 . "$PSScriptRoot\l1-lib.ps1"
@@ -169,6 +178,14 @@ $set = [ordered]@{
     HOTKEY_NEXT = 'Ctrl+Backquote'
 }
 if ($cfg.provider -eq 'openai') { $set['OPENAI_MODEL'] = $cfg.model } else { $set['GEMINI_MODEL'] = $cfg.model }
+$harnessSets = @{
+    default = [ordered]@{ SCREEN_FIRST_RULES = 'true'; EARLIER_SCREENS = 'true'; LIST_STATES = 'true'; EXPECTED_RESULT = 'false'; INSPECT = ''; INSPECT_TOOLS = 'zoom'; RECALL = 'false'; UI_TREE = 'false' }
+    on      = [ordered]@{ SCREEN_FIRST_RULES = 'true'; EARLIER_SCREENS = 'true'; LIST_STATES = 'true'; EXPECTED_RESULT = 'true'; INSPECT = 'choice'; INSPECT_TOOLS = 'both'; RECALL = 'true'; UI_TREE = 'true' }
+    off     = [ordered]@{ SCREEN_FIRST_RULES = 'false'; EARLIER_SCREENS = 'false'; LIST_STATES = 'false'; EXPECTED_RESULT = 'false'; INSPECT = ''; INSPECT_TOOLS = 'zoom'; RECALL = 'false'; UI_TREE = 'false' }
+}
+$hs = $harnessSets[$Harness]
+foreach ($k in $hs.Keys) { $set[$k] = $hs[$k] }
+$set['LEARNED_NOTES'] = $(if ($LearnedNotes) { 'true' } else { 'false' })
 $out = New-Object System.Collections.Generic.List[string]
 $seen = @{}
 foreach ($l in $envLines) {
@@ -181,7 +198,7 @@ foreach ($k in $set.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($set[$k])") } }
 $feed = Join-Path $runDir 'feed.jsonl'
 $env:NAVISUAL_DATA_DIR = $data
 $env:NAVISUAL_STEP_FEED = $feed
-Write-L1 "tier $Tier -> $($cfg.provider) $($cfg.model) effort='$($cfg.effort)'; data $data"
+Write-L1 "tier $Tier -> $($cfg.provider) $($cfg.model) effort='$($cfg.effort)'; harness $Harness, learned notes $([bool]$LearnedNotes); data $data"
 $proc = Start-Process -FilePath $Exe -PassThru -WorkingDirectory (Split-Path -Parent $Exe)
 $env:NAVISUAL_DATA_DIR = ''
 $env:NAVISUAL_STEP_FEED = ''
@@ -231,7 +248,7 @@ function Invoke-L1Run($task, [int]$rep) {
     $maxReq = 15; if ($task.max_requests) { $maxReq = [int]$task.max_requests }
     $maxMin = 8; if ($task.max_minutes) { $maxMin = [double]$task.max_minutes }
     $t0 = Get-Date
-    $requests = 0; $steps = 0; $cantFind = 0; $replies = 0; $errors = 0; $clicks = 0; $misclicked = $false
+    $requests = 0; $steps = 0; $cantFind = 0; $replies = 0; $errors = 0; $clicks = 0; $misclicked = $false; $hintSteps = 0
     $outcome = 'running'; $verdict = $null; $claimedDone = $false
 
     while ($outcome -eq 'running') {
@@ -252,6 +269,13 @@ function Invoke-L1Run($task, [int]$rep) {
             $re = Resend-PanelText $navPid
             if ($re) { Write-L1 "retry: $re" } else { Send-NextHotkey; Write-L1 "retry: Next" }
             continue
+        }
+        # The locator missed and the dashed hint ring stood in, around the model's box. A person
+        # clicks inside the ring, so the follower takes its box as the pointer. The first scored
+        # pass ignored every hint, which made the follower stricter than a person (2026-10-12).
+        if (-not $s.located -and $s.hint_shown -and $s.ai_bbox) {
+            $s | Add-Member -NotePropertyName located -NotePropertyValue ([pscustomobject]@{ bbox = $s.ai_bbox; name = 'hint ring' }) -Force
+            $hintSteps++
         }
         $loc = 'no pointer'
         if ($s.located) { $b = $s.located.bbox; $loc = "pointer ($($b.x),$($b.y) $($b.width)x$($b.height)) '$($s.located.name)'" }
@@ -285,10 +309,34 @@ function Invoke-L1Run($task, [int]$rep) {
         if ($a.pointerOnly) { Write-L1 "pointer shown, but the step asks for no click" }
         if ($a.unsupported) { Write-L1 "cannot follow: $($a.unsupported)" }
         elseif ($a.dragAcross) {
+            # Keys the step gives before the drag go first: "Undo the last alignment change with
+            # Ctrl+Z, then drag across ..." dragged and never undid (verification run, 2026-10-12).
+            foreach ($t in @($a.seq | Where-Object { $_.pos -lt $a.clickPos -and $_.kind -eq 'keys' })) {
+                if (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
+                Start-Sleep -Milliseconds 250
+            }
             $b = $s.located.bbox
             $cy = [int]($b.y + $b.height / 2)
             Drag-Between ([int]$b.x + 2) $cy ([int]($b.x + $b.width) - 2) $cy
             Write-L1 "drag across '$($s.located.name)' ($($b.x)..$($b.x + $b.width), $cy)"; $acted = $true
+        }
+        elseif ($a.areaClick -and $tw) {
+            # Inside the app window: its middle, or lower left for "an empty area" -- the spot the
+            # setup scripts already use to close Blender's splash without touching a control.
+            $r = Get-WindowRect $tw.Hwnd
+            $fx = 0.5; $fy = 0.55
+            if ($a.areaClick -eq 'empty') { $fx = 0.25; $fy = 0.75 }
+            $ax = [int]($r.Left + ($r.Right - $r.Left) * $fx); $ay = [int]($r.Top + ($r.Bottom - $r.Top) * $fy)
+            Click-Point $ax $ay
+            $clicks++; $acted = $true
+            Write-L1 "click ($ax,$ay) in the app's $($a.areaClick) area -- the step names no control"
+            Start-Sleep -Milliseconds 400
+            foreach ($t in @($a.seq)) {
+                if ($t.kind -eq 'paste') { if (Paste-Text $t.value) { Write-L1 "paste '$($t.value)'" } else { Write-L1 "paste '$($t.value)' -- the clipboard would not take it" } }
+                elseif ($t.kind -eq 'text') { Send-Text $t.value; Write-L1 "type '$($t.value)'" }
+                elseif (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
+                Start-Sleep -Milliseconds 250
+            }
         }
         elseif ($a.scrollOnly -and $tw) {
             if ($a.click) { $sx = $a.click[0]; $sy = $a.click[1] } else { $r = Get-WindowRect $tw.Hwnd; $sx = [int](($r.Left + $r.Right) / 2); $sy = [int](($r.Top + $r.Bottom) / 2) }
@@ -320,7 +368,7 @@ function Invoke-L1Run($task, [int]$rep) {
                 Start-Sleep -Milliseconds 300
             }
             foreach ($t in $before) {
-                if ($t.kind -eq 'paste') { Set-Clipboard -Value $t.value; Send-Combo 'Ctrl+V' | Out-Null; Write-L1 "paste '$($t.value)'" }
+                if ($t.kind -eq 'paste') { if (Paste-Text $t.value) { Write-L1 "paste '$($t.value)'" } else { Write-L1 "paste '$($t.value)' -- the clipboard would not take it" } }
                 elseif ($t.kind -eq 'text') { Send-Text $t.value; Write-L1 "type '$($t.value)'" }
                 elseif (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
                 $acted = $true; Start-Sleep -Milliseconds 250
@@ -342,18 +390,33 @@ function Invoke-L1Run($task, [int]$rep) {
                     $b = $s.located.bbox
                     $x = [int]($b.x + $b.width + 30); $misclicked = $true
                     Write-L1 "planted misclick at ($x,$y) instead of the target"
+                    # The select-all the follower adds is for the field it meant to click. After a
+                    # miss it selected the whole document and the paste replaced it (verification run,
+                    # 2026-10-12). A person who missed types where focus is; the select-all goes.
+                    $after = @($after | Where-Object { -not $_.before })
                 }
-                Click-Point $x $y -Button $a.button -Double:$a.double -Modifier ([string]$a.clickMod)
+                Click-Point $x $y -Button $a.button -Double:$a.double -Triple:([bool]$a.triple) -Modifier ([string]$a.clickMod)
                 $clicks++; $acted = $true
-                Write-L1 "click ($x,$y) $($a.button)$(if ($a.double) {' double'})$(if ($a.clickMod) {" with $($a.clickMod)"})"
+                Write-L1 "click ($x,$y) $($a.button)$(if ($a.double) {' double'})$(if ($a.triple) {' triple'})$(if ($a.clickMod) {" with $($a.clickMod)"})"
                 Start-Sleep -Milliseconds 400
             }
             foreach ($t in $after) {
-                if ($t.kind -eq 'paste') { Set-Clipboard -Value $t.value; Send-Combo 'Ctrl+V' | Out-Null; Write-L1 "paste '$($t.value)'" }
+                if ($t.kind -eq 'paste') { if (Paste-Text $t.value) { Write-L1 "paste '$($t.value)'" } else { Write-L1 "paste '$($t.value)' -- the clipboard would not take it" } }
                 elseif ($t.kind -eq 'text') { Send-Text $t.value; Write-L1 "type '$($t.value)'" }
                 elseif (Send-Combo $t.value) { Write-L1 "keys $($t.value)" } else { Write-L1 "keys not understood: $($t.value)" }
                 $acted = $true; Start-Sleep -Milliseconds 250
             }
+        }
+        # A step that only reports the task finished ("Done -- the smaller copy is saved as
+        # small.png") is the model saying it is done. Answering "I can't find that" ended a finished
+        # run as stuck (verification run, 2026-10-12).
+        if (-not $acted -and -not $s.target_text -and @($a.seq).Count -eq 0 -and -not $a.scroll -and -not $a.areaClick -and
+            $s.instruction -match '(?i)\b(done|completed?|finished|already (?:done|saved|set|applied|in place)|nothing (?:else|more)|all set|is (?:now )?(?:saved|set|applied|in place|numbered))\b') {
+            $claimedDone = $true
+            $verdict = Get-Verdict $task $work
+            if ($verdict.success) { $outcome = 'success' } else { $outcome = 'claimed_done' }
+            Write-L1 "the step reports the task done"
+            break
         }
         if (-not $acted) {
             $cantFind++
@@ -385,10 +448,11 @@ function Invoke-L1Run($task, [int]$rep) {
         task = $task.id; rep = $rep; tier = $Tier; provider = $cfg.provider; model = $cfg.model; effort = $cfg.effort
         outcome = $outcome; success = [bool]$verdict.success; progress = $verdict.progress; damage = [bool]$verdict.damage; detail = $verdict.detail
         claimed_done = $claimedDone; requests = $requests; steps = $steps; clicks = $clicks; cant_find = $cantFind
-        replies = $replies; errors = $errors; planted_misclick = $misclicked; wall_s = $wall
+        replies = $replies; errors = $errors; planted_misclick = $misclicked; hint_steps = $hintSteps; wall_s = $wall
         input_tokens = $inTok; output_tokens = $outTok; feed_from = $firstFeed; feed_to = $lines.Count
         est_usd = [math]::Round(($inTok * $cfg.usdIn + $outTok * $cfg.usdOut) / 1e6, 5)
         app_commit = $appCommit; exe_time = $exeTime; held_out = [bool]$task.held_out
+        harness = $Harness; learned_notes = [bool]$LearnedNotes
         run_dir = $runDir; ts = (Get-Date -Format o)
     }
 }
