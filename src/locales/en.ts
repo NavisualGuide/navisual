@@ -558,7 +558,7 @@ export const en = {
   "done.clicked": "\u2713 You clicked {what}",
   "done.autopilot": "\u2713 Autopilot advanced",
   "done.alreadyDone": "\u2713 You marked it already done",
-  "done.pressedNext": "\u2713 You pressed Next",
+  "done.pressedNext": "\u2713 You moved to the next step",
   "done.completed": "\u2713 Completed",
 
   "prov.managedPaid": "Managed ({tier})",
