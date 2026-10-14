@@ -142,6 +142,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
 
   "panel.next": "\u2192 下一步",
   "panel.nextTitle": "下一步（{hotkey}）",
+  "panel.heldKeyBanner": "{key} 被這台電腦上的另一個程式佔用，按下去可能會開啟那個程式。會告訴 AI。",
   "panel.wrong": "\u2717 這步不對",
   "panel.wrongTitle": "這條指引不對（{hotkey}）",
   "panel.wrongTitleNoKey": "這條指引不對",

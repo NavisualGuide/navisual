@@ -149,6 +149,7 @@ export const en = {
 
   "panel.next": "\u2192 Next",
   "panel.nextTitle": "Next step ({hotkey})",
+  "panel.heldKeyBanner": "{key} belongs to another program on this computer, so pressing it may open that program instead. The AI will be told.",
   "panel.wrong": "\u2717 This is wrong",
   "panel.wrongTitle": "This guidance is wrong ({hotkey})",
   "panel.wrongTitleNoKey": "This guidance is wrong",

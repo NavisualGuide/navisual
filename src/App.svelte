@@ -2481,6 +2481,9 @@ See the LICENSE file in the root of this repository for complete details.
   let hotkeyChain: Promise<unknown> = Promise.resolve();
   let lastYieldNote = "";
   let lastHeldProbe = "";
+  // The held-key warning on the step card, for the step it was found on. The history line alone sat
+  // under the card, which hid the key's name while the step was on screen (live check, 2026-10-13).
+  let heldKeyBanner = $state<{ step: number; instruction: string; keys: string[] } | null>(null);
 
   function queueHotkeys<T>(work: () => Promise<T>): Promise<T> {
     const run = hotkeyChain.then(work);
@@ -2515,9 +2518,12 @@ See the LICENSE file in the root of this repository for complete details.
       const probeNote = `${stepIndex}|${steps[stepIndex]?.instruction ?? ""}|${toProbe.join(",")}`;
       if (toProbe.length > 0 && probeNote !== lastHeldProbe) {
         lastHeldProbe = probeNote;
+        const probeStep = stepIndex;
+        const probeInstruction = steps[stepIndex]?.instruction ?? "";
         invoke<string[]>("combos_held_elsewhere", { combos: toProbe })
           .then((held) => {
             for (const c of held) addToHistory("system", t("msg.hotkeyHeldElsewhere", { key: comboLabel(c) }));
+            if (held.length > 0) heldKeyBanner = { step: probeStep, instruction: probeInstruction, keys: held.map(comboLabel) };
           })
           .catch((err) => console.warn("hotkey check failed:", err));
       }
@@ -4371,6 +4377,16 @@ See the LICENSE file in the root of this repository for complete details.
           </div>
         {/if}
         <p class="latest-text">{currentInstruction}</p>
+
+        <!-- A key this step names that another program holds: said here, while the step is on
+             screen, because the history line sat under this card (live check, 2026-10-13). -->
+        {#if heldKeyBanner && phase === "guiding" && heldKeyBanner.step === stepIndex && heldKeyBanner.instruction === (steps[stepIndex]?.instruction ?? "")}
+          <div class="stale-banner" role="status">
+            <span class="stale-icon">⚠</span>
+            <span class="stale-text">{t("panel.heldKeyBanner", { key: heldKeyBanner.keys.join(", ") })}</span>
+            <button class="stale-dismiss" onclick={() => (heldKeyBanner = null)} title={t("panel.dismiss")}>✕</button>
+          </div>
+        {/if}
 
         <!-- Pointer hidden because the target window is covered by another app -->
         {#if pointerOccluded && phase === "guiding"}
