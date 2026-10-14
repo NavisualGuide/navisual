@@ -613,10 +613,23 @@ function Get-StepActions($step) {
     # q3-sales.zip.zip, or an extension-change warning).
     $overSelection = ($ins -match '(?i)\breplace\s+the\s+highlighted\b') -or ($ins -match '(?i)\b(?:leav|keep)\w*\b[^.]{0,30}?(?:\.[a-z0-9]{2,4}\b|\b(?:extension|ending|suffix)\b)')
     $clickedHere = [bool]$step.located
+    # "clear the text completely, and type 50" typed 50 after what was there (flash baseline). As
+    # verbs only: "the empty Notes box" and "the clear button" ask for no select-all.
+    $saysReplace = ($ins -match '(?i)\b(replace|select all|overwrite|erase)\b|\bclear\b(?!\s+(?:button|icon)\b)|\bempty\s+(?:it|them|the\s+(?:box|field|text|value))\b') -and ($ins -match '(?i)\b(field|box|name|value|text)\b')
+    # Typing into an input box sets it: "In the File name box, type small.png" clicked into "garden.png"
+    # and typed there -- garden.pnsmall.pngg.png, twice (flash, 2026-10-13). A person types the name the
+    # box should hold, over what is there; Windows even opens the box with the old name selected. Luna
+    # wrote "Replace the text in the File name field", flash "type ... in the box": the same intent,
+    # which must not pass for one vendor and fail for the other on wording alone. Not when the step
+    # says to add to what is there; not in a document or a cell, which are not input boxes.
+    $fieldTarget = ([string]$step.target_role -in 'Textbox', 'Combobox') -or ($tt -match '(?i)\b(box|field|size|search|name)\b')
+    # Except Explorer's rename box, whose target is the file's own name ("sales-august.zip"): it opens
+    # with the name selected but not the extension, and a person types over that. "Type q3-sales and
+    # press Enter" passed that way; a select-all would take the extension too.
+    $renameBox = $tt -match '\.[A-Za-z0-9]{2,4}$'
+    $setsField = $fieldTarget -and -not $renameBox -and ($ins -notmatch '(?i)\b(add|append|at the end|after the|before the)\b')
     if ($clickedHere -and -not $overSelection -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0 -and
-        # "clear the text completely, and type 50" typed 50 after what was there (flash baseline). As
-        # verbs only: "the empty Notes box" and "the clear button" ask for no select-all.
-        $ins -match '(?i)\b(replace|select all|overwrite|erase)\b|\bclear\b(?!\s+(?:button|icon)\b)|\bempty\s+(?:it|them|the\s+(?:box|field|text|value))\b' -and $ins -match '(?i)\b(field|box|name|value|text)\b' -and
+        ($saysReplace -or $setsField) -and
         @($seq | Where-Object { $_.kind -eq 'keys' -and $_.value -match '(?i)^ctrl\+a$' }).Count -eq 0) {
         $pt = $seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { $_.pos } | Select-Object -First 1
         [void]$seq.Add(@{ kind = 'keys'; value = 'Ctrl+A'; pos = -1; before = $pt })
