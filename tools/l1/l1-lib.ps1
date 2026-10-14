@@ -580,7 +580,12 @@ function Get-StepActions($step) {
             if (@($seq | Where-Object { [double]$_.pos -gt $v -and [double]$_.pos -lt $clickPos }).Count -gt 0) { $clickPos = $v }
         }
     }
-    elseif ($ins -match '(?i)\b(click|select|choose|tick|open|double-click|right-click)\b') { $clickPos = $ins.IndexOf($Matches[0], [System.StringComparison]::OrdinalIgnoreCase) }
+    # Not a purpose: "Type B2:B10 and press Enter to select the cells" put the click at "select", after
+    # the Enter, and the range went in after Enter had been pressed (flash baseline, lo-validation).
+    else {
+        $cv = [regex]::Match($ins, '(?i)(?<!\bto\s)\b(click|select|choose|tick|open|double-click|right-click)\b')
+        if ($cv.Success) { $clickPos = $cv.Index }
+    }
     $a.clickPos = $clickPos
     $a.named = [bool]$tt
     # Rule 11 puts any text to type on the clipboard: the first "type ..." pastes it; with no such
@@ -609,7 +614,9 @@ function Get-StepActions($step) {
     $overSelection = ($ins -match '(?i)\breplace\s+the\s+highlighted\b') -or ($ins -match '(?i)\b(?:leav|keep)\w*\b[^.]{0,30}?(?:\.[a-z0-9]{2,4}\b|\b(?:extension|ending|suffix)\b)')
     $clickedHere = [bool]$step.located
     if ($clickedHere -and -not $overSelection -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0 -and
-        $ins -match '(?i)\b(replace|select all|overwrite)\b' -and $ins -match '(?i)\b(field|box|name|value|text)\b' -and
+        # "clear the text completely, and type 50" typed 50 after what was there (flash baseline). As
+        # verbs only: "the empty Notes box" and "the clear button" ask for no select-all.
+        $ins -match '(?i)\b(replace|select all|overwrite|erase)\b|\bclear\b(?!\s+(?:button|icon)\b)|\bempty\s+(?:it|them|the\s+(?:box|field|text|value))\b' -and $ins -match '(?i)\b(field|box|name|value|text)\b' -and
         @($seq | Where-Object { $_.kind -eq 'keys' -and $_.value -match '(?i)^ctrl\+a$' }).Count -eq 0) {
         $pt = $seq | Where-Object { $_.kind -in 'paste', 'text' } | Sort-Object { $_.pos } | Select-Object -First 1
         [void]$seq.Add(@{ kind = 'keys'; value = 'Ctrl+A'; pos = -1; before = $pt })
@@ -620,7 +627,8 @@ function Get-StepActions($step) {
             $between = $ins.Substring($t.pos, $clickPos - $t.pos)
             # Not across a comma or a "then": "Paste Yes and No in the large Entries box, then click OK"
             # pasted after OK had closed the dialog (step 3, lo-validation, 2026-10-12).
-            if ($between -match '(?i)\b(in|into|to)\s+(the\s+)?(?:(?!\bthen\b)[^.;,])*$') { $t.pos = $clickPos + 0.5 }
+            # "in" or "into" the target, not "to": "press Enter to select" is a purpose (flash baseline).
+            if ($between -match '(?i)\b(in|into)\s+(the\s+)?(?:(?!\bthen\b)[^.;,])*$') { $t.pos = $clickPos + 0.5 }
         }
     }
     # Text for a field the step does not point at is not the follower's to type: "enter colour in the

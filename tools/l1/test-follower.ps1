@@ -104,5 +104,12 @@ $a = Step 'Hold Ctrl and click sales-july.csv, then sales-september.csv.' -tt 's
 Check 'hold Ctrl and click the target' "mod=$($a.clickMod)" 'mod=ctrl'
 $a = Step 'Ctrl+click sales-july.csv to add it.' -tt 'sales-july.csv' -Located -role 'Other'
 Check 'Ctrl+click the target' "mod=$($a.clickMod)" 'mod=ctrl'
+# Flash baseline (2026-10-13).
+$a = Step 'Type B2:B10 and press Enter to select the cells for all nine requests.' -tt 'A1' -clip 'B2:B10' -Located -role 'Combobox'
+Check 'to select is a purpose, not where the click goes' ("click=$([bool]$a.click) clickPos=$($a.clickPos) " + (Seq $a)) 'click=True clickPos=0 paste:B2:B10 > keys:Enter'
+$a = Step 'Select the Horizontal box, clear the text completely, and type 50.' -tt 'Horizontal' -clip '50' -Located -role 'Textbox'
+Check 'clear the text, then type' ("click=$([bool]$a.click) " + (Seq $a)) 'click=True keys:Ctrl+A > paste:50'
+$a = Step 'Paste the ticket reference number into the empty "Notes for the service desk" box, then select "Save profile" below it.' -tt 'Notes for the service desk' -clip 'K7Q-4821' -Located -role 'Textbox'
+Check 'the empty box is no order to clear' (Seq $a) 'paste:K7Q-4821'
 
 if ($fail) { "$fail FAILED"; exit 1 } else { "all ok" }
