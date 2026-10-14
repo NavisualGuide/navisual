@@ -119,5 +119,7 @@ $a = Step 'Type q3-sales and press Enter to rename the new zip archive.' -tt 'sa
 Check 'the rename box is typed over' ((Seq $a)) 'paste:q3-sales > keys:Enter'
 $a = Step 'Click cell B2 and type 4800.' -tt 'B2' -Located -role 'Dataitem'
 Check 'a cell is not an input box' (Seq $a) 'text:4800'
+$a = Step 'Type flipped.png into the Name text box at the top.' -tt 'arrow.png' -clip 'flipped.png' -Located -role 'Textbox'
+Check 'a dialog name box named by its content is set' ("click=$([bool]$a.click) " + (Seq $a)) 'click=True keys:Ctrl+A > paste:flipped.png'
 
 if ($fail) { "$fail FAILED"; exit 1 } else { "all ok" }

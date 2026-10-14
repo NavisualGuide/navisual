@@ -626,7 +626,11 @@ function Get-StepActions($step) {
     # Except Explorer's rename box, whose target is the file's own name ("sales-august.zip"): it opens
     # with the name selected but not the extension, and a person types over that. "Type q3-sales and
     # press Enter" passed that way; a select-all would take the extension too.
-    $renameBox = $tt -match '\.[A-Za-z0-9]{2,4}$'
+    # Named by its content, a dialog's name box looks the same -- GIMP's export "Name text box" came as
+    # target "arrow.png" and got no select-all: arrow.pngflipped.png, 3 of 3 (flash, v9). A step about
+    # a dialog's box says "box" or "field"; Explorer's rename steps do not ("Type q3-sales and press
+    # Enter to rename the new zip archive").
+    $renameBox = ($tt -match '\.[A-Za-z0-9]{2,4}$') -and ($ins -notmatch '(?i)\b(box|field)\b')
     $setsField = $fieldTarget -and -not $renameBox -and ($ins -notmatch '(?i)\b(add|append|at the end|after the|before the)\b')
     if ($clickedHere -and -not $overSelection -and @($seq | Where-Object { $_.kind -in 'paste', 'text' }).Count -gt 0 -and
         ($saysReplace -or $setsField) -and
