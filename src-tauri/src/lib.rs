@@ -3626,6 +3626,19 @@ fn fs_label(monitor: Option<capture::Rect>) -> String {
 #[cfg(windows)]
 const APP_BOUNDARY_DURATION_MS: u64 = 2_200;
 
+/// The error code when a pinned window cannot be captured, or None when it can. Logged, because
+/// the refusal is the only sign of it (rule 1).
+#[cfg(windows)]
+fn pinned_window_refusal(hwnd: usize) -> Option<&'static str> {
+    let code = match capture::pinned_window_state(hwnd) {
+        capture::PinnedWindow::Usable => return None,
+        capture::PinnedWindow::Minimized => "pinned_window_minimized",
+        capture::PinnedWindow::Gone => "pinned_window_gone",
+    };
+    log::warn!("[target] pinned window {hwnd:#x} cannot be captured ({code}); nothing captured in its place");
+    Some(code)
+}
+
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
@@ -4598,7 +4611,10 @@ async fn guide_inner(
     #[cfg(windows)]
     if !is_fs {
         if let Some(hwnd) = stored_hwnd {
-            if capture::window_fully_occluded(hwnd) {
+            // A pin is that one window; when it is gone or minimized, nothing is captured in
+            // its place (`capture::pinned_window_state`).
+            let pin_refusal = if is_pinned { pinned_window_refusal(hwnd) } else { None };
+            if pin_refusal.is_some() || capture::window_fully_occluded(hwnd) {
                 let app = capture::get_window_info_for_hwnd(hwnd)
                     .map(|i| i.app_name)
                     .unwrap_or_else(|| {
@@ -4623,11 +4639,11 @@ async fn guide_inner(
                     model: None,
                     input_tokens: None,
                     output_tokens: None,
-                    error: Some(format!(
+                    error: Some(pin_refusal.map(str::to_string).unwrap_or_else(|| format!(
                         "{app} is hidden behind another window, so Navisual can't see it. \
                          Bring it to the front (click it in the taskbar), or pick a different \
                          app with the target selector (🎯), then try again."
-                    )),
+                    ))),
                     debug_screenshot_path: None,
                     chat_thumb_b64: None,
                     locate_trace: None,
@@ -4708,8 +4724,16 @@ async fn guide_inner(
             // Reuse the HWND we already discovered — skip z-order walk entirely.
             match capture::recapture_window_raw(hwnd_raw, &exclude) {
                 Ok((img, rect)) => (img, Some(rect), Some(hwnd_raw)),
+                // A pin is never replaced by whatever is in front -- here only if the window
+                // went between the check above and this capture.
+                Err(_) if is_pinned => {
+                    log::warn!("[target] pinned window {hwnd_raw:#x} went before the capture; nothing captured");
+                    return Err(());
+                }
                 Err(_) => {
-                    // Window was closed/minimised — rediscover.
+                    // Auto-detect: the window it last followed was closed/minimised —
+                    // rediscover.
+                    log::info!("[target] followed window {hwnd_raw:#x} cannot be captured; rediscovering the window in front");
                     match capture::capture_active_window_raw(&exclude) {
                         Ok((img, rect, hwnd)) => (img, Some(rect), Some(hwnd)),
                         Err(_) => return Err(()),
@@ -6041,6 +6065,9 @@ async fn send_correction_inner(
     #[cfg(windows)]
     if !is_fs {
         if let Some(hwnd) = pinned_hwnd {
+            if let Some(code) = pinned_window_refusal(hwnd) {
+                return Err(code.to_string());
+            }
             if capture::window_fully_occluded(hwnd) {
                 let app_name = capture::get_window_info_for_hwnd(hwnd)
                     .map(|i| i.app_name)
@@ -6114,17 +6141,12 @@ async fn send_correction_inner(
             .ok()
             .map(|(bytes, rect)| (bytes, rect, None))
         } else if let Some(hwnd_raw) = pinned_hwnd {
-            // Pinned window closed/minimised mid-session → fall back to
-            // rediscovery rather than failing the correction outright
-            // (mirrors guide()'s recapture fallback).
+            // A pin is never replaced by whatever is in front (`capture::pinned_window_state`);
+            // the refusal above catches a closed or minimized pin, so this fails only if the
+            // window went in between.
             capture::recapture_window_jpeg(hwnd_raw, 75, &exclude)
                 .ok()
                 .map(|(bytes, rect)| (bytes, rect, Some(hwnd_raw)))
-                .or_else(|| {
-                    capture::capture_active_window_jpeg(75, &exclude)
-                        .ok()
-                        .map(|(bytes, rect, hwnd)| (bytes, rect, Some(hwnd)))
-                })
         } else {
             capture::capture_active_window_jpeg(75, &exclude)
                 .ok()
@@ -6863,6 +6885,10 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) ->
     let usable = capture::restore_window(hwnd);
     #[cfg(not(windows))]
     let usable = true;
+    log::info!(
+        "[target] pinned {hwnd:#x} ({}), usable={usable}",
+        capture::get_window_info_for_hwnd(hwnd).map(|i| i.exe_name).unwrap_or_default()
+    );
     {
         let mut g = state.guidance.lock();
         g.pinned_hwnd = Some(hwnd);
@@ -7473,6 +7499,7 @@ fn export_session(
 /// Item 1 — clear the pinned window and return to auto-detection.
 #[tauri::command]
 fn unpin_target_window(app: AppHandle, state: State<'_, AppState>) {
+    log::info!("[target] unpinned: back to auto-detect");
     {
         let mut g = state.guidance.lock();
         g.pinned_hwnd = None;
@@ -7490,11 +7517,13 @@ fn unpin_target_window(app: AppHandle, state: State<'_, AppState>) {
 fn get_shared_app_info(state: State<'_, AppState>) -> Option<SharedAppInfoPayload> {
     #[cfg(windows)]
     {
-        let stored = {
+        let (stored, pinned) = {
             let g = state.guidance.lock();
-            g.pinned_hwnd.or(g.target_hwnd)
+            (g.pinned_hwnd.or(g.target_hwnd), g.pinned_hwnd.is_some())
         };
         let info = match stored {
+            // A pin's chip names the pinned window or nothing, never the app in front.
+            Some(hwnd) if pinned => capture::get_window_info_for_hwnd(hwnd),
             Some(hwnd) => {
                 capture::get_window_info_for_hwnd(hwnd).or_else(capture::get_active_window_info)
             }

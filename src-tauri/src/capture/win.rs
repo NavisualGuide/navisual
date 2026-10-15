@@ -70,6 +70,34 @@ pub fn validate_hwnd_raw(hwnd_raw: usize) -> Option<Rect> {
     validate_hwnd(HWND(hwnd_raw as *mut _))
 }
 
+/// See `capture::pinned_window_state`.
+pub fn pinned_window_state(hwnd_raw: usize) -> super::PinnedWindow {
+    let hwnd = HWND(hwnd_raw as *mut _);
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() || is_cloaked(hwnd) {
+            return super::PinnedWindow::Gone;
+        }
+        if IsIconic(hwnd).as_bool() {
+            return super::PinnedWindow::Minimized;
+        }
+    }
+    super::PinnedWindow::Usable
+}
+
+/// DWM-cloaked: WS_VISIBLE but not drawn -- on another virtual desktop, or a suspended UWP frame.
+fn is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked: u32 = 0;
+    let res = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    res.is_ok() && cloaked != 0
+}
+
 pub fn get_window_info(hwnd_raw: usize) -> String {
     let hwnd = HWND(hwnd_raw as *mut _);
     let title_str = window_text(hwnd_raw);
@@ -126,6 +154,19 @@ pub fn target_visible_in_rect(x: i32, y: i32, w: i32, h: i32, target_hwnd: usize
         return true;
     }
     let target = HWND(target_hwnd as *mut core::ffi::c_void);
+    // A target that is closed, hidden or cloaked shows nowhere, so its pointer is not drawn,
+    // whatever window now sits at the spot. Everything below asks only whether ANOTHER app
+    // covers the spot, and a dead handle read as visible (pid 0 -> true): on 2026-10-15 a
+    // finished task's pointer came back over a new Word document, because Word had hidden the
+    // old window and opened the new one in the same place.
+    unsafe {
+        if !IsWindow(Some(target)).as_bool() || !IsWindowVisible(target).as_bool() {
+            return false;
+        }
+    }
+    if is_cloaked(target) {
+        return false;
+    }
     let mut target_pid: u32 = 0;
     unsafe {
         GetWindowThreadProcessId(target, Some(&mut target_pid));

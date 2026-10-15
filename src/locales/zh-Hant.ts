@@ -615,4 +615,6 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "err.streamStalled": "AI 回答到一半停住了，連續兩次。請再試一次。",
   "err.streamRunaway": "AI 的回答長得反常，遠超任何一步所需，連續兩次。請再試一次。",
   "err.exportDisabled": "工作階段匯出已關閉。請在「設定 \u2192 開發者」中開啟。",
+  "err.pinnedWindowGone": "你釘選的視窗已經關閉或被隱藏，Navisual 不會改看別的視窗。請點頂部的目標應用程式標籤，重新選擇要指導的視窗，或選擇「自動偵測」。",
+  "err.pinnedWindowMinimized": "你釘選的視窗已最小化。請從工作列把它還原，然後重試。",
 };

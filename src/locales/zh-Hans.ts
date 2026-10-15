@@ -614,4 +614,6 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "err.streamStalled": "AI 回答到一半停住了，连续两次。请再试一次。",
   "err.streamRunaway": "AI 的回答长得反常，远超任何一步所需，连续两次。请再试一次。",
   "err.exportDisabled": "会话导出已关闭。请在「设置 \u2192 开发者」中开启。",
+  "err.pinnedWindowGone": "你固定的窗口已经关闭或被隐藏，Navisual 不会改看别的窗口。请点顶部的目标应用标签，重新选择要指导的窗口，或选择「自动识别」。",
+  "err.pinnedWindowMinimized": "你固定的窗口已最小化。请从任务栏把它还原，然后重试。",
 };
