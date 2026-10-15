@@ -45,7 +45,7 @@
     "src/App.svelte:scripts read both.",
     "src/App.svelte:sk-ant-…",
     "src/App.svelte:sk-…",
-    "src/App.svelte:tools\u0007nalyze-*.ps1",
+    "src/App.svelte:tools\\analyze-*.ps1",
     "src/App.svelte:— below 90% threshold",
     "src/App.svelte:— steps-annotated/",
     "src/App.svelte:— steps/",
