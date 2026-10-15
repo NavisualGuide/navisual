@@ -207,6 +207,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "target.chipDefault": "目标应用 —— 点击切换或固定",
   "target.autoDetect": "自动识别",
   "target.autoDetectSub": "跟随当前前台窗口",
+  "target.pinnedGone": "固定的窗口已关闭",
   "target.entireDesktop": "整个桌面",
   "target.entireDesktopSub": "共享整个屏幕 —— 所有窗口",
   "target.screenN": "屏幕 {n}",
@@ -514,6 +515,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
 
   // ── 对话消息（续）─────────────────────────────────────────────────────────
   "msg.newSession": "新会话已开始 —— 指引会跟随你接下来点进的应用。想锁定某个应用，点标题栏里它的名字。",
+  "msg.newSessionPinned": "新会话已开始 —— 指引会停留在你固定的窗口上。想改为跟随你接下来点进的应用，请在标题栏选择「自动识别」。",
   "msg.minimizedNoRestore": "那个窗口已最小化且无法还原 —— 请你自己把它打开，然后重试。",
   "msg.autopilotPaused": "自动推进已暂停 —— 屏幕一直在变，但没有明确的下一步。你准备好了再打开它。",
   "msg.providerSwitched": "AI 服务商已切换为 {provider}",

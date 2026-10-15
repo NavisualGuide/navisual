@@ -2704,9 +2704,11 @@ See the LICENSE file in the root of this repository for complete details.
     sessionId = "";
     staleResponse = false;
     history = [];
+    // A pin survives a new task (`new_session`), so the line must not promise to follow the
+    // next app clicked into while one is in force.
     await addToHistory(
       "system",
-      t("msg.newSession"),
+      t(pinnedHwnd !== null ? "msg.newSessionPinned" : "msg.newSession"),
     );
     // Workstream P: fresh session, fresh cold-start prefill.
     clearPrefill();
@@ -4221,6 +4223,10 @@ See the LICENSE file in the root of this repository for complete details.
         {:else if sharedApp}
           {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
           {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
+        {:else if pinnedHwnd !== null}
+          <!-- Pinned, and the window is gone: the pin is still in force and guide() refuses,
+               so this must not read "Auto-detect" (2026-10-15). -->
+          {t("target.pinnedGone")}<span class="header-shared-pin">📌</span>
         {:else}
           {t("target.autoDetect")}
         {/if}

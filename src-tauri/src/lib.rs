@@ -3701,7 +3701,7 @@ pub fn refresh_active_window(app: &AppHandle) {
         return;
     };
     let active_info = capture::get_active_window_info();
-    let (announce_hwnd, changed) = {
+    let (announce_hwnd, changed, pinned) = {
         let mut g = state.guidance.lock();
         if g.pinned_hwnd.is_none() {
             g.target_hwnd = active_info.as_ref().map(|info| info.hwnd);
@@ -3709,7 +3709,7 @@ pub fn refresh_active_window(app: &AppHandle) {
         let hwnd = g.pinned_hwnd.or(g.target_hwnd);
         let changed = hwnd != g.last_announced_hwnd;
         g.last_announced_hwnd = hwnd;
-        (hwnd, changed)
+        (hwnd, changed, g.pinned_hwnd.is_some())
     };
     // A stale AI-bbox hint ring (drawn on a miss) is NOT tracked — it sits at fixed screen
     // coordinates and would otherwise linger over the newly-focused app (live 2026-07-24:
@@ -3746,7 +3746,19 @@ pub fn refresh_active_window(app: &AppHandle) {
     // flashing one while nobody is using Navisual reads as "I just captured this".
     // Boxes are now reserved for discrete events — a real capture, an explicit pin, a
     // hovered screen row — which is why no definition of "currently guiding" is needed.
+    //
+    // A pinned window that is gone is announced as nothing, and the chip then says the pin is
+    // gone. A hidden window still has a name (Word keeps one titled "Word"), so without this the
+    // chip named a window guide() refuses to capture; and a destroyed one fell through to the
+    // chip's "Auto-detect" while the pin was still in force (2026-10-15).
+    let announce_hwnd = announce_hwnd.filter(|&h| !(pinned && pinned_window_gone(h)));
     announce_shared_app(app, announce_hwnd, false);
+}
+
+/// The pinned window is closed, hidden or cloaked -- see `capture::pinned_window_state`.
+#[cfg(windows)]
+fn pinned_window_gone(hwnd: usize) -> bool {
+    capture::pinned_window_state(hwnd) == capture::PinnedWindow::Gone
 }
 
 #[cfg(not(windows))]
@@ -7523,7 +7535,13 @@ fn get_shared_app_info(state: State<'_, AppState>) -> Option<SharedAppInfoPayloa
         };
         let info = match stored {
             // A pin's chip names the pinned window or nothing, never the app in front.
-            Some(hwnd) if pinned => capture::get_window_info_for_hwnd(hwnd),
+            Some(hwnd) if pinned => {
+                if pinned_window_gone(hwnd) {
+                    None
+                } else {
+                    capture::get_window_info_for_hwnd(hwnd)
+                }
+            }
             Some(hwnd) => {
                 capture::get_window_info_for_hwnd(hwnd).or_else(capture::get_active_window_info)
             }
