@@ -637,6 +637,8 @@ export const en = {
   "err.streamStalled": "The AI stopped partway through its answer, twice in a row. Please try again.",
   "err.streamRunaway": "The AI's answer ran on far past any real step, twice in a row. Please try again.",
   "err.exportDisabled": "Session export is off. Turn it on in Settings \u2192 Developer.",
+  "err.pinnedWindowGone": "The window you pinned has closed or is hidden, so Navisual won't look at anything in its place. Click the target app chip at the top to pick the window to guide, or choose Auto-detect.",
+  "err.pinnedWindowMinimized": "The window you pinned is minimized. Restore it from the taskbar, then try again.",
 };
 
 /** Every key the reference dictionary defines. Typing the call site and the other

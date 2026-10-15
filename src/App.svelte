@@ -3016,6 +3016,8 @@ See the LICENSE file in the root of this repository for complete details.
     free_trial_exhausted: "err.freeTrialExhausted",
     insufficient_coins: "err.insufficientCoins",
     export_disabled: "err.exportDisabled",
+    pinned_window_gone: "err.pinnedWindowGone",
+    pinned_window_minimized: "err.pinnedWindowMinimized",
     stream_stalled: "err.streamStalled",
     stream_runaway: "err.streamRunaway",
   };
@@ -3312,7 +3314,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (token !== requestToken) return;
       phase = prevPhase;
       lastRequestFailed = true;
-        addToHistory("system", "⚠️ " + String(e));
+        addToHistory("system", "⚠️ " + errText(String(e), "msg.correctionFailed"));
       if (rawNote !== "") task = rawNote;
     }
   }
