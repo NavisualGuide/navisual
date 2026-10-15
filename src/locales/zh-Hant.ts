@@ -208,6 +208,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "target.chipDefault": "目標應用程式 —— 點擊切換或釘選",
   "target.autoDetect": "自動偵測",
   "target.autoDetectSub": "跟隨目前最前面的視窗",
+  "target.pinnedGone": "釘選的視窗已關閉",
   "target.entireDesktop": "整個桌面",
   "target.entireDesktopSub": "分享整個螢幕 —— 所有視窗",
   "target.screenN": "螢幕 {n}",
@@ -515,6 +516,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
 
   // ── 對話訊息（續）─────────────────────────────────────────────────────────
   "msg.newSession": "新的工作階段已開始 —— 指引會跟隨你接下來點進的應用程式。想鎖定某個應用程式，點標題列裡它的名字。",
+  "msg.newSessionPinned": "新的工作階段已開始 —— 指引會停留在你釘選的視窗上。想改為跟隨你接下來點進的應用程式，請在標題列選擇「自動偵測」。",
   "msg.minimizedNoRestore": "那個視窗已最小化且無法還原 —— 請你自己把它開啟，然後重試。",
   "msg.autopilotPaused": "自動推進已暫停 —— 畫面一直在變，但沒有明確的下一步。你準備好了再打開它。",
   "msg.providerSwitched": "AI 服務商已切換為 {provider}",

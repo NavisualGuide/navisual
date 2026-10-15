@@ -217,6 +217,7 @@ export const en = {
   "target.chipDefault": "Target app \u2014 click to switch or pin",
   "target.autoDetect": "Auto-detect",
   "target.autoDetectSub": "follow the foreground window",
+  "target.pinnedGone": "Pinned window closed",
   "target.entireDesktop": "Entire desktop",
   "target.entireDesktopSub": "share the whole screen \u2014 all windows",
   "target.screenN": "Screen {n}",
@@ -536,6 +537,7 @@ export const en = {
 
   // ── Conversation messages, part 2 ─────────────────────────────────────────
   "msg.newSession": "New session started \u2014 guidance follows the app you click into next. To lock one app, click its name in the title bar.",
+  "msg.newSessionPinned": "New session started \u2014 guidance stays on the window you pinned. To follow the app you click into next instead, choose Auto-detect in the title bar.",
   "msg.minimizedNoRestore": "That window is minimized and wouldn't restore \u2014 bring it up yourself, then try again.",
   "msg.autopilotPaused": "Autopilot paused \u2014 the screen kept changing without a clear next step. Turn it back on when you're ready.",
   "msg.providerSwitched": "AI provider switched to {provider}",
