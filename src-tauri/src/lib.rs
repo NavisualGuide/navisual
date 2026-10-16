@@ -3525,6 +3525,16 @@ fn combos_held_elsewhere(combos: Vec<String>) -> Vec<String> {
     held_keys::probe(&combos)
 }
 
+/// The panel registers its global shortcuts through the plugin's JS API, so neither what it holds
+/// nor what it failed to take ever reached this log: two Navisual windows fighting over
+/// Ctrl+Shift+` (2026-10-16) were found in the process list. One line per registration pass and
+/// per failure (rule 1). Capped, because the text comes from the webview.
+#[tauri::command]
+fn log_hotkeys(line: String) {
+    let line: String = line.chars().take(300).collect();
+    log::info!("[hotkeys] {line}");
+}
+
 /// Deployment status of the pack-shipped Blender add-on (the script-channel bridge):
 /// which Blender installs exist, whether each has the add-on, and whether any is older
 /// than the version the pack ships. Drives the panel's install prompt.
@@ -9260,6 +9270,7 @@ pub fn run() {
             get_pack_starters,
             blender_addon_status,
             combos_held_elsewhere,
+            log_hotkeys,
             install_blender_addon,
             speak,
             get_settings,

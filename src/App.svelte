@@ -2478,12 +2478,37 @@ See the LICENSE file in the root of this repository for complete details.
   let hotkeyEntries = $state<HotkeyEntry[]>([]);
   // What is registered right now. Every register/unregister runs on one chain, in order.
   const heldHotkeys = new Set<string>();
+  // Keys whose failure is already in the log: the effect below re-runs on every phase change.
+  const hotkeyFailLogged = new Set<string>();
   let hotkeyChain: Promise<unknown> = Promise.resolve();
   let lastYieldNote = "";
   let lastHeldProbe = "";
   // The held-key warning on the step card, for the step it was found on. The history line alone sat
   // under the card, which hid the key's name while the step was on screen (live check, 2026-10-13).
   let heldKeyBanner = $state<{ step: number; instruction: string; keys: string[] } | null>(null);
+
+  // Shortcuts are registered here, through the plugin's JS API, so the backend log never saw them:
+  // two Navisual windows fighting over Ctrl+Shift+` (2026-10-16) were found in the process list.
+  // Rule 1 -- every registration pass and every failure leaves a line.
+  function logHotkeys(line: string) {
+    invoke("log_hotkeys", { line }).catch(() => {});
+  }
+  // Windows' ERROR_HOTKEY_ALREADY_REGISTERED reaches us as "HotKey already registered"
+  // (global-hotkey): another program holds the combo -- often a second Navisual left open.
+  function hotkeyTaken(err: string): boolean {
+    return /already registered/i.test(err);
+  }
+  // What the user reads when shortcuts could not be set: the taken ones together, any other
+  // failure with its reason.
+  function hotkeyFailureText(fails: { key: string; err: string }[]): string {
+    const taken = fails.filter((f) => hotkeyTaken(f.err)).map((f) => prettyHotkey(f.key));
+    const parts: string[] = [];
+    if (taken.length) parts.push(t("msg.hotkeyTaken", { keys: taken.join(", ") }));
+    for (const f of fails.filter((f) => !hotkeyTaken(f.err))) {
+      parts.push(t("msg.hotkeyNotSet", { keys: prettyHotkey(f.key), error: f.err }));
+    }
+    return parts.join(" ");
+  }
 
   function queueHotkeys<T>(work: () => Promise<T>): Promise<T> {
     const run = hotkeyChain.then(work);
@@ -2542,13 +2567,16 @@ See the LICENSE file in the root of this repository for complete details.
             // Needs global-shortcut:allow-unregister; without it this failed silently and every
             // key stayed held (first live check, 2026-10-12).
             try { await unregister(k); heldHotkeys.delete(k); }
-            catch (err) { console.warn("shortcut release failed:", k, err); }
+            catch (err) { console.warn("shortcut release failed:", k, err); logHotkeys(`could not release ${k}: ${err}`); }
           }
         }
         for (const [k, e] of wantKeys) {
           if (heldHotkeys.has(k)) continue;
-          try { await register(k, e.handler); heldHotkeys.add(k); }
-          catch (err) { console.warn("shortcut failed:", k, err); }
+          try { await register(k, e.handler); heldHotkeys.add(k); hotkeyFailLogged.delete(k); }
+          catch (err) {
+            console.warn("shortcut failed:", k, err);
+            if (!hotkeyFailLogged.has(k)) { hotkeyFailLogged.add(k); logHotkeys(`could not register ${k}: ${err}`); }
+          }
         }
       });
     });
@@ -2572,12 +2600,18 @@ See the LICENSE file in the root of this repository for complete details.
     const errors = await queueHotkeys(async () => {
       await unregisterAll().catch(() => {});
       heldHotkeys.clear();
-      const errs: string[] = [];
+      const errs: { key: string; err: string }[] = [];
       for (const e of entries) {
         if (!e.key) continue;
         try { await register(e.key, e.handler); heldHotkeys.add(e.key); }
-        catch (err) { errs.push(`${e.key}: ${err}`); console.warn("shortcut failed:", e.key, err); }
+        catch (err) { errs.push({ key: e.key, err: String(err) }); console.warn("shortcut failed:", e.key, err); }
       }
+      hotkeyFailLogged.clear();
+      for (const f of errs) hotkeyFailLogged.add(f.key);
+      logHotkeys(
+        `registered ${[...heldHotkeys].join(", ") || "none"}` +
+          (errs.length ? `; could not register ${errs.map((f) => `${f.key} (${f.err})`).join(", ")}` : ""),
+      );
       return errs;
     });
     hotkeyEntries = entries;
@@ -2655,7 +2689,7 @@ See the LICENSE file in the root of this repository for complete details.
       });
       const hkErrors = await registerShortcuts(settingsForm);
       if (hkErrors.length) {
-        settingsError = `Saved, but hotkey registration failed: ${hkErrors.join("; ")}`;
+        settingsError = `${t("set.savedButHotkeys")} ${hotkeyFailureText(hkErrors)}`;
       } else {
         settingsSaved = true;
         setTimeout(() => { settingsSaved = false; }, 2000);
@@ -3838,7 +3872,10 @@ See the LICENSE file in the root of this repository for complete details.
     // Functions are defined at module level; start now if already enabled.
     if (autoAdvanceEnabled) startAutopilotPolling();
 
-    await registerShortcuts(initHotkeys);
+    // A shortcut taken at startup did nothing and said nothing -- the second of two Navisual
+    // windows looked fine until Settings was saved (2026-10-16).
+    const startupFails = await registerShortcuts(initHotkeys);
+    if (startupFails.length) addToHistory("system", "⚠️ " + hotkeyFailureText(startupFails));
 
     // (Removed: hardcoded Ctrl+A push-to-talk global shortcut. It hijacked the
     // OS-wide "select all" combo so users couldn't Ctrl+A in Word or any other
