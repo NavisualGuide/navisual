@@ -18,8 +18,14 @@
 //! are scanned first, then bundled packs (the Tauri resource `packs/`), so a user pack with
 //! the same `id` shadows a bundled one. `get_active_pack(window_title)` returns the first
 //! pack whose `window_title_pattern` matches — user packs win ties.
+//!
+//! Learned guides live beside the packs, in `<user packs>\learned\<app>\guide.md` ([`guide`] is
+//! the file, [`learn`] keeps them current). A folder without `pack.json` is never a pack, so
+//! `learned\` cannot be mistaken for one.
 
 pub mod addon_install;
+pub mod guide;
+pub mod learn;
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -129,6 +135,13 @@ impl Pack {
             .collect()
     }
 
+    /// Whether `target_text` names one of the pack's icons in full -- the test for treating the
+    /// target as an icon (template first, no region OCR). A candidate that only CONTAINS the
+    /// target is a fallback, tried after OCR: see [`icon_stem_named_by_target`].
+    pub fn names_an_icon(&self, target_text: &str) -> bool {
+        self.icons.iter().any(|a| icon_stem_named_by_target(&a.stem, target_text))
+    }
+
     /// Display scale the pack's icon crops were authored at, clamped to a sane range so a
     /// malformed manifest value can't yield a zero/negative or absurd DPI prior. See
     /// [`PackManifest::authoring_scale`].
@@ -209,6 +222,22 @@ pub fn icon_stem_matches_target(stem: &str, target: &str) -> bool {
     }
     let contains = |set: &[String], t: &str| set.iter().any(|s| token_eq(s, t));
     st.iter().all(|t| contains(&tt, t)) || tt.iter().all(|t| contains(&st, t))
+}
+
+/// Whether the target names every word of the icon's stem ("Move" or "Move tool" for `move`,
+/// "Add Cube" for `add_cube`), plural-tolerant. Stricter than [`icon_stem_matches_target`],
+/// which also accepts a target that is only PART of the stem.
+///
+/// The difference decides whether a step is an icon target. Live L1, 2026-10-12, Blender: the
+/// header menu "Add" matched `add_cube` and the open menu's "Mesh" matched `mesh_filter`, so both
+/// became icon targets. For "Add" the template ran first and beat OCR's exact "Add" under the
+/// model's box: the pointer went to the Add Cube tool 400 px away. For "Mesh" the region OCR
+/// rescue was skipped, so the menu item was never read. A partial match now stays a candidate,
+/// but only for the fallback template pass, after OCR.
+pub fn icon_stem_named_by_target(stem: &str, target: &str) -> bool {
+    let st = normalize_tokens(stem);
+    let tt = normalize_tokens(target);
+    !st.is_empty() && st.iter().all(|s| tt.iter().any(|t| token_eq(s, t)))
 }
 
 /// All loaded packs, in match-priority order (user packs first).
@@ -402,6 +431,17 @@ mod tests {
     }
 
     #[test]
+    fn the_learned_folder_is_not_a_pack() {
+        let root = tmp();
+        let dir = root.join("learned").join("notepad");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("guide.md"), "---\napp: Notepad\nexe: notepad\n---\n## Word wrap\nView > Word wrap.\n").unwrap();
+        let reg = PackRegistry::load(Some(&root), None);
+        assert_eq!(reg.len(), 0, "learned\\ has no pack.json");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn prompt_injection_only_pack_loads_without_shortcuts() {
         let root = tmp();
         write_pack(
@@ -537,6 +577,14 @@ mod tests {
         ] {
             let got: Vec<&str> = blender.candidate_icons(target).iter().map(|a| a.stem.as_str()).collect();
             assert_eq!(got, vec![want], "target {target:?} should resolve to exactly [{want}]");
+            assert!(blender.names_an_icon(target), "{target:?} names its icon in full");
+        }
+        // A word that is only part of an icon's name: still a fallback candidate, never an icon
+        // target (L1, 2026-10-12: "Add" -> add_cube, "Mesh" -> mesh_filter).
+        for (target, partial) in [("Add", "add_cube"), ("Mesh", "mesh_filter"), ("Extrude", "extrude_region")] {
+            let got: Vec<&str> = blender.candidate_icons(target).iter().map(|a| a.stem.as_str()).collect();
+            assert!(got.contains(&partial), "{target:?} keeps {partial} as a fallback (got {got:?})");
+            assert!(!blender.names_an_icon(target), "{target:?} must not make an icon target");
         }
     }
 

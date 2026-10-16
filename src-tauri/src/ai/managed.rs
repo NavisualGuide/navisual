@@ -494,6 +494,8 @@ impl ManagedClient {
                         NavigateStepResponse {
                             goal: String::new(),
                             plan_outline: Vec::new(),
+            keep: Vec::new(),
+            app_note: String::new(),
                             plan_completed_count: None,
                             steps: vec![GuidanceStep {
                                 instruction: content.to_string(),
@@ -638,6 +640,8 @@ fn recover_leaked_pseudocall(content: &str) -> Option<NavigateStepResponse> {
     Some(NavigateStepResponse {
         goal: String::new(),
         plan_outline: Vec::new(),
+            keep: Vec::new(),
+            app_note: String::new(),
         plan_completed_count: None,
         steps: vec![GuidanceStep {
             instruction,
@@ -753,7 +757,9 @@ pub(crate) fn navigate_step_tool() -> Value {
                         "description": "A short route overview toward the goal — like a map app's route overview, not turn-by-turn directions (that's steps/instruction). 2-8 short plain-language milestones, e.g. ['Open the Insert tab', 'Add page numbers', 'Set them to start at page 3', 'Skip the title page']. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append to it) whenever your understanding of the route changes — it is expected to change as you learn more. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task where a route overview would add nothing."
                     },
                     "plan_completed_count": {"type": "integer", "description": "How many of plan_outline's milestones (counting from the first) are already done — 0 means you're still on the first one, 1 means the first is done and you're on the second, etc. Update it whenever a milestone is finished, and again whenever you revise plan_outline itself (count against the NEW list). Omit to leave the previous count unchanged; meaningless without plan_outline, so omit both together."},
-                    "state_summary": {"type": "string", "description": "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED. Never assume an earlier turn is still visible."},
+                    "keep": {"type": "array", "items": {"type": "string"}, "description": crate::ai::prompts::KEEP_FIELD},
+                    "app_note": {"type": "string", "description": crate::ai::prompts::APP_NOTE_FIELD},
+                    "state_summary": {"type": "string", "description": crate::ai::prompts::STATE_SUMMARY_FIELD},
                     "needs_input": {"type": "boolean"},
                     "suggested_tasks": {
                         "type": "array",

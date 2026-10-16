@@ -44,10 +44,27 @@ mod imp {
     };
 
     fn target_for(env_name: &str) -> Vec<u16> {
-        format!("Navisual/{env_name}")
+        target_in(prefix(), env_name)
+    }
+
+    fn target_in(prefix: &str, env_name: &str) -> Vec<u16> {
+        format!("{prefix}{env_name}")
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect()
+    }
+
+    /// A test run with its own data folder (`NAVISUAL_DATA_DIR`) keeps its own vault entries
+    /// too: what it writes -- a key typed into its Settings, its sign-in -- never lands on the
+    /// installed app's. Reads of the BYOK keys fall back to the installed app's, read-only, so a
+    /// test can use them without being able to change them; the sign-in does not, so a test
+    /// run starts signed out and can never sign the founder out or rotate their refresh token.
+    fn prefix() -> &'static str {
+        if crate::isolated_data_dir().is_some() {
+            "Navisual-isolated/"
+        } else {
+            "Navisual/"
+        }
     }
 
     /// Store `value` under `Navisual/<env_name>`. Returns whether it succeeded —
@@ -93,9 +110,17 @@ mod imp {
         ok
     }
 
-    /// Read the secret stored under `Navisual/<env_name>`; None if absent/unreadable.
+    /// Read the secret stored under `Navisual/<env_name>`; None if absent/unreadable. In an
+    /// isolated test run, a BYOK key it has not stored itself is read from the installed app's.
     pub fn read(env_name: &str) -> Option<String> {
-        let target = target_for(env_name);
+        let own = read_target(&target_for(env_name), env_name);
+        if own.is_none() && prefix() != "Navisual/" && super::SECRET_KEYS.contains(&env_name) {
+            return read_target(&target_in("Navisual/", env_name), env_name);
+        }
+        own
+    }
+
+    fn read_target(target: &[u16], env_name: &str) -> Option<String> {
         let mut pcred: *mut CREDENTIALW = std::ptr::null_mut();
         let res = unsafe {
             CredReadW(
@@ -143,7 +168,9 @@ pub use imp::{read, store, remove};
 #[cfg(all(test, windows))]
 mod tests {
     // Round-trip against the real per-user Credential Manager, under a test-only
-    // name so it can't collide with a live key.
+    // name so it can't collide with a live key -- and removed again: every `cargo test`
+    // used to leave `Navisual/TEST_CREDVAULT_ROUNDTRIP` in the developer's Credential
+    // Manager (found 2026-10-11).
     #[test]
     fn store_read_roundtrip() {
         let name = "TEST_CREDVAULT_ROUNDTRIP";
@@ -152,6 +179,8 @@ mod tests {
         // Overwrite works.
         assert!(super::store(name, "sk-test-456"));
         assert_eq!(super::read(name).as_deref(), Some("sk-test-456"));
+        assert!(super::remove(name));
+        assert!(super::read(name).is_none(), "and nothing is left behind");
     }
 
     #[test]

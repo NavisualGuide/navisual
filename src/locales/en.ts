@@ -149,8 +149,10 @@ export const en = {
 
   "panel.next": "\u2192 Next",
   "panel.nextTitle": "Next step ({hotkey})",
+  "panel.heldKeyBanner": "{key} belongs to another program on this computer, so pressing it may open that program instead. The AI will be told.",
   "panel.wrong": "\u2717 This is wrong",
   "panel.wrongTitle": "This guidance is wrong ({hotkey})",
+  "panel.wrongTitleNoKey": "This guidance is wrong",
   "panel.autopilotOn": "\u23f8 Autopilot",
   "panel.autopilotOff": "\u2708 Autopilot",
   "panel.autopilotOnTitle": "Autopilot on \u2014 click to turn off",
@@ -215,6 +217,7 @@ export const en = {
   "target.chipDefault": "Target app \u2014 click to switch or pin",
   "target.autoDetect": "Auto-detect",
   "target.autoDetectSub": "follow the foreground window",
+  "target.pinnedGone": "Pinned window closed",
   "target.entireDesktop": "Entire desktop",
   "target.entireDesktopSub": "share the whole screen \u2014 all windows",
   "target.screenN": "Screen {n}",
@@ -401,7 +404,16 @@ export const en = {
   "sg.sensitivityHint": "How much of the screen must change to auto-advance. Less ignores typing and minor updates; More reacts to smaller changes like a dialog opening.",
   "sg.savedSessions": "Saved sessions",
   "sg.savedSessionsToggle": "Keep each step's screenshot with the saved session",
-  "sg.savedSessionsHint": "The only setting here that puts a picture of your screen on disk. It keeps the same cropped, masked frame the AI was shown \u2014 never the whole monitor. The most recent {n} sessions are kept; older ones go with their screenshots.",
+  "sg.savedSessionsHint": "The only setting here that puts a picture of your screen on disk. It keeps the same cropped, masked frame the AI was shown \u2014 never the whole monitor. The most recent {n} sessions are kept; older ones go to the Recycle Bin with their screenshots.",
+  "sg.learnedNotes": "Learned notes",
+  "sg.learnedNotesHint": "What Navisual learned about each app while guiding you: where a command is, noted when finding it took more than one try, with a line the AI writes about it. Kept only on this computer, and sent with your requests in that app. Open a file to read or change it; Delete moves it to the Recycle Bin.",
+  "sg.learnedNotesEmpty": "None yet. A note is written when Navisual finds a command in an app on a second try.",
+  "sg.learnedNotesCount": "Notes: {n}",
+  "sg.learnedNotesPaused": "Paused: {n}",
+  "sg.learnedNotesOpen": "Open file",
+  "sg.learnedNotesDelete": "Delete",
+  "sg.learnedNotesOpenFailed": "Could not open the file.",
+  "sg.learnedNotesDeleteFailed": "Could not delete the file.",
   "sg.whatYouType": "What you type",
   "sg.whatYouTypeToggle": "Send the task I type along with step outcomes",
   "sg.whatYouTypeHint": "Sent with each step outcome, so we can see what people use Navisual for and which tasks it handles badly. Screenshots are never sent.",
@@ -451,7 +463,6 @@ export const en = {
   "pv.qRecommendedTextOnly": "(recommended, text-only)",
   "pv.qBestTextOnly": "(best quality, text-only)",
   "pv.qVisionExp": "(experimental, sees the screen)",
-  "pv.qNewest": "(newest \u2014 untested here)",
   "pv.qMultimodal": "(multimodal)",
   "pv.qCheapVision": "(fast, cheapest vision pick)",
 
@@ -526,6 +537,7 @@ export const en = {
 
   // ── Conversation messages, part 2 ─────────────────────────────────────────
   "msg.newSession": "New session started \u2014 guidance follows the app you click into next. To lock one app, click its name in the title bar.",
+  "msg.newSessionPinned": "New session started \u2014 guidance stays on the window you pinned. To follow the app you click into next instead, choose Auto-detect in the title bar.",
   "msg.minimizedNoRestore": "That window is minimized and wouldn't restore \u2014 bring it up yourself, then try again.",
   "msg.autopilotPaused": "Autopilot paused \u2014 the screen kept changing without a clear next step. Turn it back on when you're ready.",
   "msg.providerSwitched": "AI provider switched to {provider}",
@@ -549,7 +561,7 @@ export const en = {
   "done.clicked": "\u2713 You clicked {what}",
   "done.autopilot": "\u2713 Autopilot advanced",
   "done.alreadyDone": "\u2713 You marked it already done",
-  "done.pressedNext": "\u2713 You pressed Next",
+  "done.pressedNext": "\u2713 You moved to the next step",
   "done.completed": "\u2713 Completed",
 
   "prov.managedPaid": "Managed ({tier})",
@@ -620,9 +632,15 @@ export const en = {
   "panel.guideOnScreen": "Guide me on this screen",
   "panel.pickAnApp": "Pick an app",
   "msg.noTargetWindow": "No app window was open, so there was nothing to look at.",
+  "msg.hotkeyHeldElsewhere": "{key} belongs to another program on this computer (a game overlay or a screen recorder, for example), so pressing it may open that program instead of doing this step. The AI will be told.",
+  "msg.hotkeyYielded": "This step uses {key}, so Navisual's “{action}” shortcut is off until the next step. The panel's buttons still work.",
   "err.freeTrialExhausted": "Your free requests have been used.",
   "err.insufficientCoins": "Not enough coins for this quality tier. Buy more to continue.",
+  "err.streamStalled": "The AI stopped partway through its answer, twice in a row. Please try again.",
+  "err.streamRunaway": "The AI's answer ran on far past any real step, twice in a row. Please try again.",
   "err.exportDisabled": "Session export is off. Turn it on in Settings \u2192 Developer.",
+  "err.pinnedWindowGone": "The window you pinned has closed or is hidden, so Navisual won't look at anything in its place. Click the target app chip at the top to pick the window to guide, or choose Auto-detect.",
+  "err.pinnedWindowMinimized": "The window you pinned is minimized. Restore it from the taskbar, then try again.",
 };
 
 /** Every key the reference dictionary defines. Typing the call site and the other

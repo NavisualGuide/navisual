@@ -18,6 +18,12 @@
 //!   * **Mouse only.** A keyboard equivalent would be a keylogger: it would trip AV and Smart
 //!     App Control heuristics and contradict the product's promise. Deliberately absent.
 //!   * Session-scoped: `set_target_pid(0)` disarms it, and nothing is persisted to disk.
+//!   * The last 16 resolved clicks are also kept in order, under the same contract (RAM only,
+//!     the guided app only, role and name only), so the learned guide (`packs::learn`) can tell
+//!     whether the user clicked each control a path of steps named -- the single slot above
+//!     keeps only the latest, and a local advance never reads it. Each carries an identity for
+//!     its parent container (role, name and rect, compared and never shown), which is how two
+//!     menus on one menu bar are told apart from a menu and the item inside it.
 
 /// The prompt line for a click on `role "name"`. One function, so the replay harness reports a
 /// click in exactly the words the app uses.
@@ -35,6 +41,7 @@ mod imp {
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
+    use super::Resolved;
     use uiautomation::UIElement;
     use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -60,13 +67,45 @@ mod imp {
     }
 
     static LAST: OnceLock<Mutex<Option<Click>>> = OnceLock::new();
+    /// Resolved clicks in order, `(gen, role, name, parent)`, at most `HISTORY_CAP`.
+    static HISTORY: OnceLock<Mutex<std::collections::VecDeque<Resolved>>> = OnceLock::new();
+    const HISTORY_CAP: usize = 16;
     /// PID of the app currently being guided. 0 disarms the hook entirely — the default,
     /// so nothing is ever recorded until a session explicitly arms it.
     static TARGET_PID: AtomicU32 = AtomicU32::new(0);
     static NEXT_GEN: AtomicU64 = AtomicU64::new(1);
+    /// When the latest click in the guided app happened. Unlike `LAST`, never consumed by
+    /// `take`: the element-list cache asks it whether the user acted after a list was taken.
+    static LAST_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+    fn last_at() -> &'static Mutex<Option<Instant>> {
+        LAST_AT.get_or_init(|| Mutex::new(None))
+    }
+
+    /// When the latest click inside the guided app happened, if there has been one.
+    pub fn last_click_at() -> Option<Instant> {
+        *last_at().lock()
+    }
+
+    /// Tests stand in for the hook, which needs a real click.
+    #[cfg(test)]
+    pub fn set_last_click_at_for_test(at: Option<Instant>) {
+        *last_at().lock() = at;
+    }
 
     fn slot() -> &'static Mutex<Option<Click>> {
         LAST.get_or_init(|| Mutex::new(None))
+    }
+
+    fn history() -> &'static Mutex<std::collections::VecDeque<Resolved>> {
+        HISTORY.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+    }
+
+    /// The resolved clicks newer than `gen`, oldest first.
+    pub fn history_after(gen: u64) -> Vec<Resolved> {
+        let mut out: Vec<_> = history().lock().iter().filter(|r| r.gen > gen).cloned().collect();
+        out.sort_by_key(|r| r.gen);
+        out
     }
 
     /// Arm the hook for `pid`, or disarm with 0. Called as the guidance target is
@@ -77,11 +116,15 @@ mod imp {
             // Target changed — a click recorded against the old app must not be reported
             // as if it happened in the new one.
             *slot().lock() = None;
+            *last_at().lock() = None;
+            history().lock().clear();
         }
     }
 
     pub fn clear() {
         *slot().lock() = None;
+        *last_at().lock() = None;
+        history().lock().clear();
     }
 
     /// Low-level mouse hook. Runs on the tracker thread's message pump for every click
@@ -106,11 +149,13 @@ mod imp {
                     GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
                     if pid == target {
                         let gen = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
+                        let now = Instant::now();
                         *slot().lock() = Some(Click {
                             resolved: None,
-                            at: Instant::now(),
+                            at: now,
                             gen,
                         });
+                        *last_at().lock() = Some(now);
                         std::thread::spawn(move || resolve_and_store(pt.x, pt.y, gen));
                     }
                 }
@@ -124,7 +169,16 @@ mod imp {
     /// still matches). A later click racing ahead of this resolution finishing must win; this
     /// thread's answer describes a click that is no longer "what the user just did".
     fn resolve_and_store(x: i32, y: i32, gen: u64) {
-        let resolved = resolve_point(x, y);
+        let full = resolve_point(x, y);
+        // Every resolved click goes into the history, the current one or not.
+        if let Some((role, name, parent)) = full.clone() {
+            let mut h = history().lock();
+            h.push_back(Resolved { gen, role, name, parent });
+            while h.len() > HISTORY_CAP {
+                h.pop_front();
+            }
+        }
+        let resolved = full.map(|(role, name, _)| (role, name));
         let mut guard = slot().lock();
         if let Some(c) = guard.as_mut() {
             if c.gen == gen {
@@ -138,12 +192,19 @@ mod imp {
     /// `verify_role`). Never reports the contents of a protected field: the *name* of a
     /// password box is its label ("Password"), which is harmless, but if the provider marks
     /// the element as a password field, that's reported instead of trusting the name as-is.
-    fn resolve_point(x: i32, y: i32) -> Option<(String, String)> {
+    fn resolve_point(x: i32, y: i32) -> Option<(String, String, String)> {
         use uiautomation::types::Point;
         use uiautomation::UIAutomation;
 
         let automation = UIAutomation::new().ok()?;
         let mut el = automation.element_from_point(Point::new(x, y)).ok()?;
+        if is_light_dismiss(&el) {
+            // A XAML menu opens on pointer-down and covers its window with a light-dismiss layer
+            // at once -- already on top at +0 ms (live 2026-10-11, Notepad's View menu), so no
+            // amount of hurrying resolves the point to what was clicked. Look under the layer;
+            // and if nothing named is there, report nothing rather than "Close".
+            el = under_light_dismiss(&automation, &el, x, y)?;
+        }
 
         let walker = automation.get_control_view_walker().ok();
         let mut named: Option<(String, String)> = None;
@@ -162,14 +223,66 @@ mod imp {
                 None => break,
             }
         }
-        let (role, name) = named?;
+        let (mut role, name) = named?;
+        // A label inside a control -- XAML menu items expose their text as a Text child of the
+        // same name (live 2026-10-11, Notepad's "Word wrap"): report the control it labels.
+        if role == "Text" {
+            if let Some(p) = walker.as_ref().and_then(|w| w.get_parent(&el).ok()) {
+                let same = p.get_name().is_ok_and(|n| n.trim() == name.trim());
+                let prole = p.get_control_type().map(|ct| format!("{ct:?}")).unwrap_or_default();
+                if same && !prole.is_empty() {
+                    role = prole;
+                    el = p;
+                }
+            }
+        }
 
         let name = if is_password(&el) {
             "(password field)".to_string()
         } else {
             sanitize(&name)
         };
-        Some((role, name))
+        // The container's identity: role, name and rect. Two menus on one menu bar share it; a
+        // menu and the item inside it do not.
+        let parent = walker
+            .as_ref()
+            .and_then(|w| w.get_parent(&el).ok())
+            .map(|p| {
+                let role = p.get_control_type().map(|ct| format!("{ct:?}")).unwrap_or_default();
+                let rect = p
+                    .get_bounding_rectangle()
+                    .map(|r| format!("{},{},{},{}", r.get_left(), r.get_top(), r.get_right(), r.get_bottom()))
+                    .unwrap_or_default();
+                format!("{role}|{}|{rect}", sanitize(&p.get_name().unwrap_or_default()))
+            })
+            .unwrap_or_default();
+        Some((role, name, parent))
+    }
+
+    /// XAML's light-dismiss layer, by its class and automation id -- the framework's own names
+    /// for it, which stay the same whatever the UI language (its Name, "Close", does not).
+    fn is_light_dismiss(el: &UIElement) -> bool {
+        el.get_classname().is_ok_and(|c| c == "PopupRoot")
+            || el.get_automation_id().is_ok_and(|a| a == "Light Dismiss")
+    }
+
+    /// The smallest named control under (x, y) beside the light-dismiss layer, among the
+    /// layer's parent's descendants -- the island the menu bar lives in.
+    fn under_light_dismiss(automation: &uiautomation::UIAutomation, layer: &UIElement, x: i32, y: i32) -> Option<UIElement> {
+        let walker = automation.get_control_view_walker().ok()?;
+        let island = walker.get_parent(layer).ok()?;
+        let cond = automation.create_true_condition().ok()?;
+        let all = island.find_all(uiautomation::types::TreeScope::Descendants, &cond).ok()?;
+        all.into_iter()
+            .filter(|e| !is_light_dismiss(e) && !e.get_name().unwrap_or_default().trim().is_empty())
+            .filter_map(|e| {
+                let r = e.get_bounding_rectangle().ok()?;
+                let inside = x >= r.get_left() && x < r.get_right() && y >= r.get_top() && y < r.get_bottom();
+                let area = i64::from(r.get_right() - r.get_left()) * i64::from(r.get_bottom() - r.get_top());
+                (inside && area > 0).then_some((area, e))
+            })
+            .min_by_key(|(area, _)| *area)
+            .map(|(_, e)| e)
     }
 
     /// Install the hook. MUST be called from a thread that runs a message pump — a
@@ -254,11 +367,68 @@ mod imp {
             assert_eq!(out.chars().count(), 81, "80 chars plus the ellipsis");
             assert!(out.ends_with('…'));
         }
+
+        /// Live probe: click (NAVISUAL_PROBE_X, NAVISUAL_PROBE_Y), then print what the resolver
+        /// and the raw element chain say at several delays -- for a control whose menu opens
+        /// under the cursor. `cargo test --lib live_click_resolution -- --ignored --nocapture`
+        #[test]
+        #[ignore]
+        fn live_click_resolution() {
+            use uiautomation::types::Point;
+            use uiautomation::UIAutomation;
+            use windows::Win32::UI::Input::KeyboardAndMouse::{mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
+            use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+            let x: i32 = std::env::var("NAVISUAL_PROBE_X").unwrap().parse().unwrap();
+            let y: i32 = std::env::var("NAVISUAL_PROBE_Y").unwrap().parse().unwrap();
+            let click = std::env::var("NAVISUAL_PROBE_CLICK").map(|v| v == "1").unwrap_or(true);
+            if click {
+                unsafe {
+                    let _ = SetCursorPos(x, y);
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                }
+            }
+            let automation = UIAutomation::new().unwrap();
+            let walker = automation.get_control_view_walker().unwrap();
+            for ms in [0u64, 40, 150, 500] {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                println!("+{ms} ms resolve_point: {:?}", super::resolve_point(x, y));
+                let mut el = automation.element_from_point(Point::new(x, y)).unwrap();
+                for depth in 0..5 {
+                    let r = el.get_bounding_rectangle().ok();
+                    println!(
+                        "   {depth}: {:?} name={:?} class={:?} aid={:?} rect={:?}",
+                        el.get_control_type().ok(),
+                        el.get_name().unwrap_or_default(),
+                        el.get_classname().unwrap_or_default(),
+                        el.get_automation_id().unwrap_or_default(),
+                        r.map(|r| (r.get_left(), r.get_top(), r.get_right(), r.get_bottom()))
+                    );
+                    match walker.get_parent(&el) {
+                        Ok(p) => el = p,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
     }
 }
 
+/// One resolved click, for the learned guide.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub gen: u64,
+    pub role: String,
+    pub name: String,
+    /// The parent container's identity; empty when it could not be read.
+    pub parent: String,
+}
+
 #[cfg(windows)]
-pub use imp::{clear, describe, install, set_target_pid, take};
+pub use imp::{clear, describe, history_after, install, last_click_at, set_target_pid, take};
+#[cfg(all(test, windows))]
+pub use imp::set_last_click_at_for_test;
 
 #[cfg(not(windows))]
 pub fn install() {}
@@ -272,5 +442,13 @@ pub fn describe(_max_age: std::time::Duration) -> Option<String> {
 }
 #[cfg(not(windows))]
 pub fn take(_max_age: std::time::Duration) -> Option<String> {
+    None
+}
+#[cfg(not(windows))]
+pub fn history_after(_gen: u64) -> Vec<Resolved> {
+    Vec::new()
+}
+#[cfg(not(windows))]
+pub fn last_click_at() -> Option<std::time::Instant> {
     None
 }

@@ -348,6 +348,31 @@ pub fn encode_png_for_ocr(img: &ImageBuffer<Rgba<u8>, Vec<u8>>) -> Result<Vec<u8
     Ok(out)
 }
 
+/// What a pinned window can give a capture right now (`pinned_window_state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedWindow {
+    Usable,
+    Minimized,
+    /// Closed, hidden, or cloaked (another virtual desktop).
+    Gone,
+}
+
+/// A pin is that one window. When it is gone or minimized nothing is captured in its place --
+/// not another app, and not another window of the same app (founder, 2026-10-15). Word closing
+/// its last document hides the window rather than destroying it, and opens the next document in
+/// a new window; the old fallback then captured File Explorer instead and told the user after.
+pub fn pinned_window_state(hwnd_raw: usize) -> PinnedWindow {
+    #[cfg(windows)]
+    {
+        win::pinned_window_state(hwnd_raw)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd_raw;
+        PinnedWindow::Usable
+    }
+}
+
 /// Re-capture a previously discovered window by its stored raw HWND, returning
 /// raw RGBA pixels (no JPEG, no downscale). Used by the OCR locator path so it
 /// always sees the same window the AI was shown — even if the user switched
@@ -548,6 +573,17 @@ pub fn get_window_info_for_hwnd(hwnd_raw: usize) -> Option<win::ActiveWindowInfo
 
 #[cfg(not(windows))]
 pub fn get_window_info_for_hwnd(_hwnd_raw: usize) -> Option<()> {
+    None
+}
+
+/// The guided app's `(exe stem, display name, file version)`, for the learned guide.
+#[cfg(windows)]
+pub fn app_identity(hwnd_raw: usize) -> Option<(String, String, String)> {
+    win::app_identity(hwnd_raw)
+}
+
+#[cfg(not(windows))]
+pub fn app_identity(_hwnd_raw: usize) -> Option<(String, String, String)> {
     None
 }
 

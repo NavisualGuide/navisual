@@ -251,6 +251,9 @@ pub struct Corroboration {
     pub near_ai_bbox: bool,
     /// The answering model is a strong grounder, so `near_ai_bbox` is allowed to vote.
     pub bbox_decisive: bool,
+    /// A strong grounder's box points somewhere else -- the winner lies outside it and far from
+    /// it, with no anchor either -- which rejects a match that UIA does not confirm.
+    pub ai_bbox_disagrees: bool,
     /// Final verdict (`uia_interactive || isolation_ok || near_anchor ||
     /// (near_ai_bbox && bbox_decisive)`).
     pub accepted: bool,

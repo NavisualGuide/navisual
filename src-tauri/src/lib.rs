@@ -7,8 +7,10 @@
 mod ai;
 mod capture;
 mod credvault;
+mod held_keys;
 mod jsonl_log;
 mod last_click;
+mod recycle;
 mod locator;
 mod overlay;
 mod packs;
@@ -357,6 +359,18 @@ mod context_cache {
         Some((c.elements.clone(), c.sig.clone(), age.as_secs(), c.cost_ms))
     }
 
+    /// Whether the user clicked in the guided app after this window's list was taken. A click
+    /// can flip a control's state while hardly moving a pixel: L1, 2026-10-12, Word's "Link to
+    /// Previous" was switched off, five cells changed, and the cached list -- 11 s old -- told
+    /// the model it was still ON, three runs in a row.
+    pub(super) fn clicked_since_capture(hwnd: usize) -> bool {
+        let m = map().lock();
+        match (m.get(&hwnd), crate::last_click::last_click_at()) {
+            (Some(c), Some(at)) => at > c.captured_at,
+            _ => false,
+        }
+    }
+
     /// Drop a window's entry — the UI is known to have moved (a step was executed, the window
     /// was resized, the structure changed).
     pub(super) fn invalidate(hwnd: usize) {
@@ -512,12 +526,23 @@ fn context_cache_take_on_timeout(hwnd: usize) -> Option<Vec<locator::ContextElem
         );
         return None;
     }
+    let mut elements = (*elements).clone();
+    // A click since the list was taken may have changed what the states say. The positions
+    // are still worth serving after a timeout; a state that may be wrong is not -- none at all
+    // tells the model to look, a stale one tells it the opposite of the screen.
+    let stale_states = context_cache::clicked_since_capture(hwnd);
+    if stale_states {
+        for e in &mut elements {
+            e.state = None;
+        }
+    }
     log::info!(
-        "[context] timeout fallback served: {} elements, {age_secs}s old, {moved} cells moved | {}",
+        "[context] timeout fallback served: {} elements, {age_secs}s old, {moved} cells moved{} | {}",
         elements.len(),
+        if stale_states { ", states dropped (clicked since)" } else { "" },
         context_diag(hwnd)
     );
-    Some((*elements).clone())
+    Some(elements)
 }
 
 #[cfg(not(windows))]
@@ -561,6 +586,15 @@ fn context_cache_take_if_valid(hwnd: usize) -> Option<Vec<locator::ContextElemen
             context_diag(hwnd)
         );
         context_cache::invalidate(hwnd);
+        return None;
+    }
+    // Kept, not invalidated: if the fresh enumeration times out, the fallback still serves the
+    // positions, without the states.
+    if context_cache::clicked_since_capture(hwnd) {
+        log::info!(
+            "[context] cache refused: the user clicked in the app after this list was taken ({moved} cells moved), re-enumerating | {}",
+            context_diag(hwnd)
+        );
         return None;
     }
     log::info!(
@@ -760,6 +794,11 @@ struct AppState {
     /// Nav-Packs loaded at startup (bundled + user). Read-only after load; the active pack
     /// for the focused window injects app-specific guidance + shortcuts into the prompt.
     packs: packs::PackRegistry,
+    /// H7b: the learned per-app guides, kept current from what the user is guided through
+    /// (`packs::learn`). Written back to `packs\learned\<exe>\guide.md` on every change.
+    learned: parking_lot::Mutex<packs::learn::Learned>,
+    /// The newest click (`last_click` gen) the learned guide has been shown.
+    learned_click_gen: std::sync::atomic::AtomicU64,
     /// Session-export ring buffer (`session-export-design.md` §3.1) — the last 30
     /// steps of conversation, held in memory and never written unless the user
     /// exports. Always on, so "that one was worth keeping" stays a decision you can
@@ -885,12 +924,14 @@ fn locate_for_step(
     if let Some(text) = step.target_text.as_ref().filter(|t| !t.trim().is_empty()) {
         #[cfg(windows)]
         {
-            let (icon_templates, icon_region, icon_authoring_scale) =
+            let (icon_templates, icon_region, icon_authoring_scale, icon_named) =
                 pack_locate_hints(packs, target_hwnd, text);
-            // A pack icon for this target ⇒ a known icon-only element → A11y skips its
-            // expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
-            // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms.
-            let icon_target = !icon_templates.is_empty();
+            // A target that names a pack icon in full ⇒ a known icon-only element → A11y skips
+            // its expensive dead-end fallbacks + the bbox probe (it can't name a glyph), runs only
+            // a tight matcher pass, then template matching takes over. 150 ms vs 500 ms. A target
+            // that is only part of an icon's name ("Add" for add_cube) keeps the template as the
+            // fallback after OCR and is not an icon target (packs::icon_stem_named_by_target).
+            let icon_target = icon_named && !icon_templates.is_empty();
             // S.4 skip condition: an icon target with a pack template never uses
             // selection — the template is already the authority for glyphs.
             let selected_element_id = if icon_target {
@@ -1652,6 +1693,8 @@ mod context_cache_tests {
                 height: 10,
             },
             enabled: true,
+            state: None,
+            in_popup: false,
         }
     }
 
@@ -1729,6 +1772,26 @@ mod context_cache_tests {
         context_cache::store(hwnd, smaller, None, 900);
         let (els, _, _, _) = context_cache::peek(hwnd).expect("entry kept");
         assert_eq!(els.len(), 60, "a >=half-size read is a legitimate replacement");
+        context_cache::invalidate(hwnd);
+    }
+
+    #[test]
+    fn a_click_after_the_list_was_taken_makes_it_stale() {
+        let _guard = serial();
+        // L1, 2026-10-12: Word's "Link to Previous" switched off by a click that moved five
+        // cells, and the cached list still said ON.
+        let hwnd = live_hwnd();
+        context_cache::invalidate(hwnd);
+        let before = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        context_cache::store(hwnd, vec![el(1, "Link to Previous")], Some(vec![0u8; SIG_LEN]), 900);
+        crate::last_click::set_last_click_at_for_test(None);
+        assert!(!context_cache::clicked_since_capture(hwnd), "no click at all");
+        crate::last_click::set_last_click_at_for_test(Some(before));
+        assert!(!context_cache::clicked_since_capture(hwnd), "a click before the list was taken");
+        crate::last_click::set_last_click_at_for_test(Some(std::time::Instant::now()));
+        assert!(context_cache::clicked_since_capture(hwnd), "a click after it");
+        crate::last_click::set_last_click_at_for_test(None);
         context_cache::invalidate(hwnd);
     }
 
@@ -2392,6 +2455,51 @@ mod prompt_assembly_tests {
     }
 }
 
+#[cfg(all(test, windows))]
+mod live_pack_locate_tests {
+    use super::*;
+
+    /// Live: the locate a step gets, pack hints included, for NAVISUAL_LIVE_TARGET in the window
+    /// whose title contains NAVISUAL_LIVE_TITLE. NAVISUAL_LIVE_BBOX="x,y,w,h" (physical px) stands
+    /// in for the model's box; NAVISUAL_LIVE_ROLE for its role.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_locate_with_pack_hints() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let target = std::env::var("NAVISUAL_LIVE_TARGET").expect("NAVISUAL_LIVE_TARGET");
+        let hwnd = capture::find_window_by_title(&title, "").expect("no window with that title");
+        let bundled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packs");
+        let reg = packs::PackRegistry::load(None, Some(bundled.as_path()));
+        let (icons, region, scale, named) = pack_locate_hints(&reg, Some(hwnd), &target);
+        let names: Vec<String> = icons.iter().map(|(n, _)| n.clone()).collect();
+        let icon_target = named && !icons.is_empty();
+        let ai_bbox = std::env::var("NAVISUAL_LIVE_BBOX").ok().map(|b| {
+            let p: Vec<i32> = b.split(',').map(|s| s.trim().parse().unwrap()).collect();
+            capture::Rect { x: p[0], y: p[1], width: p[2] as u32, height: p[3] as u32 }
+        });
+        let opts = locator::orchestrator::LocateOptions {
+            role: std::env::var("NAVISUAL_LIVE_ROLE").ok().filter(|r| !r.is_empty()),
+            ai_bbox,
+            bbox_decisive: true,
+            a11y_timeout_ms: if icon_target { 150 } else { 500 },
+            min_confidence: 0.5,
+            target_hwnd: Some(hwnd),
+            icon_templates: icons,
+            icon_region: region,
+            icon_target,
+            icon_authoring_scale: scale,
+            ..Default::default()
+        };
+        let (hit, trace) = locator::orchestrator::locate(&target, &opts, None).expect("locate");
+        println!(
+            "\n[live] '{target}' candidates={names:?} icon_target={icon_target} -> {:?} via {:?}; region OCR tried: {}",
+            hit.map(|h| (h.bbox, h.role)),
+            trace.final_decision,
+            trace.ocr.region_ocr_attempted
+        );
+    }
+}
+
 #[cfg(test)]
 mod logged_request_tests {
     use super::*;
@@ -2615,7 +2723,7 @@ fn log_model_timing(
     steps: usize,
 ) {
     use std::io::Write;
-    let Ok(dir) = app.path().app_local_data_dir() else {
+    let Ok(dir) = app.path().navisual_data_dir() else {
         return;
     };
     let path = dir.join("model_timings.csv");
@@ -2650,7 +2758,7 @@ fn maybe_log_trace(
     if !log_enabled && !training {
         return;
     }
-    if let Ok(dir) = app.path().app_local_data_dir() {
+    if let Ok(dir) = app.path().navisual_data_dir() {
         let path = dir.join("locate_log.jsonl");
         if let Err(e) = locator::trace::append_jsonl(&path, trace, training) {
             log::warn!("locate_log.jsonl write failed: {e}");
@@ -2714,7 +2822,7 @@ async fn resolve_pending_candidates(app: &AppHandle, state: &AppState, escalatio
         age_ms
     );
     if training_enabled {
-        if let Ok(dir) = app.path().app_local_data_dir() {
+        if let Ok(dir) = app.path().navisual_data_dir() {
             let row = serde_json::json!({
                 "kind": "candidate_resolved",
                 "ts_ms": chrono::Utc::now().timestamp_millis(),
@@ -2801,7 +2909,8 @@ fn window_context_text(
 }
 
 /// `text`, then the window context on the next line when there is any. (Was the `add_grid`
-/// closure in `guide`, named for a grid suffix that no longer exists.)
+/// closure in `guide`, named for a grid suffix that no longer exists; its last use is now
+/// `compose_reply_prompt`.)
 fn with_window_context(text: String, window_context: &str) -> String {
     if !window_context.is_empty() {
         format!("{text}\n{window_context}")
@@ -2861,6 +2970,183 @@ fn compose_continuation_prompt(
     )
 }
 
+/// A typed reply mid-session (`is_reply`): the user's own words with the window context under
+/// them, then the goal and reply-language anchors. The state summary does not ride in this text
+/// -- it goes to `send_guidance_request` separately. Extracted from `guide` so the replay
+/// harness's multi-turn sessions (S3) send what the app sends.
+fn compose_reply_prompt(
+    task: &str,
+    window_context: &str,
+    original_task: &str,
+    reply_sample: Option<&str>,
+    voice_language: &str,
+) -> String {
+    format!(
+        "{}{}{}",
+        with_window_context(task.to_string(), window_context),
+        crate::ai::prompts::goal_anchor(original_task),
+        crate::ai::prompts::reply_language_directive(reply_sample, original_task, voice_language)
+    )
+}
+
+/// Whether this request offers `recall` (H6): its switch is on and the session has kept a screen.
+fn recall_offered(router: &ai::router::AiRouter) -> bool {
+    router.config.recall
+        && router
+            .session_manager
+            .current_session
+            .as_ref()
+            .is_some_and(|s| !s.recall_screens.is_empty())
+}
+
+/// What the look tools may look at for this request -- H2 zoom and H4 read_text on the native
+/// frame, H6 recall on the earlier screens, H3 ui_tree on the accessibility tree -- each only
+/// when its switch is on (`INSPECT`, `RECALL`, `UI_TREE`). The replay harness had them all; the
+/// app had none until L1 step 3 needed the harness measured live (2026-10-12). Every field is
+/// set on every request: a value left from the last one would offer a tool its switch no longer
+/// allows, or a screen that has gone.
+async fn set_look_sources(
+    router: &mut ai::router::AiRouter,
+    hwnd: Option<usize>,
+    capture_rect: Option<capture::Rect>,
+    ocr_png: Option<&[u8]>,
+) {
+    router.inspect_frame = if router.config.inspect != ai::inspect::Mode::Off {
+        ocr_png
+            .and_then(|png| image::load_from_memory(png).ok())
+            .map(|img| std::sync::Arc::new(img.to_rgb8()))
+    } else {
+        None
+    };
+    router.recall_screens = if recall_offered(router) {
+        router
+            .session_manager
+            .current_session
+            .as_ref()
+            .map(|s| std::sync::Arc::new(s.recall_screens.clone()))
+    } else {
+        None
+    };
+    router.ui_snapshot = None;
+    #[cfg(windows)]
+    if router.config.ui_tree {
+        if let (Some(h), Some(r)) = (hwnd, capture_rect) {
+            let read = tokio::time::timeout(
+                std::time::Duration::from_millis(2000),
+                tokio::task::spawn_blocking(move || locator::a11y::snapshot_ui_tree(h)),
+            )
+            .await;
+            match read {
+                Ok(Ok(Ok(nodes))) => {
+                    router.ui_snapshot = Some(std::sync::Arc::new(ai::inspect::UiSource {
+                        nodes,
+                        capture: [r.x, r.y, r.width as i32, r.height as i32],
+                    }))
+                }
+                Ok(Ok(Err(why))) => log::info!("[looks] ui_tree unavailable: {why}"),
+                _ => log::info!("[looks] ui_tree read timed out or failed; not offered this turn"),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (hwnd, capture_rect);
+    if router.inspect_frame.is_some() || router.recall_screens.is_some() || router.ui_snapshot.is_some() {
+        log::info!(
+            "[looks] offered this request: frame={} recall_screens={} ui_tree_nodes={}",
+            router.inspect_frame.as_ref().map(|f| format!("{}x{}", f.width(), f.height())).unwrap_or_else(|| "-".into()),
+            router.recall_screens.as_ref().map(|s| s.len()).unwrap_or(0),
+            router.ui_snapshot.as_ref().map(|u| u.nodes.len()).unwrap_or(0)
+        );
+    }
+}
+
+/// The window context with the session's memory after it: the kept notes, then the list of
+/// earlier screens when that is on. Each only when it has anything in it. One function for
+/// `guide`, `send_correction` and the replay harness.
+fn with_session_memory(
+    window_context: String,
+    session: Option<&crate::ai::session::Session>,
+    list_on: bool,
+    offer_recall: bool,
+) -> String {
+    let Some(s) = session else { return window_context };
+    let mut parts = vec![window_context, s.kept_notes()];
+    if list_on {
+        parts.push(s.earlier_screens(offer_recall));
+    }
+    parts.retain(|p| !p.is_empty());
+    parts.join("\n")
+}
+
+/// What an answer writes into the session: the model-owned goal and plan, the state summary,
+/// the user's turn (with the window it was on) and the assistant's steps. Extracted from `guide` so a replayed multi-turn
+/// session (S3) remembers exactly what the app remembers -- the window, the pinning and the
+/// summary are the whole of the app's working memory, and a harness copy would drift.
+#[allow(clippy::too_many_arguments)]
+fn record_exchange(
+    session: &mut crate::ai::session::Session,
+    task: &str,
+    is_next_requery: bool,
+    response_goal: &str,
+    response_plan_outline: Vec<String>,
+    response_plan_completed_count: Option<usize>,
+    state_summary: &str,
+    steps: &[GuidanceStep],
+    window_title: Option<String>,
+    keep: &[String],
+) {
+    // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
+    // the field leaves the stored goal alone rather than wiping it — the failure mode here
+    // must be inaction, never destruction.
+    if !response_goal.trim().is_empty() && response_goal.trim() != session.task_description {
+        log::info!(
+            "[memory] goal (model): {:?} -> {:?}",
+            session.task_description,
+            response_goal
+        );
+        session.set_task_description(response_goal.trim().to_string());
+    }
+    // Same contract as goal: empty means "unchanged". Unlike goal, a non-empty
+    // outline always replaces rather than being compared first — a revised route
+    // is the expected, routine case (the model is meant to redraw it as the plan
+    // develops), not a rare correction worth logging every time.
+    if !response_plan_outline.is_empty() {
+        session.set_plan_outline(response_plan_outline);
+    }
+    // Applied AFTER set_plan_outline so a same-turn revision clamps the count
+    // against the NEW list length, not a stale one.
+    if let Some(count) = response_plan_completed_count {
+        session.set_plan_completed_count(count);
+    }
+    session.update_state(state_summary.to_string());
+    let user_turn_text = if task.is_empty() {
+        "Next".to_string()
+    } else {
+        task.to_string()
+    };
+    // Pin turns where the user stated intent IN THEIR OWN WORDS — the opening task and any
+    // `needs_input` answer. Those are the only turns the model cannot reconstruct from a
+    // summary. Retention by KIND, not recency.
+    //
+    // `!task.is_empty()` alone is NOT that test, and using it pinned 18 of 36 turns in a
+    // live 16-step session (2026-08-14): a → Next re-query carries a machine-built
+    // "[User completed: …]" string, so `task` is non-empty and every turn got pinned —
+    // which makes pinning meaningless and stops the window evicting user turns at all,
+    // growing the prompt without bound. `is_next_requery` is the discriminator (it is
+    // exactly `task.starts_with("[User completed:")`, set at the top of `guide`).
+    let pinned = !task.is_empty() && !is_next_requery;
+    session.add_turn_pinned("user", user_turn_text, None, pinned);
+    session.set_last_user_turn_title(window_title);
+    // After the user turn, so a fact is numbered with the turn it was kept on.
+    session.add_kept(keep);
+    let content = steps
+        .iter()
+        .map(|s| s.instruction.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    session.add_turn("assistant", content, Some("...".to_string()));
+}
+
 /// Use A of H1 (harness-plan.md): the `[User completed: "…"]` line, followed by the completed
 /// step's own `expected_result` (`prompts::expectation_note`), when the switch is on and the
 /// step carried one. The step is found by its instruction, because the frontend builds the line
@@ -2910,6 +3196,14 @@ fn app_state_snapshot(hwnd: Option<usize>) -> Option<String> {
         block.len()
     );
     Some(block)
+}
+
+/// Two optional prompt lines as one, either or both absent.
+fn join_lines(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{a}{b}")),
+        (a, b) => a.or(b),
+    }
 }
 
 /// How stale a recorded click may be and still be worth telling the AI about. Long enough to
@@ -3027,7 +3321,7 @@ fn maybe_log_prompt(
         return;
     }
     let entry = prompt_log::PromptLogEntry::new(fields);
-    if let Ok(dir) = app.path().app_local_data_dir() {
+    if let Ok(dir) = app.path().navisual_data_dir() {
         let path = dir.join("prompt_log.jsonl");
         if let Err(e) = prompt_log::append_jsonl(&path, &entry, training) {
             log::warn!("prompt_log.jsonl write failed: {e}");
@@ -3051,12 +3345,13 @@ fn save_training_shot(base_dir: Option<&std::path::Path>, request_id: &str, jpeg
 /// Nav-Pack prompt injection (Workstream C): if a loaded pack's `window_title_pattern`
 /// matches the focused window, return its formatted guidance + shortcut block to append to
 /// the prompt; empty string otherwise. Keeps the lookup out of the two guidance call sites.
-fn active_pack_context(registry: &packs::PackRegistry, hwnd: usize) -> String {
-    if registry.is_empty() {
-        return String::new();
-    }
+///
+/// A learned guide for the same app follows as a block of its own (H7b); `focus` -- the
+/// request and the session's goal -- chooses which of a long guide's notes go in whole.
+fn active_pack_context(state: &AppState, hwnd: usize, focus: &str, session: &str) -> String {
+    let registry = &state.packs;
     let title = capture::get_window_title(hwnd);
-    match registry.get_active_pack(&title) {
+    let mut out = match registry.get_active_pack(&title) {
         Some(pack) => {
             log::debug!("nav-pack '{}' active for '{}'", pack.manifest.id, title);
             ai::prompts::pack_context_block(
@@ -3066,6 +3361,98 @@ fn active_pack_context(registry: &packs::PackRegistry, hwnd: usize) -> String {
             )
         }
         None => String::new(),
+    };
+    if let Some(app) = learned_app(Some(hwnd)) {
+        out.push_str(&state.learned.lock().prompt_block(&app, focus, session));
+    }
+    out
+}
+
+/// H7b: the guided app as the learned guide knows it. `None` without a single target window.
+fn learned_app(hwnd: Option<usize>) -> Option<packs::learn::AppKey> {
+    let hwnd = hwnd.filter(|h| *h != 0)?;
+    let (exe, name, version) = capture::app_identity(hwnd)?;
+    Some(packs::learn::AppKey { exe, name, version, title: capture::get_window_title(hwnd) })
+}
+
+/// A test run's own data folder, from `NAVISUAL_DATA_DIR` (an absolute path), read once.
+///
+/// The dev build is the same app as the installed one (`com.navisual.app`), so without this a live
+/// test writes into the founder's sessions, training data, usage, packs and login: on 2026-10-11
+/// six test requests pruned six of the founder's sessions for good. Set, it moves everything the
+/// app keeps -- data, logs, WebView2 storage, and the vault entries it writes (`credvault`).
+/// Unset, nothing changes.
+pub(crate) fn isolated_data_dir() -> Option<&'static std::path::Path> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::var_os("NAVISUAL_DATA_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    })
+    .as_deref()
+}
+
+/// The app's data folder: the isolated one when a test run set it, else Tauri's app-local one.
+/// Every path the app keeps hangs off this, so one switch moves all of them.
+trait DataDir {
+    fn navisual_data_dir(&self) -> tauri::Result<PathBuf>;
+}
+
+impl<R: tauri::Runtime> DataDir for tauri::path::PathResolver<R> {
+    fn navisual_data_dir(&self) -> tauri::Result<PathBuf> {
+        match isolated_data_dir() {
+            Some(dir) => Ok(dir.to_path_buf()),
+            None => self.app_local_data_dir(),
+        }
+    }
+}
+
+fn learned_today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// H7b: show the learned guide the clicks made in the guided app since it last looked. Called
+/// before each new step goes on screen, so they are matched against the step that was there.
+fn learned_clicks(state: &AppState, app: &packs::learn::AppKey) {
+    use std::sync::atomic::Ordering;
+    let new = last_click::history_after(state.learned_click_gen.load(Ordering::Relaxed));
+    if let Some(r) = new.last() {
+        state.learned_click_gen.store(r.gen, Ordering::Relaxed);
+    }
+    let clicks: Vec<packs::learn::Click> = new
+        .into_iter()
+        .map(|r| packs::learn::Click { role: r.role, name: r.name, parent: r.parent })
+        .collect();
+    state.learned.lock().clicks(app, &clicks, &learned_today());
+}
+
+/// H7b: pass over the clicks made so far without matching them.
+fn learned_skip_clicks(state: &AppState) {
+    use std::sync::atomic::Ordering;
+    if let Some(r) = last_click::history_after(state.learned_click_gen.load(Ordering::Relaxed)).last() {
+        state.learned_click_gen.store(r.gen, Ordering::Relaxed);
+    }
+}
+
+/// H7b: a step went on screen. `list` is the [Screen Elements] captured with this very screen,
+/// or `None` when the list on hand predates it.
+fn learned_step_shown(
+    state: &AppState,
+    app: Option<&packs::learn::AppKey>,
+    step: &GuidanceStep,
+    located: bool,
+    list: Option<&[String]>,
+) {
+    if let Some(app) = app {
+        state.learned.lock().step_shown(app, step.target_text.as_deref(), located, list, &learned_today());
+    }
+}
+
+/// What a learned guide's notes are chosen against: the request and the session's goal.
+fn guide_focus(task: &str, session: Option<&crate::ai::session::Session>) -> String {
+    match session {
+        Some(s) => format!("{task} {}", s.task_description),
+        None => task.to_string(),
     }
 }
 
@@ -3076,28 +3463,34 @@ type IconTemplates = Vec<(String, Vec<u8>)>;
 /// candidate icon crops `(name, bytes)` for Pass-3 template matching, plus the `element_hints`
 /// search region (fractional rect) that makes matching independent of the AI bbox. All empty/
 /// None (the common case) when there's no focused window, no active pack, or no match — so
-/// Pass 3 stays a no-op. Reads icon files lazily here; only reached on a real locate.
+/// Pass 3 stays a no-op. The last value says whether the target names one of those icons in
+/// full, the test for an icon target. Reads icon files lazily here; only reached on a real locate.
 fn pack_locate_hints(
     registry: &packs::PackRegistry,
     hwnd: Option<usize>,
     target_text: &str,
-) -> (IconTemplates, Option<[f32; 4]>, f32) {
+) -> (IconTemplates, Option<[f32; 4]>, f32, bool) {
     let Some(hwnd) = hwnd.filter(|h| *h != 0) else {
-        return (Vec::new(), None, 1.0);
+        return (Vec::new(), None, 1.0, false);
     };
     if registry.is_empty() {
-        return (Vec::new(), None, 1.0);
+        return (Vec::new(), None, 1.0, false);
     }
     let title = capture::get_window_title(hwnd);
     let Some(pack) = registry.get_active_pack(&title) else {
-        return (Vec::new(), None, 1.0);
+        return (Vec::new(), None, 1.0, false);
     };
     let icons = pack
         .candidate_icons(target_text)
         .into_iter()
         .filter_map(|a| std::fs::read(&a.path).ok().map(|bytes| (a.stem.clone(), bytes)))
         .collect();
-    (icons, pack.region_hint_for(target_text), pack.authoring_scale())
+    (
+        icons,
+        pack.region_hint_for(target_text),
+        pack.authoring_scale(),
+        pack.names_an_icon(target_text),
+    )
 }
 
 /// Workstream P (v0.7) — curated starter tasks from the nav-pack matching `hwnd`'s
@@ -3124,6 +3517,14 @@ fn get_pack_starters(state: State<'_, AppState>, hwnd: u64) -> Vec<String> {
     }
 }
 
+/// Of the key combos a step names, the ones another program holds for itself (`held_keys`). The
+/// panel passes what it does not hold itself; what this finds is told to the user there and to the
+/// model on the next request.
+#[tauri::command]
+fn combos_held_elsewhere(combos: Vec<String>) -> Vec<String> {
+    held_keys::probe(&combos)
+}
+
 /// Deployment status of the pack-shipped Blender add-on (the script-channel bridge):
 /// which Blender installs exist, whether each has the add-on, and whether any is older
 /// than the version the pack ships. Drives the panel's install prompt.
@@ -3134,7 +3535,27 @@ fn blender_addon_status(
 ) -> packs::addon_install::AddonStatus {
     let dir = state.packs.get_by_id("blender").map(|p| p.dir.clone());
     let version = blender_target_version(hwnd);
-    packs::addon_install::status(dir.as_deref(), version.as_deref())
+    let mut st = packs::addon_install::status(dir.as_deref(), version.as_deref());
+    // The file check cannot see a bridge loaded any other way -- a portable Blender with its
+    // own config folder, a startup script. L1 ran with the bridge answering every query while
+    // the panel offered to install it (2026-10-12). Ask the bridge itself, and count it only
+    // when it runs in the Blender this prompt is about.
+    #[cfg(windows)]
+    if st.needs_action {
+        if let (Some((running, blender)), Some(target)) =
+            (locator::adapters::blender::running_bridge(), st.target_version.as_deref())
+        {
+            let same_blender = blender == target || blender.starts_with(&format!("{target}."));
+            if same_blender && st.pack_version.is_some_and(|pv| running >= pv) {
+                log::info!(
+                    "[addon] bridge v{running} already running in Blender {blender}; no install offer"
+                );
+                st.running_version = Some(running);
+                st.needs_action = false;
+            }
+        }
+    }
+    st
 }
 
 /// Config-folder version ("5.1") of the Blender the prompt is about. Scoping to the
@@ -3205,6 +3626,19 @@ fn fs_label(monitor: Option<capture::Rect>) -> String {
 #[cfg(windows)]
 const APP_BOUNDARY_DURATION_MS: u64 = 2_200;
 
+/// The error code when a pinned window cannot be captured, or None when it can. Logged, because
+/// the refusal is the only sign of it (rule 1).
+#[cfg(windows)]
+fn pinned_window_refusal(hwnd: usize) -> Option<&'static str> {
+    let code = match capture::pinned_window_state(hwnd) {
+        capture::PinnedWindow::Usable => return None,
+        capture::PinnedWindow::Minimized => "pinned_window_minimized",
+        capture::PinnedWindow::Gone => "pinned_window_gone",
+    };
+    log::warn!("[target] pinned window {hwnd:#x} cannot be captured ({code}); nothing captured in its place");
+    Some(code)
+}
+
 /// Phase 0.2: emit the animated "shared app boundary" overlay and the
 /// `app_changed` event so the panel chip stays in sync with what's captured.
 #[cfg(windows)]
@@ -3267,7 +3701,7 @@ pub fn refresh_active_window(app: &AppHandle) {
         return;
     };
     let active_info = capture::get_active_window_info();
-    let (announce_hwnd, changed) = {
+    let (announce_hwnd, changed, pinned) = {
         let mut g = state.guidance.lock();
         if g.pinned_hwnd.is_none() {
             g.target_hwnd = active_info.as_ref().map(|info| info.hwnd);
@@ -3275,7 +3709,7 @@ pub fn refresh_active_window(app: &AppHandle) {
         let hwnd = g.pinned_hwnd.or(g.target_hwnd);
         let changed = hwnd != g.last_announced_hwnd;
         g.last_announced_hwnd = hwnd;
-        (hwnd, changed)
+        (hwnd, changed, g.pinned_hwnd.is_some())
     };
     // A stale AI-bbox hint ring (drawn on a miss) is NOT tracked — it sits at fixed screen
     // coordinates and would otherwise linger over the newly-focused app (live 2026-07-24:
@@ -3312,7 +3746,19 @@ pub fn refresh_active_window(app: &AppHandle) {
     // flashing one while nobody is using Navisual reads as "I just captured this".
     // Boxes are now reserved for discrete events — a real capture, an explicit pin, a
     // hovered screen row — which is why no definition of "currently guiding" is needed.
+    //
+    // A pinned window that is gone is announced as nothing, and the chip then says the pin is
+    // gone. A hidden window still has a name (Word keeps one titled "Word"), so without this the
+    // chip named a window guide() refuses to capture; and a destroyed one fell through to the
+    // chip's "Auto-detect" while the pin was still in force (2026-10-15).
+    let announce_hwnd = announce_hwnd.filter(|&h| !(pinned && pinned_window_gone(h)));
     announce_shared_app(app, announce_hwnd, false);
+}
+
+/// The pinned window is closed, hidden or cloaked -- see `capture::pinned_window_state`.
+#[cfg(windows)]
+fn pinned_window_gone(hwnd: usize) -> bool {
+    capture::pinned_window_state(hwnd) == capture::PinnedWindow::Gone
 }
 
 #[cfg(not(windows))]
@@ -3951,8 +4397,98 @@ fn cleanup_old_debug_artifacts(app_data_dir: &std::path::Path) {
     }
 }
 
+/// L1 harness: one JSON line per guidance response the panel receives, when
+/// `NAVISUAL_STEP_FEED` names a file. The live driver follows the pointer from it: the step on
+/// screen, where the locator put it (physical pixels, virtual desktop), what it asks to paste,
+/// and whether the model is asking a question. When the locator missed and the dashed hint ring
+/// stood in, `hint_shown` is set and `ai_bbox` is the box the ring surrounds -- a person clicks
+/// inside the ring, so the driver does too. Off unless the variable is set; read once.
+fn step_feed(kind: &str, result: &Result<GuideResponse, String>) {
+    use std::io::Write;
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| {
+        std::env::var_os("NAVISUAL_STEP_FEED").filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
+    }) else {
+        return;
+    };
+    let ts_ms = chrono::Utc::now().timestamp_millis();
+    let line = match result {
+        Ok(r) => {
+            let step = r.steps.get(r.step_index);
+            serde_json::json!({
+                "ts_ms": ts_ms,
+                "kind": kind,
+                "ok": r.ok,
+                "request_id": r.request_id,
+                "step_index": r.step_index,
+                "step_count": r.steps.len(),
+                "instruction": step.map(|s| s.instruction.as_str()).unwrap_or(r.instruction.as_str()),
+                "target_text": step.and_then(|s| s.target_text.as_deref()),
+                "target_role": step.and_then(|s| s.target_role.as_ref()).map(|t| format!("{t:?}")),
+                "clipboard": step.and_then(|s| s.clipboard.as_deref()),
+                "checkpoint": step.map(|s| s.checkpoint),
+                "located": r.located,
+                "hint_shown": r.hint_shown,
+                "ai_bbox": r.ai_bbox,
+                "no_target": r.no_target,
+                "needs_input": r.needs_input,
+                "goal": r.goal,
+                "plan_outline_len": r.plan_outline.len(),
+                "plan_completed_count": r.plan_completed_count,
+                "model": r.model,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "error": r.error,
+            })
+        }
+        Err(e) => serde_json::json!({ "ts_ms": ts_ms, "kind": kind, "ok": false, "error": e }),
+    };
+    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut f) => {
+            let _ = writeln!(f, "{line}");
+        }
+        Err(e) => log::warn!("step feed write failed: {e}"),
+    }
+}
+
 #[tauri::command]
 async fn guide(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task: String,
+    is_reply: bool,
+    advance: Option<String>,
+) -> Result<GuideResponse, String> {
+    let r = guide_inner(app, state, task, is_reply, advance).await;
+    step_feed("guide", &r);
+    r
+}
+
+#[tauri::command]
+async fn next_step(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    step_index: usize,
+) -> Result<GuideResponse, String> {
+    let r = next_step_inner(app, state, step_index).await;
+    step_feed("next", &r);
+    r
+}
+
+#[tauri::command]
+async fn send_correction(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    note: Option<String>,
+    avoid_bboxes: Option<Vec<locator::candidates::AvoidEntry>>,
+    reason: Option<String>,
+) -> Result<GuideResponse, String> {
+    let r = send_correction_inner(app, state, note, avoid_bboxes, reason).await;
+    step_feed("correction", &r);
+    r
+}
+
+async fn guide_inner(
     app: AppHandle,
     state: State<'_, AppState>,
     task: String,
@@ -3972,6 +4508,16 @@ async fn guide(
     // working context so recording tools in the foreground (OBS, ScreenToGif) can't steal the
     // target. The "＋ New task" button calls `new_session` to reset target_hwnd explicitly.
     if !task.is_empty() && !is_reply && !is_next_requery {
+        // H7b: the last step's click finishes the previous task's path, and the path ends with
+        // that task -- typing a new one does not go through `new_session`.
+        let prev = {
+            let g = state.guidance.lock();
+            g.pinned_hwnd.or(g.target_hwnd)
+        };
+        if let Some(a) = learned_app(prev) {
+            learned_clicks(&state, &a);
+        }
+        state.learned.lock().end();
         let mut g = state.guidance.lock();
         g.session_id = None;
         g.steps = vec![];
@@ -4077,7 +4623,10 @@ async fn guide(
     #[cfg(windows)]
     if !is_fs {
         if let Some(hwnd) = stored_hwnd {
-            if capture::window_fully_occluded(hwnd) {
+            // A pin is that one window; when it is gone or minimized, nothing is captured in
+            // its place (`capture::pinned_window_state`).
+            let pin_refusal = if is_pinned { pinned_window_refusal(hwnd) } else { None };
+            if pin_refusal.is_some() || capture::window_fully_occluded(hwnd) {
                 let app = capture::get_window_info_for_hwnd(hwnd)
                     .map(|i| i.app_name)
                     .unwrap_or_else(|| {
@@ -4102,11 +4651,11 @@ async fn guide(
                     model: None,
                     input_tokens: None,
                     output_tokens: None,
-                    error: Some(format!(
+                    error: Some(pin_refusal.map(str::to_string).unwrap_or_else(|| format!(
                         "{app} is hidden behind another window, so Navisual can't see it. \
                          Bring it to the front (click it in the taskbar), or pick a different \
                          app with the target selector (🎯), then try again."
-                    )),
+                    ))),
                     debug_screenshot_path: None,
                     chat_thumb_b64: None,
                     locate_trace: None,
@@ -4125,7 +4674,7 @@ async fn guide(
     let exclude = capture::get_panel_rects();
 
     // Debug folder is a sub-directory of the app data dir.
-    let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
+    let debug_dir = app.path().navisual_data_dir().map(|p| p.join("debug")).ok();
 
     // Session export is developer-gated (user's call, 2026-09-07, reversing the
     // original "the ring buffer runs for everyone"): the only user of the feature
@@ -4187,8 +4736,16 @@ async fn guide(
             // Reuse the HWND we already discovered — skip z-order walk entirely.
             match capture::recapture_window_raw(hwnd_raw, &exclude) {
                 Ok((img, rect)) => (img, Some(rect), Some(hwnd_raw)),
+                // A pin is never replaced by whatever is in front -- here only if the window
+                // went between the check above and this capture.
+                Err(_) if is_pinned => {
+                    log::warn!("[target] pinned window {hwnd_raw:#x} went before the capture; nothing captured");
+                    return Err(());
+                }
                 Err(_) => {
-                    // Window was closed/minimised — rediscover.
+                    // Auto-detect: the window it last followed was closed/minimised —
+                    // rediscover.
+                    log::info!("[target] followed window {hwnd_raw:#x} cannot be captured; rediscovering the window in front");
                     match capture::capture_active_window_raw(&exclude) {
                         Ok((img, rect, hwnd)) => (img, Some(rect), Some(hwnd)),
                         Err(_) => return Err(()),
@@ -4284,7 +4841,7 @@ async fn guide(
     ) = match capture_result {
         Ok((b64, rect_opt, hwnd_opt, dbg, thumb, full_bytes, pre_hash, ocr_png, ocr_rect, pre_export)) => {
             if training_enabled {
-                let base = app.path().app_local_data_dir().ok();
+                let base = app.path().navisual_data_dir().ok();
                 training_shot_file = save_training_shot(base.as_deref(), &request_id, &full_bytes);
             }
             log::info!("[capture] ok in {} ms", capture_started.elapsed().as_millis());
@@ -4411,11 +4968,20 @@ async fn guide(
     let mut router = state.ai_router.lock().await;
 
     let info = new_hwnd_opt.map(capture::get_window_prompt_info);
+    // H7b: the clicks answer the step that was on screen, and they happened before this request
+    // began -- so they are read before the prompt is built, which lets a note they complete ask
+    // for its line in this very request instead of one that may never come.
+    let learned_target = learned_app(new_hwnd_opt);
+    if let Some(a) = &learned_target {
+        learned_clicks(&state, a);
+    }
+    let focus = guide_focus(&task, router.session_manager.current_session.as_ref());
+    let session_key = router.session_manager.current_session.as_ref().map(|s| s.id.to_string()).unwrap_or_default();
     let pack_context = new_hwnd_opt
-        .map(|hwnd| active_pack_context(&state.packs, hwnd))
+        .map(|hwnd| active_pack_context(&state, hwnd, &focus, &session_key))
         .unwrap_or_default();
     let elements_block = match (context_elements.as_deref(), capture_rect_opt) {
-        (Some(els), Some(rect)) => ai::prompts::elements_context_block(els, rect),
+        (Some(els), Some(rect)) => ai::prompts::elements_context_block_with(els, rect, router.config.list_states),
         _ => String::new(),
     };
     let os_line = os_context_line();
@@ -4426,6 +4992,8 @@ async fn guide(
     // What the user actually did since the last turn, as a resolved control. Also (re)arms
     // the click hook for the app being guided — see `last_click` for the privacy contract.
     let click_line = last_click_snapshot(new_hwnd_opt);
+    // A key the last step named that another program holds: the model is told once.
+    let click_line = join_lines(click_line, held_keys::take_note());
     let window_context = window_context_text(
         info.as_deref(),
         &pack_context,
@@ -4434,10 +5002,14 @@ async fn guide(
         app_state_text.as_deref(),
         click_line.as_deref(),
     );
+    // The kept notes, and the list of earlier screens: which window each earlier turn was in.
+    let window_context = with_session_memory(
+        window_context,
+        router.session_manager.current_session.as_ref(),
+        router.config.earlier_screens,
+        recall_offered(&router),
+    );
 
-    // Append window context to the prompt (no grid suffix any more — AI returns
-    // target_bbox instead).
-    let add_grid = |text: String| -> String { with_window_context(text, &window_context) };
 
     // Streaming-first surfacing: as the instruction streams in token-by-token,
     // push it to BOTH the panel (stream_chunk) and the on-screen caption
@@ -4465,6 +5037,18 @@ async fn guide(
         std::sync::Arc::new(parking_lot::Mutex::new(None));
     let stale_post_setter = stale_post.clone();
     let on_chunk = move |chunk: &str, steps_seen: usize| {
+        // The request stalled mid-answer and is being sent again (streaming::STREAM_RESET):
+        // what streamed so far is void, in the panel and in the caption.
+        if steps_seen == crate::ai::streaming::STREAM_RESET {
+            streamed.clear();
+            let _ = app_clone.emit("stream_reset", ());
+            if let Ok(update) =
+                overlay::make_update(overlay::OverlayKind::Subtitle, None, Some(String::new()))
+            {
+                let _ = overlay::emit_update(&app_clone, update);
+            }
+            return;
+        }
         if !primed {
             primed = true;
             *ttft_setter.lock() = Some(std::time::Instant::now());
@@ -4546,6 +5130,14 @@ async fn guide(
     // it as the language authority, so it survives the machine turns that carry no language signal.
     let reply_sample = state.guidance.lock().reply_lang_sample.clone();
 
+    set_look_sources(
+        &mut router,
+        new_hwnd_opt,
+        capture_rect_opt,
+        pre_ocr.as_ref().map(|(png, _)| png.as_slice()),
+    )
+    .await;
+
     let (resp, sent_user_prompt) = if task.is_empty() || is_next_requery {
         let expect = router.config.expected_result;
         let (summary, task_line) = {
@@ -4571,15 +5163,12 @@ async fn guide(
             let g = state.guidance.lock();
             g.state_summary.clone()
         };
-        let prompt = format!(
-            "{}{}{}",
-            add_grid(task.clone()),
-            crate::ai::prompts::goal_anchor(&original_task),
-            crate::ai::prompts::reply_language_directive(
-                reply_sample.as_deref(),
-                &original_task,
-                &voice_language,
-            )
+        let prompt = compose_reply_prompt(
+            &task,
+            &window_context,
+            &original_task,
+            reply_sample.as_deref(),
+            &voice_language,
         );
         (
             router
@@ -4623,7 +5212,7 @@ async fn guide(
     // so this lets you verify nothing unintended is sent. System prompt is static
     // (src-tauri/src/ai/prompts.rs); conversation history is reset on a new task.
     if debug_screenshot_enabled {
-        if let Ok(base) = app.path().app_local_data_dir() {
+        if let Ok(base) = app.path().navisual_data_dir() {
             let dir = base.join("debug");
             let _ = std::fs::create_dir_all(&dir);
             let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
@@ -4776,6 +5365,7 @@ async fn guide(
     let steps = steps;
     let state_summary = response.state_summary;
     let response_goal = response.goal.clone();
+    let response_app_note = response.app_note.clone();
     let response_plan_outline = response.plan_outline.clone();
     let response_plan_completed_count = response.plan_completed_count;
     let needs_input = response.needs_input;
@@ -4818,55 +5408,25 @@ async fn guide(
         None
     };
 
+    let remember_screens = router.config.recall;
     if let Some(session) = &mut router.session_manager.current_session {
-        // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
-        // the field leaves the stored goal alone rather than wiping it — the failure mode here
-        // must be inaction, never destruction.
-        if !response_goal.trim().is_empty() && response_goal.trim() != session.task_description {
-            log::info!(
-                "[memory] goal (model): {:?} -> {:?}",
-                session.task_description,
-                response_goal
-            );
-            session.set_task_description(response_goal.trim().to_string());
+        record_exchange(
+            session,
+            &task,
+            is_next_requery,
+            &response_goal,
+            response_plan_outline,
+            response_plan_completed_count,
+            &state_summary,
+            &steps,
+            new_hwnd_opt.map(capture::get_window_title),
+            &response.keep,
+        );
+        if remember_screens {
+            session.remember_screen(screenshot_b64.clone());
         }
-        // Same contract as goal: empty means "unchanged". Unlike goal, a non-empty
-        // outline always replaces rather than being compared first — a revised route
-        // is the expected, routine case (the model is meant to redraw it as the plan
-        // develops), not a rare correction worth logging every time.
-        if !response_plan_outline.is_empty() {
-            session.set_plan_outline(response_plan_outline);
-        }
-        // Applied AFTER set_plan_outline so a same-turn revision clamps the count
-        // against the NEW list length, not a stale one.
-        if let Some(count) = response_plan_completed_count {
-            session.set_plan_completed_count(count);
-        }
-        session.update_state(state_summary.clone());
-        let user_turn_text = if task.is_empty() {
-            "Next".to_string()
-        } else {
-            task.clone()
-        };
-        // Pin turns where the user stated intent IN THEIR OWN WORDS — the opening task and any
-        // `needs_input` answer. Those are the only turns the model cannot reconstruct from a
-        // summary. Retention by KIND, not recency.
-        //
-        // `!task.is_empty()` alone is NOT that test, and using it pinned 18 of 36 turns in a
-        // live 16-step session (2026-08-14): a → Next re-query carries a machine-built
-        // "[User completed: …]" string, so `task` is non-empty and every turn got pinned —
-        // which makes pinning meaningless and stops the window evicting user turns at all,
-        // growing the prompt without bound. `is_next_requery` is the discriminator (it is
-        // exactly `task.starts_with("[User completed:")`, set at the top of this fn).
-        let pinned = !task.is_empty() && !is_next_requery;
-        session.add_turn_pinned("user", user_turn_text, None, pinned);
+        // Searches back for the user turn, so it lands there though the assistant's is newer.
         session.set_last_user_turn_facts(clicked.clone(), advance.clone(), frame.clone());
-        let content = steps
-            .iter()
-            .map(|s| s.instruction.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-        session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
         // Bound the store as it grows, not only at launch — a machine that stays
         // on for days must not drift past the limit between restarts.
@@ -4940,7 +5500,7 @@ async fn guide(
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path()
-            .app_local_data_dir()
+            .navisual_data_dir()
             .ok()
             .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
@@ -4974,6 +5534,12 @@ async fn guide(
         );
     }
 
+    // H7b: the model's line answers the request this prompt carried; then this step goes up.
+    if let Some(a) = &learned_target {
+        state.learned.lock().attach_line(a, &response_app_note, &learned_today());
+    }
+    let learned_list: Option<Vec<String>> =
+        context_elements.as_ref().map(|els| els.iter().map(|e| e.name.clone()).collect());
     let (located, mut locate_trace, hint_shown, shown_candidates, drawn_rect) = execute_step(
         &app,
         &steps[0],
@@ -5002,6 +5568,7 @@ async fn guide(
         },
     )
     .unwrap_or((None, None, false, Vec::new(), None));
+    learned_step_shown(&state, learned_target.as_ref(), &steps[0], located.is_some(), learned_list.as_deref());
     // Flow B: a first-locate ambiguity set was drawn — arm the state readback.
     arm_candidates_if_shown(
         &state,
@@ -5082,8 +5649,7 @@ async fn guide(
     })
 }
 
-#[tauri::command]
-async fn next_step(
+async fn next_step_inner(
     app: AppHandle,
     state: State<'_, AppState>,
     step_index: usize,
@@ -5151,13 +5717,17 @@ async fn next_step(
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path()
-            .app_local_data_dir()
+            .navisual_data_dir()
             .ok()
             .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
         None
     };
     let ai_bbox = compute_ai_bbox_for_step(&steps[step_index], capture_rect, &provider);
+    let learned_target = learned_app(stored_hwnd);
+    if let Some(a) = &learned_target {
+        learned_clicks(&state, a);
+    }
     let (located, mut locate_trace, hint_shown, shown_candidates, _drawn_rect) = execute_step(
         &app,
         &steps[step_index],
@@ -5179,6 +5749,8 @@ async fn next_step(
         None, // no AI capture on this path — see execute_step's pre_export
     )
     .unwrap_or((None, None, false, Vec::new(), None));
+    // The list on hand was captured before the steps began, so it cannot vouch for this screen.
+    learned_step_shown(&state, learned_target.as_ref(), &steps[step_index], located.is_some(), None);
     arm_candidates_if_shown(
         &state,
         request_id.clone(),
@@ -5315,7 +5887,7 @@ async fn retry_locate(
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path()
-            .app_local_data_dir()
+            .navisual_data_dir()
             .ok()
             .map(|p| p.join("debug").join(format!("ocr_retry_{ts}.png")))
     } else {
@@ -5438,8 +6010,7 @@ async fn retry_locate(
     })
 }
 
-#[tauri::command]
-async fn send_correction(
+async fn send_correction_inner(
     app: AppHandle,
     state: State<'_, AppState>,
     note: Option<String>,
@@ -5459,6 +6030,19 @@ async fn send_correction(
     // Flow A: resolve any on-screen candidate boxes before the correction reshapes
     // the step (a "None of these" Wrong press lands here — resolves unresolved).
     resolve_pending_candidates(&app, &state, true).await;
+    // H7b: ✗ Wrong on the step on screen -- a contradiction of the note behind it, if any.
+    {
+        let hwnd = {
+            let g = state.guidance.lock();
+            g.pinned_hwnd.or(g.target_hwnd)
+        };
+        if let Some(a) = learned_app(hwnd) {
+            // Clicks made before the press are not matched against anything: they answer the
+            // step being rejected, and must not be read later as answering the corrected one.
+            learned_skip_clicks(&state);
+            state.learned.lock().wrong(&a, &learned_today());
+        }
+    }
     let session_id = {
         let g = state.guidance.lock();
         g.session_id.clone()
@@ -5493,6 +6077,9 @@ async fn send_correction(
     #[cfg(windows)]
     if !is_fs {
         if let Some(hwnd) = pinned_hwnd {
+            if let Some(code) = pinned_window_refusal(hwnd) {
+                return Err(code.to_string());
+            }
             if capture::window_fully_occluded(hwnd) {
                 let app_name = capture::get_window_info_for_hwnd(hwnd)
                     .map(|i| i.app_name)
@@ -5519,7 +6106,7 @@ async fn send_correction(
     let request_id = uuid::Uuid::new_v4().to_string();
     let prev_request_id = state.guidance.lock().request_id.clone();
 
-    let debug_dir = app.path().app_local_data_dir().map(|p| p.join("debug")).ok();
+    let debug_dir = app.path().navisual_data_dir().map(|p| p.join("debug")).ok();
 
     // Clear the previous pointer before capture.
     state.tracker.clear();
@@ -5566,17 +6153,12 @@ async fn send_correction(
             .ok()
             .map(|(bytes, rect)| (bytes, rect, None))
         } else if let Some(hwnd_raw) = pinned_hwnd {
-            // Pinned window closed/minimised mid-session → fall back to
-            // rediscovery rather than failing the correction outright
-            // (mirrors guide()'s recapture fallback).
+            // A pin is never replaced by whatever is in front (`capture::pinned_window_state`);
+            // the refusal above catches a closed or minimized pin, so this fails only if the
+            // window went in between.
             capture::recapture_window_jpeg(hwnd_raw, 75, &exclude)
                 .ok()
                 .map(|(bytes, rect)| (bytes, rect, Some(hwnd_raw)))
-                .or_else(|| {
-                    capture::capture_active_window_jpeg(75, &exclude)
-                        .ok()
-                        .map(|(bytes, rect, hwnd)| (bytes, rect, Some(hwnd)))
-                })
         } else {
             capture::capture_active_window_jpeg(75, &exclude)
                 .ok()
@@ -5653,7 +6235,7 @@ async fn send_correction(
     let mut training_shot_file: Option<String> = None;
     if let Some(bytes) = full_jpeg_opt {
         if training_enabled {
-            let base = app.path().app_local_data_dir().ok();
+            let base = app.path().navisual_data_dir().ok();
             training_shot_file = save_training_shot(base.as_deref(), &request_id, &bytes);
         }
         *state.chat_full_jpeg.lock() = Some(bytes);
@@ -5720,23 +6302,32 @@ async fn send_correction(
     };
 
     let info = new_hwnd.map(capture::get_window_prompt_info);
+    let focus = guide_focus(note.as_deref().unwrap_or(""), router.session_manager.current_session.as_ref());
+    let session_key = router.session_manager.current_session.as_ref().map(|s| s.id.to_string()).unwrap_or_default();
     let pack_context = new_hwnd
-        .map(|hwnd| active_pack_context(&state.packs, hwnd))
+        .map(|hwnd| active_pack_context(&state, hwnd, &focus, &session_key))
         .unwrap_or_default();
     let elements_block = match (context_elements.as_deref(), new_capture_rect) {
-        (Some(els), Some(rect)) => ai::prompts::elements_context_block(els, rect),
+        (Some(els), Some(rect)) => ai::prompts::elements_context_block_with(els, rect, router.config.list_states),
         _ => String::new(),
     };
     let os_line = os_context_line();
     // L1 app state — same as guide()'s capture path.
     let app_state_text = app_state_snapshot(new_hwnd);
+    let keys_line = held_keys::take_note();
     let window_context = window_context_text(
         info.as_deref(),
         &pack_context,
         &elements_block,
         os_line,
         app_state_text.as_deref(),
-        None,
+        keys_line.as_deref(),
+    );
+    let window_context = with_session_memory(
+        window_context,
+        router.session_manager.current_session.as_ref(),
+        router.config.earlier_screens,
+        recall_offered(&router),
     );
 
     // Same language + goal anchor as guide()'s continuation turns — a correction is a
@@ -5788,6 +6379,18 @@ async fn send_correction(
         std::sync::Arc::new(parking_lot::Mutex::new(None));
     let stale_post_setter = stale_post.clone();
     let on_chunk = move |chunk: &str, steps_seen: usize| {
+        // The request stalled mid-answer and is being sent again (streaming::STREAM_RESET):
+        // what streamed so far is void, in the panel and in the caption.
+        if steps_seen == crate::ai::streaming::STREAM_RESET {
+            streamed.clear();
+            let _ = app_clone.emit("stream_reset", ());
+            if let Ok(update) =
+                overlay::make_update(overlay::OverlayKind::Subtitle, None, Some(String::new()))
+            {
+                let _ = overlay::emit_update(&app_clone, update);
+            }
+            return;
+        }
         if !primed {
             primed = true;
             *ttft_setter.lock() = Some(std::time::Instant::now());
@@ -5823,6 +6426,14 @@ async fn send_correction(
             let _ = overlay::emit_update(&app_clone, update);
         }
     };
+
+    set_look_sources(
+        &mut router,
+        new_hwnd,
+        new_capture_rect,
+        pre_ocr.as_ref().map(|(png, _)| png.as_slice()),
+    )
+    .await;
 
     let timing_provider = router.config.api_provider.clone();
     let ai_started = std::time::Instant::now();
@@ -5928,6 +6539,7 @@ async fn send_correction(
     let steps = steps;
     let state_summary = response.state_summary;
     let response_goal = response.goal.clone();
+    let response_app_note = response.app_note.clone();
     let response_plan_outline = response.plan_outline.clone();
     let response_plan_completed_count = response.plan_completed_count;
     let needs_input = response.needs_input;
@@ -5940,6 +6552,7 @@ async fn send_correction(
     let provider = router.config.api_provider.clone();
     let bbox_distrust = router.config.bbox_distrust_models.clone();
 
+    let remember_screens = router.config.recall;
     if let Some(session) = &mut router.session_manager.current_session {
         // The model owns the goal (stage 2). Empty means "unchanged", so a model that ignores
         // the field leaves the stored goal alone rather than wiping it — the failure mode here
@@ -5977,6 +6590,9 @@ async fn send_correction(
         // same rule, finally applied on this path. The context blocks describe the screen
         // at the moment of THAT correction and are stale by the next turn anyway.
         session.add_turn("correction", user_text_owned.clone(), None);
+        if remember_screens {
+            session.remember_screen(screenshot_b64.clone());
+        }
         // No `clicked` / `advanced_by`: a correction is the user saying the last step was
         // wrong, which is neither a click in the guided app nor something that advanced the
         // step. The frame is the part worth keeping.
@@ -6054,7 +6670,7 @@ async fn send_correction(
     let debug_ocr_path = if debug_screenshot_enabled {
         let ts = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         app.path()
-            .app_local_data_dir()
+            .navisual_data_dir()
             .ok()
             .map(|p| p.join("debug").join(format!("ocr_{ts}.png")))
     } else {
@@ -6085,6 +6701,12 @@ async fn send_correction(
         avoid_bboxes.as_deref().unwrap_or(&[]),
         steps[0].target_text.as_deref(),
     );
+    let learned_target = learned_app(new_hwnd);
+    if let Some(a) = &learned_target {
+        state.learned.lock().attach_line(a, &response_app_note, &learned_today());
+    }
+    let learned_list: Option<Vec<String>> =
+        context_elements.as_ref().map(|els| els.iter().map(|e| e.name.clone()).collect());
     let (located, mut locate_trace, hint_shown, shown_candidates, _drawn_rect) = execute_step(
         &app,
         &steps[0],
@@ -6109,6 +6731,7 @@ async fn send_correction(
         },
     )
     .unwrap_or((None, None, false, Vec::new(), None));
+    learned_step_shown(&state, learned_target.as_ref(), &steps[0], located.is_some(), learned_list.as_deref());
     arm_candidates_if_shown(
         &state,
         Some(request_id.clone()),
@@ -6274,6 +6897,10 @@ fn pin_target_window(app: AppHandle, state: State<'_, AppState>, hwnd: usize) ->
     let usable = capture::restore_window(hwnd);
     #[cfg(not(windows))]
     let usable = true;
+    log::info!(
+        "[target] pinned {hwnd:#x} ({}), usable={usable}",
+        capture::get_window_info_for_hwnd(hwnd).map(|i| i.exe_name).unwrap_or_default()
+    );
     {
         let mut g = state.guidance.lock();
         g.pinned_hwnd = Some(hwnd);
@@ -6575,6 +7202,8 @@ fn new_session(state: State<'_, AppState>) {
     // it would be reported as fresh context on the first turn and steer the opening answer.
     last_click::clear();
     drop(g);
+    // H7b: a path of guided clicks does not run on into the next task.
+    state.learned.lock().end();
 
     // Drop the abandoned session itself, not just the id. `session_goal` /
     // `session_plan_outline` read straight off `current_session`, and every
@@ -6586,6 +7215,37 @@ fn new_session(state: State<'_, AppState>) {
     if let Ok(mut router) = state.ai_router.try_lock() {
         router.session_manager.current_session = None;
     }
+}
+
+/// H7b in Settings: the learned guides, one row per app.
+#[tauri::command]
+fn list_learned_guides(state: State<'_, AppState>) -> Vec<packs::learn::GuideInfo> {
+    state.learned.lock().list()
+}
+
+/// Open an app's learned guide in Notepad, to read or edit it. Notepad rather than the `.md`
+/// association: on most machines `.md` opens nothing, or asks. Edits are picked up while the
+/// app runs (`packs::learn`).
+#[tauri::command]
+fn open_learned_guide(state: State<'_, AppState>, exe: String) -> Result<(), String> {
+    let path = state.learned.lock().path_of(&exe).ok_or("learned_guide_missing")?;
+    std::process::Command::new("notepad.exe")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| {
+            log::warn!("[guide] could not open {} in Notepad: {e}", path.display());
+            "learned_guide_open_failed".to_string()
+        })
+}
+
+/// Delete an app's learned guide; the file goes to the Recycle Bin.
+#[tauri::command]
+fn delete_learned_guide(state: State<'_, AppState>, exe: String) -> Result<(), String> {
+    state.learned.lock().delete(&exe).map_err(|e| {
+        log::warn!("[guide] could not delete the guide for {exe}: {e}");
+        "learned_guide_delete_failed".to_string()
+    })
 }
 
 /// How many sessions the store keeps.
@@ -6851,6 +7511,7 @@ fn export_session(
 /// Item 1 — clear the pinned window and return to auto-detection.
 #[tauri::command]
 fn unpin_target_window(app: AppHandle, state: State<'_, AppState>) {
+    log::info!("[target] unpinned: back to auto-detect");
     {
         let mut g = state.guidance.lock();
         g.pinned_hwnd = None;
@@ -6868,11 +7529,19 @@ fn unpin_target_window(app: AppHandle, state: State<'_, AppState>) {
 fn get_shared_app_info(state: State<'_, AppState>) -> Option<SharedAppInfoPayload> {
     #[cfg(windows)]
     {
-        let stored = {
+        let (stored, pinned) = {
             let g = state.guidance.lock();
-            g.pinned_hwnd.or(g.target_hwnd)
+            (g.pinned_hwnd.or(g.target_hwnd), g.pinned_hwnd.is_some())
         };
         let info = match stored {
+            // A pin's chip names the pinned window or nothing, never the app in front.
+            Some(hwnd) if pinned => {
+                if pinned_window_gone(hwnd) {
+                    None
+                } else {
+                    capture::get_window_info_for_hwnd(hwnd)
+                }
+            }
             Some(hwnd) => {
                 capture::get_window_info_for_hwnd(hwnd).or_else(capture::get_active_window_info)
             }
@@ -7056,7 +7725,7 @@ async fn open_debug_folder(app: AppHandle) -> Result<(), String> {
     }
     let dir = app
         .path()
-        .app_local_data_dir()
+        .navisual_data_dir()
         .map_err(|e| format!("app_local_data_dir: {e}"))?
         .join("debug");
     std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir: {e}"))?;
@@ -8332,7 +9001,7 @@ async fn submit_feedback(
     let payload = payload;
 
     if training_enabled {
-        if let Ok(dir) = app.path().app_local_data_dir() {
+        if let Ok(dir) = app.path().navisual_data_dir() {
             let mut local = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
             if let Some(obj) = local.as_object_mut() {
                 obj.insert(
@@ -8370,6 +9039,15 @@ async fn submit_feedback(
 pub fn run() {
     // First statement, so every later webview timestamp has a process-relative origin.
     let _ = process_start_ms();
+    // A test run's isolated folder holds the WebView2 storage too. WebView2 reads this variable
+    // when the webview is created, ahead of the folder the host passes.
+    if let Some(dir) = isolated_data_dir() {
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir.join("EBWebView"));
+    }
+    let log_target = match isolated_data_dir() {
+        Some(dir) => tauri_plugin_log::TargetKind::Folder { path: dir.join("logs"), file_name: None },
+        None => tauri_plugin_log::TargetKind::LogDir { file_name: None },
+    };
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -8379,9 +9057,7 @@ pub fn run() {
                 // `.target()` APPENDS — adding them again wrote every record to the file (and
                 // stdout) TWICE. `.targets()` REPLACES the set, so we get exactly these two.
                 .targets([
-                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
-                        file_name: None,
-                    }),
+                    tauri_plugin_log::Target::new(log_target),
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                 ])
                 .max_file_size(2_000_000)
@@ -8456,11 +9132,15 @@ pub fn run() {
             // Falls back to CWD so dev builds with no installation still work.
             let app_data_dir = app
                 .path()
-                .app_local_data_dir()
+                .navisual_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
             std::fs::create_dir_all(&app_data_dir).ok();
+            if let Some(dir) = isolated_data_dir() {
+                // The line that says this run cannot touch the installed app's data.
+                log::info!("[data] isolated data folder: {} (NAVISUAL_DATA_DIR)", dir.display());
+            }
             // One-time migration: move files written to Roaming AppData before v0.5.24.
-            if let Ok(old_roaming) = app.path().app_data_dir() {
+            if let (None, Ok(old_roaming)) = (isolated_data_dir(), app.path().app_data_dir()) {
                 migrate_roaming_to_local(&old_roaming, &app_data_dir);
             }
             cleanup_old_debug_artifacts(&app_data_dir);
@@ -8518,6 +9198,11 @@ pub fn run() {
                 Some(user_packs_dir.as_path()),
                 bundled_packs_dir.as_deref(),
             );
+            let learned = if router.config.learned_notes {
+                packs::learn::Learned::load(user_packs_dir.join("learned"))
+            } else {
+                packs::learn::Learned::disabled(user_packs_dir.join("learned"))
+            };
 
             handle.manage(AppState {
                 ai_router: tokio::sync::Mutex::new(router),
@@ -8531,6 +9216,8 @@ pub fn run() {
                 screen_sig: parking_lot::Mutex::new(None),
                 chat_full_jpeg: parking_lot::Mutex::new(None),
                 packs,
+                learned: parking_lot::Mutex::new(learned),
+                learned_click_gen: std::sync::atomic::AtomicU64::new(0),
                 export: parking_lot::Mutex::new(session_export::ExportBuffer::new()),
                 export_dest: parking_lot::Mutex::new(None),
             });
@@ -8552,6 +9239,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            list_learned_guides,
+            open_learned_guide,
+            delete_learned_guide,
             ping_sidecar,
             sidecar_echo,
             capture_screen,
@@ -8569,6 +9259,7 @@ pub fn run() {
             get_shared_app_info,
             get_pack_starters,
             blender_addon_status,
+            combos_held_elsewhere,
             install_blender_addon,
             speak,
             get_settings,

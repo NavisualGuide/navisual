@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use futures_util::StreamExt;
 use reqwest::{header, Client};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -10,7 +9,7 @@ use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role, UsageD
 
 /// Same schema instruction as Ollama — DeepSeek doesn't support function-calling
 /// for vision models, so we use prompt engineering + response_format:json_object.
-const JSON_FORMAT_INSTRUCTION: &str = r#"
+pub(crate) const JSON_FORMAT_INSTRUCTION: &str = r#"
 
 IMPORTANT: Respond ONLY with a single valid JSON object — no markdown, no explanation. The top-level object has exactly three keys: "steps", "state_summary", "needs_input".
 
@@ -40,11 +39,13 @@ Step fields (inside "steps" array only):
 
 Top-level fields (outside "steps", required):
 - goal: the user's overall objective, carried across turns. MERGE later detail into it rather than replacing it ('centre them at the bottom' refines the goal, it is not a new goal); replace it outright only on a genuine task switch; omit to leave it unchanged
-- state_summary: your ONLY memory between turns (earlier turns are truncated away). Rewrite it in full each turn carrying the user's GOAL in their own words, any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED
+- state_summary: your ONLY memory between turns (earlier turns are truncated away). Rewrite it in full each turn carrying the user's GOAL in their own words, any CONSTRAINTS they stated, what is DONE, anything TRIED THAT FAILED, and anything you have SEEN on an earlier screen that the user may still need once it is gone, copied exactly
 - needs_input: true only if you must ask the user a question before continuing
 
 Optional top-level fields:
 - suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence
+- keep: facts the user may still need after they leave the screen, each copied exactly as shown; kept notes come back on every later turn and are never rewritten, so add each once and never repeat one already kept (omit when there is nothing new)
+- app_note: only when the prompt asks for a learned note, that one line; otherwise omit
 - plan_outline: a short route overview toward the goal — like a map app's route overview, not turn-by-turn (that's steps/instruction). 2-8 short plain-language milestones, e.g. ["Open the Insert tab", "Add page numbers", "Set them to start at page 3"]. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append) whenever your understanding of the route changes. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task
 - plan_completed_count: how many of plan_outline's milestones (counting from the first) are already done — 0 means still on the first one, 1 means the first is done and you're on the second, etc. Update as milestones finish, and again whenever you revise plan_outline (count against the NEW list). Omit to leave the previous count unchanged; meaningless without plan_outline, so omit both together"#;
 
@@ -63,6 +64,18 @@ pub struct DeepSeekClient {
     last_usage: parking_lot::Mutex<Option<UsageDetail>>,
     /// H1 switch, set by the router from `Config::expected_result` (see `prompts::system_prompt`).
     pub(crate) expected_result: bool,
+    /// H2: the frame `inspect` crops from (OpenAI via Responses only); `None` = no tool.
+    pub(crate) inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
+    pub(crate) inspect_mode: crate::ai::inspect::Mode,
+    pub(crate) inspect_tools: crate::ai::inspect::Tools,
+    /// H6: earlier screens `recall` can return (OpenAI via Responses only).
+    pub(crate) recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
+    pub(crate) recall_max: usize,
+    /// H3: the accessibility snapshot `ui_tree` reads, set per request by the router.
+    pub(crate) ui_snapshot: Option<std::sync::Arc<crate::ai::inspect::UiSource>>,
+    last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
+    /// `response.model` of the last Responses API call: the model that answered.
+    last_served: parking_lot::Mutex<Option<String>>,
 }
 
 impl DeepSeekClient {
@@ -95,6 +108,14 @@ impl DeepSeekClient {
             reasoning_effort,
             last_usage: parking_lot::Mutex::new(None),
             expected_result: false,
+            inspect_frame: None,
+            inspect_mode: crate::ai::inspect::Mode::Off,
+            inspect_tools: crate::ai::inspect::Tools::Zoom,
+            recall_screens: None,
+            recall_max: 1,
+            ui_snapshot: None,
+            last_inspects: parking_lot::Mutex::new(Vec::new()),
+            last_served: parking_lot::Mutex::new(None),
         })
     }
 
@@ -102,6 +123,16 @@ impl DeepSeekClient {
     /// nothing can never be read as this one.
     pub fn take_last_usage(&self) -> Option<UsageDetail> {
         self.last_usage.lock().take()
+    }
+
+    #[cfg(test)]
+    pub fn take_inspects(&self) -> Vec<crate::ai::inspect::Look> {
+        std::mem::take(&mut *self.last_inspects.lock())
+    }
+
+    #[cfg(test)]
+    pub fn take_served(&self) -> Option<String> {
+        self.last_served.lock().take()
     }
 
     pub async fn send_message(
@@ -212,7 +243,7 @@ impl DeepSeekClient {
             "model": effective_model,
             "instructions": instructions,
             "input": input,
-            "tools": [flat_tool],
+            "tools": [flat_tool.clone()],
             "tool_choice": {"type": "function", "name": "navigate_step"},
             "stream": true,
         });
@@ -228,26 +259,110 @@ impl DeepSeekClient {
             log_effort_once("provider default (no reasoning field sent)");
         }
 
-        self.stream_once_responses_api(&payload, on_chunk).await
+        // H2 (`inspect.rs`): with a frame offered, `tool_choice: required` lets the model zoom
+        // first; each zoom continues the same response (`previous_response_id`) with the crop
+        // inside the function_call_output. After MAX_INSPECTS the original payload forces
+        // navigate_step again. Only the navigate_step round streams a caption.
+        // H6 `recall` joins the same loop when earlier screens are offered.
+        let sources = crate::ai::inspect::Sources {
+            frame: self.inspect_frame.clone(),
+            earlier: self.recall_screens.clone(),
+            recall_max: self.recall_max,
+            ui: self.ui_snapshot.clone(),
+        };
+        self.last_inspects.lock().clear();
+        let look_names = sources.names(self.inspect_tools);
+        let mut declared = vec![flat_tool.clone()];
+        for (name, description, parameters) in
+            crate::ai::inspect::declarations(self.inspect_mode, &look_names, self.recall_max)
+        {
+            declared.push(json!({"type": "function", "name": name,
+                                 "description": description, "parameters": parameters}));
+        }
+        if !look_names.is_empty() {
+            // Says the tools reached the request; an "[inspect]" line follows each one the model calls.
+            log::info!("[looks] {} declared: {}", self.name, look_names.join(", "));
+        }
+        let mut total = UsageDetail::default();
+        let mut zooms = 0usize;
+        let mut follow_up: Option<(String, Value)> = None;
+        loop {
+            let zoom_open = !look_names.is_empty() && zooms < crate::ai::inspect::MAX_INSPECTS;
+            let mut p = payload.clone();
+            if zoom_open {
+                p["tools"] = Value::Array(declared.clone());
+                // `First`: the opening round must look -- with both tools offered, it is forced
+                // to the first (the zoom), since a forced choice names one function. Recall is
+                // never forced.
+                p["tool_choice"] = if zooms == 0
+                    && self.inspect_mode == crate::ai::inspect::Mode::First
+                    && sources.frame.is_some()
+                {
+                    json!({"type": "function", "name": look_names[0]})
+                } else {
+                    json!("required")
+                };
+                p["parallel_tool_calls"] = json!(false);
+            }
+            if let Some((id, input)) = &follow_up {
+                p["previous_response_id"] = json!(id);
+                p["input"] = input.clone();
+            }
+            let round = self.stream_round_responses_api(&p, on_chunk).await?;
+            total.input += round.usage.input;
+            total.cached_input += round.usage.cached_input;
+            total.output += round.usage.output;
+            total.reasoning += round.usage.reasoning;
+            if look_names.contains(&round.name.as_str()) && zoom_open {
+                {
+                    zooms += 1;
+                    let args: Value =
+                        serde_json::from_str(&round.arguments).unwrap_or_else(|_| json!({}));
+                    let (answer, look) = crate::ai::inspect::answer(&round.name, &sources, args).await;
+                    if let Some(l) = look {
+                        log::info!("[inspect] {} {} {zooms}: {:?} turns {:?}", self.name, l.tool, l.region, l.turns);
+                        self.last_inspects.lock().push(l);
+                    }
+                    let output = match answer {
+                        // A zoom's crop goes back alone, as H2 was measured; a recalled screen
+                        // says which turn it is.
+                        crate::ai::inspect::Reply::Images(images, caption) if round.name == crate::ai::inspect::RECALL => {
+                            let mut parts = vec![json!({"type": "input_text", "text": caption})];
+                            parts.extend(images.iter().map(|b64| json!({"type": "input_image",
+                                "image_url": format!("data:image/jpeg;base64,{b64}")})));
+                            Value::Array(parts)
+                        }
+                        crate::ai::inspect::Reply::Images(images, _) => Value::Array(images.iter().map(|b64| json!({
+                            "type": "input_image", "image_url": format!("data:image/jpeg;base64,{b64}")})).collect()),
+                        crate::ai::inspect::Reply::Text(text) => json!(text),
+                        crate::ai::inspect::Reply::Refused(why) => json!(why),
+                    };
+                    follow_up = Some((
+                        round.response_id.clone(),
+                        json!([{"type": "function_call_output", "call_id": round.call_id, "output": output}]),
+                    ));
+                    continue;
+                }
+            }
+            *self.last_usage.lock() = Some(total);
+            let resp = self.parse_navigate(&round.arguments, round.emitted_instruction_len, on_chunk)?;
+            return Ok((resp, total.input, total.output));
+        }
     }
 
-    /// SSE parser for `/v1/responses`. Genuinely different event vocabulary from
-    /// Chat Completions (see `stream_once`) — no `choices[].delta`, instead typed
-    /// `type`-tagged events. The only one that matters for us is
-    /// `response.function_call_arguments.delta` (`delta` field, accumulated —
-    /// forcing exactly one tool via `tool_choice` means there's only ever one
-    /// function_call item, so no need to key deltas by `item_id`/`output_index`).
-    /// Live-caption extraction reuses the exact same `instruction_delta` scan
-    /// `stream_once` uses on Chat Completions' `content` — same partial-JSON
-    /// shape, same technique. `response.completed` carries the full final
-    /// `response` object (incl. `usage`) as a cross-check / token-count source;
-    /// the accumulated `delta` buffer is what's actually parsed, since it's
-    /// confirmed byte-identical to the completed event's own copy.
-    async fn stream_once_responses_api(
+    /// SSE parser for one `/v1/responses` round. Genuinely different event vocabulary from
+    /// Chat Completions (see `stream_once`) — no `choices[].delta`, instead typed `type`-tagged
+    /// events: `response.output_item.added` names the function being called,
+    /// `response.function_call_arguments.delta` carries its arguments (accumulated —
+    /// `parallel_tool_calls: false` or a forced tool means one function_call item per round),
+    /// and `response.completed` carries the response id and `usage`. Live captions reuse the
+    /// `instruction_delta` scan `stream_once` uses on Chat Completions' `content`, for
+    /// navigate_step only — an `inspect` call has no instruction to show.
+    async fn stream_round_responses_api(
         &self,
         payload: &Value,
         on_chunk: &mut impl FnMut(&str, usize),
-    ) -> Result<(NavigateStepResponse, u64, u64)> {
+    ) -> Result<ResponsesRound> {
         let response = self
             .client
             .post("https://api.openai.com/v1/responses")
@@ -262,17 +377,37 @@ impl DeepSeekClient {
             bail!("{} Responses API error ({}): {}", self.name, status, body);
         }
 
-        let mut arguments = String::new();
-        let mut input_tokens = 0u64;
-        let mut output_tokens = 0u64;
+        let mut r = ResponsesRound::default();
         let mut in_instruction = false;
-        let mut emitted_instruction_len = 0usize;
         let mut line_buf = String::new();
         let mut usage_logged = false;
 
         let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
+        let mut progress = crate::ai::streaming::AnswerProgress::default();
+        // What the stream did, for the one line logged if it fails. Two "stalls" on the
+        // verification runs (2026-10-12) ran the full 90 s with the answer begun and no stall
+        // line, so either the answer kept growing (a runaway) or the wait was elsewhere; this
+        // says which.
+        let mut diag = StreamDiag::new();
+        loop {
+            let next = crate::ai::streaming::next_or_stall(&mut stream, progress.update(r.arguments.len()), &self.name).await;
+            let chunk_result = match next {
+                Ok(Some(c)) => c,
+                Ok(None) => break,
+                Err(e) => {
+                    diag.log_failure(&self.name, &e, r.arguments.len(), &progress);
+                    return Err(e);
+                }
+            };
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    let e = anyhow::Error::from(e);
+                    diag.log_failure(&self.name, &e, r.arguments.len(), &progress);
+                    return Err(e);
+                }
+            };
+            diag.bytes += chunk.len();
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(nl) = line_buf.find('\n') {
@@ -292,28 +427,43 @@ impl DeepSeekClient {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                diag.event(data["type"].as_str().unwrap_or("?"));
 
                 match data["type"].as_str() {
+                    Some("response.created") => {
+                        if let Some(id) = data["response"]["id"].as_str() {
+                            r.response_id = id.to_string();
+                        }
+                    }
+                    Some("response.output_item.added")
+                        if data["item"]["type"].as_str() == Some("function_call") =>
+                    {
+                        r.name = data["item"]["name"].as_str().unwrap_or_default().to_string();
+                        r.call_id = data["item"]["call_id"].as_str().unwrap_or_default().to_string();
+                    }
                     Some("response.function_call_arguments.delta") => {
                         if let Some(delta) = data["delta"].as_str() {
-                            arguments.push_str(delta);
+                            r.arguments.push_str(delta);
+                            if crate::ai::inspect::is_look(&r.name) {
+                                continue;
+                            }
 
                             let prefix = r#""instruction":""#;
                             let prefix_sp = r#""instruction": ""#;
                             if !in_instruction
-                                && (arguments.contains(prefix) || arguments.contains(prefix_sp))
+                                && (r.arguments.contains(prefix) || r.arguments.contains(prefix_sp))
                             {
                                 in_instruction = true;
                             }
                             if in_instruction {
                                 let (d, new_len) = crate::ai::streaming::instruction_delta(
-                                    &arguments,
-                                    emitted_instruction_len,
+                                    &r.arguments,
+                                    r.emitted_instruction_len,
                                 );
                                 if !d.is_empty() {
-                                    on_chunk(&d, crate::ai::streaming::count_streamed_steps(&arguments));
+                                    on_chunk(&d, crate::ai::streaming::count_streamed_steps(&r.arguments));
                                 }
-                                emitted_instruction_len = new_len;
+                                r.emitted_instruction_len = new_len;
                             }
                         }
                     }
@@ -321,12 +471,17 @@ impl DeepSeekClient {
                         bail!("{} Responses API stream error: {}", self.name, data);
                     }
                     Some("response.completed") => {
+                        if let Some(id) = data["response"]["id"].as_str() {
+                            r.response_id = id.to_string();
+                        }
+                        if let Some(m) = data["response"]["model"].as_str() {
+                            *self.last_served.lock() = Some(m.to_string());
+                        }
                         if let Some(usage) = data["response"]["usage"].as_object() {
-                            input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                            output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                             // Responses API names: cache hits under input_tokens_details,
                             // reasoning under output_tokens_details (both already included in
-                            // the totals above).
+                            // the totals).
+                            let top = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
                             let detail = |group: &str, key: &str| {
                                 usage
                                     .get(group)
@@ -334,13 +489,13 @@ impl DeepSeekClient {
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0)
                             };
-                            *self.last_usage.lock() = Some(UsageDetail {
-                                input: input_tokens,
+                            r.usage = UsageDetail {
+                                input: top("input_tokens"),
                                 cached_input: detail("input_tokens_details", "cached_tokens"),
                                 cache_write: 0,
-                                output: output_tokens,
+                                output: top("output_tokens"),
                                 reasoning: detail("output_tokens_details", "reasoning_tokens"),
-                            });
+                            };
                             if !usage_logged {
                                 log::info!("[tokens] responses-api raw usage (once): {}", data["response"]["usage"]);
                                 usage_logged = true;
@@ -351,12 +506,21 @@ impl DeepSeekClient {
                 }
             }
         }
+        Ok(r)
+    }
 
+    /// The navigate_step answer of the last round, parsed, with the first step shown as the
+    /// caption if nothing streamed.
+    fn parse_navigate(
+        &self,
+        arguments: &str,
+        emitted_instruction_len: usize,
+        on_chunk: &mut impl FnMut(&str, usize),
+    ) -> Result<NavigateStepResponse> {
         if arguments.trim().is_empty() {
             bail!("{}: Responses API stream produced no function_call_arguments", self.name);
         }
-
-        let resp: NavigateStepResponse = serde_json::from_str(&arguments).map_err(|e| {
+        let resp: NavigateStepResponse = serde_json::from_str(arguments).map_err(|e| {
             anyhow::anyhow!(
                 "{}: function_call arguments didn't match the schema: {} — raw: {}",
                 self.name,
@@ -364,14 +528,12 @@ impl DeepSeekClient {
                 arguments
             )
         })?;
-
         if emitted_instruction_len == 0 {
             if let Some(step) = resp.steps.first() {
                 on_chunk(&step.instruction, resp.steps.len().max(1));
             }
         }
-
-        Ok((resp, input_tokens, output_tokens))
+        Ok(resp)
     }
 
     /// One streamed request. Returns `Ok(None)` when the model produced no usable
@@ -406,7 +568,10 @@ impl DeepSeekClient {
         let mut line_buf = String::new();
 
         let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
+        let mut progress = crate::ai::streaming::AnswerProgress::default();
+        while let Some(chunk_result) =
+            crate::ai::streaming::next_or_stall(&mut stream, progress.update(accumulated_text.len()), &self.name).await?
+        {
             let chunk = chunk_result?;
             line_buf.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -598,6 +763,63 @@ impl DeepSeekClient {
 /// fresh session with no prior assistant turn, so this never surfaced until
 /// real multi-turn history hit it live. Mirror the relay's fix here too —
 /// keep the two in sync.
+/// Counts kept while a Responses stream runs, logged in one line only if it fails.
+struct StreamDiag {
+    started: std::time::Instant,
+    bytes: usize,
+    events: std::collections::BTreeMap<String, u32>,
+    last_event: String,
+}
+
+impl StreamDiag {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            bytes: 0,
+            events: std::collections::BTreeMap::new(),
+            last_event: String::new(),
+        }
+    }
+
+    fn event(&mut self, kind: &str) {
+        *self.events.entry(kind.to_string()).or_default() += 1;
+        self.last_event = kind.to_string();
+    }
+
+    fn log_failure(
+        &self,
+        provider: &str,
+        err: &anyhow::Error,
+        answer_chars: usize,
+        progress: &crate::ai::streaming::AnswerProgress,
+    ) {
+        let grew = progress
+            .grew_at()
+            .map(|t| format!("{} ms ago", t.elapsed().as_millis()))
+            .unwrap_or_else(|| "never".to_string());
+        log::warn!(
+            "[stream] {provider} failed after {} ms: {err}; answer {answer_chars} chars, last grew {grew}; \
+             {} bytes; events {:?}; last event {:?}",
+            self.started.elapsed().as_millis(),
+            self.bytes,
+            self.events,
+            self.last_event
+        );
+    }
+}
+
+/// One `/v1/responses` round: which function the model called, its arguments, and what to
+/// continue from.
+#[derive(Default)]
+struct ResponsesRound {
+    name: String,
+    call_id: String,
+    response_id: String,
+    arguments: String,
+    emitted_instruction_len: usize,
+    usage: UsageDetail,
+}
+
 fn messages_to_responses_input(messages: &[Value]) -> (String, Vec<Value>) {
     let mut instructions = String::new();
     let mut input = Vec::new();
@@ -697,6 +919,8 @@ fn wrap_as_single_step(text: &str) -> NavigateStepResponse {
     NavigateStepResponse {
         goal: String::new(),
         plan_outline: Vec::new(),
+            keep: Vec::new(),
+            app_note: String::new(),
         plan_completed_count: None,
         steps: vec![GuidanceStep {
             instruction: text.to_string(),

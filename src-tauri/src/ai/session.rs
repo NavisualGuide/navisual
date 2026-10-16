@@ -32,6 +32,15 @@ const EVICTION_BATCH: usize = 6;
 /// bound in a chatty session. Oldest-first eviction: if the goal has been restated since, the
 /// first phrasing is the stale one.
 const MAX_PINNED_TURNS: usize = 5;
+/// Earlier turns the list of earlier screens names at most, most recent kept. Each line is about
+/// 20 tokens; past this the oldest are counted rather than listed.
+const MAX_EARLIER_SCREENS: usize = 40;
+/// Screenshots kept in memory for `recall` (H6), newest last.
+const MAX_RECALL_SCREENS: usize = 12;
+/// What the user said, cut to this many characters per line of that list.
+const EARLIER_SAID_CHARS: usize = 80;
+/// Kept notes held at most; past this the oldest goes. About 15 tokens each.
+const MAX_KEPT_NOTES: usize = 15;
 
 /// Whether a string may be used as a frame's file name.
 ///
@@ -106,6 +115,11 @@ pub struct Turn {
     /// Where the pointer landed on that frame, and what it takes to redraw it (§4.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<StoredMark>,
+    /// The title of the window this user turn was guided from, for the list of earlier screens
+    /// (`Session::earlier_screens`). Absent on a whole-screen capture, which has no window, and
+    /// on every turn stored before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
 }
 
 /// What was drawn on a stored frame, kept so the picture can be redrawn WITH its pointer
@@ -182,6 +196,23 @@ pub struct Session {
     pub token_usage: TokenUsage,
     pub started_at: String,
     pub last_active_at: String,
+    /// Facts the model asked to keep (`NavigateStepResponse::keep`), oldest first, never
+    /// rewritten; handed back on every turn by `kept_notes`. `#[serde(default)]` so sessions saved
+    /// before this existed load with none.
+    #[serde(default)]
+    pub kept: Vec<KeptNote>,
+    /// The screenshot each user turn sent, for `recall` (H6) when its switch is on (`RECALL`).
+    /// Memory only -- never serialised, so a stored or reopened session carries none -- and only
+    /// the newest `MAX_RECALL_SCREENS`. Every one of them already went to the provider on its turn.
+    #[serde(skip)]
+    pub recall_screens: Vec<crate::ai::inspect::EarlierScreen>,
+}
+
+/// One kept fact and the turn it was kept on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeptNote {
+    pub turn: usize,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -205,7 +236,26 @@ impl Session {
             token_usage: TokenUsage::default(),
             started_at: now.clone(),
             last_active_at: now,
+            kept: Vec::new(),
+            recall_screens: Vec::new(),
         }
+    }
+
+    /// Keep the screenshot the latest user turn sent, numbered as `earlier_screens` numbers that
+    /// turn, so `recall(turn)` finds the screen the list names.
+    pub fn remember_screen(&mut self, jpeg_b64: String) {
+        let turn = self
+            .conversation
+            .iter()
+            .filter(|t| matches!(t.role.as_str(), "user" | "correction"))
+            .count();
+        if turn == 0 || jpeg_b64.is_empty() {
+            return;
+        }
+        self.recall_screens.retain(|s| s.turn != turn);
+        self.recall_screens.push(crate::ai::inspect::EarlierScreen { turn, jpeg_b64 });
+        let excess = self.recall_screens.len().saturating_sub(MAX_RECALL_SCREENS);
+        self.recall_screens.drain(..excess);
     }
 
     pub fn add_turn(&mut self, role: &str, content: String, screenshot_hash: Option<String>) {
@@ -232,6 +282,7 @@ impl Session {
             advanced_by: None,
             frame: None,
             mark: None,
+            window_title: None,
         });
         self.last_active_at = Local::now().to_rfc3339();
         if pinned {
@@ -316,6 +367,84 @@ impl Session {
             turn.advanced_by = advanced_by;
             turn.frame = frame;
         }
+    }
+
+    /// The window title of the user turn just added -- see `Turn::window_title`. Searches back
+    /// for the user turn, like `set_last_user_turn_facts`. An empty title is no title.
+    pub fn set_last_user_turn_title(&mut self, title: Option<String>) {
+        if let Some(turn) = self.last_user_side_turn() {
+            turn.window_title = title.filter(|t| !t.trim().is_empty());
+        }
+    }
+
+    /// The list of earlier screens (S3/H6, harness-plan.md): one line per earlier user turn --
+    /// its number, the window it was on, what the user said -- so the model knows which window
+    /// each turn was in long after the turn left the window. On the S3 memory battery it held
+    /// every fact a window title carried (an old file name, a deleted note) on all three models,
+    /// where the model's own summary held them by luck. Everything in it already went to the
+    /// model on its own turn; this only says which turn it belonged to. `offer_recall` names the
+    /// H6 tool in the heading when that tool is offered. Empty before the second turn.
+    pub fn earlier_screens(&self, offer_recall: bool) -> String {
+        let turns: Vec<&Turn> = self
+            .conversation
+            .iter()
+            .filter(|t| matches!(t.role.as_str(), "user" | "correction"))
+            .collect();
+        if turns.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from(if offer_recall {
+            "[Earlier screens] Screenshots from earlier turns of this session; recall(turn) shows one again."
+        } else {
+            "[Earlier screens] The window and what the user said on each earlier turn of this session."
+        });
+        let skip = turns.len().saturating_sub(MAX_EARLIER_SCREENS);
+        if skip > 0 {
+            out.push_str(&format!("\n({skip} earlier turns not listed)"));
+        }
+        for (i, t) in turns.iter().enumerate().skip(skip) {
+            let said: String = t.content.chars().take(EARLIER_SAID_CHARS).collect();
+            match t.window_title.as_deref() {
+                Some(title) => out.push_str(&format!("\nturn {}: {title} -- \"{said}\"", i + 1)),
+                None => out.push_str(&format!("\nturn {}: \"{said}\"", i + 1)),
+            }
+        }
+        out
+    }
+
+    /// Add the facts a turn asked to keep, numbered with the latest user turn. A fact already kept
+    /// (case and spacing aside) is not added twice; past `MAX_KEPT_NOTES` the oldest goes.
+    pub fn add_kept(&mut self, notes: &[String]) {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let turn = self
+            .conversation
+            .iter()
+            .filter(|t| matches!(t.role.as_str(), "user" | "correction"))
+            .count();
+        for n in notes {
+            let n = n.trim();
+            if n.is_empty() || self.kept.iter().any(|k| norm(&k.text) == norm(n)) {
+                continue;
+            }
+            self.kept.push(KeptNote { turn, text: n.to_string() });
+        }
+        let over = self.kept.len().saturating_sub(MAX_KEPT_NOTES);
+        if over > 0 {
+            self.kept.drain(..over);
+        }
+    }
+
+    /// The kept notes as the model reads them back, word for word, with the turn each was kept
+    /// on. Empty when there are none.
+    pub fn kept_notes(&self) -> String {
+        if self.kept.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("[Kept notes] Facts kept on earlier turns of this session, word for word:");
+        for k in &self.kept {
+            out.push_str(&format!("\n- (turn {}) {}", k.turn, k.text));
+        }
+        out
     }
 
     /// Record what was drawn for this turn's step, once the locator has decided it.
@@ -595,6 +724,11 @@ impl SessionManager {
 
     /// Keep the `keep` most recent sessions; retire the rest.
     ///
+    /// **A retired session goes to the Recycle Bin** (`retire`), not straight to oblivion: the
+    /// bound exists to keep the list short, not to destroy the user's history, and a prune the
+    /// user did not watch happen must be undoable (on 2026-10-11 a test run pruned six real
+    /// sessions; File History is what brought them back).
+    ///
     /// **The first run archives instead of deleting.** Going from an unbounded store to a
     /// bounded one destroys whatever was already there, and export does not exist yet, so
     /// there would be no way to get any of it back. Surplus moves to `archive-<date>/`
@@ -658,17 +792,19 @@ impl SessionManager {
                     }
                     Err(e) => log::warn!("[sessions] could not archive {path:?}: {e}"),
                 },
-                None => match fs::remove_file(&path) {
+                None => match retire(&path) {
                     Ok(()) => {
                         deleted += 1;
                         // Orphaned frames would outlive the transcript with nothing pointing
                         // at them -- invisible disk creep, and the reason prune knows about
                         // this directory at all.
                         if frames.is_dir() {
-                            let _ = fs::remove_dir_all(&frames);
+                            if let Err(e) = retire(&frames) {
+                                log::warn!("[sessions] retired {} but not its frames: {e}", s.id);
+                            }
                         }
                     }
-                    Err(e) => log::warn!("[sessions] could not remove {path:?}: {e}"),
+                    Err(e) => log::warn!("[sessions] could not retire {path:?}: {e}"),
                 },
             }
         }
@@ -682,11 +818,27 @@ impl SessionManager {
             );
         } else if deleted > 0 {
             log::info!(
-                "[sessions] pruned {deleted} of {}, keeping the most recent {keep}",
+                "[sessions] pruned {deleted} of {} to the Recycle Bin, keeping the most recent {keep}",
                 all.len()
             );
         }
         (deleted, archived)
+    }
+}
+
+/// Send a retired session file or frames folder to the Recycle Bin. Tests delete outright, so a
+/// `cargo test` run never fills the developer's Recycle Bin with temp files.
+#[cfg(all(windows, not(test)))]
+fn retire(path: &Path) -> std::io::Result<()> {
+    crate::recycle::to_recycle_bin(path)
+}
+
+#[cfg(any(not(windows), test))]
+fn retire(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
     }
 }
 
@@ -837,6 +989,80 @@ mod tests {
         );
         assert!(!dir.join("frames").join("evil.png").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `recall(turn)` must find the screen the list of earlier screens numbers that way, and only
+    /// the newest screens stay in memory.
+    #[test]
+    fn remembered_screens_carry_the_turn_number_the_list_shows() {
+        let mut s = Session::new("t".into());
+        s.remember_screen("before any turn".into());
+        assert!(s.recall_screens.is_empty(), "no user turn yet, nothing to number it with");
+        s.add_turn("user", "open the file".into(), None);
+        s.remember_screen("shot1".into());
+        s.add_turn("assistant", "click File".into(), None);
+        s.add_turn("correction", "that was wrong".into(), None);
+        s.remember_screen("shot2".into());
+        let turns: Vec<(usize, &str)> = s.recall_screens.iter().map(|e| (e.turn, e.jpeg_b64.as_str())).collect();
+        assert_eq!(turns, vec![(1, "shot1"), (2, "shot2")]);
+        assert!(s.earlier_screens(true).contains("turn 2: \"that was wrong\""), "{}", s.earlier_screens(true));
+        for i in 0..20 {
+            s.add_turn("user", format!("Next {i}"), None);
+            s.remember_screen(format!("shot{}", i + 3));
+        }
+        assert_eq!(s.recall_screens.len(), super::MAX_RECALL_SCREENS);
+        assert_eq!(s.recall_screens.last().unwrap().turn, 22, "the newest kept");
+        let stored = serde_json::to_string(&s).unwrap();
+        assert!(!stored.contains("shot22"), "screens are never written with the session");
+    }
+
+    #[test]
+    fn earlier_screens_name_each_user_turn_with_its_window() {
+        let mut s = Session::new("t".into());
+        assert!(s.earlier_screens(false).is_empty(), "nothing before the second turn");
+        s.add_turn_pinned("user", "Rename this note to Q3 budget.".into(), None, true);
+        s.set_last_user_turn_title(Some("Contoso Notes - Q3 planning".into()));
+        s.add_turn("assistant", "Double-click the name.".into(), None);
+        s.add_turn("user", "Next".into(), None);
+        s.set_last_user_turn_title(Some("  ".into()));
+        s.add_turn("assistant", "Type Q3 budget.".into(), None);
+        let list = s.earlier_screens(false);
+        assert!(list.starts_with("[Earlier screens] The window and what the user said"), "{list}");
+        assert!(list.contains("\nturn 1: Contoso Notes - Q3 planning -- \"Rename this note to Q3 budget.\""));
+        assert!(list.ends_with("\nturn 2: \"Next\""), "a blank title is no title: {list}");
+        assert!(s.earlier_screens(true).contains("recall(turn) shows one again"));
+        assert!(!list.contains("Double-click"), "the assistant's words are not listed");
+    }
+
+    #[test]
+    fn kept_notes_only_grow_and_never_repeat() {
+        let mut s = Session::new("t".into());
+        assert!(s.kept_notes().is_empty());
+        s.add_turn("user", "I opened Share.".into(), None);
+        s.add_kept(&["Share code: 7Q4-KM2".into(), "  ".into()]);
+        s.add_turn("assistant", "Send the code.".into(), None);
+        s.add_turn("user", "Next".into(), None);
+        s.add_kept(&["share  code: 7q4-km2".into(), "Offsite: 14 November".into()]);
+        assert_eq!(s.kept.len(), 2, "the same fact is not kept twice");
+        let block = s.kept_notes();
+        assert!(block.contains("\n- (turn 1) Share code: 7Q4-KM2\n- (turn 2) Offsite: 14 November"), "{block}");
+        for i in 0..20 {
+            s.add_kept(&[format!("fact {i}")]);
+        }
+        assert_eq!(s.kept.len(), 15);
+        assert_eq!(s.kept.last().unwrap().text, "fact 19");
+    }
+
+    #[test]
+    fn earlier_screens_count_what_they_leave_out() {
+        let mut s = Session::new("t".into());
+        for i in 0..45 {
+            s.add_turn("user", format!("request {i}"), None);
+            s.add_turn("assistant", "ok".into(), None);
+        }
+        let list = s.earlier_screens(false);
+        assert!(list.contains("(5 earlier turns not listed)"), "{list}");
+        assert!(list.contains("\nturn 6: \"request 5\"") && list.ends_with("turn 45: \"request 44\""));
     }
 
     #[test]

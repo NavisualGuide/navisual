@@ -10,7 +10,7 @@ use crate::ai::types::{GuidanceStep, Message, NavigateStepResponse, Role};
 /// Appended to the system prompt so the model knows to return JSON.
 /// Vision models in Ollama don't support the tools/function-calling API,
 /// so we use prompt engineering instead and parse JSON from the text response.
-const JSON_FORMAT_INSTRUCTION: &str = r#"
+pub(crate) const JSON_FORMAT_INSTRUCTION: &str = r#"
 
 IMPORTANT: Respond ONLY with a single valid JSON object — no markdown, no explanation. The top-level object has exactly three keys: "steps", "state_summary", "needs_input".
 
@@ -40,10 +40,12 @@ Step fields (inside "steps" array only):
 
 Top-level fields (outside "steps", required):
 - goal: the user's overall objective, carried across turns. MERGE later detail into it rather than replacing it ('centre them at the bottom' refines the goal, it is not a new goal); replace it outright only on a genuine task switch; omit to leave it unchanged
-- state_summary: your ONLY memory between turns (earlier turns are truncated away). Rewrite it in full each turn carrying the user's GOAL in their own words, any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED
+- state_summary: your ONLY memory between turns (earlier turns are truncated away). Rewrite it in full each turn carrying the user's GOAL in their own words, any CONSTRAINTS they stated, what is DONE, anything TRIED THAT FAILED, and anything you have SEEN on an earlier screen that the user may still need once it is gone, copied exactly
 - needs_input: true only if you must ask the user a question before continuing
 
 Optional top-level field:
+- keep: facts the user may still need after they leave the screen, each copied exactly as shown; kept notes come back on every later turn and are never rewritten, so add each once and never repeat one already kept (omit when there is nothing new)
+- app_note: only when the prompt asks for a learned note, that one line; otherwise omit
 - suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence"#;
 
 pub struct OllamaClient {
@@ -249,6 +251,8 @@ impl OllamaClient {
         let fallback = NavigateStepResponse {
             goal: String::new(),
             plan_outline: Vec::new(),
+            keep: Vec::new(),
+            app_note: String::new(),
             plan_completed_count: None,
             steps: vec![GuidanceStep {
                 instruction: text.clone(),

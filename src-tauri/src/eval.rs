@@ -76,6 +76,43 @@ struct Fixture {
     /// "no list", the case for apps without an accessibility tree or over the 300 cap.
     #[serde(default)]
     elements_block: Option<String>,
+    /// The same list with each element's state (`Config::list_states`), written by the capture
+    /// test; the `list_states` variant sends it in place of `elements_block`.
+    #[serde(default)]
+    elements_block_states: Option<String>,
+    /// H3: the accessibility snapshot taken with the screenshot (`a11y::snapshot_ui_tree`), a JSON
+    /// file next to `image`. The `ui_tree` variant offers it; every other run ignores it.
+    #[serde(default)]
+    ui_snapshot: Option<String>,
+    /// With `avoid_text`: the answer must also say why the trap is wrong (`instruction_any`), and a
+    /// step that points at the trap while saying so is not taking it -- "Paste is disabled because
+    /// nothing is copied" with the pointer on the greyed button is the right answer, and "press
+    /// Ctrl+V to paste" with no pointer is not. Off by default, so older batteries grade as they did.
+    #[serde(default)]
+    say_why: bool,
+    /// H7b: a learned guide for the app (`packs::guide`), a file relative to the item directory --
+    /// one per battery, shared by its items. Sent the way the app sends one, unless the variant is
+    /// `no_guide`; `stale_guide` sends `guide_stale` instead, an older edition the app has moved on
+    /// from.
+    #[serde(default)]
+    guide: Option<String>,
+    #[serde(default)]
+    guide_stale: Option<String>,
+    /// L2 step 2: the guide `packs::learn` writes after one guided session per task -- paths
+    /// only, no prose. The `local_guide` variant sends it.
+    #[serde(default)]
+    guide_local: Option<String>,
+    /// The files' text, read by `load_fixtures`.
+    #[serde(skip)]
+    guide_text: Option<String>,
+    #[serde(skip)]
+    guide_stale_text: Option<String>,
+    #[serde(skip)]
+    guide_local_text: Option<String>,
+    /// L2 option B: the request `packs::learn` adds to the prompt right after a note is written,
+    /// asking for the model's `app_note`. The answer is read from the result row.
+    #[serde(default)]
+    learn_request: Option<LearnRequest>,
     pass_if: PassIf,
     #[serde(default)]
     target_text_any: Vec<String>,
@@ -115,6 +152,16 @@ struct Fixture {
     /// screen after the user acted, and the answer graded is the model's reply to it.
     #[serde(default)]
     continuation: Option<Continuation>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LearnRequest {
+    app: String,
+    title: String,
+    path: Vec<String>,
+    /// The note's current line, for a rewrite request.
+    #[serde(default)]
+    line: Option<String>,
 }
 
 /// Turn 1 of an S2 item, canned so both arms of a comparison see the same history and differ
@@ -167,7 +214,7 @@ impl RunConfig {
         );
         let battery = env_or("NAVISUAL_EVAL_BATTERY", "s1");
         let provider = env_or("NAVISUAL_EVAL_PROVIDER", "gemini");
-        let model = env_or("NAVISUAL_EVAL_MODEL", "gemini-3.7-flash");
+        let model = env_or("NAVISUAL_EVAL_MODEL", "gemini-3.8-flash");
         // Unset = no reasoning field at all, which is what the managed tiers send
         // (settings.md: the tiers do not read REASONING_EFFORT).
         let reasoning = std::env::var("NAVISUAL_EVAL_REASONING")
@@ -190,8 +237,11 @@ impl RunConfig {
         // opposite, `with_rect`, reproduces the prompt from before, for comparison runs.
         // `expect` turns on H1 (Config::expected_result): rule 19 and the step field.
         assert!(
-            ["", "with_rect", "expect"].contains(&variant.as_str()),
-            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect)"
+            ["", "with_rect", "expect", "inspect", "inspect_note", "inspect_first", "read_text", "read_text_first", "look_both", "recall", "recall3", "no_list", "ui_tree", "list_states", "list_plain", "no_guide", "stale_guide", "local_guide", "file_guide"]
+                .contains(&variant.as_str()),
+            "unknown NAVISUAL_EVAL_VARIANT {variant:?} (known: with_rect, expect, inspect, inspect_note, \
+             inspect_first, read_text, read_text_first, look_both, recall, recall3, no_list, ui_tree, list_states, list_plain, \
+             no_guide, stale_guide, local_guide, file_guide)"
         );
         let rescore = std::env::var("NAVISUAL_EVAL_RESCORE")
             .ok()
@@ -237,8 +287,16 @@ fn load_fixtures(rc: &RunConfig) -> Vec<(PathBuf, Fixture)> {
     dirs.into_iter()
         .map(|d| {
             let text = std::fs::read_to_string(d.join("item.json")).expect("item.json");
-            let fx: Fixture = serde_json::from_str(&text)
+            let mut fx: Fixture = serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("{}: {e}", d.join("item.json").display()));
+            let read = |f: &Option<String>| {
+                f.as_ref().map(|f| {
+                    std::fs::read_to_string(d.join(f)).unwrap_or_else(|e| panic!("{}: {e}", d.join(f).display()))
+                })
+            };
+            fx.guide_text = read(&fx.guide);
+            fx.guide_stale_text = read(&fx.guide_stale);
+            fx.guide_local_text = read(&fx.guide_local);
             (d, fx)
         })
         .filter(|(_, fx)| rc.only.is_empty() || rc.only.iter().any(|o| o == &fx.id))
@@ -256,6 +314,50 @@ fn encode_fixture(path: &Path) -> (String, usize, u32, u32) {
     (capture::to_base64(&jpeg), len, w, h)
 }
 
+/// The [Screen Elements] block an item sends. Without a variant it follows the app's own default
+/// (`Config::list_states`, on since 2026-10-10), so "no variant" still means "what the app sends";
+/// `list_plain` sends the block without states, `list_states` the block with them. A fixture
+/// captured before states existed has only the plain block.
+fn elements_for<'a>(fx: &'a Fixture, variant: &str) -> &'a str {
+    let states = match variant {
+        "list_plain" => false,
+        "list_states" => true,
+        _ => crate::ai::config::Config::default().list_states,
+    };
+    match (states, fx.elements_block_states.as_deref()) {
+        (true, Some(b)) => b,
+        _ => fx.elements_block.as_deref().unwrap_or(""),
+    }
+}
+
+/// The learned-guide block an item sends (H7b), through the app's own parser and selection, with
+/// the task as the focus -- `guide` adds the session's goal, which a turn-1 item does not have yet.
+fn guide_for(fx: &Fixture, variant: &str) -> String {
+    // `file_guide`: one guide for the whole run, from a file -- a model's own written lines.
+    let from_file = (variant == "file_guide").then(|| {
+        let f = std::env::var("NAVISUAL_EVAL_GUIDE_FILE").expect("file_guide needs NAVISUAL_EVAL_GUIDE_FILE");
+        std::fs::read_to_string(&f).unwrap_or_else(|e| panic!("{f}: {e}"))
+    });
+    let text = match variant {
+        "no_guide" => None,
+        "stale_guide" => fx.guide_stale_text.as_deref(),
+        "local_guide" => fx.guide_local_text.as_deref(),
+        "file_guide" => from_file.as_deref(),
+        _ => fx.guide_text.as_deref(),
+    };
+    let mut block = text
+        .map(|t| {
+            crate::packs::guide::Guide::parse(t, PathBuf::new())
+                .unwrap_or_else(|| panic!("{}: the guide does not parse", fx.id))
+                .block(&fx.task)
+        })
+        .unwrap_or_default();
+    if let Some(r) = &fx.learn_request {
+        block.push_str(&crate::packs::learn::request_block(&r.app, &r.title, &r.path, r.line.as_deref()));
+    }
+    block
+}
+
 /// The turn-2 prompt `guide` would build after the user acted: the `[User completed: "…"]`
 /// line (with use A's expectation when the variant turns H1 on, exactly as `guide` adds it), the
 /// window context with the click record, and the tail anchors.
@@ -266,8 +368,8 @@ fn continuation_prompt(fx: &Fixture, c: &Continuation, voice_language: &str, var
     let click = c.click.as_ref().map(|[role, name]| crate::last_click::prompt_line(role, name));
     let window_context = crate::window_context_text(
         Some(&capture::format_window_prompt_info(&fx.window_title)),
-        "",
-        fx.elements_block.as_deref().unwrap_or(""),
+        &guide_for(fx, variant),
+        elements_for(fx, variant),
         crate::os_context_line(),
         None,
         click.as_deref(),
@@ -310,8 +412,8 @@ fn item_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
     }
 }
 
-/// The turn-1 prompt `guide` would build for this window: no pack, no app-state channel and
-/// no click record, because a fixture has none of them.
+/// The turn-1 prompt `guide` would build for this window: no authored pack, no app-state channel
+/// and no click record, because a fixture has none of them; a learned guide when it has one.
 fn fixture_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
     let info = match variant {
         // The prompt before 2026-10-07: the title AND the window's frame.
@@ -320,8 +422,8 @@ fn fixture_prompt(fx: &Fixture, voice_language: &str, variant: &str) -> String {
     };
     let window_context = crate::window_context_text(
         Some(&info),
-        "",
-        fx.elements_block.as_deref().unwrap_or(""),
+        &guide_for(fx, variant),
+        elements_for(fx, variant),
         crate::os_context_line(),
         None,
         None,
@@ -473,14 +575,23 @@ fn score(fx: &Fixture, resp: &NavigateStepResponse, w: u32, h: u32) -> (Outcome,
             } else {
                 resp.steps.iter().collect()
             };
+            let explains = |s: &crate::ai::types::GuidanceStep| {
+                let t = normalize(&s.instruction);
+                fx.instruction_any.iter().any(|p| contains_phrase(&t, &normalize(p)))
+            };
             let trap = considered.into_iter().find(|s| {
-                s.target_text
+                let points = s
+                    .target_text
                     .as_deref()
                     .is_some_and(|t| text_matches(t, &fx.target_text_none))
-                    || matches!((fx.avoid_rect, real_bbox(s.target_bbox)), (Some(r), Some(b)) if inside(bbox_centre(b, w, h), r))
+                    || matches!((fx.avoid_rect, real_bbox(s.target_bbox)), (Some(r), Some(b)) if inside(bbox_centre(b, w, h), r));
+                points && !(fx.say_why && explains(s))
             });
             match trap {
                 Some(s) => (Outcome::Wrong, format!("instructed the trap: {:?}", s.instruction)),
+                None if fx.say_why && !said_it => {
+                    (Outcome::Wrong, format!("never said why: {first_instruction:?}"))
+                }
                 None => (
                     Outcome::Pass,
                     format!("avoided the trap; first instruction: {first_instruction:?}"),
@@ -624,7 +735,30 @@ fn base_config(rc: &RunConfig) -> Config {
     // Set from the variant alone, never inherited from the .env: a hand-set EXPECTED_RESULT
     // left on there would otherwise turn every "production" run into an H1 run, silently.
     config.expected_result = h1_on(&rc.variant);
+    // H2: the zoom tool, offered by the router only when the frame was reduced below
+    // inspect::MIN_SCALE -- so on a 1080p fixture this variant sends what production sends.
+    // H4: `read_text` alone (the model's choice, or forced first), or both tools by choice.
+    use crate::ai::inspect::{Mode, Tools};
+    (config.inspect, config.inspect_tools) = match rc.variant.as_str() {
+        "inspect" => (Mode::Choice, Tools::Zoom),
+        "inspect_note" => (Mode::Note, Tools::Zoom),
+        "inspect_first" => (Mode::First, Tools::Zoom),
+        "read_text" => (Mode::Choice, Tools::Text),
+        "read_text_first" => (Mode::First, Tools::Text),
+        "look_both" => (Mode::Choice, Tools::Both),
+        _ => (Mode::Off, Tools::Zoom),
+    };
+    // The list of earlier screens is the app's default now; `no_list` takes it away. Set here,
+    // never inherited from the .env.
+    config.earlier_screens = rc.variant != "no_list";
+    // `recall3`: one recall may return up to three screens (the higher tier's setting).
+    config.recall_max = if rc.variant == "recall3" { 3 } else { 1 };
     config
+}
+
+/// Whether a variant hands the router the native frame for a look tool.
+fn config_looks(variant: &str) -> bool {
+    variant.starts_with("inspect") || variant.starts_with("read_text") || variant == "look_both"
 }
 
 fn append_line(path: &Path, value: &serde_json::Value) {
@@ -725,6 +859,158 @@ fn use_b_local_check() {
     }
 }
 
+/// H4 step 0, no model call: what Windows.Media.Ocr reads off each fixture of a battery, whole
+/// at 1x and tiled at 2x and 3x (Lanczos3, as `try_region_ocr` upscales). Prints every line
+/// with its box in fixture pixels. `NAVISUAL_EVAL_OCR_ITEMS` (comma-separated ids) narrows it.
+#[test]
+#[ignore = "reads the fixtures; run by name"]
+fn ocr_probe() {
+    println!();
+    let dir = PathBuf::from(std::env::var("NAVISUAL_EVAL_DIR").expect("NAVISUAL_EVAL_DIR"));
+    let root = dir.join(std::env::var("NAVISUAL_EVAL_BATTERY").unwrap_or_else(|_| "s2b_2160".into()));
+    let only: Vec<String> = std::env::var("NAVISUAL_EVAL_OCR_ITEMS")
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+    let mut ids: Vec<PathBuf> = std::fs::read_dir(&root)
+        .expect("battery dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("item.json").is_file())
+        .collect();
+    ids.sort();
+    let png = |img: &image::RgbImage| -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).expect("png");
+        buf.into_inner()
+    };
+    for d in ids {
+        let fx: Fixture =
+            serde_json::from_str(&std::fs::read_to_string(d.join("item.json")).unwrap()).unwrap();
+        if !only.is_empty() && !only.contains(&fx.id) {
+            continue;
+        }
+        let img = image::open(d.join(&fx.image)).expect("image").to_rgb8();
+        let (w, h) = img.dimensions();
+        println!("=== {} ({w}x{h})", fx.id);
+        for up in [1u32, 2, 3] {
+            // Tiles small enough that the upscaled tile stays under the engine's size limit,
+            // overlapping by 60 px so a line cut by one edge is whole in the neighbour.
+            let (tw, th) = if up == 1 { (w, h) } else { (1280.min(w), 720.min(h)) };
+            let started = Instant::now();
+            let mut lines: Vec<(u32, u32, u32, u32, String)> = Vec::new();
+            let mut y = 0;
+            loop {
+                let mut x = 0;
+                loop {
+                    let cw = tw.min(w - x);
+                    let ch = th.min(h - y);
+                    let tile = image::imageops::crop_imm(&img, x, y, cw, ch).to_image();
+                    let tile = if up == 1 {
+                        tile
+                    } else {
+                        image::imageops::resize(&tile, cw * up, ch * up, image::imageops::FilterType::Lanczos3)
+                    };
+                    match crate::locator::ocr::run_ocr(&png(&tile)) {
+                        Ok(rs) => {
+                            // run_ocr returns each line, then its words; keep the lines only --
+                            // a line is the one whose box contains the words that follow it.
+                            let mut last: Option<(i32, i32, u32, u32)> = None;
+                            for r in rs {
+                                let inside = last.is_some_and(|(lx, ly, lw, lh)| {
+                                    r.bbox.0 >= lx
+                                        && r.bbox.1 >= ly
+                                        && r.bbox.0 + r.bbox.2 as i32 <= lx + lw as i32
+                                        && r.bbox.1 + r.bbox.3 as i32 <= ly + lh as i32
+                                        && r.text.split(' ').count() == 1
+                                });
+                                if inside {
+                                    continue;
+                                }
+                                last = Some(r.bbox);
+                                let bx = x + (r.bbox.0.max(0) as u32) / up;
+                                let by = y + (r.bbox.1.max(0) as u32) / up;
+                                lines.push((bx, by, r.bbox.2 / up, r.bbox.3 / up, r.text));
+                            }
+                        }
+                        Err(e) => println!("  [{up}x] tile {x},{y}: {e}"),
+                    }
+                    if x + cw >= w {
+                        break;
+                    }
+                    x += cw - 60;
+                }
+                if y + th.min(h - y) >= h {
+                    break;
+                }
+                y += th - 60;
+            }
+            lines.sort_by_key(|l| (l.1 / 8, l.0));
+            lines.dedup_by(|a, b| a.4 == b.4 && a.0.abs_diff(b.0) < 40 && a.1.abs_diff(b.1) < 40);
+            println!("  -- {up}x: {} line(s), {} ms", lines.len(), started.elapsed().as_millis());
+            for (x, y, lw, lh, t) in &lines {
+                println!("  [{up}x] ({x:4},{y:4} {lw:4}x{lh:2}) {t}");
+            }
+        }
+    }
+}
+
+/// H3 fixtures from a real window: `NAVISUAL_CAPTURE_TITLE` (a substring of its title, the
+/// front-most match), `NAVISUAL_CAPTURE_EXCLUDE` (optional), `NAVISUAL_CAPTURE_OUT` (the item
+/// directory). Writes `screen.png` through the app's own capture, `ui.json` from
+/// `a11y::snapshot_ui_tree`, and `item.json` with the production [Screen Elements] block --
+/// empty when the app's own enumeration skips it (over the cap, or no tree) -- and an empty task
+/// for a person to write. No model call.
+#[cfg(windows)]
+#[test]
+#[ignore = "captures a live window; run by name"]
+fn capture_ui_fixture() {
+    let title = std::env::var("NAVISUAL_CAPTURE_TITLE").expect("NAVISUAL_CAPTURE_TITLE");
+    let exclude = std::env::var("NAVISUAL_CAPTURE_EXCLUDE").unwrap_or_default();
+    let out = PathBuf::from(std::env::var("NAVISUAL_CAPTURE_OUT").expect("NAVISUAL_CAPTURE_OUT"));
+    std::fs::create_dir_all(&out).expect("out dir");
+    let hwnd = crate::capture::find_window_by_title(&title, &exclude).expect("no window with that title");
+    let info = crate::capture::get_window_info_for_hwnd(hwnd).expect("window info");
+    let rect = info.rect;
+    let img = crate::capture::capture_region_raw(rect, &[]).expect("capture");
+    img.save(out.join("screen.png")).expect("png");
+    let window_title = crate::capture::get_window_title(hwnd);
+    let (elements_block, elements_block_states, sc) = match crate::locator::a11y::enumerate_context_elements(hwnd) {
+        Ok(els) => (
+            crate::ai::prompts::elements_context_block(&els, rect),
+            crate::ai::prompts::elements_context_block_with(&els, rect, true),
+            format!("{} elements, {} with a state", els.len(), els.iter().filter(|e| e.state.is_some()).count()),
+        ),
+        Err(e) => (String::new(), String::new(), e),
+    };
+    let nodes = crate::locator::a11y::snapshot_ui_tree(hwnd).unwrap_or_else(|e| panic!("snapshot: {e}"));
+    std::fs::write(out.join("ui.json"), serde_json::to_string_pretty(&nodes).unwrap()).expect("ui.json");
+    let id = out.file_name().unwrap().to_string_lossy().to_string();
+    let item = serde_json::json!({
+        "id": id,
+        "task": "",
+        "window_title": window_title,
+        "window_rect": [rect.x, rect.y, rect.x + rect.width as i32, rect.y + rect.height as i32],
+        "image": "screen.png",
+        "pass_if": "text_or_bbox",
+        "target_text_any": [],
+        "target_text_none": [],
+        "target_rect": null,
+        "avoid_rect": null,
+        "notes": "",
+        "elements_block": if elements_block.is_empty() { serde_json::Value::Null } else { serde_json::json!(elements_block) },
+        "elements_block_states": if elements_block_states.is_empty() { serde_json::Value::Null } else { serde_json::json!(elements_block_states) },
+        "ui_snapshot": "ui.json",
+    });
+    std::fs::write(out.join("item.json"), serde_json::to_string_pretty(&item).unwrap() + "\n").expect("item.json");
+    println!(
+        "\n[capture] {id}: {}x{} at ({},{}) | {window_title:?} | Screen Elements: {sc} | ui_tree: {} nodes",
+        rect.width,
+        rect.height,
+        rect.x,
+        rect.y,
+        nodes.len()
+    );
+}
+
 /// Run one battery against one provider/model. Configured entirely by environment
 /// variables -- see `tools/run-replay.ps1`, which sets them.
 #[tokio::test]
@@ -797,6 +1083,23 @@ async fn replay_battery() {
             let (b64, jpeg_len, w, h) = encode_fixture(&dir.join(&fx.image));
             let prompt = item_prompt(fx, &rc.voice_language, &rc.variant);
             prime_session(&mut router, fx);
+            // H3: the item's accessibility snapshot, mapped onto its capture rect.
+            router.ui_snapshot = match (&fx.ui_snapshot, rc.variant == "ui_tree") {
+                (Some(file), true) => {
+                    let nodes: Vec<crate::locator::UiNode> = serde_json::from_str(
+                        &std::fs::read_to_string(dir.join(file)).expect("ui snapshot"),
+                    )
+                    .expect("ui snapshot json");
+                    let [l, t, r, b] = fx.window_rect;
+                    Some(std::sync::Arc::new(crate::ai::inspect::UiSource { nodes, capture: [l, t, r - l, b - t] }))
+                }
+                _ => None,
+            };
+            router.inspect_frame = config_looks(&rc.variant).then(|| {
+                std::sync::Arc::new(
+                    image::open(dir.join(&fx.image)).expect("fixture image").to_rgb8(),
+                )
+            });
 
             let started = Instant::now();
             let mut first_token: Option<Instant> = None;
@@ -810,6 +1113,8 @@ async fn replay_battery() {
             let total_ms = started.elapsed().as_millis();
             let ttft_ms = first_token.map(|t| t.duration_since(started).as_millis());
             let detail = router.take_client_usage();
+            let inspects = router.take_inspects();
+            let served_model = router.take_served_model();
             let (bill_in, bill_out) = router.get_last_usage();
 
             let mut row = serde_json::json!({
@@ -828,6 +1133,8 @@ async fn replay_battery() {
                 "class": fx.continuation.as_ref().map(|c| c.class.clone()),
                 "ttft_ms": ttft_ms,
                 "total_ms": total_ms,
+                "inspects": inspects,
+                "served_model": served_model,
             });
             match result {
                 Ok(resp) => {
@@ -913,6 +1220,463 @@ async fn replay_battery() {
     println!("[eval] results: {}", rc.out.display());
 }
 
+// ================================================================== S3: working memory
+
+/// S3 (harness-plan.md): one scripted session. Every turn is something the user typed with the
+/// screen they typed it on; the model's answers are recorded into the session exactly as `guide`
+/// records them (`record_exchange`), so what reaches turn k is the app's own working memory --
+/// the window, the pinned user turns, the model's rolling summary and goal. A fact shows on
+/// screen up to `fact_turn` and never again; each probe asks for it at `distance` turns after,
+/// on a branch the main line never sees.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SessionFixture {
+    id: String,
+    /// before_edit | closed_dialog | gone_toast | other_view -- what kind of fact.
+    kind: String,
+    /// The fact, for people reading the item.
+    fact: String,
+    /// 1-based: the last turn whose screen shows the fact.
+    fact_turn: usize,
+    /// Text that IS the fact; an answer recalls it when what the user is told contains one.
+    expect_any: Vec<String>,
+    /// The other candidates on the probe screen: an answer naming one of them alongside the fact
+    /// listed the choices rather than remembering (luna, first run, the four Trash notes).
+    #[serde(default)]
+    distractors: Vec<String>,
+    /// Where the fact can still be found in the app: an answer that sends the user there is
+    /// `looked` -- the right result one step later, not memory.
+    #[serde(default)]
+    lookup_any: Vec<String>,
+    turns: Vec<SessionTurn>,
+    probes: Vec<SessionProbe>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SessionTurn {
+    image: String,
+    title: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SessionProbe {
+    /// Sent as turn `fact_turn + distance`.
+    distance: usize,
+    image: String,
+    title: String,
+    text: String,
+}
+
+/// Every `session.json` under the battery directory, in directory order.
+fn load_sessions(rc: &RunConfig) -> Vec<(PathBuf, SessionFixture)> {
+    let root = rc.dir.join(&rc.battery);
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("session.json").is_file())
+        .collect();
+    dirs.sort();
+    dirs.into_iter()
+        .map(|d| {
+            let text = std::fs::read_to_string(d.join("session.json")).expect("session.json");
+            let sx: SessionFixture = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{}: {e}", d.join("session.json").display()));
+            (d, sx)
+        })
+        .filter(|(_, sx)| rc.only.is_empty() || rc.only.iter().any(|o| o == &sx.id))
+        .collect()
+}
+
+/// The prompt and the summary argument `guide` would send for turn `k` of a typed session: turn 1
+/// is a new task, every later turn a typed reply (the panel is guiding, so `isReply`).
+/// The list of earlier screens comes from the session through `with_earlier_screens`, exactly as
+/// `guide` adds it, so it is never stored in history and the anchors stay last.
+#[allow(clippy::too_many_arguments)]
+fn session_prompt(
+    k: usize,
+    text: &str,
+    title: &str,
+    original_task: &str,
+    sample: Option<&str>,
+    voice_language: &str,
+    session: Option<&crate::ai::session::Session>,
+    list_on: bool,
+    offer_recall: bool,
+) -> String {
+    let window_context = crate::window_context_text(
+        Some(&capture::format_window_prompt_info(title)),
+        "",
+        "",
+        crate::os_context_line(),
+        None,
+        None,
+    );
+    let window_context = crate::with_session_memory(window_context, session, list_on, offer_recall);
+    if k == 1 {
+        crate::compose_turn1_prompt(text, &window_context, sample, voice_language)
+    } else {
+        crate::compose_reply_prompt(text, &window_context, original_task, sample, voice_language)
+    }
+}
+
+fn normalize_fact(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn has_fact(text: &str, expect_any: &[String]) -> bool {
+    let t = normalize_fact(text);
+    expect_any.iter().any(|e| {
+        let e = normalize_fact(e);
+        !e.is_empty() && t.contains(&e)
+    })
+}
+
+/// What the user gets: every instruction, every target_text, and anything put on their clipboard
+/// -- luna answered "paste the offsite details" with the date on the clipboard.
+fn told(resp: &NavigateStepResponse) -> String {
+    resp.steps
+        .iter()
+        .map(|s| {
+            format!(
+                "{} {} {}",
+                s.instruction,
+                s.target_text.as_deref().unwrap_or(""),
+                s.clipboard.as_deref().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// A probe's outcome. `recalled`: the fact is in what the user is told, and no distractor with
+/// it. `carried`: not yet, but it is in this answer's own summary, goal or plan -- an answer is
+/// 1-4 steps, and the first run had terra open the rename command now and keep the old name for
+/// the next step. `looked`: it sends the user back to where the fact still is. `denied`: it says
+/// the fact never existed ("No share code was shown earlier in our session" -- flash, first run),
+/// which tells the user they misremember. `asked`: the answer asks or admits it cannot tell -- an
+/// honest miss. `missed`: it answered without the fact, which includes guessing. The phrase lists
+/// are a first sort; read the answers.
+fn probe_outcome(resp: &NavigateStepResponse, sx: &SessionFixture) -> &'static str {
+    let said = told(resp);
+    if has_fact(&said, &sx.expect_any) && !has_fact(&said, &sx.distractors) {
+        return "recalled";
+    }
+    let kept = format!("{} {} {}", resp.state_summary, resp.goal, resp.plan_outline.join(" "));
+    if has_fact(&kept, &sx.expect_any) && !has_fact(&kept, &sx.distractors) {
+        return "carried";
+    }
+    if has_fact(&said, &sx.lookup_any) {
+        return "looked";
+    }
+    let l = said.to_lowercase().replace('\u{2019}', "'");
+    let denial = [
+        "not mentioned", "wasn't mentioned", "was not shown", "wasn't shown", "never shown",
+        "was not displayed", "wasn't displayed", "no earlier", "there was no", "there is no record",
+    ];
+    // "No share code was shown earlier": the negation sits before the noun.
+    let no_noun = (l.starts_with("no ") || l.contains(" no "))
+        && (l.contains("was shown earlier") || l.contains("was displayed earlier"));
+    if no_noun || denial.iter().any(|p| l.contains(p)) {
+        return "denied";
+    }
+    let honest = [
+        "don't know", "do not know", "not sure", "can't see", "cannot see", "can't tell",
+        "cannot tell", "no longer", "not visible", "isn't visible", "remind me", "what was",
+        "which note", "do you remember", "if you remember", "don't have", "do not have",
+        "not shown", "unable to",
+    ];
+    if resp.needs_input || honest.iter().any(|p| l.contains(p)) {
+        "asked"
+    } else {
+        "missed"
+    }
+}
+
+/// S3: replay each session, probing at its distances. `NAVISUAL_EVAL_WINDOW` sets the
+/// conversation window in exchanges (the app's is 5) -- the memory plan's 3 / 5 / 8 A/B.
+#[tokio::test]
+#[ignore = "spends real BYOK money; run via tools/run-replay.ps1 -Sessions"]
+async fn replay_sessions() {
+    println!();
+    let rc = RunConfig::from_env();
+    // The 2026-10-10 `remember` ablation is rule 16 now; results tagged `remember` are that rule.
+    // The app's default carries the list of earlier screens; `no_list` takes it away. `recall`:
+    // H6, every earlier screen of the session offered to `recall` on every turn. (Before the list
+    // was the default, the 2026-10-10 `earlier_list` runs were the list alone.)
+    assert!(
+        ["", "recall", "recall3", "no_list"].contains(&rc.variant.as_str()),
+        "S3 variants: none, recall, recall3, no_list"
+    );
+    let list_on = rc.variant != "no_list";
+    let recall_on = rc.variant.starts_with("recall");
+    // `inline`: each probe is recorded into the session as the turn it was, so a later probe
+    // sees what an earlier one looked up -- and whether the model wrote it down. `branch` (the
+    // default): each probe is asked on a copy the main line never sees.
+    let inline = env_or("NAVISUAL_EVAL_PROBES", "branch") == "inline";
+    let window: usize = env_or("NAVISUAL_EVAL_WINDOW", "0").parse().unwrap_or(0);
+    let sessions = load_sessions(&rc);
+    assert!(!sessions.is_empty(), "no sessions under {}", rc.dir.join(&rc.battery).display());
+    let session_dir = std::env::temp_dir().join(format!("navisual-eval-{}", std::process::id()));
+    let mut router = AiRouter::new(
+        base_config(&rc),
+        CostTracker::new(None),
+        SessionManager::new(session_dir),
+        None,
+    );
+    if window > 0 {
+        router.conversation_exchanges = window;
+    }
+    let mut out = if window > 0 {
+        rc.out.with_file_name(format!(
+            "{}-w{window}.jsonl",
+            rc.out.file_stem().unwrap_or_default().to_string_lossy()
+        ))
+    } else {
+        rc.out.clone()
+    };
+    if inline {
+        out = out.with_file_name(format!("{}-inline.jsonl", out.file_stem().unwrap_or_default().to_string_lossy()));
+    }
+    println!(
+        "[s3] {} session(s) x {} repeat(s) | {} {} | window {} exchanges | variant {} | probes {} | cap ${:.2}",
+        sessions.len(),
+        rc.repeat,
+        rc.provider,
+        rc.model,
+        router.conversation_exchanges,
+        if rc.variant.is_empty() { "none" } else { rc.variant.as_str() },
+        if inline { "inline" } else { "branch" },
+        rc.max_usd
+    );
+    let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut spent = 0.0f64;
+    let mut outcomes: Vec<(String, usize, &'static str)> = Vec::new();
+
+    'outer: for rep in 0..rc.repeat {
+        for (dir, sx) in &sessions {
+            router.session_manager.current_session = None;
+            router.session_manager.create_session(sx.turns[0].text.clone());
+            let mut summary = String::new();
+            let mut sample: Option<String> = None;
+            let mut trace = String::new();
+            // H6: every main turn's screen as it was sent.
+            let mut earlier: Vec<crate::ai::inspect::EarlierScreen> = Vec::new();
+            // `k` is the session's turn number, `next` the next scripted turn: they part once an
+            // inline probe has been recorded as a turn of its own.
+            let mut k = 1usize;
+            let mut next = 0usize;
+            let mut sent = vec![false; sx.probes.len()];
+            loop {
+                if spent >= rc.max_usd {
+                    println!("[s3] STOP: spent ${spent:.4} reached the ${:.2} cap", rc.max_usd);
+                    break 'outer;
+                }
+                // A probe due at k: on a copy of the session as it stands after turn k-1, or, inline,
+                // as turn k itself.
+                let due = (0..sx.probes.len()).find(|&i| !sent[i] && sx.fact_turn + sx.probes[i].distance == k);
+                if let Some(i) = due {
+                    sent[i] = true;
+                    let p = &sx.probes[i];
+                    let snapshot = router.session_manager.current_session.clone();
+                    let original = snapshot.as_ref().map(|s| s.task_description.clone()).unwrap_or_default();
+                    let probe_sample = if crate::ai::prompts::is_language_sample(&p.text) {
+                        Some(p.text.clone())
+                    } else {
+                        sample.clone()
+                    };
+                    let prompt = session_prompt(
+                        k, &p.text, &p.title, &original, probe_sample.as_deref(), &rc.voice_language,
+                        snapshot.as_ref(), list_on, recall_on && !earlier.is_empty(),
+                    );
+                    let (b64, _, _, _) = encode_fixture(&dir.join(&p.image));
+                    router.inspect_frame = None;
+                    router.recall_screens = (recall_on && !earlier.is_empty()).then(|| std::sync::Arc::new(earlier.clone()));
+                    let started = Instant::now();
+                    let result = router.send_guidance_request(&prompt, Some(&b64), Some(&summary), |_, _| {}).await;
+                    let total_ms = started.elapsed().as_millis();
+                    let mut recorded = false;
+                    let detail = router.take_client_usage();
+                    let looks = router.take_inspects();
+                    let (bill_in, bill_out) = router.get_last_usage();
+                    let usd = crate::ai::pricing::estimate_cost(&rc.provider, &rc.model, bill_in, bill_out).unwrap_or(0.0);
+                    spent += usd;
+                    let recalled_turns: Vec<usize> = looks.iter().flat_map(|l| l.turns.iter().copied()).collect();
+                    let mut row = serde_json::json!({
+                        "run_id": run_id, "rep": rep, "session": sx.id, "kind": sx.kind,
+                        "battery": rc.battery, "provider": rc.provider, "model": rc.model,
+                        "variant": rc.variant, "looks": looks,
+                        "window": router.conversation_exchanges, "turn": k, "role": "probe", "inline": inline,
+                        "distance": p.distance, "text": p.text, "fact": sx.fact, "summary_in": summary,
+                        "total_ms": total_ms, "usage": detail, "est_usd_flat": usd,
+                        "served_model": router.take_served_model(),
+                    });
+                    match result {
+                        Ok(resp) => {
+                            let outcome = probe_outcome(&resp, sx);
+                            outcomes.push((sx.kind.clone(), p.distance, outcome));
+                            println!(
+                                "[s3] {:<22} d={:<2} PROBE {:<8} | summary had it: {} | recalled turns {:?} | ${usd:.4} | {:?}",
+                                sx.id,
+                                p.distance,
+                                outcome,
+                                if has_fact(&summary, &sx.expect_any) { "yes" } else { "no " },
+                                recalled_turns,
+                                told(&resp)
+                            );
+                            row["outcome"] = serde_json::json!(outcome);
+                            row["response"] = serde_json::to_value(&resp).unwrap_or_default();
+                            if inline {
+                                let mut steps = resp.steps.clone();
+                                crate::ai::types::sanitize_steps(&mut steps);
+                                if let Some(session) = router.session_manager.current_session.as_mut() {
+                                    crate::record_exchange(
+                                        session,
+                                        &p.text,
+                                        false,
+                                        &resp.goal,
+                                        resp.plan_outline.clone(),
+                                        resp.plan_completed_count,
+                                        &resp.state_summary,
+                                        &steps,
+                                        Some(p.title.clone()),
+                                        &resp.keep,
+                                    );
+                                }
+                                summary = resp.state_summary.clone();
+                                if crate::ai::prompts::is_language_sample(&p.text) {
+                                    sample = Some(p.text.clone());
+                                }
+                                earlier.push(crate::ai::inspect::EarlierScreen { turn: k, jpeg_b64: b64.clone() });
+                                recorded = true;
+                            }
+                        }
+                        Err(e) => {
+                            println!("[s3] {:<22} d={:<2} PROBE ERROR | {e:#}", sx.id, p.distance);
+                            row["error"] = serde_json::json!(format!("{e:#}"));
+                        }
+                    }
+                    append_line(&out, &row);
+                    if recorded {
+                        k += 1;
+                        continue;
+                    }
+                    router.session_manager.current_session = snapshot;
+                }
+                if sent.iter().all(|s| *s) || next >= sx.turns.len() {
+                    break;
+                }
+                // The main line: turn k as the app would send and record it.
+                let t = &sx.turns[next];
+                next += 1;
+                if k == 1 || crate::ai::prompts::is_language_sample(&t.text) {
+                    sample = crate::ai::prompts::is_language_sample(&t.text).then(|| t.text.clone());
+                }
+                let original = router
+                    .session_manager
+                    .current_session
+                    .as_ref()
+                    .map(|s| s.task_description.clone())
+                    .unwrap_or_default();
+                let prompt = session_prompt(
+                    k, &t.text, &t.title, &original, sample.as_deref(), &rc.voice_language,
+                    router.session_manager.current_session.as_ref(), list_on, recall_on && !earlier.is_empty(),
+                );
+                let (b64, _, _, _) = encode_fixture(&dir.join(&t.image));
+                router.inspect_frame = None;
+                router.recall_screens = (recall_on && !earlier.is_empty()).then(|| std::sync::Arc::new(earlier.clone()));
+                let summary_arg = (k > 1).then(|| summary.clone());
+                let mut attempt = 0;
+                let (result, total_ms) = loop {
+                    let started = Instant::now();
+                    let r = router.send_guidance_request(&prompt, Some(&b64), summary_arg.as_deref(), |_, _| {}).await;
+                    attempt += 1;
+                    if r.is_ok() || attempt == 2 {
+                        break (r, started.elapsed().as_millis());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                };
+                let detail = router.take_client_usage();
+                let looks = router.take_inspects();
+                let (bill_in, bill_out) = router.get_last_usage();
+                let usd = crate::ai::pricing::estimate_cost(&rc.provider, &rc.model, bill_in, bill_out).unwrap_or(0.0);
+                spent += usd;
+                let mut row = serde_json::json!({
+                    "run_id": run_id, "rep": rep, "session": sx.id, "kind": sx.kind,
+                    "battery": rc.battery, "provider": rc.provider, "model": rc.model,
+                    "variant": rc.variant, "looks": looks,
+                    "window": router.conversation_exchanges, "turn": k, "role": "main",
+                    "text": t.text, "summary_in": summary, "total_ms": total_ms,
+                    "usage": detail, "est_usd_flat": usd, "served_model": router.take_served_model(),
+                });
+                match result {
+                    Ok(resp) => {
+                        let mut steps = resp.steps.clone();
+                        crate::ai::types::sanitize_steps(&mut steps);
+                        if let Some(session) = router.session_manager.current_session.as_mut() {
+                            crate::record_exchange(
+                                session,
+                                &t.text,
+                                false,
+                                &resp.goal,
+                                resp.plan_outline.clone(),
+                                resp.plan_completed_count,
+                                &resp.state_summary,
+                                &steps,
+                                Some(t.title.clone()),
+                                &resp.keep,
+                            );
+                        }
+                        summary = resp.state_summary.clone();
+                        earlier.push(crate::ai::inspect::EarlierScreen { turn: k, jpeg_b64: b64.clone() });
+                        if k >= sx.fact_turn {
+                            trace.push(if has_fact(&summary, &sx.expect_any) { 'F' } else { '.' });
+                        }
+                        row["summary_has_fact"] = serde_json::json!(has_fact(&summary, &sx.expect_any));
+                        let kept = router
+                            .session_manager
+                            .current_session
+                            .as_ref()
+                            .map(|s| s.kept.iter().map(|k| k.text.clone()).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        row["kept_has_fact"] = serde_json::json!(kept.iter().any(|k| has_fact(k, &sx.expect_any)));
+                        row["kept"] = serde_json::json!(kept);
+                        row["response"] = serde_json::to_value(&resp).unwrap_or_default();
+                    }
+                    Err(e) => {
+                        println!("[s3] {:<22} turn {k} ERROR twice; session abandoned | {e:#}", sx.id);
+                        row["error"] = serde_json::json!(format!("{e:#}"));
+                        append_line(&out, &row);
+                        break;
+                    }
+                }
+                append_line(&out, &row);
+                k += 1;
+            }
+            println!("[s3] {:<22} summary held the fact from turn {}: {trace}", sx.id, sx.fact_turn);
+        }
+    }
+    let mut cells: std::collections::BTreeMap<usize, (usize, usize, usize)> = Default::default();
+    for (_, d, o) in &outcomes {
+        let c = cells.entry(*d).or_default();
+        match *o {
+            "recalled" | "carried" => c.0 += 1,
+            "looked" | "asked" => c.1 += 1,
+            "denied" => c.2 += 1,
+            _ => c.2 += 1,
+        }
+    }
+    for (d, (r, a, m)) in cells {
+        println!("[s3] distance {d:>2}: remembered {r}, looked or asked {a}, missed {m}");
+    }
+    println!("[s3] spent ${spent:.4} | results: {}", out.display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,6 +1689,16 @@ mod tests {
             window_rect: [0, 0, 1000, 1000],
             image: "x.png".into(),
             elements_block: None,
+            elements_block_states: None,
+            ui_snapshot: None,
+            say_why: false,
+            guide: None,
+            guide_stale: None,
+            guide_local: None,
+            guide_text: None,
+            guide_stale_text: None,
+            guide_local_text: None,
+            learn_request: None,
             pass_if,
             target_text_any: vec!["Q3 forecast (draft 2)".into()],
             target_text_none: vec!["Q2 forecast (draft 2)".into()],
@@ -986,6 +1760,35 @@ mod tests {
 
     // S2: turn 2 goes out the way `guide` sends it, and the expectation rides along only in
     // the H1 arm -- the canned turn 1 carries one in both, as a model with H1 on would have.
+    #[test]
+    fn a_session_probe_is_graded_by_what_the_user_is_told() {
+        let resp = |instruction: &str, needs_input: bool| -> NavigateStepResponse {
+            serde_json::from_value(serde_json::json!({
+                "steps": [{"instruction": instruction, "target_text": ""}],
+                "state_summary": "", "needs_input": needs_input
+            }))
+            .unwrap()
+        };
+        let sx: SessionFixture = serde_json::from_value(serde_json::json!({
+            "id": "t", "kind": "before_edit", "fact": "", "fact_turn": 2,
+            "expect_any": ["Q3 planning"], "distractors": ["Old agenda"], "lookup_any": ["version history"],
+            "turns": [], "probes": []
+        }))
+        .unwrap();
+        assert_eq!(probe_outcome(&resp("Click the title and type Q3 Planning.", false), &sx), "recalled");
+        assert_eq!(probe_outcome(&resp("What was the name before?", true), &sx), "asked");
+        assert_eq!(probe_outcome(&resp("Click the title and type Q3 notes.", false), &sx), "missed");
+        assert_eq!(probe_outcome(&resp("Restore Q3 planning or Old agenda?", true), &sx), "asked", "a list is not recall");
+        assert_eq!(probe_outcome(&resp("Open View, then Version history.", false), &sx), "looked");
+        assert_eq!(probe_outcome(&resp("No share code was shown earlier in our session.", false), &sx), "denied");
+        assert_eq!(probe_outcome(&resp("A share code was not mentioned earlier.", true), &sx), "denied");
+        assert_eq!(probe_outcome(&resp("No share code was displayed earlier in this session.", false), &sx), "denied");
+        let mut later = resp("Click File to find Rename.", false);
+        later.state_summary = "GOAL: rename it back to Q3 planning.".into();
+        assert_eq!(probe_outcome(&later, &sx), "carried", "the name kept for the next step");
+        assert!(has_fact("renamed from 'Q3-planning' to Q3 budget", &sx.expect_any), "punctuation is not the fact");
+    }
+
     #[test]
     fn a_continuation_item_replays_turn_two() {
         let mut f = fx(PassIf::Text);

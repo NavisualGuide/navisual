@@ -30,9 +30,9 @@ use uiautomation::variants::Variant;
 use uiautomation::{UIAutomation, UIElement};
 use windows::Win32::Foundation::{FALSE, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowLongW,
-    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, GW_HWNDNEXT,
-    GW_OWNER, WS_POPUP,
+    EnumChildWindows, EnumWindows, GetAncestor, GetForegroundWindow, GetTopWindow, GetWindow,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GA_ROOTOWNER,
+    GWL_STYLE, GW_CHILD, GW_HWNDNEXT, GW_OWNER, WS_CAPTION, WS_POPUP,
 };
 
 /// Chromium/Electron windows build their UIA tree lazily; on a 0-candidate first pass
@@ -336,6 +336,71 @@ fn find_button_descendant(automation: &UIAutomation, parent: &UIElement) -> Opti
 /// nearest interactive control, then accept only if its role matches the AI's requested family
 /// and its rect is control-sized (≤ 20× the bbox area, on-screen). A bad bbox lands on the
 /// wrong thing / a container and is rejected → no pointer (the safe outcome).
+/// Whether the element the AI-bbox probe resolved may stand for `target` by name.
+///
+/// The probe verifies role and size, which is what lets it find a control whose accessible name
+/// differs from what the model wrote -- an unnamed button, a glyph target such as "..." for "More
+/// options". It is also what let it accept the wrong control whenever the model's box landed on
+/// a neighbour of the same role. So: an element with no name, or a target with no letter or digit
+/// (a glyph), cannot be judged by name and passes; a named element must share a word with the
+/// target -- for text with Chinese, Japanese or Korean in it, which does not separate words with
+/// spaces, one must contain the other once spaces are dropped ("确 定" is "确定").
+///
+/// Measured on the founder's locate log, 2026-10-11: of 20 accepted probes, 4 pointed at the
+/// wrong control -- "OK" -> "End of Quick Access - Screenshots", "云服务器 ECS" -> "轻量应用服务器
+/// SAS…", taskbar "Excel" -> "Word", "Format" -> "File" -- and those 4 are exactly what this
+/// refuses; the 16 others, unnamed buttons and glyphs among them, still pass.
+fn probe_name_agrees(target: &str, resolved: Option<&str>) -> bool {
+    let Some(name) = resolved.map(str::trim).filter(|n| !n.is_empty()) else {
+        return true;
+    };
+    let words = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let target_words = words(target);
+    if target_words.is_empty() {
+        return true;
+    }
+    let name_words = words(name);
+    if target_words.iter().any(|w| name_words.contains(w)) {
+        return true;
+    }
+    let cjk = |s: &str| {
+        s.chars().any(|c| {
+            matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF)
+        })
+    };
+    if cjk(target) || cjk(name) {
+        let squash = |s: &str| s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        let (t, n) = (squash(target), squash(name));
+        return t.chars().count() >= 2 && n.chars().count() >= 2 && (n.contains(&t) || t.contains(&n));
+    }
+    false
+}
+
+/// Refuse a probe hit whose name does not agree with the target, and say so in the trace.
+fn probe_by_name(
+    hit: Option<LocateResult>,
+    probe: &mut BboxProbe,
+    target_text: &str,
+) -> Option<LocateResult> {
+    let hit = hit?;
+    if probe_name_agrees(target_text, probe.resolved_name.as_deref()) {
+        return Some(hit);
+    }
+    probe.accepted = false;
+    probe.detail = format!(
+        "refused: resolved {:?}, which shares no word with {target_text:?} (rule 14)",
+        probe.resolved_name.as_deref().unwrap_or("")
+    );
+    log::info!("[a11y] bbox probe refused: {}", probe.detail);
+    None
+}
+
 fn ai_bbox_probe(
     automation: &UIAutomation,
     ai_bbox: Rect,
@@ -892,10 +957,12 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let mut roots: Vec<UIElement> = Vec::new();
     unsafe {
         for popup in collect_owned_popups(hwnd) {
-            if let Ok(el) = automation.element_from_handle(popup.into()) {
-                roots.push(el);
-            }
+            roots.extend(popup_root_elements(&automation, popup));
         }
+    }
+    // The leading roots are popups; what they yield is marked `in_popup`.
+    let popup_roots = roots.len();
+    unsafe {
         if IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
             if let Ok(el) = automation.element_from_handle(hwnd.into()) {
                 roots.push(el);
@@ -954,6 +1021,17 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let _ = cache.add_property(UIProperty::IsOffscreen);
     let _ = cache.add_property(UIProperty::ClassName); // for the Excel walk's dedup
     let _ = cache.add_property(UIProperty::IsEnabled); // greyed-out marker for the prompt
+    // States for `ContextElement::state`; read only where the pattern is reported.
+    for p in [
+        UIProperty::ToggleToggleState,
+        UIProperty::IsTogglePatternAvailable,
+        UIProperty::SelectionItemIsSelected,
+        UIProperty::IsSelectionItemPatternAvailable,
+        UIProperty::ValueValue,
+        UIProperty::IsValuePatternAvailable,
+    ] {
+        let _ = cache.add_property(p);
+    }
 
     // ONE gather pipeline with two independent guards (restructured 2026-08-16). It used to be
     // two mutually-exclusive branches — "Excel walks INSTEAD, everyone else bulks" — and then
@@ -965,12 +1043,12 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     // Both gathers yield the SAME 12 context control types through the SAME filter below, so
     // merging is safe by construction and the union is never worse than either half.
     let gather_started = Instant::now();
-    let mut candidates: Vec<UIElement> = Vec::new();
+    let mut candidates: Vec<(UIElement, bool)> = Vec::new();
     if !bulk_detonates {
-        for root in &roots {
+        for (i, root) in roots.iter().enumerate() {
             // A dead popup root must not kill the main window's list.
             if let Ok(els) = root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) {
-                candidates.extend(els);
+                candidates.extend(els.into_iter().map(|e| (e, i < popup_roots)));
             }
         }
     }
@@ -1000,6 +1078,7 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
     let mut total_qualifying: usize = 0;
     type SeenKey = (String, (i32, i32, u32, u32));
     let apply_filter = |el: &UIElement,
+                        in_popup: bool,
                         out: &mut Vec<super::ContextElement>,
                         seen: &mut std::collections::HashSet<SeenKey>,
                         total_qualifying: &mut usize| {
@@ -1065,11 +1144,13 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                 // wrongly calling a live control "disabled" would steer the model away
                 // from a valid target (the worse error of the two).
                 enabled: el.is_cached_enabled().unwrap_or(true),
+                state: cached_state(el, ct),
+                in_popup,
             });
         }
     };
-    for el in &candidates {
-        apply_filter(el, &mut out, &mut seen, &mut total_qualifying);
+    for (el, in_popup) in &candidates {
+        apply_filter(el, *in_popup, &mut out, &mut seen, &mut total_qualifying);
     }
 
     // Guard 2 of 2: run the materialising walk — either because bulk never ran, or because what
@@ -1104,7 +1185,8 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
             // pass precisely when the bulk pass was slow, and the caller's wait is bounded by
             // the outer timeout regardless (an over-budget completion still banks its result).
             let deadline = Instant::now() + Duration::from_millis(budget_ms as u64);
-            for root in &roots {
+            for (i, root) in roots.iter().enumerate() {
+                let in_popup = i < popup_roots;
                 // grid_cond: None DISABLES the ExcelGrid flat-Descendants escape hatch here
                 // (audit 2026-07-13, confirmed by `excel_enum_histogram_live` against a live
                 // 209-cell CSV). That hatch is a raw Descendants query on the ExcelGrid pane and
@@ -1125,7 +1207,7 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
                     deadline,
                     &mut |el, _class_name| {
                         if matches!(el.get_cached_control_type(), Ok(ct) if is_context_ct(ct)) {
-                            apply_filter(el, &mut out, &mut seen, &mut total_qualifying);
+                            apply_filter(el, in_popup, &mut out, &mut seen, &mut total_qualifying);
                         }
                     },
                 );
@@ -1158,6 +1240,170 @@ pub fn enumerate_context_elements(hwnd_raw: usize) -> Result<Vec<super::ContextE
 /// **live** rect, so a control that scrolled/moved since capture resolves to something
 /// else, fails the name check, and the caller falls back to the normal pipeline —
 /// a stale snapshot can never place a pointer ("no pointer beats wrong pointer").
+/// H3 `ui_tree` (harness-plan.md): every on-screen element of a window -- popups first, as
+/// `enumerate_context_elements` roots them -- with role, name, rect, enabled, and toggle state,
+/// value, selection and expansion where the element has them. No cap and no control-type filter:
+/// the tool reads one region of it. An element with neither a name nor a state is left out (a
+/// bare container says nothing). Not for Excel's main window, whose bulk query detonates (see
+/// `BULK_UNSAFE_CLASSES`); that returns an error rather than two minutes of duplicates. Read live
+/// for the tool when `UI_TREE` is on (`set_look_sources` in lib.rs).
+pub fn snapshot_ui_tree(hwnd_raw: usize) -> Result<Vec<super::UiNode>, String> {
+    if hwnd_raw == 0 {
+        return Err("no target window".to_string());
+    }
+    let automation = UIAutomation::new().map_err(|e| format!("UIAutomation init: {e}"))?;
+    let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+    let mut roots: Vec<UIElement> = Vec::new();
+    for popup in collect_owned_popups(hwnd) {
+        roots.extend(unsafe { popup_root_elements(&automation, popup) });
+    }
+    if let Ok(el) = automation.element_from_handle(hwnd.into()) {
+        roots.push(el);
+    }
+    if roots.iter().any(|r| matches!(r.get_classname(), Ok(c) if c == EXCEL_MAIN_WINDOW_CLASS)) {
+        return Err("Excel's main window: a bulk query would detonate".to_string());
+    }
+    // Popups are rooted by PID, and every UWP app's frame belongs to ApplicationFrameHost -- the
+    // first Settings capture came back with Calculator's tree in it. Only what lies inside the
+    // window counts, as `enumerate_context_elements` already filters.
+    let mut win_rect = RECT::default();
+    unsafe {
+        GetWindowRect(hwnd, &mut win_rect).map_err(|e| format!("GetWindowRect: {e}"))?;
+    }
+    let cond = automation.create_true_condition().map_err(|e| format!("condition: {e}"))?;
+    let cache = automation
+        .create_cache_request()
+        .map_err(|e| format!("cache request: {e}"))?;
+    for p in [
+        UIProperty::Name,
+        UIProperty::ControlType,
+        UIProperty::BoundingRectangle,
+        UIProperty::IsOffscreen,
+        UIProperty::IsEnabled,
+        UIProperty::ToggleToggleState,
+        UIProperty::ValueValue,
+        UIProperty::SelectionItemIsSelected,
+        UIProperty::ExpandCollapseExpandCollapseState,
+        UIProperty::IsTogglePatternAvailable,
+        UIProperty::IsValuePatternAvailable,
+        UIProperty::IsSelectionItemPatternAvailable,
+        UIProperty::IsExpandCollapsePatternAvailable,
+    ] {
+        let _ = cache.add_property(p);
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in &roots {
+        let Ok(els) = root.find_all_build_cache(TreeScope::Descendants, &cond, &cache) else {
+            continue;
+        };
+        for el in els {
+            if el.is_cached_offscreen().unwrap_or(false) {
+                continue;
+            }
+            let (Ok(ct), Ok(rect)) = (el.get_cached_control_type(), el.get_cached_bounding_rectangle()) else {
+                continue;
+            };
+            let r = [rect.get_left(), rect.get_top(), rect.get_width(), rect.get_height()];
+            if r[2] < 4 || r[3] < 4 || !rect_is_onscreen(r[0], r[1]) {
+                continue;
+            }
+            if r[0] + r[2] <= win_rect.left || r[0] >= win_rect.right || r[1] + r[3] <= win_rect.top || r[1] >= win_rect.bottom {
+                continue;
+            }
+            let name = el.get_cached_name().map(|n| n.trim().to_string()).unwrap_or_default();
+            // A pattern property read from an element without that pattern comes back as the
+            // property's DEFAULT (toggle "indeterminate", not selected, an empty value) -- the first
+            // capture showed every button "mixed". So each is read only where the element says
+            // it has the pattern.
+            let has = |p| -> bool {
+                el.get_cached_property_value(p).ok().and_then(|v| TryInto::<bool>::try_into(v).ok()).unwrap_or(false)
+            };
+            let int = |p| -> Option<i32> { el.get_cached_property_value(p).ok().and_then(|v| v.try_into().ok()) };
+            let toggled = match int(UIProperty::ToggleToggleState).filter(|_| has(UIProperty::IsTogglePatternAvailable)) {
+                Some(0) => Some("off".to_string()),
+                Some(1) => Some("on".to_string()),
+                Some(2) => Some("mixed".to_string()),
+                _ => None,
+            };
+            let expanded = match int(UIProperty::ExpandCollapseExpandCollapseState)
+                .filter(|_| has(UIProperty::IsExpandCollapsePatternAvailable))
+            {
+                Some(0) => Some(false),
+                Some(1) | Some(2) => Some(true),
+                _ => None,
+            };
+            let selected: Option<bool> = el
+                .get_cached_property_value(UIProperty::SelectionItemIsSelected)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .filter(|_| has(UIProperty::IsSelectionItemPatternAvailable));
+            let value: Option<String> = el
+                .get_cached_property_value(UIProperty::ValueValue)
+                .ok()
+                .filter(|_| has(UIProperty::IsValuePatternAvailable))
+                .and_then(|v| TryInto::<String>::try_into(v).ok())
+                .map(|v| v.trim().chars().take(120).collect::<String>())
+                .filter(|v| !v.is_empty());
+            if name.is_empty() && toggled.is_none() && value.is_none() && selected != Some(true) {
+                continue;
+            }
+            let role = format!("{ct:?}");
+            if !seen.insert((role.clone(), name.clone(), r)) {
+                continue;
+            }
+            out.push(super::UiNode {
+                role,
+                name: name.chars().take(120).collect(),
+                rect: r,
+                enabled: el.is_cached_enabled().unwrap_or(true),
+                toggled,
+                value,
+                selected,
+                expanded,
+            });
+            if out.len() >= 5000 {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `ContextElement::state` from cached properties. A pattern property read from an element without
+/// the pattern returns its default (toggle "indeterminate", not selected), so each is read only
+/// where the element reports the pattern. A value is kept only for a combo box, slider or spinner:
+/// an edit box's value is typed content, and the screenshot already shows what is visible of it.
+fn cached_state(el: &UIElement, ct: ControlType) -> Option<String> {
+    let has = |p| -> bool {
+        el.get_cached_property_value(p).ok().and_then(|v| TryInto::<bool>::try_into(v).ok()).unwrap_or(false)
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if has(UIProperty::IsTogglePatternAvailable) {
+        let t: Option<i32> = el.get_cached_property_value(UIProperty::ToggleToggleState).ok().and_then(|v| v.try_into().ok());
+        match t {
+            Some(0) => parts.push("OFF".into()),
+            Some(1) => parts.push("ON".into()),
+            _ => {}
+        }
+    }
+    if has(UIProperty::IsSelectionItemPatternAvailable) {
+        let s: Option<bool> = el.get_cached_property_value(UIProperty::SelectionItemIsSelected).ok().and_then(|v| v.try_into().ok());
+        if s == Some(true) {
+            parts.push("SELECTED".into());
+        }
+    }
+    if matches!(ct, ControlType::ComboBox | ControlType::Slider | ControlType::Spinner)
+        && has(UIProperty::IsValuePatternAvailable)
+    {
+        let v: Option<String> = el.get_cached_property_value(UIProperty::ValueValue).ok().and_then(|v| TryInto::<String>::try_into(v).ok());
+        if let Some(v) = v.map(|v| v.trim().chars().take(40).collect::<String>()).filter(|v| !v.is_empty()) {
+            parts.push(format!("value=\"{v}\""));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" | "))
+}
+
 pub fn verify_context_element(snap: &super::ContextElement) -> (Option<Rect>, String) {
     let Ok(automation) = UIAutomation::new() else {
         return (None, "UIAutomation init failed".to_string());
@@ -1467,11 +1713,17 @@ fn collect_owned_popups(target: HWND) -> Vec<HWND> {
         //  - Owned windows (GW_OWNER non-null) — modal dialogs (OK/Cancel, Find, Save As).
         //  - WS_POPUP windows — open menus / dropdowns / combo lists. VLC's Qt menu popups are
         //    WS_POPUP WITHOUT an owner, so the owner check alone missed the open submenu (Speed).
+        // And neither may be ANOTHER window of the same process -- see `is_targets_popup`.
         let owned = GetWindow(hwnd, GW_OWNER)
             .map(|o| !o.0.is_null())
             .unwrap_or(false);
-        let is_popup = (GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_POPUP.0) != 0;
-        if owned || is_popup {
+        let root_owner = GetAncestor(hwnd, GA_ROOTOWNER);
+        let owned_by_target = root_owner.0 as isize == state.target;
+        let owner_visible = owned && IsWindowVisible(root_owner).as_bool();
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let is_popup = style & WS_POPUP.0 != 0;
+        let has_caption = style & WS_CAPTION.0 == WS_CAPTION.0;
+        if is_targets_popup(owned, owned_by_target, owner_visible, is_popup, has_caption) {
             state.hwnds.push(hwnd);
         }
         TRUE
@@ -1486,6 +1738,78 @@ fn collect_owned_popups(target: HWND) -> Vec<HWND> {
         let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
     }
     state.hwnds
+}
+
+/// Whether a visible top-level window of the target's process is one of the target's own popups.
+///
+/// Same process is not same window. Every UWP app's frame -- Calculator, Settings -- belongs to
+/// ApplicationFrameHost, and each frame is an **unowned WS_POPUP with a title bar**. Rooting by PID
+/// and popup style made every other UWP frame a "popup" of the target, and the window-rect filter
+/// cannot drop a frame stacked behind the target at the same rect: live 2026-10-10, two Calculators
+/// stacked put the hidden one's 58 elements into [Screen Elements] where the visible one has 52.
+/// `find_element` searches the same roots.
+///
+/// - An owned window (a dialog) belongs to whoever owns it: the target, or an invisible helper
+///   window some apps own their dialogs from. A dialog of another visible window is that window's.
+/// - An unowned popup is a menu, dropdown or combo list (VLC's Qt menus are exactly that) -- unless
+///   it has a title bar, which makes it a window of its own.
+///
+/// Style-based, not identity-based (rule 16): no class or exe name is consulted.
+fn is_targets_popup(owned: bool, owned_by_target: bool, owner_visible: bool, is_popup: bool, has_caption: bool) -> bool {
+    if owned {
+        return owned_by_target || !owner_visible;
+    }
+    is_popup && !has_caption
+}
+
+/// Roles ranked below a same-named control: they hold controls and are not what a step asks the
+/// user to click. Wider than `is_container_role`, which removes a candidate outright; this only
+/// orders. A List, Tree or Table stays out: those are targets in their own right ("the Entries box").
+fn ranks_as_container(role: &str) -> bool {
+    matches!(
+        role,
+        "Menu" | "MenuBar" | "ToolBar" | "Pane" | "Window" | "Group" | "Tab" | "StatusBar" | "TitleBar"
+    )
+}
+
+/// The UIA roots for one popup window: its own element, or -- when that element is empty -- the
+/// elements of its visible child windows.
+///
+/// Office's menus and galleries are an empty shell. The popup is a top-level window whose own
+/// element has no children; the items sit on a child window, and UIA parents that child under
+/// the ribbon control that opened the menu. Live 2026-10-12, Excel's open Freeze Panes menu: the
+/// popup's element had 0 descendants and its child window 5 (the three items). The main window's
+/// walk stops one level short of them (13 deep against `SCROLLBAR_SCAN_DEPTH`), so neither root
+/// carried the menu. [Screen Elements] listed only the ribbon button that opened it, the model
+/// asked for that button by id, and each click closed the menu (L1 `xl-freeze`, 1 of 9).
+///
+/// Structural, not by class (rule 16): any popup whose element is empty is read through its
+/// child windows. One `GetFirstChild` per popup; a popup with content keeps its own root.
+unsafe fn popup_root_elements(automation: &UIAutomation, popup: HWND) -> Vec<UIElement> {
+    let Ok(el) = automation.element_from_handle(popup.into()) else {
+        return Vec::new();
+    };
+    let empty = automation
+        .get_raw_view_walker()
+        .map(|w| w.get_first_child(&el).is_err())
+        .unwrap_or(false);
+    if !empty {
+        return vec![el];
+    }
+    let mut roots = Vec::new();
+    let mut child = GetWindow(popup, GW_CHILD).ok();
+    while let Some(c) = child.filter(|c| !c.0.is_null()) {
+        if IsWindowVisible(c).as_bool() {
+            if let Ok(ce) = automation.element_from_handle(c.into()) {
+                roots.push(ce);
+            }
+        }
+        child = GetWindow(c, GW_HWNDNEXT).ok();
+    }
+    if roots.is_empty() {
+        roots.push(el); // nothing better: keep the shell, as before
+    }
+    roots
 }
 
 /// Public entry point. Returns the first element whose accessible name
@@ -1565,10 +1889,9 @@ pub fn find_element(
             // added as explicit search roots; the main window's subtree walk
             // does not reach them.
             for popup in collect_owned_popups(hwnd) {
-                if let Ok(el) = automation.element_from_handle(popup.into()) {
-                    roots.push(el);
-                    popup_root_count += 1;
-                }
+                let els = popup_root_elements(&automation, popup);
+                popup_root_count += els.len();
+                roots.extend(els);
             }
             if !hwnd.0.is_null() && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() {
                 if let Ok(el) = automation.element_from_handle(hwnd.into()) {
@@ -1843,7 +2166,9 @@ pub fn find_element(
         // the scoped A11y shorten).
         if let Some(ai) = opts.ai_bbox {
             if opts.bbox_decisive && !opts.icon_target {
-                let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                let (probe_hit, mut probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                // Anywhere: a named control must agree with the target by name (rule 14).
+                let probe_hit = probe_by_name(probe_hit, &mut probe, target_text);
                 // On a shell surface the probe's role+size verification stops
                 // discriminating: every taskbar button is the same role and the same
                 // size, so a bbox guessed one icon off resolves to a neighbour and looks
@@ -1917,7 +2242,10 @@ pub fn find_element(
     // menubar menu, must not outrank the exact "Layers" the target asked for; live
     // Krita wrong-pointer 2026-07-13), then AI-bbox proximity. Both bboxes are
     // already in virtual-desktop physical pixels. The sort is stable, so without a
-    // role or bbox the original pass order is preserved.
+    // role or bbox the original pass order is preserved. Before proximity, a control
+    // outranks a container that carries the same name: Office's open menu is a Menu
+    // named after the button that opened it, around an item of that name, and pass
+    // order put the whole menu first (live 2026-10-12, "Freeze Panes").
     let winner_anchored;
     {
         let desired_role = desired_ct.map(|ct| format!("{ct:?}"));
@@ -1934,6 +2262,7 @@ pub fn find_element(
             a_role_miss
                 .cmp(&b_role_miss)
                 .then_with(|| b_anch.cmp(a_anch)) // anchored (true) first
+                .then_with(|| ranks_as_container(&a.role).cmp(&ranks_as_container(&b.role)))
                 .then_with(|| {
                     let Some((tx, ty)) = ai_center else {
                         return std::cmp::Ordering::Equal;
@@ -1965,7 +2294,10 @@ pub fn find_element(
     if opts.bbox_decisive {
         if let Some(ai) = opts.ai_bbox {
             if center_outside_expanded(candidates[0].bbox, ai) {
-                let (probe_hit, probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                let (probe_hit, mut probe) = ai_bbox_probe(&automation, ai, desired_ct);
+                // A name match far away is not to be traded for a control that does not agree
+                // with the target at all (rule 14).
+                let probe_hit = probe_by_name(probe_hit, &mut probe, target_text);
                 trace.bbox_probe = Some(probe);
                 if let Some(hit) = probe_hit {
                     for c in &candidates {
@@ -3030,7 +3362,124 @@ mod incremental_walk_live_tests {
 }
 
 #[cfg(test)]
+mod probe_name_tests {
+    use super::probe_name_agrees;
+
+    /// Every accepted probe in the founder's locate log, 2026-10-11, and the live Notepad case.
+    #[test]
+    fn the_wrong_pointers_in_the_log_are_refused_and_the_rest_pass() {
+        // Wrong control: refused.
+        assert!(!probe_name_agrees("OK", Some("End of Quick Access - Screenshots")));
+        assert!(!probe_name_agrees("云服务器 ECS", Some("轻量应用服务器 SAS 以经济高效的方式实时运行轻量级应用程序")));
+        assert!(!probe_name_agrees("Excel", Some("Word - 1 running window")));
+        assert!(!probe_name_agrees("Format", Some("File")));
+        // Right control: still accepted.
+        assert!(probe_name_agrees("...", Some("More options")), "a glyph cannot be judged by name");
+        assert!(probe_name_agrees(">_", Some("复制 CLI 命令 Claude Code")), "nor can this one");
+        assert!(probe_name_agrees("确定", Some("确 定")), "spaces inside a CJK label");
+        assert!(probe_name_agrees("Printer", None), "an unnamed button is what the probe is for");
+        assert!(probe_name_agrees("Continue", Some("Continue as someone")));
+        assert!(probe_name_agrees("更多", Some("更多 down")));
+        assert!(probe_name_agrees("Excel", Some("Excel - 1 running window")));
+        assert!(probe_name_agrees("Updated+Estimate (1).PDF", Some("Updated+Estimate (1).PDF")));
+        // Short Latin targets are not matched inside longer words.
+        assert!(!probe_name_agrees("OK", Some("Bookmarks")));
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn a_popup_is_the_targets_only_when_it_is_a_menu_or_the_targets_dialog() {
+        // (owned, owned_by_target, owner_visible, is_popup, has_caption)
+        assert!(!super::is_targets_popup(false, false, false, true, true), "another UWP frame: unowned popup with a title bar");
+        assert!(super::is_targets_popup(false, false, false, true, false), "a menu or dropdown (VLC's Qt menus are unowned)");
+        assert!(super::is_targets_popup(true, true, true, false, true), "the target's own dialog");
+        assert!(super::is_targets_popup(true, false, false, false, true), "a dialog owned by an invisible helper window");
+        assert!(!super::is_targets_popup(true, false, true, false, true), "another visible window's dialog");
+        assert!(!super::is_targets_popup(false, false, false, false, true), "another plain top-level window");
+    }
+
+    /// Live probe for the popup roots: what [Screen Elements] would carry for the front-most window
+    /// whose title contains NAVISUAL_LIVE_TITLE, and which roots it was gathered from.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_context_list_for_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
+        let roots = super::collect_owned_popups(windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void));
+        let automation = uiautomation::UIAutomation::new().expect("UIAutomation");
+        let elements: usize = roots.iter().map(|&p| unsafe { super::popup_root_elements(&automation, p) }.len()).sum();
+        let els = super::enumerate_context_elements(hwnd).expect("enumeration");
+        println!(
+            "\n[live] {} popup window(s) as {} UIA root(s); {} elements; names: {:?}",
+            roots.len(),
+            elements,
+            els.len(),
+            els.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The roles `find_element` compares are `format!("{ct:?}")`; a renamed variant would make
+    /// the container tiebreak silently match nothing.
+    #[test]
+    fn container_roles_are_spelled_as_the_ranking_formats_them() {
+        use uiautomation::controls::ControlType as C;
+        for ct in [C::Menu, C::MenuBar, C::ToolBar, C::Pane, C::Window, C::Group, C::Tab, C::StatusBar, C::TitleBar] {
+            assert!(super::ranks_as_container(&format!("{ct:?}")), "{ct:?}");
+        }
+        for ct in [C::MenuItem, C::ListItem, C::Button, C::List, C::Tree, C::Table, C::Edit, C::Text] {
+            assert!(!super::ranks_as_container(&format!("{ct:?}")), "{ct:?}");
+        }
+    }
+
+    /// Live probe: the accessibility tree of the window whose title contains NAVISUAL_LIVE_TITLE,
+    /// with its popups, through the app's own UIA client -- the managed .NET client a PowerShell
+    /// probe uses sees a different tree in LibreOffice. NAVISUAL_LIVE_REGION="x,y,w,h" keeps only
+    /// what overlaps it.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_ui_tree_for_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
+        let region: Option<Vec<i32>> = std::env::var("NAVISUAL_LIVE_REGION")
+            .ok()
+            .map(|r| r.split(',').map(|s| s.trim().parse().unwrap()).collect());
+        let nodes = super::snapshot_ui_tree(hwnd).expect("tree");
+        println!("\n[live] {} node(s)", nodes.len());
+        for n in nodes {
+            let r = n.rect;
+            if let Some(g) = &region {
+                if r[0] + r[2] <= g[0] || r[0] >= g[0] + g[2] || r[1] + r[3] <= g[1] || r[1] >= g[1] + g[3] {
+                    continue;
+                }
+            }
+            println!("[live]   {} {:?} {:?} value={:?}", n.role, n.name, r, n.value);
+        }
+    }
+
+    /// Live probe for Pass 1: where `find_element` lands NAVISUAL_LIVE_TARGET in the window whose
+    /// title contains NAVISUAL_LIVE_TITLE -- with a menu open, its item rather than the ribbon
+    /// control of the same name.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_find_element_in_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let target = std::env::var("NAVISUAL_LIVE_TARGET").expect("NAVISUAL_LIVE_TARGET");
+        let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
+        let opts = crate::locator::orchestrator::LocateOptions {
+            target_hwnd: Some(hwnd),
+            a11y_timeout_ms: 8000,
+            ..Default::default()
+        };
+        let (hit, trace) = super::find_element(&target, &opts).expect("find_element");
+        println!("\n[live] '{target}' -> {:?}", hit.map(|h| (h.bbox, h.role)));
+        println!("[live] {} root(s); candidates:", trace.search_roots_count);
+        for c in &trace.candidates {
+            println!("[live]   {} '{}' {:?} selected={} {:?}", c.role, c.name, c.bbox, c.selected, c.reject_reason);
+        }
+    }
+
     use super::{build_name_regex, norm_dashes, strip_accelerator, walk_name_matches};
     use super::target_has_matchable_name;
 

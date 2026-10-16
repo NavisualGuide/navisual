@@ -24,6 +24,19 @@ pub struct GeminiClient {
     last_usage: parking_lot::Mutex<Option<UsageDetail>>,
     /// H1 switch, set by the router from `Config::expected_result` (see `prompts::system_prompt`).
     pub(crate) expected_result: bool,
+    /// H2: the frame `inspect` crops from, set per request by the router; `None` = no tool.
+    pub(crate) inspect_frame: Option<std::sync::Arc<image::RgbImage>>,
+    pub(crate) inspect_mode: crate::ai::inspect::Mode,
+    pub(crate) inspect_tools: crate::ai::inspect::Tools,
+    /// H6: earlier screens `recall` can return, set per request by the router.
+    pub(crate) recall_screens: Option<std::sync::Arc<Vec<crate::ai::inspect::EarlierScreen>>>,
+    pub(crate) recall_max: usize,
+    /// H3: the accessibility snapshot `ui_tree` reads, set per request by the router.
+    pub(crate) ui_snapshot: Option<std::sync::Arc<crate::ai::inspect::UiSource>>,
+    last_inspects: parking_lot::Mutex<Vec<crate::ai::inspect::Look>>,
+    /// `modelVersion` of the last response: the model that answered, which is not always the one
+    /// named (Google redirected gemini-3.7-flash to 3.8 on 2026-10-09).
+    last_served: parking_lot::Mutex<Option<String>>,
 }
 
 impl GeminiClient {
@@ -53,6 +66,14 @@ impl GeminiClient {
             thinking_level,
             last_usage: parking_lot::Mutex::new(None),
             expected_result: false,
+            inspect_frame: None,
+            inspect_mode: crate::ai::inspect::Mode::Off,
+            inspect_tools: crate::ai::inspect::Tools::Zoom,
+            recall_screens: None,
+            recall_max: 1,
+            ui_snapshot: None,
+            last_inspects: parking_lot::Mutex::new(Vec::new()),
+            last_served: parking_lot::Mutex::new(None),
         })
     }
 
@@ -60,6 +81,16 @@ impl GeminiClient {
     /// nothing can never be read as this one.
     pub fn take_last_usage(&self) -> Option<UsageDetail> {
         self.last_usage.lock().take()
+    }
+
+    #[cfg(test)]
+    pub fn take_inspects(&self) -> Vec<crate::ai::inspect::Look> {
+        std::mem::take(&mut *self.last_inspects.lock())
+    }
+
+    #[cfg(test)]
+    pub fn take_served(&self) -> Option<String> {
+        self.last_served.lock().take()
     }
 
     #[allow(dead_code)]
@@ -124,7 +155,9 @@ impl GeminiClient {
                         "description": "A short route overview toward the goal — like a map app's route overview, not turn-by-turn directions (that's steps/instruction). 2-8 short plain-language milestones, e.g. ['Open the Insert tab', 'Add page numbers', 'Set them to start at page 3', 'Skip the title page']. Shown to the user when they ask to see the plan. REVISE the whole list (replace it, don't append to it) whenever your understanding of the route changes — it is expected to change as you learn more. Omit to leave the previously shown plan unchanged; omit entirely on a simple one-step task where a route overview would add nothing."
                     },
                     "plan_completed_count": {"type": "integer", "description": "How many of plan_outline's milestones (counting from the first) are already done — 0 means you're still on the first one, 1 means the first is done and you're on the second, etc. Update it whenever a milestone is finished, and again whenever you revise plan_outline itself (count against the NEW list). Omit to leave the previous count unchanged; meaningless without plan_outline, so omit both together."},
-                    "state_summary": {"type": "string", "description": "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED. Never assume an earlier turn is still visible."},
+                    "keep": {"type": "array", "items": {"type": "string"}, "description": crate::ai::prompts::KEEP_FIELD},
+                    "app_note": {"type": "string", "description": crate::ai::prompts::APP_NOTE_FIELD},
+                    "state_summary": {"type": "string", "description": crate::ai::prompts::STATE_SUMMARY_FIELD},
                     "needs_input": {"type": "boolean"},
                     "suggested_tasks": {
                         "type": "array",
@@ -174,7 +207,7 @@ impl GeminiClient {
         // request for someone whose only mistake was using a word another provider accepts.
         //
         // `minimal` is NOT a universal Gemini floor. Measured live 2026-09-21 against
-        // gemini-3.7-flash, the shipped default: 400 INVALID_ARGUMENT, "Thinking level
+        // gemini-3.7-flash, then the shipped default: 400 INVALID_ARGUMENT, "Thinking level
         // MINIMAL is not supported for this model." Only the Flash-Lite line accepts it;
         // on Flash and Pro the floor is `low`. So the clamp goes UP, not down -- giving a
         // model more thinking than asked costs a little latency, while asking for a level
@@ -200,154 +233,266 @@ impl GeminiClient {
             log_thinking_once("provider default (no thinkingConfig sent)");
         }
 
-        let response = self
-            .client
-            .post(stream_url(effective_model))
-            .header("x-goog-api-key", &self.api_key)
-            .json(&payload)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body_text = response.text().await?;
-            bail!("Gemini API error ({}): {}", status, body_text);
+        // H2 (`inspect.rs`): when a frame is offered the model may zoom before it answers, up to
+        // MAX_INSPECTS times; each zoom is one more round on the same contents, the crop riding
+        // back inside the functionResponse. Only the navigate_step round streams a caption.
+        // H6 `recall` joins the same loop when earlier screens are offered.
+        let sources = crate::ai::inspect::Sources {
+            frame: self.inspect_frame.clone(),
+            earlier: self.recall_screens.clone(),
+            recall_max: self.recall_max,
+            ui: self.ui_snapshot.clone(),
+        };
+        self.last_inspects.lock().clear();
+        let look_names = sources.names(self.inspect_tools);
+        if !look_names.is_empty() {
+            // Says the tools reached the request; an "[inspect]" line follows each one the model calls.
+            log::info!("[looks] gemini declared: {}", look_names.join(", "));
         }
+        let mut declared = vec![tool_schema.clone()];
+        for (name, description, parameters) in
+            crate::ai::inspect::declarations(self.inspect_mode, &look_names, self.recall_max)
+        {
+            declared.push(json!({"name": name, "description": description, "parameters": parameters}));
+        }
+        let mut contents: Vec<Value> = payload["contents"].as_array().cloned().unwrap_or_default();
+        let mut total = UsageDetail::default();
+        let mut zooms = 0usize;
 
         use eventsource_stream::Eventsource;
-        use futures_util::StreamExt;
 
-        let mut stream = response.bytes_stream().eventsource();
-
-        let mut accumulated_json = String::new();
-        let mut input_tokens = 0;
-        let mut output_tokens = 0;
-        let mut in_instruction = false;
-        let mut emitted_instruction_len = 0;
-        let mut raw_text = String::new();
-
-        while let Some(event_result) = stream.next().await {
-            let event = event_result?;
-
-            // Gemini sends data events
-            let data_str = event.data;
-            if data_str.is_empty() {
-                continue;
+        let (accumulated_json, raw_text) = loop {
+            let zoom_open = !look_names.is_empty() && zooms < crate::ai::inspect::MAX_INSPECTS;
+            payload["contents"] = Value::Array(contents.clone());
+            if zoom_open {
+                // `First`: the opening round may only look at the current frame. Recall is
+                // never forced -- most turns need no earlier screen.
+                let forced = zooms == 0
+                    && self.inspect_mode == crate::ai::inspect::Mode::First
+                    && sources.frame.is_some();
+                let mut allowed: Vec<&str> = if forced {
+                    self.inspect_tools.names().to_vec()
+                } else {
+                    look_names.clone()
+                };
+                if !forced {
+                    allowed.insert(0, "navigate_step");
+                }
+                payload["tools"] = json!([{"function_declarations": declared.clone()}]);
+                payload["toolConfig"] = json!({"functionCallingConfig": {
+                    "mode": "ANY",
+                    "allowedFunctionNames": allowed
+                }});
+            } else if zooms > 0 {
+                payload["tools"] = json!([{"function_declarations": [tool_schema.clone()]}]);
+                payload["toolConfig"] = json!({"functionCallingConfig": {
+                    "mode": "ANY",
+                    "allowedFunctionNames": ["navigate_step"]
+                }});
             }
 
-            let data: Value = serde_json::from_str(&data_str).unwrap_or_default();
+            let response = self
+                .client
+                .post(stream_url(effective_model))
+                .header("x-goog-api-key", &self.api_key)
+                .json(&payload)
+                .send()
+                .await?;
 
-            // Extract usage if present
-            if let Some(usage) = data.get("usageMetadata") {
-                input_tokens = usage
-                    .get("promptTokenCount")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(input_tokens);
-                // Google bills reasoning as OUTPUT, so the cost estimate needs both.
-                // `candidatesTokenCount` alone under-reported by ~4x on a measured request
-                // (156 visible against 447 thinking) — the Usage tab was showing a quarter
-                // of what was actually charged.
-                let visible = usage
-                    .get("candidatesTokenCount")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
-                let thoughts = usage
-                    .get("thoughtsTokenCount")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
-                if visible + thoughts > 0 {
-                    output_tokens = visible + thoughts;
+            let status = response.status();
+            if !status.is_success() {
+                let body_text = response.text().await?;
+                bail!("Gemini API error ({}): {}", status, body_text);
+            }
+
+            let mut stream = response.bytes_stream().eventsource();
+
+            let mut accumulated_json = String::new();
+            let mut in_instruction = false;
+            let mut emitted_instruction_len = 0;
+            let mut raw_text = String::new();
+            let mut round: Option<UsageDetail> = None;
+            // The model's turn as it will be echoed back on a zoom: every non-thought part, one
+            // functionCall (the latest, carrying the thoughtSignature Gemini 3 requires back).
+            let mut model_parts: Vec<Value> = Vec::new();
+            let mut inspect_args: Option<Value> = None;
+            let mut inspect_id: Option<Value> = None;
+            let mut inspect_name = String::new();
+
+            let mut progress = crate::ai::streaming::AnswerProgress::default();
+            while let Some(event_result) = crate::ai::streaming::next_or_stall(
+                &mut stream,
+                progress.update(accumulated_json.len() + raw_text.len()),
+                "Gemini",
+            )
+            .await?
+            {
+                let event = event_result?;
+
+                // Gemini sends data events
+                let data_str = event.data;
+                if data_str.is_empty() {
+                    continue;
                 }
-                // Gemini reports implicit-cache hits here. We never ask for caching, so a
-                // non-zero value means we are getting it free; a persistent zero is the
-                // evidence for wiring explicit context caching on the constant prefix.
-                let c = usage
-                    .get("cachedContentTokenCount")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
-                log::info!("[tokens] gemini in={input_tokens} out={output_tokens} cached={c}");
-                // Usage arrives on more than one chunk, cumulatively; the last one wins.
-                *self.last_usage.lock() = Some(UsageDetail {
-                    input: input_tokens,
-                    cached_input: c,
-                    cache_write: 0,
-                    output: output_tokens,
-                    reasoning: thoughts,
-                });
-                // A zero is ambiguous between "not caching" and "not reporting", so put the
-                // real field set on record once rather than guessing from the absence.
-                if c == 0 {
-                    static DUMPED: std::sync::atomic::AtomicBool =
-                        std::sync::atomic::AtomicBool::new(false);
-                    if !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        log::info!("[tokens] raw gemini usageMetadata (once): {usage}");
+
+                let data: Value = serde_json::from_str(&data_str).unwrap_or_default();
+                if let Some(v) = data.get("modelVersion").and_then(Value::as_str) {
+                    *self.last_served.lock() = Some(v.to_string());
+                }
+
+                // Extract usage if present
+                if let Some(usage) = data.get("usageMetadata") {
+                    let input_tokens = usage
+                        .get("promptTokenCount")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    // Google bills reasoning as OUTPUT, so the cost estimate needs both.
+                    // `candidatesTokenCount` alone under-reported by ~4x on a measured request
+                    // (156 visible against 447 thinking) — the Usage tab was showing a quarter
+                    // of what was actually charged.
+                    let visible = usage
+                        .get("candidatesTokenCount")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    let thoughts = usage
+                        .get("thoughtsTokenCount")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    // Gemini reports implicit-cache hits here. We never ask for caching, so a
+                    // non-zero value means we are getting it free; a persistent zero is the
+                    // evidence for wiring explicit context caching on the constant prefix.
+                    let c = usage
+                        .get("cachedContentTokenCount")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    log::info!("[tokens] gemini in={input_tokens} out={} cached={c}", visible + thoughts);
+                    // Usage arrives on more than one chunk, cumulatively; the last one wins.
+                    round = Some(UsageDetail {
+                        input: input_tokens,
+                        cached_input: c,
+                        cache_write: 0,
+                        output: visible + thoughts,
+                        reasoning: thoughts,
+                    });
+                    // A zero is ambiguous between "not caching" and "not reporting", so put the
+                    // real field set on record once rather than guessing from the absence.
+                    if c == 0 {
+                        static DUMPED: std::sync::atomic::AtomicBool =
+                            std::sync::atomic::AtomicBool::new(false);
+                        if !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            log::info!("[tokens] raw gemini usageMetadata (once): {usage}");
+                        }
                     }
                 }
-            }
 
-            if let Some(candidates) = data.get("candidates").and_then(|c| c.as_array()) {
-                if let Some(first_candidate) = candidates.first() {
-                    if let Some(parts) = first_candidate
-                        .get("content")
-                        .and_then(|c| c.get("parts"))
-                        .and_then(|p| p.as_array())
-                    {
-                        for part in parts {
-                            if let Some(fn_call) = part.get("functionCall") {
-                                if fn_call.get("name").and_then(|n| n.as_str())
-                                    == Some("navigate_step")
-                                {
-                                    if let Some(args) = fn_call.get("args") {
-                                        // Gemini might stream partial args as JSON object or a string fragment?
-                                        // Wait, Gemini function calling streaming behaviour: it returns partial args!
-                                        // But the args might be partially constructed JSON object.
-                                        // Wait, actually Gemini streamGenerateContent with tools returns the full args object
-                                        // progressively in chunks. Let's just convert it to string to extract the instruction.
-                                        let partial =
-                                            serde_json::to_string(args).unwrap_or_default();
+                if let Some(candidates) = data.get("candidates").and_then(|c| c.as_array()) {
+                    if let Some(first_candidate) = candidates.first() {
+                        if let Some(parts) = first_candidate
+                            .get("content")
+                            .and_then(|c| c.get("parts"))
+                            .and_then(|p| p.as_array())
+                        {
+                            for part in parts {
+                                if !part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+                                    keep_model_part(&mut model_parts, part);
+                                }
+                                if let Some(fn_call) = part.get("functionCall") {
+                                    let name = fn_call.get("name").and_then(|n| n.as_str());
+                                    if name.is_some_and(|n| look_names.contains(&n)) {
+                                        inspect_name = name.unwrap_or_default().to_string();
+                                        inspect_args = fn_call.get("args").cloned();
+                                        inspect_id = fn_call.get("id").cloned();
+                                    } else if name == Some("navigate_step") {
+                                        if let Some(args) = fn_call.get("args") {
+                                            // Gemini sends the cumulative args so far, not diffs,
+                                            // so the latest state replaces the buffer.
+                                            accumulated_json =
+                                                serde_json::to_string(args).unwrap_or_default();
 
-                                        // We just replace accumulated_json with the latest `args` state
-                                        // because Gemini sends the cumulative args so far, not diffs!
-                                        accumulated_json = partial;
+                                            let instruction_prefix = r#""instruction":""#;
+                                            let instruction_prefix_spaced = r#""instruction": ""#;
 
-                                        let instruction_prefix = r#""instruction":""#;
-                                        let instruction_prefix_spaced = r#""instruction": ""#;
-
-                                        if !in_instruction
-                                            && (accumulated_json.contains(instruction_prefix)
-                                                || accumulated_json
-                                                    .contains(instruction_prefix_spaced))
-                                        {
-                                            in_instruction = true;
-                                        }
-
-                                        if in_instruction {
-                                            let (delta, new_len) =
-                                                crate::ai::streaming::instruction_delta(
-                                                    &accumulated_json,
-                                                    emitted_instruction_len,
-                                                );
-                                            if !delta.is_empty() {
-                                                on_chunk(
-                                                    &delta,
-                                                    crate::ai::streaming::count_streamed_steps(
-                                                        &accumulated_json,
-                                                    ),
-                                                );
+                                            if !in_instruction
+                                                && (accumulated_json.contains(instruction_prefix)
+                                                    || accumulated_json
+                                                        .contains(instruction_prefix_spaced))
+                                            {
+                                                in_instruction = true;
                                             }
-                                            emitted_instruction_len = new_len;
+
+                                            if in_instruction {
+                                                let (delta, new_len) =
+                                                    crate::ai::streaming::instruction_delta(
+                                                        &accumulated_json,
+                                                        emitted_instruction_len,
+                                                    );
+                                                if !delta.is_empty() {
+                                                    on_chunk(
+                                                        &delta,
+                                                        crate::ai::streaming::count_streamed_steps(
+                                                            &accumulated_json,
+                                                        ),
+                                                    );
+                                                }
+                                                emitted_instruction_len = new_len;
+                                            }
                                         }
                                     }
+                                } else if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    raw_text.push_str(text);
+                                    // Prevent streaming raw text directly as it might be pseudo-JSON
                                 }
-                            } else if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                raw_text.push_str(text);
-                                // Prevent streaming raw text directly as it might be pseudo-JSON
                             }
                         }
                     }
                 }
             }
-        }
+
+            if let Some(r) = round {
+                total.input += r.input;
+                total.cached_input += r.cached_input;
+                total.output += r.output;
+                total.reasoning += r.reasoning;
+            }
+
+            if accumulated_json.trim().is_empty() && zoom_open {
+                if let Some(args) = inspect_args {
+                    zooms += 1;
+                    let (answer, look) = crate::ai::inspect::answer(&inspect_name, &sources, args).await;
+                    if let Some(l) = look {
+                        log::info!("[inspect] gemini {} {zooms}: {:?} turns {:?}", l.tool, l.region, l.turns);
+                        self.last_inspects.lock().push(l);
+                    }
+                    let reply = match answer {
+                        crate::ai::inspect::Reply::Images(images, caption) => json!({"functionResponse": {
+                            "name": inspect_name,
+                            "response": {"result": caption},
+                            "parts": images.iter().map(|b64| json!({"inlineData": {"mimeType": "image/jpeg", "data": b64}})).collect::<Vec<_>>()
+                        }}),
+                        crate::ai::inspect::Reply::Text(text) => json!({"functionResponse": {
+                            "name": inspect_name,
+                            "response": {"result": text}
+                        }}),
+                        crate::ai::inspect::Reply::Refused(why) => json!({"functionResponse": {
+                            "name": inspect_name,
+                            "response": {"error": why}
+                        }}),
+                    };
+                    // The 3.8 migration guide asks every FunctionResponse to carry the call's id
+                    // as well as its name; 3.8 accepted it without, so it is echoed when present.
+                    let mut reply = reply;
+                    if let Some(id) = inspect_id {
+                        reply["functionResponse"]["id"] = id;
+                    }
+                    contents.push(json!({"role": "model", "parts": model_parts}));
+                    contents.push(json!({"role": "user", "parts": [reply]}));
+                    continue;
+                }
+            }
+            break (accumulated_json, raw_text);
+        };
+        let (input_tokens, output_tokens) = (total.input, total.output);
+        *self.last_usage.lock() = Some(total);
 
         if accumulated_json.trim().is_empty() {
             if !raw_text.is_empty() {
@@ -416,6 +561,8 @@ impl GeminiClient {
                 let fallback = NavigateStepResponse {
                     goal: String::new(),
                     plan_outline: Vec::new(),
+            keep: Vec::new(),
+            app_note: String::new(),
                     plan_completed_count: None,
                     steps: vec![crate::ai::types::GuidanceStep {
                         instruction: clean_instruction,
@@ -457,6 +604,25 @@ impl GeminiClient {
 /// reaches. Seen 2026-10-07, when a replay-harness run printed a BYOK key in full.
 fn stream_url(model: &str) -> String {
     format!("{GEMINI_API_BASE}/{model}:streamGenerateContent?alt=sse")
+}
+
+/// One part of a streamed model turn, kept for echoing back on an `inspect` round. A
+/// functionCall replaces an earlier one (Gemini may stream cumulative args as several parts), and
+/// keeps the earlier part's thoughtSignature if the new one has none.
+fn keep_model_part(parts: &mut Vec<Value>, part: &Value) {
+    if part.get("functionCall").is_some() {
+        if let Some(i) = parts.iter().position(|p| p.get("functionCall").is_some()) {
+            let mut merged = part.clone();
+            if merged.get("thoughtSignature").is_none() {
+                if let Some(sig) = parts[i].get("thoughtSignature").cloned() {
+                    merged["thoughtSignature"] = sig;
+                }
+            }
+            parts[i] = merged;
+            return;
+        }
+    }
+    parts.push(part.clone());
 }
 
 pub fn build_messages(
@@ -525,8 +691,8 @@ fn log_thinking_once(what: &str) {
 mod tests {
     #[test]
     fn the_api_key_never_rides_in_the_url() {
-        let url = super::stream_url("gemini-3.7-flash");
-        assert!(url.ends_with("/gemini-3.7-flash:streamGenerateContent?alt=sse"), "{url}");
+        let url = super::stream_url("gemini-3.8-flash");
+        assert!(url.ends_with("/gemini-3.8-flash:streamGenerateContent?alt=sse"), "{url}");
         assert!(!url.contains("key"), "{url}");
     }
 }

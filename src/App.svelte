@@ -7,14 +7,14 @@ See the LICENSE file in the root of this repository for complete details.
   import { onMount, onDestroy, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
-  import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
+  import { register, unregister, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
   import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
   import { LogicalSize, LogicalPosition, PhysicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
   import { listen, emitTo } from "@tauri-apps/api/event";
   import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
   import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
   import HotkeyInput from "./HotkeyInput.svelte";
-  import { prettyHotkey } from "./lib/hotkey";
+  import { prettyHotkey, acceleratorCombo, combosInText, comboLabel } from "./lib/hotkey";
   import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
   import { providerName } from "./lib/providers";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
@@ -637,6 +637,35 @@ See the LICENSE file in the root of this repository for complete details.
   // Ids ticked in the list. Empty means the export button offers everything, which is the
   // common case -- "send me all of them" should not need twenty clicks.
   let selectedSessions = $state<string[]>([]);
+  // H7b: the learned guides, one row per app in Settings. Read again whenever the tab opens --
+  // a guide changes while the app runs, and can be edited by hand.
+  type LearnedGuide = { app: string; exe: string; notes: number; withheld: number };
+  let learnedGuides = $state<LearnedGuide[]>([]);
+  let learnedError = $state<MessageKey | null>(null);
+  async function loadLearnedGuides() {
+    try {
+      learnedGuides = await invoke<LearnedGuide[]>("list_learned_guides");
+    } catch (_) {
+      learnedGuides = [];
+    }
+  }
+  async function openLearnedGuide(exe: string) {
+    learnedError = null;
+    try {
+      await invoke("open_learned_guide", { exe });
+    } catch (_) {
+      learnedError = "sg.learnedNotesOpenFailed";
+    }
+  }
+  async function deleteLearnedGuide(exe: string) {
+    learnedError = null;
+    try {
+      await invoke("delete_learned_guide", { exe });
+    } catch (_) {
+      learnedError = "sg.learnedNotesDeleteFailed";
+    }
+    await loadLearnedGuides();
+  }
   let targetPickerOpen = $state(false);
   let targetWindows = $state<TargetWindowInfo[]>([]);
   // "target" = pick what Navisual assists with; "dock" = pick what fills the
@@ -1062,6 +1091,9 @@ See the LICENSE file in the root of this repository for complete details.
   // `is_packaged` command + navisual-internal/docs/msix-store-spike.md.
   let isPackaged = $state(false);
   let settingsTab = $state<SettingsTab>("provider");
+  $effect(() => {
+    if (showSettings && settingsTab === "screen-guide") untrack(() => loadLearnedGuides());
+  });
 
   // Info (About) dialog → Usage tab
   type UsageRow = {
@@ -1117,7 +1149,7 @@ See the LICENSE file in the root of this repository for complete details.
     subtitle_enabled: true, auto_advance: false, autopilot_min_cells: 16,
     tts_enabled: true, tts_voice: "", voice_input_enabled: false, voice_language: "auto",
     ui_language: "system",
-    hotkey_next: "Ctrl+Backquote", hotkey_wrong: "Ctrl+KeyE",
+    hotkey_next: "Ctrl+Backquote", hotkey_wrong: "",
     hotkey_pause: "", hotkey_icon: "Ctrl+Shift+Backquote", hotkey_talk: "Ctrl+KeyD",
     debug_screenshot_enabled: false,
     debug_diagnostics_enabled: false,
@@ -1141,11 +1173,14 @@ See the LICENSE file in the root of this repository for complete details.
   let settingsSaving = $state(false);
   let settingsError = $state<string | null>(null);
   let settingsSaved = $state(false);
-  const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-4-6","claude-opus-4-7"];
-  const MODEL_PRESETS_GEMINI    = ["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-3.5-flash","gemini-3.1-pro-preview"];
-  const MODEL_PRESETS_OPENAI    = ["gpt-5.5","gpt-5.4-mini"];
+  // Each list must name exactly the <option>s of that provider's model dropdown below: a model
+  // missing here is shown as "Custom" with a text box. By 2026-10-09 four of the five had
+  // drifted, so every provider's default model opened as Custom.
+  const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-5","claude-opus-5"];
+  const MODEL_PRESETS_GEMINI    = ["gemini-3.8-flash","gemini-2.5-flash-lite","gemini-3.1-pro-preview","gemini-2.5-flash"];
+  const MODEL_PRESETS_OPENAI    = ["gpt-6.1-sol","gpt-6-luna","gpt-6-astra"];
   const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp"];
-  const MODEL_PRESETS_QWEN      = ["qwen3.6-plus","qwen3.5-omni-plus"];
+  const MODEL_PRESETS_QWEN      = ["qwen3.8-max","qwen3.7-flash","qwen3.5-omni-plus"];
   // Qwen DashScope OpenAI-compatible endpoints by region. Picking a region in the
   // Settings "Endpoint" dropdown auto-fills qwen_base_url; "Custom" reveals a free
   // field for local servers (LM Studio / llama.cpp) and workspace URLs (e.g. HK ws-xxx…).
@@ -2429,26 +2464,123 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
-  // Re-register global shortcuts. Called on mount and after settings change.
+  // ── Global hotkeys: held only while needed, released for a step that uses them ──────────
+  // A global hotkey takes its keys from every app. Registered at launch, Ctrl+E (Wrong) was
+  // gone from Word (Center), Excel (Flash Fill) and the browser (search box) for as long as
+  // Navisual ran. So Next and Wrong exist only while a step is being guided, and any hotkey a
+  // step tells the user to press is released while that step is on screen (L1, 2026-10-12:
+  // Luna said "press Ctrl+E" in Word, and the keypress opened the Wrong picker instead).
+  type HotkeyRole = "next" | "wrong" | "pause" | "icon" | "talk";
+  type HotkeyEntry = { role: HotkeyRole; key: string; guidance: boolean; handler: () => void };
+  const HOTKEY_LABEL: Record<HotkeyRole, MessageKey> = {
+    next: "hk.next", wrong: "hk.wrong", pause: "hk.pause", icon: "hk.icon", talk: "hk.talk",
+  };
+  let hotkeyEntries = $state<HotkeyEntry[]>([]);
+  // What is registered right now. Every register/unregister runs on one chain, in order.
+  const heldHotkeys = new Set<string>();
+  let hotkeyChain: Promise<unknown> = Promise.resolve();
+  let lastYieldNote = "";
+  let lastHeldProbe = "";
+  // The held-key warning on the step card, for the step it was found on. The history line alone sat
+  // under the card, which hid the key's name while the step was on screen (live check, 2026-10-13).
+  let heldKeyBanner = $state<{ step: number; instruction: string; keys: string[] } | null>(null);
+
+  function queueHotkeys<T>(work: () => Promise<T>): Promise<T> {
+    const run = hotkeyChain.then(work);
+    hotkeyChain = run.catch(() => {});
+    return run;
+  }
+
+  // Which hotkeys should be held now, and which a step on screen has claimed.
+  function wantedHotkeys(): { want: HotkeyEntry[]; yielded: HotkeyEntry[]; claimed: Set<string> } {
+    const guiding =
+      phase === "guiding" || phase === "needs_input" || (phase === "thinking" && steps.length > 0);
+    const claimed = guiding ? combosInText(steps[stepIndex]?.instruction ?? "") : new Set<string>();
+    const want: HotkeyEntry[] = [];
+    const yielded: HotkeyEntry[] = [];
+    for (const e of hotkeyEntries) {
+      if (!e.key || (e.guidance && !guiding)) continue;
+      if (claimed.has(acceleratorCombo(e.key))) yielded.push(e);
+      else want.push(e);
+    }
+    return { want, yielded, claimed };
+  }
+
+  $effect(() => {
+    const { want, yielded, claimed } = wantedHotkeys();
+    untrack(() => {
+      // A combo the step names that another program holds never reaches the app: NVIDIA's overlay
+      // took Word's Alt+F9 for its Record dialog in L1 (2026-10-12). Navisual cannot release
+      // another program's key, but it can find out and say so; the backend also tells the model
+      // on the next request. Not Navisual's own keys (released above), not Win+ (Windows' own).
+      const own = new Set(hotkeyEntries.filter((e) => e.key).map((e) => acceleratorCombo(e.key)));
+      const toProbe = [...claimed].filter((c) => !own.has(c) && !c.split("+").includes("win"));
+      const probeNote = `${stepIndex}|${steps[stepIndex]?.instruction ?? ""}|${toProbe.join(",")}`;
+      if (toProbe.length > 0 && probeNote !== lastHeldProbe) {
+        lastHeldProbe = probeNote;
+        const probeStep = stepIndex;
+        const probeInstruction = steps[stepIndex]?.instruction ?? "";
+        invoke<string[]>("combos_held_elsewhere", { combos: toProbe })
+          .then((held) => {
+            for (const c of held) addToHistory("system", t("msg.hotkeyHeldElsewhere", { key: comboLabel(c) }));
+            if (held.length > 0) heldKeyBanner = { step: probeStep, instruction: probeInstruction, keys: held.map(comboLabel) };
+          })
+          .catch((err) => console.warn("hotkey check failed:", err));
+      }
+      // Say so once per step: the key now goes to the app, and the panel's button still works.
+      const note = `${stepIndex}|${steps[stepIndex]?.instruction ?? ""}|${yielded.map((e) => e.key).join(",")}`;
+      if (yielded.length > 0 && note !== lastYieldNote) {
+        lastYieldNote = note;
+        for (const e of yielded) {
+          addToHistory("system", t("msg.hotkeyYielded", { key: prettyHotkey(e.key), action: t(HOTKEY_LABEL[e.role]) }));
+        }
+      }
+      const wantKeys = new Map(want.map((e) => [e.key, e]));
+      queueHotkeys(async () => {
+        for (const k of [...heldHotkeys]) {
+          if (!wantKeys.has(k)) {
+            // Needs global-shortcut:allow-unregister; without it this failed silently and every
+            // key stayed held (first live check, 2026-10-12).
+            try { await unregister(k); heldHotkeys.delete(k); }
+            catch (err) { console.warn("shortcut release failed:", k, err); }
+          }
+        }
+        for (const [k, e] of wantKeys) {
+          if (heldHotkeys.has(k)) continue;
+          try { await register(k, e.handler); heldHotkeys.add(k); }
+          catch (err) { console.warn("shortcut failed:", k, err); }
+        }
+      });
+    });
+  });
+
+  // Re-register global shortcuts. Called on mount and after settings change. Every key is
+  // registered once here so Settings can report one another program holds; the effect above
+  // then releases whatever is not needed at this moment.
   async function registerShortcuts(hk: Pick<SettingsPayload, "hotkey_next"|"hotkey_wrong"|"hotkey_pause"|"hotkey_icon"|"hotkey_talk">) {
-    await unregisterAll().catch(() => {});
     function debounced(fn: () => void, ms = 350): () => void {
       let last = 0;
       return () => { const now = Date.now(); if (now - last < ms) return; last = now; fn(); };
     }
-    const pairs: Array<[string, () => void]> = [
-      [hk.hotkey_next,  debounced(() => { if (!actionDisabled) nextStep(); })],
-      [hk.hotkey_wrong, debounced(() => { if (!actionDisabled) openWrongPicker(); })],
-      [hk.hotkey_pause, debounced(() => cancelRequest())],
-      [hk.hotkey_icon,  debounced(() => { if (iconMode) expandToPanel(); else collapseToIcon(); })],
-      [hk.hotkey_talk,  debounced(() => { if (settingsForm.voice_input_enabled) toggleVoiceInput(); })],
+    const entries: HotkeyEntry[] = [
+      { role: "next",  key: hk.hotkey_next,  guidance: true,  handler: debounced(() => { if (!actionDisabled) nextStep(); }) },
+      { role: "wrong", key: hk.hotkey_wrong, guidance: true,  handler: debounced(() => { if (!actionDisabled) openWrongPicker(); }) },
+      { role: "pause", key: hk.hotkey_pause, guidance: false, handler: debounced(() => cancelRequest()) },
+      { role: "icon",  key: hk.hotkey_icon,  guidance: false, handler: debounced(() => { if (iconMode) expandToPanel(); else collapseToIcon(); }) },
+      { role: "talk",  key: hk.hotkey_talk,  guidance: false, handler: debounced(() => { if (settingsForm.voice_input_enabled) toggleVoiceInput(); }) },
     ];
-    const errors: string[] = [];
-    for (const [key, handler] of pairs) {
-      if (!key) continue;
-      try { await register(key, handler); }
-      catch (e) { errors.push(`${key}: ${e}`); console.warn("shortcut failed:", key, e); }
-    }
+    const errors = await queueHotkeys(async () => {
+      await unregisterAll().catch(() => {});
+      heldHotkeys.clear();
+      const errs: string[] = [];
+      for (const e of entries) {
+        if (!e.key) continue;
+        try { await register(e.key, e.handler); heldHotkeys.add(e.key); }
+        catch (err) { errs.push(`${e.key}: ${err}`); console.warn("shortcut failed:", e.key, err); }
+      }
+      return errs;
+    });
+    hotkeyEntries = entries;
     return errors;
   }
 
@@ -2554,6 +2686,9 @@ See the LICENSE file in the root of this repository for complete details.
     sessionGoal = "";
     sessionPlanOutline = [];
     sessionPlanCompletedCount = 0;
+    // The Wrong picker belongs to the step on screen. Left open, it turned the next task's
+    // text into a "wrong" report against no session ("no active session"; L1, 2026-10-12).
+    wrongPickerOpen = false;
     cancelRequest();
     // Reset Rust-side session state including target_hwnd so the next Guide me
     // call re-discovers the foreground window instead of reusing a stale target.
@@ -2569,9 +2704,11 @@ See the LICENSE file in the root of this repository for complete details.
     sessionId = "";
     staleResponse = false;
     history = [];
+    // A pin survives a new task (`new_session`), so the line must not promise to follow the
+    // next app clicked into while one is in force.
     await addToHistory(
       "system",
-      t("msg.newSession"),
+      t(pinnedHwnd !== null ? "msg.newSessionPinned" : "msg.newSession"),
     );
     // Workstream P: fresh session, fresh cold-start prefill.
     clearPrefill();
@@ -2881,6 +3018,10 @@ See the LICENSE file in the root of this repository for complete details.
     free_trial_exhausted: "err.freeTrialExhausted",
     insufficient_coins: "err.insufficientCoins",
     export_disabled: "err.exportDisabled",
+    pinned_window_gone: "err.pinnedWindowGone",
+    pinned_window_minimized: "err.pinnedWindowMinimized",
+    stream_stalled: "err.streamStalled",
+    stream_runaway: "err.streamRunaway",
   };
   // Nothing was open to guide. Not an error to report -- a scope to offer. One helper so
   // the three callers cannot drift (rule 18); each passes what to re-run afterwards.
@@ -3175,7 +3316,7 @@ See the LICENSE file in the root of this repository for complete details.
       if (token !== requestToken) return;
       phase = prevPhase;
       lastRequestFailed = true;
-        addToHistory("system", "⚠️ " + String(e));
+        addToHistory("system", "⚠️ " + errText(String(e), "msg.correctionFailed"));
       if (rawNote !== "") task = rawNote;
     }
   }
@@ -3381,6 +3522,9 @@ See the LICENSE file in the root of this repository for complete details.
   // "wrong" report (logged as wrong_other) rather than a normal follow-up.
   function submitTask() {
     lastRequestFailed = false;
+    // Only a step being guided can be wrong; any other way out of guiding must not leave the
+    // picker deciding what the next text means.
+    if (wrongPickerOpen && phase !== "guiding") wrongPickerOpen = false;
     if (wrongPickerOpen && task.trim()) submitWrong("wrong_other");
     else guide();
   }
@@ -3635,6 +3779,14 @@ See the LICENSE file in the root of this repository for complete details.
         // Live step counter: >1 means later steps are already streaming past —
         // show "Step 1 of ~N" instead of discarding that signal until completion.
         streamStepsSeen = event.payload.steps_seen ?? 0;
+      }
+    });
+    // The request stalled mid-answer and is being sent again: drop the half-streamed text
+    // so the retry's answer does not land after it.
+    listen("stream_reset", () => {
+      if (phase === "thinking" || phase === "guiding") {
+        currentInstruction = "";
+        streamStepsSeen = 0;
       }
     });
 
@@ -4071,6 +4223,10 @@ See the LICENSE file in the root of this repository for complete details.
         {:else if sharedApp}
           {friendlyName(sharedApp.exe_name) || sharedApp.app_name}
           {#if pinnedHwnd !== null}<span class="header-shared-pin">📌</span>{/if}
+        {:else if pinnedHwnd !== null}
+          <!-- Pinned, and the window is gone: the pin is still in force and guide() refuses,
+               so this must not read "Auto-detect" (2026-10-15). -->
+          {t("target.pinnedGone")}<span class="header-shared-pin">📌</span>
         {:else}
           {t("target.autoDetect")}
         {/if}
@@ -4230,6 +4386,16 @@ See the LICENSE file in the root of this repository for complete details.
         {/if}
         <p class="latest-text">{currentInstruction}</p>
 
+        <!-- A key this step names that another program holds: said here, while the step is on
+             screen, because the history line sat under this card (live check, 2026-10-13). -->
+        {#if heldKeyBanner && phase === "guiding" && heldKeyBanner.step === stepIndex && heldKeyBanner.instruction === (steps[stepIndex]?.instruction ?? "")}
+          <div class="stale-banner" role="status">
+            <span class="stale-icon">⚠</span>
+            <span class="stale-text">{t("panel.heldKeyBanner", { key: heldKeyBanner.keys.join(", ") })}</span>
+            <button class="stale-dismiss" onclick={() => (heldKeyBanner = null)} title={t("panel.dismiss")}>✕</button>
+          </div>
+        {/if}
+
         <!-- Pointer hidden because the target window is covered by another app -->
         {#if pointerOccluded && phase === "guiding"}
           <div class="stale-banner" role="status">
@@ -4255,7 +4421,7 @@ See the LICENSE file in the root of this repository for complete details.
         {#if phase === "guiding"}
           <div class="wrong-footer">
             {#if !wrongPickerOpen}
-              <button class="wrong-btn" onclick={openWrongPicker} title={t("panel.wrongTitle", { hotkey: prettyHotkey(settingsForm.hotkey_wrong) })}>{t("panel.wrong")}</button>
+              <button class="wrong-btn" onclick={openWrongPicker} title={settingsForm.hotkey_wrong ? t("panel.wrongTitle", { hotkey: prettyHotkey(settingsForm.hotkey_wrong) }) : t("panel.wrongTitleNoKey")}>{t("panel.wrong")}</button>
             {:else}
               <div class="reason-row">
                 <span class="reason-prompt">{t("wrong.prompt")}</span>
@@ -5279,14 +5445,11 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="gemini-model" class="setting-select"
                   value={customGemini ? "__custom__" : settingsForm.gemini_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customGemini = false; settingsForm.gemini_model = v; } else { customGemini = true; settingsForm.gemini_model = ""; } }}>
-                  <option value="gemini-3.7-flash">gemini-3.7-flash {t("pv.qRecommended")}</option>
-                  <!-- 3.8 is listed but NOT the default. It is newer and the family
-                       prior is strong, but 3.7 is the one with measured grounding
-                       here (100% bbox, 92% hit, median 1px — model-comparison.md),
-                       and 3.8's model card says thinking cannot be set below "low",
-                       which is the shape that broke forced tool calls on OpenAI's
-                       reasoning models. Promote it once it has its own numbers. -->
-                  <option value="gemini-3.8-flash">gemini-3.8-flash {t("pv.qNewest")}</option>
+                  <!-- 3.7 is gone: Google retired it on 2026-10-09 and redirects every request
+                       naming it to 3.8, which has carried forced tool calls fine since
+                       (native API and the relay's OpenAI-compatible path, with and
+                       without thinking at "low"). -->
+                  <option value="gemini-3.8-flash">gemini-3.8-flash {t("pv.qRecommended")}</option>
                   <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite {t("pv.qFast")}</option>
                   <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview {t("pv.qBest")}</option>
                   <option value="gemini-2.5-flash">gemini-2.5-flash</option>
@@ -5294,7 +5457,7 @@ See the LICENSE file in the root of this repository for complete details.
                 </select>
                 {#if customGemini}
                   <input class="setting-input" type="text" bind:value={settingsForm.gemini_model}
-                    placeholder="e.g. gemini-3.7-flash" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. gemini-3.8-flash" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
 
@@ -5350,14 +5513,14 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="openai-model" class="setting-select"
                   value={customOpenAI ? "__custom__" : settingsForm.openai_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customOpenAI = false; settingsForm.openai_model = v; } else { customOpenAI = true; settingsForm.openai_model = ""; } }}>
-                  <option value="gpt-5.6-terra">gpt-5.6-terra {t("pv.qRecommended")}</option>
-                  <option value="gpt-5.6-luna">gpt-5.6-luna {t("pv.qFast")}</option>
-                  <option value="gpt-5.6-sol">gpt-5.6-sol {t("pv.qBest")}</option>
+                  <option value="gpt-6.1-sol">gpt-6.1-sol {t("pv.qRecommended")}</option>
+                  <option value="gpt-6-luna">gpt-6-luna {t("pv.qFast")}</option>
+                  <option value="gpt-6-astra">gpt-6-astra {t("pv.qBest")}</option>
                   <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customOpenAI}
                   <input class="setting-input" type="text" bind:value={settingsForm.openai_model}
-                    placeholder="e.g. gpt-5.6-terra" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. gpt-6.1-sol" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
 
@@ -5601,6 +5764,29 @@ See the LICENSE file in the root of this repository for complete details.
               </p>
             </div>
             <div class="setting-group">
+              <p class="setting-label">{t("sg.learnedNotes")}</p>
+              <p class="setting-hint">{t("sg.learnedNotesHint")}</p>
+              {#if learnedGuides.length === 0}
+                <p class="setting-hint learned-empty">{t("sg.learnedNotesEmpty")}</p>
+              {:else}
+                {#each learnedGuides as g (g.exe)}
+                  <div class="learned-row">
+                    <div class="learned-what">
+                      <span class="learned-app">{g.app}</span>
+                      <span class="learned-count">
+                        {t("sg.learnedNotesCount", { n: g.notes })}{#if g.withheld > 0}{" · "}{t("sg.learnedNotesPaused", { n: g.withheld })}{/if}
+                      </span>
+                    </div>
+                    <button class="key-toggle" onclick={() => openLearnedGuide(g.exe)}>{t("sg.learnedNotesOpen")}</button>
+                    <button class="key-toggle" onclick={() => deleteLearnedGuide(g.exe)}>{t("sg.learnedNotesDelete")}</button>
+                  </div>
+                {/each}
+              {/if}
+              {#if learnedError}
+                <p class="setting-hint learned-error">{t(learnedError)}</p>
+              {/if}
+            </div>
+            <div class="setting-group">
               <p class="setting-label">{t("sg.whatYouType")}</p>
               <label class="toggle-row">
                 <input type="checkbox" bind:checked={settingsForm.log_request_text} />
@@ -5662,7 +5848,7 @@ See the LICENSE file in the root of this repository for complete details.
                 <input type="checkbox" bind:checked={settingsForm.debug_log_files_enabled} />
                 <span>Append every locate and every prompt to <code>locate_log.jsonl</code> / <code>prompt_log.jsonl</code></span>
               </label>
-              <p class="stub-hint" style="margin-top:4px">Text only, in %LOCALAPPDATA%\com.navisual.app\. One switch for both: a locate trace without the prompt that caused it answers half a question, and the <code>toolsnalyze-*.ps1</code> scripts read both.</p>
+              <p class="stub-hint" style="margin-top:4px">Text only, in %LOCALAPPDATA%\com.navisual.app\. One switch for both: a locate trace without the prompt that caused it answers half a question, and the <code>tools\analyze-*.ps1</code> scripts read both.</p>
 
               <label class="toggle-row" style="margin-top:10px">
                 <input type="checkbox" bind:checked={settingsForm.debug_screenshot_enabled} />
@@ -8374,6 +8560,31 @@ See the LICENSE file in the root of this repository for complete details.
     transition: background 120ms ease-out;
   }
   .key-toggle:hover { background: var(--surface-4); color: var(--text-primary); }
+
+  .learned-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+  }
+  .learned-what {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+  .learned-app {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .learned-count { font-size: 11px; color: var(--text-secondary); }
+  .learned-empty { margin-top: 4px; }
+  .learned-error { margin-top: 4px; color: var(--danger, #e5484d); }
 
   .color-row {
     display: flex;

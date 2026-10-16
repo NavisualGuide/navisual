@@ -482,6 +482,7 @@ mod tests {
             advanced_by: None,
             frame: None,
             mark: None,
+            window_title: None,
         }
     }
 

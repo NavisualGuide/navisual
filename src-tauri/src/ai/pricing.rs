@@ -60,11 +60,19 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // nothing. See model-comparison.md.
         "gemini-3.7-flash" | "gemini-3.8-flash" => (0.75, 3.75),
         m if m.starts_with("gemini-3.1-pro") || m.starts_with("gemini-3-pro") => (2.0, 12.0),
+        // OpenAI — GPT-6 (2026-10-11): Luna 6 for Speed and Sol 6.1 for Smart are the
+        // founder's picks for L1; Astra is the top of the line. List prices from
+        // developers.openai.com/api/docs/models/compare. Cached input is a tenth of these and
+        // a cache write 1.25x; like every OpenAI row, input is counted here at the full rate.
+        "gpt-6-luna" => (0.10, 0.50),
+        "gpt-6.1-sol" => (2.0, 10.0),
+        "gpt-6-sol" => (2.0, 10.0), // superseded by gpt-6.1-sol, same price
+        "gpt-6-astra" => (10.0, 50.0),
         // OpenAI — 5.6 family (2026-08-16 refresh) replaces 5.4/5.5, ~86% cheaper at the
         // fast tier (Luna vs old 5.4-mini's 0.75/4.50). Old rows kept for historical logs.
-        "gpt-5.6-luna" => (0.10, 0.60),
-        "gpt-5.6-terra" => (2.50, 15.0),
-        "gpt-5.6-sol" => (5.0, 30.0),
+        "gpt-5.6-luna" => (0.10, 0.60),  // superseded by gpt-6-luna
+        "gpt-5.6-terra" => (2.50, 15.0), // superseded by gpt-6.1-sol
+        "gpt-5.6-sol" => (5.0, 30.0),    // superseded by the GPT-6 rows above
         "gpt-5.4-mini" => (0.75, 4.50), // superseded by gpt-5.6-luna
         "gpt-5.4" => (2.50, 15.0),      // superseded by gpt-5.6-terra
         "gpt-5.5" => (5.0, 30.0),       // superseded by gpt-5.6-sol

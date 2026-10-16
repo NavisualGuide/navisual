@@ -4,6 +4,7 @@ pub mod config;
 pub mod cost_tracker;
 pub mod deepseek;
 pub mod gemini;
+pub mod inspect;
 pub mod managed;
 pub mod ollama;
 pub mod pricing;

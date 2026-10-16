@@ -34,6 +34,8 @@ use std::time::Instant;
 /// packed menu/tab strips (short lines) are never falsely rejected.
 const ISOLATION_LINE_FLOOR: usize = 40;
 const ISOLATION_MIN: f32 = 0.4;
+/// A control's label found by OCR on a text-content surface must be its own line, near enough.
+const CONTROL_LABEL_ISOLATION: f32 = 0.9;
 
 #[derive(Debug, Clone, Default)]
 pub struct LocateOptions {
@@ -111,6 +113,70 @@ pub(crate) fn rejected_by_avoid(bbox: &Rect, avoid: &[Rect]) -> bool {
 }
 
 pub fn locate(
+    target_text: &str,
+    opts: &LocateOptions,
+    pre_ocr: Option<(&[u8], Rect)>,
+) -> Result<(Option<LocateResult>, LocateTrace)> {
+    let (hit, mut trace) = locate_passes(target_text, opts, pre_ocr)?;
+    if let Some(h) = &hit {
+        let text_hit = match trace.final_decision {
+            FinalDecision::HitA11y => h.role == "Text",
+            FinalDecision::HitOcr => !trace
+                .ocr
+                .corroboration
+                .as_ref()
+                .is_some_and(|c| c.snapped_to_uia),
+            _ => false,
+        };
+        let ai = if opts.bbox_decisive { opts.ai_bbox } else { None };
+        if text_hit && is_label_beside_target(&h.bbox, ai, opts.role.as_deref()) {
+            log::info!(
+                "[locate] {target_text:?}: the {} match at {:?} lies outside the model's box {:?} for a {:?}; its label, not the control -- left to the hint",
+                h.role,
+                h.bbox,
+                ai,
+                opts.role
+            );
+            trace.final_decision = FinalDecision::RejectedUncorroborated {
+                detail: format!(
+                    "label beside the target: {} match outside the model's box for a {}",
+                    h.role,
+                    opts.role.as_deref().unwrap_or("control")
+                ),
+            };
+            trace.final_bbox = None;
+            return Ok((None, trace));
+        }
+    }
+    Ok((hit, trace))
+}
+
+/// Whether a text match is the LABEL of the thing the model asked for rather than the thing: its
+/// trusted box marks where, and the matched text lies wholly outside that box. Live 2026-10-12,
+/// Calc's Validity dialog: the Entries box has no UIA element at all, only its label (58x272,
+/// stretched to the row), so Pass 1 pointed at the label on every request while Luna's box sat
+/// on the input (L1 `lo-validation`, 0 of 9; the models called it a textbox 16 times in 20 and
+/// "other" 4). With this the step falls to the hint ring on the model's box.
+///
+/// Not for roles whose text is the control itself -- a button's caption, a checkbox's, a menu
+/// item, a tab, a link, a heading: there the text is the target, and a box beside it is the
+/// model's imprecision. A wrong veto costs a dashed ring at the model's box, near the target; a
+/// wrong accept costs a pointer on the wrong element.
+fn is_label_beside_target(hit: &Rect, ai_bbox: Option<Rect>, role: Option<&str>) -> bool {
+    let Some(ai) = ai_bbox else {
+        return false;
+    };
+    if !matches!(role, None | Some("textbox" | "combobox" | "slider" | "image" | "other")) {
+        return false;
+    }
+    // Wholly apart: no pixel of the text inside the box.
+    hit.x + hit.width as i32 <= ai.x
+        || ai.x + ai.width as i32 <= hit.x
+        || hit.y + hit.height as i32 <= ai.y
+        || ai.y + ai.height as i32 <= hit.y
+}
+
+fn locate_passes(
     target_text: &str,
     opts: &LocateOptions,
     pre_ocr: Option<(&[u8], Rect)>,
@@ -510,7 +576,7 @@ pub fn locate(
     // (1) UIA role hit-test — primary; works native AND primed-Electron.
     // On an interactive hit it also hands back the control's bounding rect, used below to
     // snap the pointer off the OCR text span onto the whole clickable control.
-    let (role, role_rect) = hit_test::verify_role(cx, cy);
+    let (role, role_rect) = hit_test::verify_role_bounded(cx, cy, hit_test::ROLE_CHECK_BUDGET);
     let (uia_control_type, uia_interactive) = match &role {
         RoleHit::Interactive(ct) => (Some(ct.clone()), true),
         RoleHit::Content(ct) => (Some(ct.clone()), false),
@@ -518,7 +584,11 @@ pub fn locate(
     };
     // (2) Label isolation (image-pixel space, same as `results`).
     let (isolation, line_len) = ocr::isolation_for(&hit.bbox, target_text, &results);
-    let isolation_ok = !(line_len > ISOLATION_LINE_FLOOR && isolation < ISOLATION_MIN);
+    let control_hunt = matches!(
+        opts.role.as_deref(),
+        Some("button" | "tab" | "menuitem" | "checkbox" | "radio" | "combobox" | "slider")
+    );
+    let isolation_ok = isolation_passes(isolation, line_len, control_hunt && matches!(role, RoleHit::Content(_)));
     // (3) nearby_text anchor proximity (soft). A nearby_text identical to the
     // target carries no independent signal (self-anchor) — treat as absent.
     let near_anchor = opts
@@ -543,6 +613,19 @@ pub fn locate(
         })
         .unwrap_or(false);
     let near_ai_bbox = near_ai_bbox_raw && opts.bbox_decisive;
+    // (4b) ...and its disagreement as a vote AGAINST. GIMP's Save Image dialog, step 3 of L1
+    // (2026-10-12): the model boxed the Save button at the lower right; OCR's only exact "Save" was
+    // in the dialog's title, 1,270 px away, isolated enough to pass, and the follower clicked the
+    // title seven times. Across every L1 locate log (426 OCR hits) the rule below rejects 12: GIMP's
+    // title "Save" x7 and a Word body "2" far from the footer number -- wrong; Blender's outliner
+    // "Cylinder" x3 with the box on the 3D object -- either selects it; one GIMP "Cancel" unknown.
+    // The hits it leaves alone sit inside a wide box (a row, a field) with an anchor.
+    let ai_bbox_disagrees = opts.bbox_decisive
+        && !near_anchor
+        && !near_ai_bbox_raw
+        && ai_bbox_img
+            .map(|ab| outside_ai_bbox(hit.bbox, ab, img_w, img_h))
+            .unwrap_or(false);
 
     // A fuzzy (approximate) OCR match is a guess about WHICH word — so it must NOT win on
     // isolation alone; it needs spatial agreement (the nearby-text anchor or a trusted AI
@@ -577,7 +660,7 @@ pub fn locate(
         near_ai_bbox,
         opts.icon_target,
         content_role_requested,
-    );
+    ) && !(ai_bbox_disagrees && role_kind != RoleKind::Interactive);
     ocr_trace.corroboration = Some(Corroboration {
         uia_control_type,
         uia_interactive,
@@ -587,6 +670,7 @@ pub fn locate(
         near_anchor,
         near_ai_bbox: near_ai_bbox_raw,
         bbox_decisive: opts.bbox_decisive,
+        ai_bbox_disagrees,
         accepted: accept,
         snapped_to_uia: false,
     });
@@ -622,7 +706,7 @@ pub fn locate(
         trace.ocr = ocr_trace;
         trace.final_decision = FinalDecision::RejectedUncorroborated {
             detail: format!(
-                "uia={role_label} fuzzy={is_fuzzy} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox}"
+                "uia={role_label} fuzzy={is_fuzzy} isolation={isolation:.2}/{line_len} anchor={near_anchor} ai_bbox={near_ai_bbox} ai_bbox_disagrees={ai_bbox_disagrees}"
             ),
         };
         trace.elapsed_ms = started.elapsed().as_millis() as u32;
@@ -742,6 +826,37 @@ fn shares_token(a: &str, b: &str) -> bool {
         return a.chars().filter(|c| super::is_cjk_char(*c)).any(|c| b.contains(c));
     }
     false
+}
+
+/// Whether an OCR match counts as an isolated label.
+///
+/// A line of `ISOLATION_LINE_FLOOR` characters or fewer counts as a label whatever share of it the
+/// word is -- right for a toolbar row or a custom-drawn menu, where a short line holds several
+/// controls. Not for a **control hunt on text content** (UIA says Document, Edit or Text under the
+/// word, and the model asked for a button, tab, menu item, check box, radio, combo box or
+/// slider): there a short line is just a short line of the user's text. Live 2026-10-11, Notepad
+/// showing a file that read "names: Format > Word wrap" (25 characters, the word 0.24 of it):
+/// target menu item "Format" -> pointer on the document text. There the word must be its own
+/// line (`CONTROL_LABEL_ISOLATION`). Measured on the founder's locate log: of the 6 accepted OCR
+/// hits for a control inside Document/Edit, the 4 correct ones -- Chrome page buttons and a combo
+/// box, the whole line each (1.0) -- still pass, and the 2 wrong ones -- Notepad document words at
+/// 0.75 and 0.24 -- do not. Surfaces UIA cannot name (Unknown) keep the short-line rule.
+fn isolation_passes(isolation: f32, line_len: usize, control_hunt_in_content: bool) -> bool {
+    if control_hunt_in_content {
+        return isolation >= CONTROL_LABEL_ISOLATION;
+    }
+    !(line_len > ISOLATION_LINE_FLOOR && isolation < ISOLATION_MIN)
+}
+
+/// The hit's centre lies outside the AI box grown by 5% of the image diagonal: a wide box (a list
+/// row, a text field) whose label sits at one end still contains its hit.
+fn outside_ai_bbox(hit: (i32, i32, u32, u32), ab: (i32, i32, u32, u32), img_w: u32, img_h: u32) -> bool {
+    let margin = ((img_w as f32).powi(2) + (img_h as f32).powi(2)).sqrt() * 0.05;
+    let cx = hit.0 as f32 + hit.2 as f32 / 2.0;
+    let cy = hit.1 as f32 + hit.3 as f32 / 2.0;
+    let (x0, y0) = (ab.0 as f32 - margin, ab.1 as f32 - margin);
+    let (x1, y1) = (ab.0 as f32 + ab.2 as f32 + margin, ab.1 as f32 + ab.3 as f32 + margin);
+    !(x0..=x1).contains(&cx) || !(y0..=y1).contains(&cy)
 }
 
 /// UIA role family under the OCR match, for the corroboration decision.
@@ -1150,6 +1265,56 @@ mod tests {
     // given BBOX region. IN=capture.png; BBOX=x,y,w,h (around the target text); TARGET=word.
     //   $env:IN="vscode_cap.png"; $env:BBOX="450,180,200,150"; $env:TARGET="user";
     //   cargo test --lib region_ocr_live -- --ignored --nocapture
+    fn rr(x: i32, y: i32, w: u32, h: u32) -> Rect {
+        Rect { x, y, width: w, height: h }
+    }
+
+    /// Live 2026-10-12, Calc's Validity dialog: the label "Entries" (58x272) beside the input Luna
+    /// boxed at 645,398 297x272.
+    #[test]
+    fn a_label_outside_the_box_of_an_input_is_not_the_input() {
+        let label = rr(577, 398, 58, 272);
+        let input = Some(rr(645, 398, 297, 272));
+        assert!(super::is_label_beside_target(&label, input, Some("textbox")));
+        assert!(super::is_label_beside_target(&label, input, Some("combobox")));
+        assert!(super::is_label_beside_target(&label, input, None), "no role named");
+        // A button's text, a checkbox's caption, a menu item's belong to the control.
+        for role in ["button", "checkbox", "radio", "menuitem", "tab", "link", "heading"] {
+            assert!(!super::is_label_beside_target(&label, input, Some(role)), "{role}");
+        }
+        // Text inside the box (a typed value) is the input; no trusted box, no judgement.
+        assert!(!super::is_label_beside_target(&rr(660, 410, 40, 16), input, Some("textbox")));
+        assert!(!super::is_label_beside_target(&label, None, Some("textbox")));
+    }
+
+    /// Live: the whole pipeline, as the app calls it after a step, for NAVISUAL_LIVE_TARGET in the
+    /// window whose title contains NAVISUAL_LIVE_TITLE. NAVISUAL_LIVE_BBOX="x,y,w,h" (physical px)
+    /// stands in for the model's box. Prints the trace the debug drawer would show.
+    #[test]
+    #[ignore = "reads a live window; run by name"]
+    fn live_locate_in_a_window() {
+        let title = std::env::var("NAVISUAL_LIVE_TITLE").expect("NAVISUAL_LIVE_TITLE");
+        let target = std::env::var("NAVISUAL_LIVE_TARGET").expect("NAVISUAL_LIVE_TARGET");
+        let hwnd = crate::capture::find_window_by_title(&title, "").expect("no window with that title");
+        let ai_bbox = std::env::var("NAVISUAL_LIVE_BBOX").ok().map(|b| {
+            let p: Vec<i32> = b.split(',').map(|s| s.trim().parse().unwrap()).collect();
+            Rect { x: p[0], y: p[1], width: p[2] as u32, height: p[3] as u32 }
+        });
+        let opts = LocateOptions {
+            role: std::env::var("NAVISUAL_LIVE_ROLE").ok().filter(|r| !r.is_empty()),
+            ai_bbox,
+            bbox_decisive: true,
+            a11y_timeout_ms: 500,
+            min_confidence: 0.5,
+            target_hwnd: Some(hwnd),
+            ..Default::default()
+        };
+        let t = std::time::Instant::now();
+        let (hit, trace) = locate(&target, &opts, None).expect("locate");
+        println!("\n[live] '{target}' -> {:?} in {} ms", hit.map(|h| (h.bbox, h.role)), t.elapsed().as_millis());
+        println!("[live] {}", serde_json::to_string(&trace).unwrap_or_default());
+    }
+
     #[test]
     #[ignore]
     fn region_ocr_live() {
@@ -1169,6 +1334,21 @@ mod tests {
         match res {
             Some(r) => eprintln!("FOUND '{}' role={} at {:?} in {ms:.0}ms (bbox region {:?})", r.name, r.role, r.bbox, bbox),
             None => eprintln!("not found in {ms:.0}ms (bbox region {:?})", bbox),
+        }
+        // What OCR read in the window the rescue used (same margins and scale as try_region_ocr).
+        if std::env::var("DUMP").is_ok() {
+            let full = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            let (cx, cy) = (bbox.0 + bbox.2 as i32 / 2, bbox.1 + bbox.3 as i32 / 2);
+            let (hw, hh) = ((bbox.2 as i32 / 2 + 100).min(350), (bbox.3 as i32 / 2 + 70).min(250));
+            let (x0, y0) = ((cx - hw).max(0), (cy - hh).max(0));
+            let (x1, y1) = ((cx + hw).min(w as i32), (cy + hh).min(h as i32));
+            let region = image::imageops::crop_imm(&full, x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32).to_image();
+            let up = image::imageops::resize(&region, region.width() * 3, region.height() * 3, image::imageops::FilterType::Lanczos3);
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(up).write_to(&mut png, image::ImageFormat::Png).unwrap();
+            for r in ocr::run_ocr(png.get_ref()).unwrap() {
+                eprintln!("  ocr '{}' {:?} conf {:.2}", r.text, r.bbox, r.confidence);
+            }
         }
     }
 
@@ -1272,6 +1452,8 @@ mod tests {
                 role: "Button".to_string(),
                 rect: bbox_stub(),
                 enabled: true,
+                state: None,
+                in_popup: false,
             },
             ContextElement {
                 id: 2,
@@ -1279,6 +1461,8 @@ mod tests {
                 role: "TabItem".to_string(),
                 rect: bbox_stub(),
                 enabled: true,
+                state: None,
+                in_popup: false,
             },
         ];
         // Fabricated id → not in snapshot.
@@ -1336,6 +1520,12 @@ mod tests {
         // non-UIA (Unknown) surface, far from the AI bbox and with no anchor → must REJECT so
         // template matching gets a turn.
         assert!(!corroboration_accept(RoleKind::Unknown, true, true, false, false, false, false));
+        // Isolation for a control hunt on text content: the word must be its own line.
+        assert!(!isolation_passes(0.24, 25, true), "\"Format\" in \"names: Format > Word wrap\"");
+        assert!(!isolation_passes(0.75, 12, true), "\"Word wrap\" inside a document sentence");
+        assert!(isolation_passes(1.0, 11, true), "a web page's button label, alone on its line");
+        assert!(isolation_passes(0.24, 25, false), "any other short line still counts as a label");
+        assert!(!isolation_passes(0.3, 60, false), "and a long line still does not");
         // A fuzzy match that DOES agree spatially is accepted.
         assert!(corroboration_accept(RoleKind::Unknown, true, true, true, false, false, false));
         // Exact/substring (not fuzzy) still passes on isolation alone — no regression.
@@ -1347,6 +1537,19 @@ mod tests {
         assert!(corroboration_accept(RoleKind::Interactive, true, false, false, false, false, false));
         // Nothing corroborates a non-fuzzy Unknown match with no isolation → reject.
         assert!(!corroboration_accept(RoleKind::Unknown, false, false, false, false, false, false));
+    }
+
+    #[test]
+    fn a_hit_outside_the_ai_box_is_outside_it() {
+        use super::outside_ai_bbox;
+        // GIMP, step 3 of L1: the title's "Save" against the box on the Save button.
+        assert!(outside_ai_bbox((313, 11, 24, 9), (1236, 836, 87, 39), 1400, 900));
+        // Chrome: "Hardware" at the left end of the row the model boxed.
+        assert!(!outside_ai_bbox((294, 461, 59, 10), (281, 458, 709, 17), 1250, 860));
+        // GIMP's Name field: the file name at the start of the boxed field.
+        assert!(!outside_ai_bbox((73, 53, 37, 12), (63, 40, 1354, 40), 1400, 900));
+        // Just past the box but within the margin still counts as inside.
+        assert!(!outside_ai_bbox((400, 100, 20, 10), (300, 100, 60, 20), 1250, 860));
     }
 
     #[test]

@@ -166,7 +166,10 @@ actions — the user does everything.
     verbatim until they change it), any CONSTRAINTS they stated ("not the
     title page"), what is DONE so far, and anything TRIED THAT FAILED so you
     do not propose it again. Never assume an earlier turn is still visible.
-    Not shown to the user.
+    Not shown to the user. When a screen shows something the user may still
+    need once it is gone, put it in keep, copied exactly: kept notes are never
+    rewritten and come back on every later turn, so write each one once. The
+    same goes for anything you look up on an earlier screen.
 17. SUGGESTED NEXT TASKS: when the current task looks complete, or no task is
     stated yet, you MAY set suggested_tasks (top-level, next to state_summary)
     to up to 3 SHORT suggestions phrased as tasks the user would ask for
@@ -215,19 +218,74 @@ const EXPECTED_RESULT_FIELD: &str = "What the screen will show right after the u
 /// The same, as a line in a prompted-JSON field list (DeepSeek, Qwen, Ollama, custom).
 const EXPECTED_RESULT_FIELD_LINE: &str = "- expected_result: one short sentence - what the screen will show right after this step, with any newly appearing text in double quotes exactly as displayed; exactly \"no visible change\" when the step changes nothing visible (required)";
 
+// ---- Rule 16's schema twin ------------------------------------------------------------------
+//
+// The description of `state_summary` in the navigate_step schema says what rule 16 says. It was
+// three identical literals (Anthropic, Gemini, managed -- which OpenAI also uses) until rule 16
+// gained its fifth slot on 2026-10-10: S3 found the summary kept what the user DID and never what
+// the screen SHOWED, because no slot asked for it (harness-plan.md). One constant now, so the
+// copies cannot disagree; the two prompted-JSON field lines are pinned by a test instead.
+pub const STATE_SUMMARY_FIELD: &str = "Your ONLY memory between turns — earlier turns are truncated away. Rewrite it in full each turn, carrying: the user's GOAL in their own words (verbatim until they change it), any CONSTRAINTS they stated, what is DONE, and anything TRIED THAT FAILED. Never assume an earlier turn is still visible. Facts to keep for the rest of the session go in keep, not here.";
+
+/// The schema description of `keep` (rule 16). No example, by rule 21: an example names a kind of
+/// fact, and that kind is then what the model keeps.
+/// Option B of the learned guide (`packs::learn::request_block` asks for it). Says nothing about
+/// what to write: the request does that, only on the turn a note was written.
+pub const APP_NOTE_FIELD: &str = "Only when the prompt asks for a learned note: that one line. Otherwise omit.";
+
+pub const KEEP_FIELD: &str = "Facts the user may still need after they leave the screen, each copied exactly as it was shown. Kept notes are never rewritten and come back on every later turn: add a fact once, and never repeat one already kept. Omit when there is nothing new.";
+
 /// The system prompt, carrying rule 19 when H1 is on.
 pub fn system_prompt(expected_result: bool) -> std::borrow::Cow<'static, str> {
+    let base: std::borrow::Cow<'static, str> = if screen_first_rules() {
+        std::borrow::Cow::Borrowed(SYSTEM_PROMPT)
+    } else {
+        std::borrow::Cow::Owned(with_rules_2_3_of_v0736(SYSTEM_PROMPT))
+    };
     if !expected_result {
-        return std::borrow::Cow::Borrowed(SYSTEM_PROMPT);
+        return base;
     }
     // Asserted by `h1_system_prompt_gets_rule_19_before_the_tail`.
-    let at = SYSTEM_PROMPT.rfind(PROMPT_TAIL).unwrap_or(SYSTEM_PROMPT.len());
-    std::borrow::Cow::Owned(format!(
-        "{}\n{}{}",
-        &SYSTEM_PROMPT[..at],
-        EXPECTED_RESULT_RULE,
-        &SYSTEM_PROMPT[at..]
-    ))
+    let at = base.rfind(PROMPT_TAIL).unwrap_or(base.len());
+    std::borrow::Cow::Owned(format!("{}\n{}{}", &base[..at], EXPECTED_RESULT_RULE, &base[at..]))
+}
+
+/// Rules 2 and 3 exactly as v0.7.36 shipped them, before "the screen outranks the Next" (v0.7.37):
+/// trust a confirmation and advance. Kept only so the harness can be measured on and off
+/// (`SCREEN_FIRST_RULES=false`, L1 step 3); the product always runs the current rules.
+const RULES_2_3_V0736: &str = "2. If the screen shows the user completed the step, acknowledge and advance. If
+   the screen shows something unexpected, describe what you see and suggest how
+   to recover.
+3. TRUST CONFIRMATIONS; NEVER REPEAT: if the user says they completed a step
+   (\"done\", \"yes\", \"I did it\", \"ok\"), TRUST them and advance — many actions
+   (placing a cursor, focusing a field, selecting text) leave no visible trace
+   in a screenshot. If you are about to give the exact same instruction as the
+   immediately preceding step, STOP: either (a) advance assuming the action
+   succeeded, or (b) ask a short yes/no question (\"Did you click at the end of
+   that line?\"). NEVER issue the identical instruction twice in a row.
+";
+
+const RULE_2_START: &str = "2. If the screen shows the user completed the step";
+const RULE_4_START: &str = "4. If you need clarification";
+
+static SCREEN_FIRST_RULES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set once from `Config::screen_first_rules` when the router is built.
+pub fn set_screen_first_rules(on: bool) {
+    SCREEN_FIRST_RULES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn screen_first_rules() -> bool {
+    SCREEN_FIRST_RULES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `prompt` with its rules 2-3 swapped for v0.7.36's. Unchanged if either anchor is missing; the
+/// test `rules_2_3_switch_back_to_v0736` fails first if an edit moves them.
+fn with_rules_2_3_of_v0736(prompt: &str) -> String {
+    match (prompt.find(RULE_2_START), prompt.find(RULE_4_START)) {
+        (Some(a), Some(b)) if a < b => format!("{}{}{}", &prompt[..a], RULES_2_3_V0736, &prompt[b..]),
+        _ => prompt.to_string(),
+    }
 }
 
 /// A prompted-JSON format instruction, with the `expected_result` line added after the
@@ -352,9 +410,21 @@ are pressed, not pasted), instead of pointing at a button:\n",
 /// model can cross-reference the list against what it sees in the screenshot. Names are
 /// truncated for display only — the id resolves into the full snapshot. Empty input or
 /// a degenerate capture rect → empty string (callers append unconditionally).
+/// The block as it was before states existed; the app calls `elements_context_block_with`.
+#[cfg(test)]
 pub fn elements_context_block(
     elements: &[crate::locator::ContextElement],
     capture_rect: crate::capture::Rect,
+) -> String {
+    elements_context_block_with(elements, capture_rect, false)
+}
+
+/// The block with each element's state when `states` is on (`Config::list_states`): ON / OFF,
+/// SELECTED, a combo box's value. Off, it is byte-identical to the block before states existed.
+pub fn elements_context_block_with(
+    elements: &[crate::locator::ContextElement],
+    capture_rect: crate::capture::Rect,
+    states: bool,
 ) -> String {
     if elements.is_empty() || capture_rect.width == 0 || capture_rect.height == 0 {
         return String::new();
@@ -363,9 +433,19 @@ pub fn elements_context_block(
     let mut block = String::from(
         "\n[Screen Elements] — interactive elements detected on the current screen.\n\
          If your target is one of these, set target_element_id to its id (and still fill target_text).\n\
-         A row ending in | DISABLED is greyed out and CANNOT be clicked — see rule 7.\n\
-         id | role | name | center x,y (0-1000)\n",
+         A row ending in | DISABLED is greyed out and CANNOT be clicked — see rule 7.\n",
     );
+    if states {
+        block.push_str(
+            "| ON or | OFF is a switch or check box's current state, | SELECTED the current choice, \
+             | value=\"...\" a box's current value.\n",
+        );
+    }
+    // Only when something is in a popup, so a list without one stays byte-identical.
+    if elements.iter().any(|e| e.in_popup) {
+        block.push_str("| POPUP marks an element of the open menu, list or dialog in front of the window.\n");
+    }
+    block.push_str("id | role | name | center x,y (0-1000)\n");
     for el in elements {
         let cx = ((el.rect.x - capture_rect.x) as f64 + el.rect.width as f64 / 2.0)
             / capture_rect.width as f64
@@ -389,6 +469,17 @@ pub fn elements_context_block(
             (cy.round() as i64).clamp(0, 1000),
             if el.enabled { "" } else { " | DISABLED" },
         ));
+        if el.in_popup {
+            block.pop();
+            block.push_str(" | POPUP\n");
+        }
+        if states {
+            if let Some(st) = &el.state {
+                // Before the newline just written.
+                block.pop();
+                block.push_str(&format!(" | {st}\n"));
+            }
+        }
     }
     block
 }
@@ -420,6 +511,19 @@ pub fn os_context(os: &str) -> String {
     format!(
         "
 [System] {os}. Authoritative for the OS version only; the screenshot remains authoritative for layout and for anything not stated here. Do not assume a UI from the version — use it to choose wording and to rule out steps that cannot exist on this release.
+"
+    )
+}
+
+/// `[Keyboard]`: key combos a step named that another program on this computer holds for itself,
+/// found by `held_keys::probe`. In L1 step 3 NVIDIA's overlay took Word's Alt+F9 and opened its
+/// Record dialog; the screenshot cannot show who receives a key. The line says what to avoid, not
+/// which route to take instead (rule 21: an example route is read as a preference).
+pub fn held_keys_note(keys: &[String]) -> String {
+    let list = keys.join(", ");
+    format!(
+        "
+[Keyboard] Another program on this computer holds {list} for itself, so pressing it never reaches the app. Do not ask for {list} again; if a step needs what it does in the app, give a way that does not use it.
 "
     )
 }
@@ -559,17 +663,37 @@ fn looks_like_english(text: &str) -> bool {
         "the", "you", "your", "how", "what", "make", "using", "use", "with", "this", "that",
         "please", "help", "want", "need", "show", "create", "add", "select", "click", "and",
         "for", "are", "from", "open", "into", "when", "where", "which", "step", "next", "then",
+        "why", "can", "out", "little", "just", "whole", "these", "all",
     ];
-    let mut hits = 0u8;
-    for w in text.split(|c: char| !c.is_ascii_alphabetic()) {
-        if !w.is_empty() && EN.contains(&w.to_ascii_lowercase().as_str()) {
-            hits += 1;
-            if hits >= 2 {
-                return true;
-            }
-        }
+    // Function words of the other Latin-script languages a user is likely to write. Words English
+    // uses too ("a", "do", "die", "per", "come", "no", "as", "on", "in", "van") are left out.
+    const OTHER: &[&str] = &[
+        "el", "la", "los", "las", "de", "del", "que", "en", "y", "por", "para", "con", "una", "un",
+        "es", "esta", "este", "haz", "pulsa", "clic", "como", "mi", "se", "lo", "al", "le", "les",
+        "des", "du", "et", "est", "pour", "avec", "une", "sur", "dans", "ce", "cette", "je", "ne",
+        "pas", "qui", "au", "aux", "cliquez", "ou", "os", "um", "uma", "com", "em", "da", "das",
+        "dos", "na", "nao", "isso", "il", "di", "che", "gli", "della", "questo", "non", "der",
+        "das", "und", "ist", "mit", "ein", "eine", "nicht", "ich", "wie", "auf", "zu", "den",
+        "dem", "sie", "bitte", "het", "een", "dit", "niet", "op", "ik", "o", "abra", "abre",
+        "abrir", "ouvrez", "ouvrir", "apri",
+    ];
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let hits = words.iter().filter(|w| EN.contains(&w.as_str())).count();
+    if hits >= 2 {
+        return true;
     }
-    false
+    // One distinctive word is enough in a request that is plainly no other Latin language: three
+    // or more words, no accented letters, none of the words above. Under the two-word rule alone
+    // "Export this note." got the weak exemplar, and one model answered it in Spanish a quarter
+    // of the time (harness, 2026-10-09). The guard still stops "Haz clic en Open".
+    hits == 1
+        && words.len() >= 3
+        && !text.chars().any(|c| c.is_alphabetic() && !c.is_ascii())
+        && !words.iter().any(|w| OTHER.contains(&w.as_str()))
 }
 
 /// The end-of-prompt LANGUAGE LOCK — applied to EVERY turn's prompt, including turn 1.
@@ -668,6 +792,16 @@ mod tests {
     fn the_model_gets_the_window_title_and_no_frame() {
         assert_eq!(crate::capture::format_window_prompt_info("Book1 - Excel"), "Title: 'Book1 - Excel'");
         assert!(!super::SYSTEM_PROMPT.contains("Title and Class"));
+        // Rule 16 sends facts to keep, and every field list that restates the schema has it.
+        assert!(super::SYSTEM_PROMPT.contains("put it in keep, copied exactly"), "rule 16");
+        assert!(!super::SYSTEM_PROMPT.contains("anything you have SEEN"), "the summary slot is gone");
+        assert!(super::STATE_SUMMARY_FIELD.contains("go in keep, not here"));
+        for (who, format) in [
+            ("deepseek", crate::ai::deepseek::JSON_FORMAT_INSTRUCTION),
+            ("ollama", crate::ai::ollama::JSON_FORMAT_INSTRUCTION),
+        ] {
+            assert!(format.contains("- keep: facts the user may still need"), "{who}'s field line");
+        }
     }
 
     #[test]
@@ -677,6 +811,22 @@ mod tests {
         assert!(line.contains("remains authoritative for layout"));
     }
     use std::collections::BTreeMap;
+
+    /// The harness off switch for rules 2-3 (L1 step 3): the v0.7.36 text in, the current text out,
+    /// everything else byte-identical.
+    #[test]
+    fn rules_2_3_switch_back_to_v0736() {
+        let old = super::with_rules_2_3_of_v0736(super::SYSTEM_PROMPT);
+        assert!(old.contains("3. TRUST CONFIRMATIONS; NEVER REPEAT:"), "the old rule 3 is in");
+        assert!(!old.contains("the screen outranks the confirmation"), "the new rule 3 is out");
+        assert!(!old.contains("make your FIRST step undo it"), "the new rule 2 is out");
+        let cut = |p: &str| -> (String, String) {
+            let a = p.find(super::RULE_2_START).unwrap();
+            let b = p.find(super::RULE_4_START).unwrap();
+            (p[..a].to_string(), p[b..].to_string())
+        };
+        assert_eq!(cut(&old), cut(super::SYSTEM_PROMPT), "only rules 2-3 change");
+    }
 
     fn ctx_el(id: u32, name: &str, role: &str, x: i32, y: i32, w: u32, h: u32) -> crate::locator::ContextElement {
         ctx_el_state(id, name, role, x, y, w, h, true)
@@ -704,7 +854,43 @@ mod tests {
                 height: h,
             },
             enabled,
+            state: None,
+            in_popup: false,
         }
+    }
+
+    #[test]
+    fn elements_block_carries_states_only_when_asked() {
+        let rect = crate::capture::Rect { x: 0, y: 0, width: 1000, height: 1000 };
+        let mut sw = ctx_el(1, "Transparency effects", "Button", 100, 100, 20, 20);
+        sw.state = Some("ON".into());
+        let mut mode = ctx_el(2, "Choose your mode", "ComboBox", 200, 200, 20, 20);
+        mode.state = Some("value=\"Dark\"".into());
+        let plain = super::elements_context_block(&[sw.clone(), mode.clone()], rect);
+        assert!(!plain.contains("| ON") && !plain.contains("value="), "off: the block as before
+{plain}");
+        let with = super::elements_context_block_with(&[sw, mode], rect, true);
+        assert!(with.contains("1 | button | \"Transparency effects\" | 110,110 | ON
+"), "{with}");
+        assert!(with.contains("2 | combobox | \"Choose your mode\" | 210,210 | value=\"Dark\"
+"), "{with}");
+        assert!(with.contains("| ON or | OFF is a switch"), "the legend says what the markers mean");
+    }
+
+    /// L1, 2026-10-12: Excel's open Freeze Panes menu and the ribbon button that opened it carry
+    /// the same name; only the marker tells them apart.
+    #[test]
+    fn elements_block_marks_what_is_in_a_popup_and_only_then_explains_it() {
+        let rect = crate::capture::Rect { x: 0, y: 0, width: 1000, height: 1000 };
+        let mut item = ctx_el(1, "Freeze Panes", "ListItem", 100, 300, 300, 50);
+        item.in_popup = true;
+        let button = ctx_el(2, "Freeze Panes", "MenuItem", 100, 200, 100, 20);
+        let block = super::elements_context_block(&[item, button.clone()], rect);
+        assert!(block.contains("1 | listitem | \"Freeze Panes\" | 250,325 | POPUP\n"), "{block}");
+        assert!(block.contains("2 | menuitem | \"Freeze Panes\" | 150,210\n"), "{block}");
+        assert!(block.contains("| POPUP marks an element of the open menu"), "{block}");
+        let plain = super::elements_context_block(&[button], rect);
+        assert!(!plain.contains("POPUP"), "no popup, no marker and no legend:\n{plain}");
     }
 
     #[test]
@@ -851,6 +1037,35 @@ mod tests {
         assert!(!b.contains("the user's language is English"), "{b}");
     }
 
+    // The harness tasks a model answered in Spanish or French, 2026-10-09: each had fewer than
+    // two words from the list and so got the weak exemplar. And the other direction -- a
+    // non-English request quoting one English UI label must not be named English.
+    #[test]
+    fn short_english_requests_are_named_and_quoted_labels_are_not() {
+        use super::looks_like_english;
+        for en in [
+            "Export this note.",
+            "Help!! My whole paragraph just disappeared!!",
+            "Zoom out a little.",
+            "Why can't I export this note?",
+            "Why can’t I export this note?",
+        ] {
+            assert!(looks_like_english(en), "{en}");
+        }
+        for other in [
+            "the",
+            "Haz clic en Open",
+            "Cliquez sur Open puis Export",
+            "Exportar esta nota",
+            "Klik op Open",
+            "Klicken Sie auf Open",
+            "faire un tableau avec ces données",
+            "Abra o menu Open",
+        ] {
+            assert!(!looks_like_english(other), "{other}");
+        }
+    }
+
     #[test]
     fn directive_names_language_from_dominant_script() {
         use super::reply_language_directive;
@@ -885,7 +1100,7 @@ mod tests {
         // The Latin sample must flip us back — NOT stay stuck on the original Chinese request.
         let a = reply_language_directive(Some("please speak English."), "帮我做数据透视表", "auto");
         assert!(!a.contains("Chinese"), "{a}");
-        assert!(a.contains("please speak English."), "{a}");
+        assert!(a.contains("the user's language is English"), "{a}");
     }
 
     #[test]
