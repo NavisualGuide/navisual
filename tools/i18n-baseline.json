@@ -36,6 +36,7 @@
     "src/App.svelte:e.g. qwen2.5-vl-7b-instruct",
     "src/App.svelte:e.g. qwen3.8-max",
     "src/App.svelte:gemini-2.5-flash",
+    "src/App.svelte:gemini-3.1-pro-preview",
     "src/App.svelte:held in memory whether this is on or off, so switching it on mid-session finds the session already recorded rather than starting from empty. Nothing reaches disk until you press Save.",
     "src/App.svelte:leaf class",
     "src/App.svelte:locate_log.jsonl",

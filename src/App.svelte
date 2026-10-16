@@ -1177,7 +1177,7 @@ See the LICENSE file in the root of this repository for complete details.
   // missing here is shown as "Custom" with a text box. By 2026-10-09 four of the five had
   // drifted, so every provider's default model opened as Custom.
   const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-5","claude-opus-5"];
-  const MODEL_PRESETS_GEMINI    = ["gemini-3.8-flash","gemini-2.5-flash-lite","gemini-3.1-pro-preview","gemini-2.5-flash"];
+  const MODEL_PRESETS_GEMINI    = ["gemini-3.8-flash","gemini-2.5-flash-lite","gemini-4-argon","gemini-3.1-pro-preview","gemini-2.5-flash"];
   const MODEL_PRESETS_OPENAI    = ["gpt-6.1-sol","gpt-6-luna","gpt-6-astra"];
   const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp"];
   const MODEL_PRESETS_QWEN      = ["qwen3.8-max","qwen3.7-flash","qwen3.5-omni-plus"];
@@ -5488,7 +5488,8 @@ See the LICENSE file in the root of this repository for complete details.
                        without thinking at "low"). -->
                   <option value="gemini-3.8-flash">gemini-3.8-flash {t("pv.qRecommended")}</option>
                   <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite {t("pv.qFast")}</option>
-                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview {t("pv.qBest")}</option>
+                  <option value="gemini-4-argon">gemini-4-argon {t("pv.qBest")}</option>
+                  <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
                   <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                   <option value="__custom__">{t("pv.customModel")}</option>
                 </select>

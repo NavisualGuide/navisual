@@ -60,6 +60,11 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // nothing. See model-comparison.md.
         "gemini-3.7-flash" | "gemini-3.8-flash" => (0.75, 3.75),
         m if m.starts_with("gemini-3.1-pro") || m.starts_with("gemini-3-pro") => (2.0, 12.0),
+        // Gemini 4 Argon, Google's frontier model (GA on the API 2026-10-13): $2 / $10 through
+        // 2026-11-30, then $4 / $20 from 2026-12-01 (ai.google.dev/gemini-api/docs/pricing,
+        // checked 2026-10-16). Cached input $0.10 -> $0.20, implicit caching only; no free tier.
+        // Thinking bills as output. From December this row under-states by half.
+        "gemini-4-argon" => (2.0, 10.0),
         // OpenAI — GPT-6 (2026-10-11): Luna 6 for Speed and Sol 6.1 for Smart are the
         // founder's picks for L1; Astra is the top of the line. List prices from
         // developers.openai.com/api/docs/models/compare. Cached input is a tenth of these and
