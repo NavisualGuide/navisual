@@ -188,7 +188,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "privacy.aria": "隐私须知",
   "privacy.title": "开始第一个任务之前",
   "privacy.lead": "Navisual 会截取你当前的窗口，并发送给你选择的 AI 服务商。",
-  "privacy.b1": "它截取你指定的那个窗口 —— 如果你选的是整个屏幕，就是整个屏幕 —— 并把画面发送给你选择的 AI 服务商。",
+  "privacy.b1": "它截取你指定的那个窗口 —— 如果你选的是整个屏幕，就是整个屏幕 —— 并把画面发送给你选择的 AI 服务商。AI 也可能要求再看一次同一任务里之前的画面。",
   "privacy.b2": "它保存的任何截图都只存在你自己的电脑上 —— 绝不会存到我们的服务器。",
   "privacy.b3strong": "默认的免费档所用的 AI 模型，可能会保留你的请求 —— 包括截图 —— 用于训练。",
   "privacy.b3rest": "付费档和你自己的 API Key 不会；Ollama 则完全不离开你的电脑。",

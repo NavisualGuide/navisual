@@ -189,7 +189,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "privacy.aria": "隱私須知",
   "privacy.title": "開始第一個工作之前",
   "privacy.lead": "Navisual 會擷取你目前的視窗，並傳送給你選擇的 AI 服務商。",
-  "privacy.b1": "它擷取你指定的那個視窗 —— 如果你選的是整個螢幕，就是整個螢幕 —— 並把畫面傳送給你選擇的 AI 服務商。",
+  "privacy.b1": "它擷取你指定的那個視窗 —— 如果你選的是整個螢幕，就是整個螢幕 —— 並把畫面傳送給你選擇的 AI 服務商。AI 也可能要求再看一次同一個工作裡之前的畫面。",
   "privacy.b2": "它儲存的任何螢幕截圖都只存在你自己的電腦上 —— 絕不會存到我們的伺服器。",
   "privacy.b3strong": "預設的免費方案所用的 AI 模型，可能會保留你的請求 —— 包括螢幕截圖 —— 用於訓練。",
   "privacy.b3rest": "付費方案和你自己的 API Key 不會；Ollama 則完全不離開你的電腦。",
