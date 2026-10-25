@@ -212,6 +212,9 @@ pub struct A11yCandidate {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct OcrTrace {
     pub ran: bool,
+    /// The recognizer's language tag ("en-US", "zh-Hans-CN"): the profile default, or the one
+    /// chosen for a CJK target (`ocr::recognizer_for_script`).
+    pub recognizer: Option<String>,
     pub line_count: usize,
     pub word_count: usize,
     /// Up to 30 OCR text samples for at-a-glance debugging.

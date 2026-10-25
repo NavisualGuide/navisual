@@ -394,7 +394,9 @@ fn locate_passes(
         }
     }
 
-    let results = match ocr::run_ocr(&ocr_bytes) {
+    // The recognizer follows the target's script: a Chinese target on an English-first profile is
+    // read by the installed Chinese recognizer, not the default English one.
+    let (results, recognizer) = match ocr::run_ocr_for(&ocr_bytes, Some(target_text)) {
         Ok(r) => r,
         Err(e) => {
             trace.final_decision = FinalDecision::Error {
@@ -406,6 +408,7 @@ fn locate_passes(
     };
     let mut ocr_trace = OcrTrace {
         ran: true,
+        recognizer: Some(recognizer),
         line_count: results.iter().filter(|r| r.confidence >= 1.0).count(),
         word_count: results.iter().filter(|r| r.confidence < 1.0).count(),
         sample_texts: results.iter().take(30).map(|r| r.text.clone()).collect(),
@@ -969,7 +972,7 @@ fn try_region_ocr(
     image::DynamicImage::ImageRgba8(up)
         .write_to(&mut png, image::ImageFormat::Png)
         .ok()?;
-    let results = ocr::run_ocr(png.get_ref()).ok()?;
+    let (results, _) = ocr::run_ocr_for(png.get_ref(), Some(target_text)).ok()?;
     // The whole window is the AI-bbox area, so no overlap filter is needed here.
     let find_opts = ocr::FindOptions {
         role,
