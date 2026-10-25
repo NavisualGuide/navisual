@@ -87,7 +87,7 @@ See the LICENSE file in the root of this repository for complete details.
   // `storedFrame` points at a picture in the store; `inlineFrame` IS the picture, base64
   // JPEG, for a session opened from a file -- those never reach disk, so there is nothing
   // to point at. Both render identically; only the lightbox has to tell them apart.
-  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; storedFrame?: { sessionId: string; frame: string }; inlineFrame?: string };
+  type HistoryEntry = { id: number; role: HistoryRole; text: string; meta?: string; thumb?: string; storedFrame?: { sessionId: string; frame: string }; inlineFrame?: string; requestId?: string };
   type SettingsTab = "provider" | "screen-guide" | "hotkeys" | "audio" | "developer" | "account";
   type SettingsPayload = {
     api_provider: string;
@@ -1579,7 +1579,7 @@ See the LICENSE file in the root of this repository for complete details.
           sessionId: entry.storedFrame.sessionId, frame: entry.storedFrame.frame, thumb: false,
         });
       } else {
-        lightboxSrc = await invoke<string | null>("get_chat_full_screenshot");
+        lightboxSrc = await invoke<string | null>("get_chat_full_screenshot", { requestId: entry?.requestId ?? null });
       }
     } catch (_) {}
     lightboxLoading = false;
@@ -1681,9 +1681,13 @@ See the LICENSE file in the root of this repository for complete details.
   // more: what matters is that the picture stays on their computer, not that it stops
   // existing. These never leave the page — 160x90 at JPEG q40, a couple of KB each, so a
   // seventy-turn session costs a few hundred KB of memory and nothing on disk.
-  function attachThumb(entryId: number, thumbB64: string) {
+  // The request id is what opens THIS step's full-size picture: the backend keeps one per
+  // request, where it used to keep one in all, so every thumbnail enlarged to the newest.
+  function attachThumb(entryId: number, thumbB64: string, requestId?: string | null) {
     const entry = history.find(h => h.id === entryId);
-    if (entry) entry.thumb = thumbB64;
+    if (!entry) return;
+    entry.thumb = thumbB64;
+    if (requestId) entry.requestId = requestId;
   }
 
   // Whether the global auto-advance setting is on (loaded from config on mount).
@@ -3144,7 +3148,7 @@ See the LICENSE file in the root of this repository for complete details.
       const res = await invoke<GuideResponse>("guide", { task: taskText, isReply });
       stopTimer();
       if (token !== requestToken) return;
-      if (res.chat_thumb_b64) attachThumb(userEntryId, res.chat_thumb_b64);
+      if (res.chat_thumb_b64) attachThumb(userEntryId, res.chat_thumb_b64, res.request_id);
       if (!res.ok) {
         phase = prevPhase;
         lastRequestFailed = true;
@@ -3259,7 +3263,7 @@ See the LICENSE file in the root of this repository for complete details.
         });
         stopTimer();
         if (token !== requestToken) return;
-        if (res.chat_thumb_b64) attachThumb(reQueryId, res.chat_thumb_b64);
+        if (res.chat_thumb_b64) attachThumb(reQueryId, res.chat_thumb_b64, res.request_id);
         if (res.last_click) attachClick(reQueryId, res.last_click, advanceKind);
         if (!res.ok) {
           phase = prevPhase;
@@ -3333,7 +3337,7 @@ See the LICENSE file in the root of this repository for complete details.
       const res = await invoke<GuideResponse>("send_correction", { note: note || null, avoidBboxes, reason: category ?? null });
       stopTimer();
       if (token !== requestToken) return;
-      if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64);
+      if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64, res.request_id);
       if (!res.ok) {
         phase = prevPhase;
         if (res.no_target) {
