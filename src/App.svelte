@@ -2022,7 +2022,7 @@ See the LICENSE file in the root of this repository for complete details.
   // Where the icon sat before it grew, in logical px, so shrinking puts it back.
   let iconRestorePos: { x: number; y: number } | null = null;
 
-  // Widest row measured at 159px natural ("↗ Expand" plus its Ctrl+Shift+~ cap),
+  // Widest row measured at 159px natural ("↗ Expand" plus its Ctrl+Shift+` cap),
   // so 190 still has room after the menu grew to ten items.
   const ICON_MENU_W = 190;
   // Measured, not guessed — the same way 212 was, and for the same reason: a
@@ -2128,7 +2128,7 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // The collapsed icon has no room for the status bar's shortcut legend, which is
-  // the whole reason Ctrl+~ was invisible here despite always having worked. Hover
+  // the whole reason Ctrl+` was invisible here despite always having worked. Hover
   // carries it permanently (see `iconTitle`), but hovering is something you have to
   // think to do — so the key is also shown ONCE, unprompted, the first time a step
   // lands while collapsed. Same mechanism as the target-chip and collapse hints:
@@ -4097,7 +4097,7 @@ See the LICENSE file in the root of this repository for complete details.
 {#if iconMode}
   <!-- Icon mode: goldfish icon — mousedown starts drag; click expands.
        The ring and the thinking state are here rather than in the panel because
-       collapsed is exactly when the panel can't tell you anything: pressing Ctrl+~
+       collapsed is exactly when the panel can't tell you anything: pressing Ctrl+`
        moved the pointer and changed the caption, but the fish itself sat inert,
        which is what made the shortcut feel like it went nowhere. -->
   <div class="icon-shell" class:icon-flip-x={iconFlipX} class:icon-flip-y={iconFlipY}>
@@ -4152,7 +4152,7 @@ See the LICENSE file in the root of this repository for complete details.
   {#if iconSurface === "menu"}
     <!-- Each item carries its shortcut, so the menu TEACHES the keyboard path
          rather than competing with it - the whole reason the collapsed icon exists
-         is that Ctrl+~ already drives a session and was never visible here.
+         is that Ctrl+` already drives a session and was never visible here.
          Wrong is deliberately absent: 2 corrections in 574 AI calls and 0 local
          retries in 66 locate traces make it dead pixels. -->
     <div class="icon-menu" role="menu">

@@ -430,7 +430,7 @@ export const en = {
   "hk.pause": "Pause / cancel",
   "hk.icon": "Toggle icon mode",
   "hk.talk": "Voice input (push-to-talk)",
-  "hk.backquoteHint": "The ~ (Tilde / Backtick) key is located directly below the Esc key (top left of the keyboard).",
+  "hk.backquoteHint": "The ` key (backtick, with ~ printed above it) is directly below Esc, at the top left of the keyboard.",
 
   // ── Audio tab (P3) ────────────────────────────────────────────────────────
   "au.output": "Audio output (TTS)",

@@ -49,7 +49,7 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 - **Observe, never act** — understands your screen, never moves the mouse or types
 - **Screen Guide** — visual pointers land on the exact button, tab, or field
 - **Live captions** — subtitle strip shows the current instruction
-- **Audio narration** — TTS via Windows SAPI, no install required
+- **Audio narration** — spoken with Windows' built-in voices, no install required
 - **Voice input** — push-to-talk via Web Speech API
 - **Free managed tier** — 30 requests out of the box, no account needed
 - **Multi-provider AI** — 6 BYOK providers (incl. DeepSeek & Qwen for China) plus any OpenAI-compatible local server (LM Studio, llama.cpp, llamafile)
@@ -68,12 +68,14 @@ Configure your provider in-app via **Settings → Provider** — no file editing
 | Key | Action |
 |-----|--------|
 | <kbd>Ctrl</kbd>+<kbd>`</kbd> | Next step — confirm completed and advance |
-| <kbd>Ctrl</kbd>+<kbd>E</kbd> | Wrong — re-analyze the current screen |
-| *(not set)* | Pause / resume capture |
-| *(not set)* | Show / hide the panel |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>`</kbd> | Shrink the panel to its icon, and back |
 | <kbd>Ctrl</kbd>+<kbd>D</kbd> | Push-to-talk voice input |
+| *(not set)* | Wrong — re-analyze the current screen |
+| *(not set)* | Pause / resume capture |
 
-All hotkeys are configurable in **Settings → Hotkeys**.
+<kbd>`</kbd> is the backtick key, left of <kbd>1</kbd>. Wrong and Pause ship unset because every
+<kbd>Ctrl</kbd>+letter is already some app's shortcut. All hotkeys are configurable in
+**Settings → Hotkeys**.
 
 ---
 
@@ -130,7 +132,7 @@ For a short technical tour of the data flow, element locator, and key design dec
 
 ## Roadmap
 
-Current release: **v0.7.8** · [release notes](https://github.com/NavisualGuide/navisual/releases)
+What each release changed: [release notes](https://github.com/NavisualGuide/navisual/releases).
 
 ```
 v0.5   ✅ Free managed tier · signed installer + auto-updater · 6 BYOK providers
@@ -174,4 +176,8 @@ Issues and pull requests are welcome. See [ARCHITECTURE.md](ARCHITECTURE.md) for
 
 ## License
 
-[FSL-1.1-Apache-2.0](https://fsl.software/) — source-available. Each version converts to Apache 2.0 two years after its release date.
+[Functional Source License 1.1, Apache 2.0 future license](https://fsl.software/) (SPDX
+`FSL-1.1-ALv2`) — source-available. Each version converts to Apache 2.0 two years after its
+release date. The full text is in [LICENSE.md](LICENSE.md). GitHub shows the license as "Other"
+because FSL is not on the list of licenses it recognizes; the same happens on other FSL
+projects.

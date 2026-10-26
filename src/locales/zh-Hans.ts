@@ -413,7 +413,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "hk.pause": "暂停 / 取消",
   "hk.icon": "切换图标模式",
   "hk.talk": "语音输入（按住说话）",
-  "hk.backquoteHint": "~（波浪号 / 反引号）键就在 Esc 键正下方（键盘左上角）。",
+  "hk.backquoteHint": "`（反引号，键帽上方印着 ~ 波浪号）键就在 Esc 键正下方（键盘左上角）。",
 
   // ── 音频标签页 (P3) ───────────────────────────────────────────────────────
   "au.output": "语音输出（TTS）",
