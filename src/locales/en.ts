@@ -237,6 +237,7 @@ export const en = {
   "wrong.spot": "Wrong spot",
   "wrong.notFound": "Can't find it",
   "wrong.alreadyDone": "Already did that",
+  "wrong.noNewStep": "I don't have another step to suggest for this. Tell me what you see on the screen now, or describe what you want in other words.",
   "wrong.other": "Other",
   "wrong.hintOther": "Not one of these? Type what's wrong below, then \u21a9 Follow up.",
   "wrong.hintApp": "Wrong app? Click the correct window first, then press \u2717 Wrong.",

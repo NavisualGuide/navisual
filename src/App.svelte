@@ -78,6 +78,7 @@ See the LICENSE file in the root of this repository for complete details.
     // where `error` is deliberately null -- the message lives here so it can be
     // translated and carry buttons.
     no_target: boolean;
+    no_new_step?: boolean;
   };
   type AppPhase = "idle" | "thinking" | "guiding" | "needs_input" | "error";
   // "completed" is the user's own action -- the machine-built `[User completed: "..."]`
@@ -3334,7 +3335,7 @@ See the LICENSE file in the root of this repository for complete details.
     startTimer();
     const token = ++requestToken;
     try {
-      const res = await invoke<GuideResponse>("send_correction", { note: note || null, avoidBboxes, reason: category ?? null });
+      const res = await invoke<GuideResponse>("send_correction", { note: note || null, avoidBboxes, reason: category ?? null, stepIndex });
       stopTimer();
       if (token !== requestToken) return;
       if (res.chat_thumb_b64) attachThumb(corrEntryId, res.chat_thumb_b64, res.request_id);
@@ -3349,6 +3350,12 @@ See the LICENSE file in the root of this repository for complete details.
         return;
       }
       applyResponse(res, 0, token);
+      // The answer gave back a step already rejected here: say so instead of offering it again.
+      if (res.no_new_step) {
+        const msg = t("wrong.noNewStep");
+        addToHistory("ai", msg);
+        if (!isMuted) invoke("speak", { text: msg, lang: settingsForm.voice_language, requestHint: lastRequestHint, fallbackLocale: navigator.language }).catch(() => {});
+      }
     } catch (e) {
       stopTimer();
       if (token !== requestToken) return;

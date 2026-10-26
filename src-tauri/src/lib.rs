@@ -93,6 +93,11 @@ struct GuidanceState {
     /// guide/correction request reads it as `prev_request_id` (chaining
     /// rejected→chosen correction pairs) before replacing it with its own.
     request_id: Option<String>,
+    /// ✗ Wrong on the screen the user is stuck on: every step rejected since the session last
+    /// moved on. Quoted in the next correction and checked against its answer, so a rejected
+    /// step is not offered again. Cleared when the user advances, on a new task and on a new
+    /// session.
+    rejected_steps: Vec<crate::ai::prompts::RejectedStep>,
     /// Flow A: candidate boxes currently on screen awaiting state-readback
     /// resolution (the user's next click in the app is the answer). Armed by
     /// `retry_locate` when it shows 2+ candidates; resolved (label banked to the
@@ -3859,6 +3864,10 @@ struct GuideResponse {
     /// than a dead end, so `error` is deliberately None alongside it: the message
     /// belongs to the side that can localize it and hang buttons off it.
     no_target: bool,
+    /// A correction's answer gave back a step the user had already rejected on this screen,
+    /// so no step is shown: the panel says it has no other suggestion and asks what the user
+    /// sees (its own words, translated there).
+    no_new_step: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -4510,8 +4519,9 @@ async fn send_correction(
     note: Option<String>,
     avoid_bboxes: Option<Vec<locator::candidates::AvoidEntry>>,
     reason: Option<String>,
+    step_index: Option<usize>,
 ) -> Result<GuideResponse, String> {
-    let r = send_correction_inner(app, state, note, avoid_bboxes, reason).await;
+    let r = send_correction_inner(app, state, note, avoid_bboxes, reason, step_index).await;
     step_feed("correction", &r);
     r
 }
@@ -4531,6 +4541,11 @@ async fn guide_inner(
     // click left behind — read it before this request changes anything.
     resolve_pending_candidates(&app, &state, false).await;
     let is_next_requery = task.starts_with("[User completed:");
+    // ✗ Wrong's memory is for the screen the user is stuck on: an advance or a new task ends it.
+    // A typed reply does not -- it is usually about the same problem.
+    if !task.is_empty() && !is_reply {
+        state.guidance.lock().rejected_steps.clear();
+    }
     // Only reset session state for a genuine new task (not resume, not reply, not next-requery).
     // target_hwnd is intentionally NOT reset here — it persists across new sub-tasks in the same
     // working context so recording tools in the foreground (OBS, ScreenToGif) can't steal the
@@ -4692,6 +4707,7 @@ async fn guide_inner(
         hint_shown: false,
         candidates: Vec::new(),
         no_target: false,
+        no_new_step: false,
                 });
             }
         }
@@ -4934,6 +4950,7 @@ async fn guide_inner(
         hint_shown: false,
         candidates: Vec::new(),
         no_target,
+        no_new_step: false,
             });
         }
     };
@@ -5381,6 +5398,7 @@ async fn guide_inner(
         hint_shown: false,
         candidates: Vec::new(),
         no_target: false,
+        no_new_step: false,
             });
         }
     };
@@ -5516,6 +5534,7 @@ async fn guide_inner(
             hint_shown: false,
             candidates: Vec::new(),
             no_target: false,
+            no_new_step: false,
         });
     }
 
@@ -5674,6 +5693,7 @@ async fn guide_inner(
         hint_shown,
         candidates: shown_candidates,
         no_target: false,
+        no_new_step: false,
     })
 }
 
@@ -5682,6 +5702,8 @@ async fn next_step_inner(
     state: State<'_, AppState>,
     step_index: usize,
 ) -> Result<GuideResponse, String> {
+    // The user moved on: what they rejected on the last screen no longer applies.
+    state.guidance.lock().rejected_steps.clear();
     // Flow A: resolve candidate boxes from the app state the user's click produced.
     resolve_pending_candidates(&app, &state, false).await;
     // The user just performed the step we pointed at, so the UI has almost certainly moved —
@@ -5828,6 +5850,7 @@ async fn next_step_inner(
         hint_shown,
         candidates: shown_candidates,
         no_target: false,
+        no_new_step: false,
     })
 }
 
@@ -6035,6 +6058,7 @@ async fn retry_locate(
         hint_shown,
         candidates: shown_candidates,
         no_target: false,
+        no_new_step: false,
     })
 }
 
@@ -6054,7 +6078,20 @@ async fn send_correction_inner(
     // category — guessing the category back out of prose would be a fabrication
     // sitting in an exported record that reads as fact.
     reason: Option<String>,
+    // The step on screen when ✗ Wrong was pressed (the panel's index into the steps).
+    step_index: Option<usize>,
 ) -> Result<GuideResponse, String> {
+    // Remember what is being rejected, for this correction's prompt and its answer's check.
+    {
+        let mut g = state.guidance.lock();
+        if let Some(step) = step_index.and_then(|i| g.steps.get(i)).cloned() {
+            g.rejected_steps.push(crate::ai::prompts::RejectedStep {
+                instruction: step.instruction,
+                target: step.target_text.unwrap_or_default(),
+                reason: reason.clone(),
+            });
+        }
+    }
     // Flow A: resolve any on-screen candidate boxes before the correction reshapes
     // the step (a "None of these" Wrong press lands here — resolves unresolved).
     resolve_pending_candidates(&app, &state, true).await;
@@ -6320,14 +6357,18 @@ async fn send_correction_inner(
         g.state_summary.clone()
     };
 
-    let user_text_owned = match note.as_deref().filter(|n| !n.trim().is_empty()) {
-        Some(n) => format!(
-            "{} User note: {}",
-            crate::ai::prompts::CORRECTION_CONTEXT,
-            n
-        ),
-        None => crate::ai::prompts::CORRECTION_CONTEXT.to_string(),
-    };
+    let rejected = state.guidance.lock().rejected_steps.clone();
+    let mut user_text_owned = crate::ai::prompts::CORRECTION_CONTEXT.to_string();
+    let rejected_block = crate::ai::prompts::rejected_steps_block(&rejected);
+    if !rejected_block.is_empty() {
+        user_text_owned.push('\n');
+        user_text_owned.push_str(&rejected_block);
+    }
+    // The note stays last: the list of earlier screens reads it from after "User note: ".
+    if let Some(n) = note.as_deref().filter(|n| !n.trim().is_empty()) {
+        user_text_owned.push_str(if rejected_block.is_empty() { " User note: " } else { "\nUser note: " });
+        user_text_owned.push_str(n);
+    }
 
     let info = new_hwnd.map(capture::get_window_prompt_info);
     let focus = guide_focus(note.as_deref().unwrap_or(""), router.session_manager.current_session.as_ref());
@@ -6564,13 +6605,28 @@ async fn send_correction_inner(
     let mut steps = response.steps;
     // Rule-14 defense in depth — same sanitation as guide().
     ai::types::sanitize_steps(&mut steps);
+    // A step the user already rejected on this screen is not offered again, whatever the
+    // prompt said: the panel says there is no other suggestion and asks what they see.
+    let no_new_step = steps.first().is_some_and(|s| {
+        crate::ai::prompts::repeats_rejected(&s.instruction, s.target_text.as_deref().unwrap_or(""), &rejected)
+    });
+    if no_new_step {
+        log::info!(
+            "[wrong] the correction gave back a rejected step ({:?}, target {:?}); not shown -- {} rejected on this screen",
+            steps[0].instruction,
+            steps[0].target_text.as_deref().unwrap_or(""),
+            rejected.len()
+        );
+        steps.clear();
+    }
     let steps = steps;
     let state_summary = response.state_summary;
     let response_goal = response.goal.clone();
     let response_app_note = response.app_note.clone();
     let response_plan_outline = response.plan_outline.clone();
     let response_plan_completed_count = response.plan_completed_count;
-    let needs_input = response.needs_input;
+    // No new step: the user is asked what they see, so the panel waits for words.
+    let needs_input = response.needs_input || no_new_step;
     // Workstream P: same source-gating as guide().
     let suggested_tasks = if router.config.task_suggestions {
         response.suggested_tasks
@@ -6625,11 +6681,17 @@ async fn send_correction_inner(
         // wrong, which is neither a click in the guided app nor something that advanced the
         // step. The frame is the part worth keeping.
         session.set_last_user_turn_facts(None, None, correction_frame.clone());
-        let content = steps
-            .iter()
-            .map(|s| s.instruction.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = if no_new_step {
+            "(No new step: the answer repeated a step the user had already rejected, so the user \
+was asked what they see.)"
+                .to_string()
+        } else {
+            steps
+                .iter()
+                .map(|s| s.instruction.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         session.add_turn("assistant", content, Some("...".to_string()));
         router.session_manager.save_session(None);
         router.session_manager.prune(SESSION_HISTORY_KEEP);
@@ -6655,6 +6717,12 @@ async fn send_correction_inner(
     }
 
     if steps.is_empty() {
+        // The refused step streamed into the caption while the model wrote it; take it down.
+        if no_new_step {
+            if let Ok(update) = overlay::make_update(overlay::OverlayKind::None, None, None) {
+                let _ = overlay::emit_update(&app, update);
+            }
+        }
         // Decoupled like guide()'s empty-steps branch: block-sig baseline, and a stale
         // sample taken at first token (see on_chunk) — overlay-clean like pre_hash.
         anchor_autopilot_baseline(&state).await;
@@ -6685,6 +6753,7 @@ async fn send_correction_inner(
             hint_shown: false,
             candidates: Vec::new(),
             no_target: false,
+            no_new_step,
         });
     }
 
@@ -6809,6 +6878,7 @@ async fn send_correction_inner(
         hint_shown,
         candidates: shown_candidates,
         no_target: false,
+        no_new_step: false,
     })
 }
 
@@ -7226,6 +7296,7 @@ fn new_session(state: State<'_, AppState>) {
     g.steps = vec![];
     g.state_summary = String::new();
     g.target_hwnd = None;
+    g.rejected_steps.clear();
     // A click from the abandoned task is not "what the user just did" for the new one —
     // it would be reported as fresh context on the first turn and steer the opening answer.
     last_click::clear();

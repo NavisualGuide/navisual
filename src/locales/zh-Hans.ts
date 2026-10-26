@@ -225,6 +225,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "wrong.spot": "位置不对",
   "wrong.notFound": "找不到",
   "wrong.alreadyDone": "已经做过了",
+  "wrong.noNewStep": "这一步我没有别的建议了。请告诉我屏幕上现在显示什么，或者换个说法描述你想做的事。",
   "wrong.other": "其他",
   "wrong.hintOther": "都不是？在下面写清楚哪里不对，然后点 \u21a9 追问。",
   "wrong.hintApp": "应用选错了？先点一下正确的窗口，再按 \u2717 这步不对。",
