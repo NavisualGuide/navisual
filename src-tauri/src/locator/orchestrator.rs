@@ -893,7 +893,21 @@ fn hit_left_the_screen(
             region.height,
         )
         .to_image();
-        changed_share(&then, &now).ok_or("sizes differ")
+        let share = changed_share(&then, &now).ok_or("sizes differ")?;
+        // Dev builds only: the same spot captured WITH our overlay in the picture, so a live check
+        // can show both halves at once -- that the caption really sat over the spot, and that
+        // leaving the overlay out removed it. One more capture; release builds skip it.
+        if cfg!(debug_assertions) {
+            if let Ok(plain) = capture::capture_region_raw(region, &capture::get_panel_rects()) {
+                if let Some(with_overlay) = changed_share(&then, &plain) {
+                    log::info!(
+                        "[fresh] (dev) with our overlay in the picture the same spot reads {:.0}% changed",
+                        with_overlay * 100.0
+                    );
+                }
+            }
+        }
+        Ok(share)
     })();
     let ms = started.elapsed().as_millis();
     let (gone, detail) = match verdict {
