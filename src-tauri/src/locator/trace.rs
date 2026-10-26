@@ -300,6 +300,10 @@ pub enum FinalDecision {
     RejectedUncorroborated {
         detail: String,
     },
+    /// The model picked an element from the list enumerated at capture time and it has left the
+    /// screen since: absent from a live tree that did enumerate, nothing at its point. No pointer
+    /// and no hint ring (`orchestrator::target_left_the_tree`).
+    Gone,
     Error {
         message: String,
     },

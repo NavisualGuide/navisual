@@ -226,6 +226,7 @@ See the LICENSE file in the root of this repository for complete details.
     | { kind: "hit_selection" }
     | { kind: "rejected_by_hit_test"; leaf_class: string }
     | { kind: "rejected_uncorroborated"; detail: string }
+    | { kind: "gone" }
     | { kind: "error"; message: string };
   type LocateTrace = {
     timestamp_ms: number;
@@ -4460,6 +4461,8 @@ See the LICENSE file in the root of this repository for complete details.
         {#if !locateResult && !pointerOccluded && candidateCount < 2 && steps[stepIndex]?.target_text && phase === "guiding"}
           {#if behindPanel}
             <p class="miss-note">{t("status.behindPanel")}</p>
+          {:else if locateTrace?.final_decision?.kind === "gone"}
+            <p class="miss-note">{t("status.targetGone")}</p>
           {:else}
             <p class="miss-note">{t("status.noPointer")}</p>
           {/if}

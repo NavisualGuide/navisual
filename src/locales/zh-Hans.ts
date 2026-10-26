@@ -239,6 +239,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "status.copiedTitle": "文本已复制到剪贴板",
   "status.behindPanel": "\u25ce 这个位置好像被本面板挡住了 —— 把面板拖开就能看到标出的位置。",
   "status.noPointer": "\u2298 无法给出指针 —— 请按上面的说明操作",
+  "status.targetGone": "\u2298 它已经不在屏幕上了，可能已经关闭。如果你还能看到它，请按上面的说明操作。",
   "status.needsInput": "💬 AI 需要你的输入 —— 请在下面写下你的回答",
 
   "balance.viewBilling": "查看账单",

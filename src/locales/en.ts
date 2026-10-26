@@ -251,6 +251,7 @@ export const en = {
   "status.copiedTitle": "Text copied to clipboard",
   "status.behindPanel": "\u25ce This looks like it's behind this panel \u2014 drag the panel aside to reveal the highlighted spot.",
   "status.noPointer": "\u2298 Pointer unavailable \u2014 follow the instruction above",
+  "status.targetGone": "\u2298 It's no longer on the screen \u2014 it may have closed. If you still see it, follow the instruction above.",
   "status.needsInput": "💬 AI needs your input \u2014 type your answer below",
 
   "balance.viewBilling": "View billing",

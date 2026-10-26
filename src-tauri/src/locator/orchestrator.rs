@@ -302,6 +302,17 @@ fn locate_passes(
         return Ok((Some(hit), trace));
     }
 
+    // Gone, not missed. OCR is skipped as well: its frame is from capture time and still shows
+    // the item, so a hit there would point at a place where nothing is any more.
+    if target_left_the_tree(&trace, target_text) {
+        log::info!(
+            "[locate] {target_text:?} was in the element list at capture time and has left the screen; no pointer, no hint"
+        );
+        trace.final_decision = FinalDecision::Gone;
+        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+        return Ok((None, trace));
+    }
+
     // Pass 2 — OCR fallback on the active window.
     //
     // A1: Capture at native resolution (no cap_size, no JPEG encode) so OCR
@@ -803,6 +814,42 @@ fn try_selection_pass(
 /// either way, plus a shared-character check for the reordered case. This loosens layer 2
 /// only; the live `verify_context_element` (layer 3) remains the strong gate, so the
 /// risk profile matches the existing English behaviour.
+/// Whether the target has LEFT the screen rather than been missed. All of:
+/// - the model picked it by id from the element list the app enumerated at capture time, and
+///   that element carries the target's name -- so the app itself saw it there;
+/// - the live check at its point found no control at all (not a different one);
+/// - the live name search ran on a tree that did enumerate (`element_count` > 0), was not cut
+///   short, and matched nothing of that name;
+/// - the AI-box probe, if it ran, found no control either.
+///
+/// On 2026-10-25 a Google notification ("全部更改") closed itself during the 6 s the model took;
+/// the hint ring drawn on its old place sat on our own caption and read as the AI pointing at
+/// the subtitle. A plain miss -- a target never in the list, as in an app with no tree -- does
+/// not qualify, and keeps the hint on the model's box.
+fn target_left_the_tree(trace: &LocateTrace, target_text: &str) -> bool {
+    let Some(sel) = trace.selection.as_ref() else {
+        return false;
+    };
+    let comparable = |s: &str| -> String { s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect() };
+    let (snap, target) = (comparable(sel.snapshot_name.as_deref().unwrap_or("")), comparable(target_text));
+    let names_agree = !snap.is_empty()
+        && !target.is_empty()
+        && (snap == target || (target.chars().count() >= 2 && snap.contains(&target)));
+    let a = &trace.a11y;
+    let probe_found_nothing = a
+        .bbox_probe
+        .as_ref()
+        .is_none_or(|p| p.resolved_role.is_none() && p.resolved_name.is_none());
+    names_agree
+        && !sel.verified
+        && sel.detail.starts_with("no interactive control at snapshot point")
+        && a.ran
+        && !a.timed_out
+        && a.element_count.unwrap_or(0) > 0
+        && a.candidates.is_empty()
+        && probe_found_nothing
+}
+
 fn shares_token(a: &str, b: &str) -> bool {
     let tokens = |s: &str| -> Vec<String> {
         s.to_lowercase()
@@ -1252,6 +1299,70 @@ fn uia_snap_plausible(er: &Rect, ocr: &Rect, crop: &Rect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 2026-10-25 trace: #44 "全部更改" picked from the list, nothing at its point, no
+    /// element of that name among the 96 the live search enumerated, the probe empty.
+    fn gone_trace() -> LocateTrace {
+        let mut t = LocateTrace::new("全部更改");
+        t.selection = Some(crate::locator::trace::SelectionTrace {
+            id: 44,
+            snapshot_len: 87,
+            snapshot_name: Some("全部更改".into()),
+            verified: false,
+            detail: "no interactive control at snapshot point".into(),
+        });
+        t.a11y = A11yTrace {
+            ran: true,
+            element_count: Some(96),
+            bbox_probe: Some(crate::locator::trace::BboxProbe {
+                attempted: true,
+                detail: "no interactive control under bbox".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        t
+    }
+
+    #[test]
+    fn a_picked_element_that_left_the_tree_is_gone() {
+        assert!(target_left_the_tree(&gone_trace(), "全部更改"));
+    }
+
+    #[test]
+    fn anything_short_of_that_stays_a_plain_miss() {
+        // Never in the list (an app with no tree): a miss, the hint stays.
+        let mut t = gone_trace();
+        t.selection = None;
+        assert!(!target_left_the_tree(&t, "全部更改"));
+        // Something else stands at its point.
+        let mut t = gone_trace();
+        t.selection.as_mut().unwrap().detail = "role mismatch: live Edit ≠ snapshot button".into();
+        assert!(!target_left_the_tree(&t, "全部更改"));
+        // The tree did not enumerate, or the search was cut short.
+        let mut t = gone_trace();
+        t.a11y.element_count = Some(0);
+        assert!(!target_left_the_tree(&t, "全部更改"));
+        let mut t = gone_trace();
+        t.a11y.timed_out = true;
+        assert!(!target_left_the_tree(&t, "全部更改"));
+        // The name search found it, even if it then rejected it.
+        let mut t = gone_trace();
+        t.a11y.candidates.push(crate::locator::trace::A11yCandidate {
+            name: "全部更改".into(),
+            role: "Button".into(),
+            bbox: (0, 0, 10, 10),
+            selected: false,
+            reject_reason: Some("outside its own window — stale/off-screen rect".into()),
+        });
+        assert!(!target_left_the_tree(&t, "全部更改"));
+        // The probe found a control where the model's box is.
+        let mut t = gone_trace();
+        t.a11y.bbox_probe.as_mut().unwrap().resolved_role = Some("Button".into());
+        assert!(!target_left_the_tree(&t, "全部更改"));
+        // The model's target is not the element it picked.
+        assert!(!target_left_the_tree(&gone_trace(), "Reload"));
+    }
 
     fn r(x: i32, y: i32, w: u32, h: u32) -> Rect {
         Rect {

@@ -1204,8 +1204,14 @@ fn execute_step(
         }
     }
 
+    // A target that has left the screen gets no hint: the ring would mark where it used to be
+    // (`orchestrator::target_left_the_tree`); the panel says it may have closed instead.
+    let target_gone = trace
+        .as_ref()
+        .is_some_and(|t| matches!(t.final_decision, locator::trace::FinalDecision::Gone));
     let mut hint_shown = false;
     if !candidate_mode
+        && !target_gone
         && located.is_none()
         && bbox_decisive
         && step
