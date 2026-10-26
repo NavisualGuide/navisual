@@ -226,6 +226,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "wrong.spot": "位置不對",
   "wrong.notFound": "找不到",
   "wrong.alreadyDone": "已經做過了",
+  "wrong.noNewStep": "這一步我沒有別的建議了。請告訴我螢幕上現在顯示什麼，或者換個說法描述你想做的事。",
   "wrong.other": "其他",
   "wrong.hintOther": "都不是？在下面寫清楚哪裡不對，然後點 \u21a9 追問。",
   "wrong.hintApp": "應用程式選錯了？先點一下正確的視窗，再按 \u2717 這步不對。",

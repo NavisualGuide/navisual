@@ -358,6 +358,69 @@ pub const CORRECTION_CONTEXT: &str =
     "The user pressed the 'wrong' button on the previous instruction. Re-examine the \
 current screen carefully and provide a corrected instruction that resolves the problem.";
 
+/// A step the user marked ✗ Wrong on the screen they are still on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RejectedStep {
+    pub instruction: String,
+    pub target: String,
+    /// The reason chip ("already_done", "wrong_instruction", "wrong_spot", ...), if one was chosen.
+    pub reason: Option<String>,
+}
+
+/// Whether a rejection rules the step out. "Wrong spot" and "can't find it" ask for the SAME step
+/// pointed better, so they do not; every other reason, and a bare ✗ Wrong, does.
+fn rejection_bars_repeat(reason: Option<&str>) -> bool {
+    !matches!(reason, Some("wrong_spot" | "not_found" | "cant_find"))
+}
+
+fn comparable(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// The steps already rejected on this screen, quoted for the next correction. On 2026-10-25 a
+/// correction said only "the previous instruction", the model saw the same screen, and "click
+/// Reload" came back after two "already done" presses in a row: nothing told it which step had
+/// been rejected, or that it had been rejected before. Empty when nothing rules a step out.
+pub fn rejected_steps_block(rejected: &[RejectedStep]) -> String {
+    let barred: Vec<&RejectedStep> =
+        rejected.iter().filter(|r| rejection_bars_repeat(r.reason.as_deref())).collect();
+    if barred.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "[Rejected steps] The user marked these steps wrong on this screen. Do not give any of them \
+again, however it is worded:",
+    );
+    for (i, r) in barred.iter().enumerate() {
+        let quoted: String = r.instruction.chars().take(200).collect();
+        let why = match r.reason.as_deref() {
+            Some("already_done") => "the user had already done it",
+            Some("wrong_instruction") => "the wrong action for the goal",
+            _ => "marked wrong",
+        };
+        if r.target.trim().is_empty() {
+            out.push_str(&format!("\n{}. \"{quoted}\": {why}", i + 1));
+        } else {
+            out.push_str(&format!("\n{}. \"{quoted}\" (target \"{}\"): {why}", i + 1, r.target.trim()));
+        }
+    }
+    out.push_str("\nIf no other step would move the task on, say so plainly in the instruction and give no target.");
+    out
+}
+
+/// Whether a corrected step gives back one the user ruled out: the same target after "already
+/// done" or "wrong action", or the same instruction after any reason that bars a repeat. The
+/// local guard behind `rejected_steps_block` -- a model that repeats itself anyway is not shown
+/// as offering something new.
+pub fn repeats_rejected(instruction: &str, target: &str, rejected: &[RejectedStep]) -> bool {
+    let (instr, tgt) = (comparable(instruction), comparable(target));
+    rejected.iter().filter(|r| rejection_bars_repeat(r.reason.as_deref())).any(|r| {
+        let same_target = !tgt.is_empty() && tgt == comparable(&r.target);
+        let target_strict = matches!(r.reason.as_deref(), Some("already_done" | "wrong_instruction"));
+        (target_strict && same_target) || (!instr.is_empty() && instr == comparable(&r.instruction))
+    })
+}
+
 pub fn session_resume_template(state_summary: &str) -> String {
     format!(
         "Resuming session. Last known state: {}. \
@@ -779,7 +842,44 @@ language than the conversation."
 
 #[cfg(test)]
 mod tests {
-    use super::{elements_context_block, pack_context_block};
+    use super::{elements_context_block, pack_context_block, rejected_steps_block, repeats_rejected, RejectedStep};
+
+    fn rejected(instruction: &str, target: &str, reason: Option<&str>) -> RejectedStep {
+        RejectedStep { instruction: instruction.into(), target: target.into(), reason: reason.map(Into::into) }
+    }
+
+    #[test]
+    fn the_rejected_step_is_quoted_with_its_reason() {
+        // 2026-10-25: two "already done" presses on "click Reload".
+        let r = vec![
+            rejected("Click the Reload button in the top left of your browser.", "Reload", Some("already_done")),
+            rejected("Click the Reload button in the top-left corner.", "Reload", Some("already_done")),
+        ];
+        let block = rejected_steps_block(&r);
+        assert!(block.starts_with("[Rejected steps]"), "{block}");
+        assert!(block.contains("1. \"Click the Reload button in the top left of your browser.\" (target \"Reload\"): the user had already done it"), "{block}");
+        assert!(block.contains("\n2. "), "{block}");
+        assert!(block.contains("give no target"), "{block}");
+    }
+
+    #[test]
+    fn a_wrong_spot_asks_for_the_same_step_pointed_better() {
+        let r = vec![rejected("Click Save.", "Save", Some("wrong_spot"))];
+        assert!(rejected_steps_block(&r).is_empty(), "nothing is ruled out");
+        assert!(!repeats_rejected("Click Save.", "Save", &r));
+    }
+
+    #[test]
+    fn a_repeat_is_caught_by_target_or_by_wording() {
+        let done = vec![rejected("Click the Reload button in the top left.", "Reload", Some("already_done"))];
+        // Same target in other words, after "already done": a repeat.
+        assert!(repeats_rejected("Click Reload next to the address bar to refresh YouTube.", "reload", &done));
+        assert!(!repeats_rejected("Open the three-dot menu.", "More actions", &done));
+        // A bare Wrong rules out the same wording, not the same target.
+        let bare = vec![rejected("Click Insert, then Page Number.", "Insert", None)];
+        assert!(repeats_rejected("Click Insert, then Page Number!", "Insert", &bare));
+        assert!(!repeats_rejected("Click Insert, then Header.", "Insert", &bare));
+    }
 
     // The line once carried three runs of ten spaces mid-sentence -- the mark of a string
     // continuation flattened into literal spaces by an edit -- and went out like that on every

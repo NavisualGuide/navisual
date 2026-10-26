@@ -403,7 +403,18 @@ impl Session {
             out.push_str(&format!("\n({skip} earlier turns not listed)"));
         }
         for (i, t) in turns.iter().enumerate().skip(skip) {
-            let said: String = t.content.chars().take(EARLIER_SAID_CHARS).collect();
+            // A correction's content opens with the app's own wording ("The user pressed the
+            // 'wrong' button..."), which cut at 80 characters left out the one part that
+            // differs: the user's note. List it as what the user said.
+            let note = t.content.rsplit_once("User note: ").map(|(_, n)| n.trim()).filter(|n| !n.is_empty());
+            let said_full = match note {
+                Some(note) if t.role == "correction" => format!("\u{2717} Wrong: {note}"),
+                None if t.role == "correction" && t.content.starts_with(crate::ai::prompts::CORRECTION_CONTEXT) => {
+                    "\u{2717} Wrong".to_string()
+                }
+                _ => t.content.clone(),
+            };
+            let said: String = said_full.chars().take(EARLIER_SAID_CHARS).collect();
             match t.window_title.as_deref() {
                 Some(title) => out.push_str(&format!("\nturn {}: {title} -- \"{said}\"", i + 1)),
                 None => out.push_str(&format!("\nturn {}: \"{said}\"", i + 1)),
@@ -1032,6 +1043,22 @@ mod tests {
         assert!(list.ends_with("\nturn 2: \"Next\""), "a blank title is no title: {list}");
         assert!(s.earlier_screens(true).contains("recall(turn) shows one again"));
         assert!(!list.contains("Double-click"), "the assistant's words are not listed");
+    }
+
+    #[test]
+    fn a_correction_is_listed_by_the_users_note() {
+        let mut s = Session::new("t".into());
+        s.add_turn("user", "Change the translation language.".into(), None);
+        s.add_turn("assistant", "Click Reload.".into(), None);
+        s.add_turn(
+            "correction",
+            "The user pressed the 'wrong' button on the previous instruction. Re-examine the current screen.\n[Rejected steps] ...\nUser note: I have ALREADY done this step.".into(),
+            None,
+        );
+        s.add_turn("correction", crate::ai::prompts::CORRECTION_CONTEXT.to_string(), None);
+        let list = s.earlier_screens(false);
+        assert!(list.contains("turn 2: \"\u{2717} Wrong: I have ALREADY done this step.\""), "{list}");
+        assert!(list.ends_with("turn 3: \"\u{2717} Wrong\""), "{list}");
     }
 
     #[test]
