@@ -105,8 +105,152 @@ pub fn anchor_near(
 /// line-level results plus word-level results (so single-word targets can
 /// still get a tight bbox instead of the whole line's span).
 pub fn run_ocr(image_bytes: &[u8]) -> Result<Vec<OcrResult>> {
-    let engine = OcrEngine::TryCreateFromUserProfileLanguages()
-        .map_err(|e| anyhow!("OCR engine init: {e}"))?;
+    run_ocr_for(image_bytes, None).map(|(results, _)| results)
+}
+
+/// Which installed recognizer reads `target`, when the profile's default recognizer is the wrong
+/// script for it. `None` keeps the default.
+///
+/// The default comes from the user's first profile language that has a recognizer. On an
+/// English-first profile that is en-US, which reads no Chinese at all: on 2026-10-25 a Google
+/// notification's "全部更改" sat in the OCR frame and the engine returned nine Latin lines and
+/// not one character, though zh-Hans-CN was installed on the same machine. Han alone prefers a
+/// Chinese recognizer, kana a Japanese one, Hangul a Korean one; a default already in the right
+/// family is kept (a Japanese profile reads kanji labels with its own recognizer). `available`
+/// is in the order Windows lists them, which follows the profile.
+pub(crate) fn recognizer_for_script(target: &str, default_tag: &str, available: &[String]) -> Option<String> {
+    let any = |f: fn(u32) -> bool| target.chars().any(|c| f(c as u32));
+    let families: &[&str] = if any(|u| (0xac00..=0xd7af).contains(&u) || (0x1100..=0x11ff).contains(&u)) {
+        &["ko"]
+    } else if any(|u| (0x3040..=0x30ff).contains(&u)) {
+        &["ja", "zh"]
+    } else if any(|u| (0x4e00..=0x9fff).contains(&u) || (0x3400..=0x4dbf).contains(&u) || (0xf900..=0xfaff).contains(&u)) {
+        &["zh", "ja"]
+    } else {
+        return None;
+    };
+    let primary = |tag: &str| tag.split('-').next().unwrap_or("").to_ascii_lowercase();
+    if families.contains(&primary(default_tag).as_str()) {
+        return None;
+    }
+    families
+        .iter()
+        .find_map(|fam| available.iter().find(|t| primary(t) == *fam).cloned())
+}
+
+/// The engine for `text_hint`: the profile default, or the recognizer `recognizer_for_script`
+/// picks for a CJK target. Logs only when the choice departs from the default, or when a CJK
+/// target has no recognizer to read it (rule 1: the locate trace alone could not show why OCR
+/// read nothing).
+fn engine_for(text_hint: Option<&str>) -> Result<OcrEngine> {
+    let default =
+        OcrEngine::TryCreateFromUserProfileLanguages().map_err(|e| anyhow!("OCR engine init: {e}"))?;
+    let Some(hint) = text_hint.filter(|h| super::contains_cjk(h)) else {
+        return Ok(default);
+    };
+    let default_tag = default
+        .RecognizerLanguage()
+        .and_then(|l| l.LanguageTag())
+        .map(|t| t.to_string())
+        .unwrap_or_default();
+    let available: Vec<String> = OcrEngine::AvailableRecognizerLanguages()
+        .map(|v| v.into_iter().filter_map(|l| l.LanguageTag().ok().map(|t| t.to_string())).collect())
+        .unwrap_or_default();
+    let Some(tag) = recognizer_for_script(hint, &default_tag, &available) else {
+        let primary = default_tag.split('-').next().unwrap_or("");
+        if !matches!(primary, "zh" | "ja" | "ko") {
+            log::info!(
+                "[ocr] CJK target but no Chinese/Japanese/Korean recognizer is installed; reading with {default_tag} (installed: {})",
+                available.join(", ")
+            );
+        }
+        return Ok(default);
+    };
+    let engine = windows::Globalization::Language::CreateLanguage(&windows::core::HSTRING::from(tag.as_str()))
+        .and_then(|lang| OcrEngine::TryCreateFromLanguage(&lang));
+    match engine {
+        Ok(e) => {
+            log::info!("[ocr] recognizer {tag} for a CJK target (profile default {default_tag})");
+            Ok(e)
+        }
+        Err(e) => {
+            log::warn!("[ocr] recognizer {tag} would not start ({e}); reading with {default_tag}");
+            Ok(default)
+        }
+    }
+}
+
+/// An OCR box in image pixels: (x, y, w, h), as `OcrResult::bbox`.
+type PxBox = (i32, i32, u32, u32);
+
+/// Han, kana and CJK punctuation: scripts written without spaces between words. A Chinese or
+/// Japanese recognizer returns each such character as its own "word", and joining those with
+/// spaces ("全 部 更 改") hid every Chinese label from the matcher. Hangul is deliberately not
+/// here: Korean puts spaces between words, so the recognizer's word breaks are real ones.
+fn is_unspaced_script(c: char) -> bool {
+    let u = c as u32;
+    (0x4e00..=0x9fff).contains(&u)
+        || (0x3400..=0x4dbf).contains(&u)
+        || (0xf900..=0xfaff).contains(&u)
+        || (0x3040..=0x30ff).contains(&u) // kana
+        || (0x3000..=0x303f).contains(&u) // CJK symbols and punctuation
+        || (0xff00..=0xffef).contains(&u) // full-width forms
+}
+
+/// One OCR line's results from its words, in reading order: the line (confidence 1.0), then its
+/// words (0.95) so a single-word target gets a tight box. Neighbouring words that meet in an
+/// unspaced script are joined with no space and emitted as ONE word, so "全部更改" is a line and a
+/// word rather than four characters the matcher's two-character guard ignores. Latin text is
+/// unchanged: words joined by spaces, each its own word.
+fn line_results(words: &[(String, PxBox)]) -> Vec<OcrResult> {
+    fn union(a: PxBox, b: PxBox) -> PxBox {
+        let x0 = a.0.min(b.0);
+        let y0 = a.1.min(b.1);
+        let x1 = (a.0 + a.2 as i32).max(b.0 + b.2 as i32);
+        let y1 = (a.1 + a.3 as i32).max(b.1 + b.3 as i32);
+        (x0, y0, (x1 - x0).max(0) as u32, (y1 - y0).max(0) as u32)
+    }
+    let mut segments: Vec<(String, PxBox)> = Vec::new();
+    for (text, bbox) in words.iter().filter(|(t, _)| !t.trim().is_empty()) {
+        let text = text.trim();
+        let joins = segments.last().is_some_and(|(prev, _)| {
+            prev.chars().last().is_some_and(is_unspaced_script)
+                && text.chars().next().is_some_and(is_unspaced_script)
+        });
+        match segments.last_mut() {
+            Some((prev, pb)) if joins => {
+                prev.push_str(text);
+                *pb = union(*pb, *bbox);
+            }
+            _ => segments.push((text.to_string(), *bbox)),
+        }
+    }
+    let Some(line_bbox) = segments.iter().map(|(_, b)| *b).reduce(union) else {
+        return Vec::new();
+    };
+    let line_text = segments.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(" ");
+    let mut out = Vec::new();
+    if line_bbox.2 > 0 && line_bbox.3 > 0 {
+        out.push(OcrResult { text: line_text.clone(), bbox: line_bbox, confidence: 1.0 });
+    }
+    for (text, bbox) in segments {
+        if text == line_text || bbox.2 == 0 || bbox.3 == 0 {
+            continue;
+        }
+        out.push(OcrResult { text, bbox, confidence: 0.95 });
+    }
+    out
+}
+
+/// `run_ocr` with the recognizer chosen for `text_hint`'s script (`recognizer_for_script`).
+/// Returns the results and the recognizer's language tag, which the locate trace records.
+pub fn run_ocr_for(image_bytes: &[u8], text_hint: Option<&str>) -> Result<(Vec<OcrResult>, String)> {
+    let engine = engine_for(text_hint)?;
+    let recognizer = engine
+        .RecognizerLanguage()
+        .and_then(|l| l.LanguageTag())
+        .map(|t| t.to_string())
+        .unwrap_or_default();
 
     // Wrap the bytes in an InMemoryRandomAccessStream via a DataWriter.
     let stream = InMemoryRandomAccessStream::new().map_err(|e| anyhow!("create stream: {e}"))?;
@@ -156,85 +300,18 @@ pub fn run_ocr(image_bytes: &[u8]) -> Result<Vec<OcrResult>> {
     let lines = ocr.Lines().map_err(|e| anyhow!("Lines: {e}"))?;
     for line in lines {
         let words = line.Words().map_err(|e| anyhow!("Words: {e}"))?;
-        let mut min_x = f32::INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
-        let mut parts: Vec<String> = Vec::new();
+        let mut parts: Vec<(String, PxBox)> = Vec::new();
         for word in &words {
-            let r = match word.BoundingRect() {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let x = r.X;
-            let y = r.Y;
-            let w = r.Width;
-            let h = r.Height;
-            if x < min_x {
-                min_x = x;
-            }
-            if y < min_y {
-                min_y = y;
-            }
-            if x + w > max_x {
-                max_x = x + w;
-            }
-            if y + h > max_y {
-                max_y = y + h;
-            }
-            if let Ok(t) = word.Text() {
-                let ts = t.to_string();
-                if !ts.is_empty() {
-                    parts.push(ts);
-                }
-            }
-        }
-        if parts.is_empty() || !min_x.is_finite() {
-            continue;
-        }
-        let line_text = parts.join(" ");
-        let line_bbox = (
-            min_x as i32,
-            min_y as i32,
-            (max_x - min_x).max(0.0) as u32,
-            (max_y - min_y).max(0.0) as u32,
-        );
-        if line_bbox.2 > 0 && line_bbox.3 > 0 {
-            out.push(OcrResult {
-                text: line_text.clone(),
-                bbox: line_bbox,
-                confidence: 1.0,
-            });
-        }
-
-        // Also emit individual words so single-word searches get a tight bbox.
-        for word in &words {
-            let r = match word.BoundingRect() {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let wt = match word.Text() {
-                Ok(t) => t.to_string(),
-                Err(_) => continue,
-            };
-            let wt = wt.trim().to_string();
-            if wt.is_empty() || wt == line_text {
+            let (Ok(r), Ok(t)) = (word.BoundingRect(), word.Text()) else {
                 continue;
-            }
-            let w = r.Width.max(0.0) as u32;
-            let h = r.Height.max(0.0) as u32;
-            if w == 0 || h == 0 {
-                continue;
-            }
-            out.push(OcrResult {
-                text: wt,
-                bbox: (r.X as i32, r.Y as i32, w, h),
-                confidence: 0.95,
-            });
+            };
+            let bbox = (r.X as i32, r.Y as i32, r.Width.max(0.0) as u32, r.Height.max(0.0) as u32);
+            parts.push((t.to_string(), bbox));
         }
+        out.extend(line_results(&parts));
     }
 
-    Ok(out)
+    Ok((out, recognizer))
 }
 
 // ---------- `find_text` matcher ----------
@@ -852,6 +929,117 @@ fn sequence_ratio(a: &str, b: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tags(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_chinese_target_on_an_english_profile_gets_the_chinese_recognizer() {
+        // The 2026-10-25 machine: en-US first, zh-Hans-CN installed, target 全部更改.
+        let avail = tags(&["en-US", "zh-Hans-CN"]);
+        assert_eq!(recognizer_for_script("全部更改", "en-US", &avail).as_deref(), Some("zh-Hans-CN"));
+        // Mixed text with Han still needs it.
+        assert_eq!(recognizer_for_script("全部更改 (Change all)", "en-US", &avail).as_deref(), Some("zh-Hans-CN"));
+    }
+
+    #[test]
+    fn the_default_recognizer_stays_when_it_already_reads_the_script() {
+        let avail = tags(&["en-US", "zh-Hans-CN", "ja-JP"]);
+        assert_eq!(recognizer_for_script("Save", "en-US", &avail), None);
+        assert_eq!(recognizer_for_script("全部更改", "zh-Hans-CN", &avail), None);
+        // A Japanese profile reads a kanji-only label with its own recognizer.
+        assert_eq!(recognizer_for_script("保存", "ja-JP", &avail), None);
+    }
+
+    #[test]
+    fn script_picks_the_family_and_profile_order_picks_within_it() {
+        let avail = tags(&["en-US", "ja-JP", "zh-Hant-TW", "zh-Hans-CN", "ko-KR"]);
+        // Han alone: Chinese before Japanese, and the first Chinese Windows lists.
+        assert_eq!(recognizer_for_script("全部更改", "en-US", &avail).as_deref(), Some("zh-Hant-TW"));
+        // Kana: Japanese.
+        assert_eq!(recognizer_for_script("ファイル", "en-US", &avail).as_deref(), Some("ja-JP"));
+        // Hangul: Korean.
+        assert_eq!(recognizer_for_script("파일 열기", "en-US", &avail).as_deref(), Some("ko-KR"));
+        // Nothing installed for it: keep the default.
+        assert_eq!(recognizer_for_script("파일", "en-US", &tags(&["en-US"])), None);
+    }
+
+    fn w(t: &str, x: i32) -> (String, PxBox) {
+        (t.to_string(), (x, 100, 20, 20))
+    }
+
+    #[test]
+    fn chinese_characters_join_into_one_line_and_one_word() {
+        // What the zh-Hans recognizer returns for Google's notification: one word per character.
+        let r = line_results(&[w("全", 0), w("部", 22), w("更", 44), w("改", 66)]);
+        assert_eq!(r.len(), 1, "the line is the word, so it is emitted once: {r:?}");
+        assert_eq!(r[0].text, "全部更改");
+        assert_eq!(r[0].bbox, (0, 100, 86, 20));
+        assert_eq!(r[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn mixed_lines_keep_spaces_at_latin_edges_and_emit_runs_as_words() {
+        let r = line_results(&[w("您", 0), w("使", 22), w("用", 44), w("Google", 70), w("服", 140), w("务", 162)]);
+        assert_eq!(r[0].text, "您使用 Google 服务");
+        let words: Vec<&str> = r[1..].iter().map(|o| o.text.as_str()).collect();
+        assert_eq!(words, ["您使用", "Google", "服务"]);
+        assert_eq!(r[1].bbox, (0, 100, 64, 20));
+    }
+
+    #[test]
+    fn latin_and_korean_words_are_unchanged() {
+        let r = line_results(&[w("Ask", 0), w("Gemini", 40)]);
+        assert_eq!(r[0].text, "Ask Gemini");
+        assert_eq!(r[1..].iter().map(|o| o.text.as_str()).collect::<Vec<_>>(), ["Ask", "Gemini"]);
+        // Korean writes spaces between words; the recognizer's breaks are real.
+        let k = line_results(&[w("파일", 0), w("열기", 50)]);
+        assert_eq!(k[0].text, "파일 열기");
+        assert_eq!(k.len(), 3);
+    }
+
+    #[test]
+    fn a_chinese_label_is_found_once_its_characters_are_joined() {
+        let mut results = line_results(&[w("有", 0), w("些", 22), w("产", 44), w("品", 66)]);
+        results.extend(line_results(&[w("全", 300), w("部", 322), w("更", 344), w("改", 366)]));
+        let opts = FindOptions {
+            role: Some("button"),
+            nearby_text: None,
+            screen_width: 1920,
+            screen_height: 1080,
+            ai_bbox: None,
+            avoid_bboxes: Vec::new(),
+            min_confidence: 0.5,
+        };
+        let hit = find_text("全部更改", &results, &opts).winner.expect("found");
+        assert_eq!(hit.text, "全部更改");
+        assert_eq!(hit.bbox.0, 300);
+    }
+
+    // The recognizer choice on a real frame. IN = a PNG; TARGET = the text to look for.
+    //   $env:IN="ocr.png"; $env:TARGET="全部更改"; cargo test --lib ocr_target_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn ocr_target_probe() {
+        let bytes = std::fs::read(std::env::var("IN").expect("set IN")).expect("read");
+        let target = std::env::var("TARGET").expect("set TARGET");
+        let (results, tag) = run_ocr_for(&bytes, Some(&target)).expect("ocr");
+        eprintln!("recognizer {tag}, {} results", results.len());
+        let opts = FindOptions {
+            role: None,
+            nearby_text: None,
+            screen_width: 1920,
+            screen_height: 1080,
+            ai_bbox: None,
+            avoid_bboxes: Vec::new(),
+            min_confidence: 0.5,
+        };
+        match find_text(&target, &results, &opts).winner {
+            Some(h) => eprintln!("FOUND '{}' at {:?}", h.text, h.bbox),
+            None => eprintln!("not found"),
+        }
+    }
 
     // E2 spike (measurement only — no production change): OCR a capture at several scales,
     // full-image or a cropped REGION, to see whether upscaling rescues compact text the native

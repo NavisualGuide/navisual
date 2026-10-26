@@ -85,6 +85,9 @@ windows = { version = "0.62", features = [
   "Media_Ocr",
   "Graphics_Imaging",
   "Storage_Streams",
+  # Language -- choosing the OCR recognizer by the target's script (a CJK target on an
+  # English-first profile needs the installed Chinese/Japanese/Korean recognizer)
+  "Globalization",
   # WinRT TTS — OneCore (modern) voices via SpeechSynthesizer + MediaPlayer + MediaSource
   "Foundation",
   "Media_SpeechSynthesis",
