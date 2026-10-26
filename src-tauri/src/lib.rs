@@ -786,11 +786,12 @@ struct AppState {
     /// the screen the AI last guided against. Compared per-cell against each poll; not the drifting
     /// per-poll baseline of the pre-anchor design.
     screen_sig: parking_lot::Mutex<Option<Vec<u8>>>,
-    /// Most-recent AI-image JPEG bytes (the one sent to the AI on the latest
-    /// `guide`/`next_step`/`send_correction`). Held in RAM only — never
-    /// written to disk — so the lightbox can re-open it without persisting
-    /// the user's screen content to storage. Cleared on new task / on quit.
-    chat_full_jpeg: parking_lot::Mutex<Option<Vec<u8>>>,
+    /// The AI-image JPEG of each recent request in this task, keyed by request id, newest
+    /// last, at most `FULL_SHOTS_KEPT`. Held in RAM only — never written to disk — so a
+    /// thumbnail in the panel opens ITS OWN screenshot. It used to be one slot that every
+    /// request overwrote, so any earlier thumbnail enlarged to the newest picture (founder,
+    /// 2026-10-25). Cleared on new task / on quit.
+    chat_full_jpegs: parking_lot::Mutex<std::collections::VecDeque<(String, Vec<u8>)>>,
     /// Nav-Packs loaded at startup (bundled + user). Read-only after load; the active pack
     /// for the focused window injects app-specific guidance + shortcuts into the prompt.
     packs: packs::PackRegistry,
@@ -4013,7 +4014,7 @@ fn update_env_file(path: &std::path::Path, updates: &[(&str, &str)]) -> Result<(
 
 /// Encode a 160×90 thumbnail of the AI image as base64 — for the inline chat
 /// bubble in the panel. Pure in-memory: nothing is written to disk. The full
-/// JPEG is held in `AppState::chat_full_jpeg` for the lightbox.
+/// JPEG is held in `AppState::chat_full_jpegs` for the lightbox.
 fn make_chat_thumbnail(jpeg_bytes: &[u8]) -> Option<String> {
     let img = image::load_from_memory(jpeg_bytes).ok()?;
     let thumb = img.resize(160, 90, image::imageops::FilterType::Nearest);
@@ -4268,13 +4269,30 @@ fn adopt_session_state(state: &State<'_, AppState>, session: &Session) {
     last_click::clear();
 }
 
-/// Return the full-resolution chat screenshot as base64 (for the lightbox).
-/// Read from in-memory state — never touched disk. Returns None if no
-/// screenshot has been captured yet this session.
+/// Full-size screenshots kept for the panel's thumbnails: about 20 steps back, a few
+/// hundred KB each, memory only.
+const FULL_SHOTS_KEPT: usize = 20;
+
+/// Keep this request's AI-image JPEG for its thumbnail, dropping the oldest past the cap.
+fn keep_full_shot(state: &AppState, request_id: &str, bytes: Vec<u8>) {
+    let mut shots = state.chat_full_jpegs.lock();
+    shots.retain(|(id, _)| id != request_id);
+    shots.push_back((request_id.to_string(), bytes));
+    while shots.len() > FULL_SHOTS_KEPT {
+        shots.pop_front();
+    }
+}
+
+/// The full-resolution screenshot of one request as base64 (for the lightbox): the one
+/// `request_id` names, or the newest when it is absent or no longer kept. Read from memory —
+/// never touched disk. None if nothing has been captured in this task.
 #[tauri::command]
-fn get_chat_full_screenshot(state: State<'_, AppState>) -> Option<String> {
-    let bytes = state.chat_full_jpeg.lock().clone()?;
-    Some(capture::to_base64(&bytes))
+fn get_chat_full_screenshot(state: State<'_, AppState>, request_id: Option<String>) -> Option<String> {
+    let shots = state.chat_full_jpegs.lock();
+    let bytes = request_id
+        .and_then(|id| shots.iter().find(|(k, _)| *k == id).map(|(_, b)| b))
+        .or_else(|| shots.back().map(|(_, b)| b))?;
+    Some(capture::to_base64(bytes))
 }
 
 /// Move any plaintext BYOK API key still sitting in `.env` into the Windows
@@ -4535,8 +4553,8 @@ async fn guide_inner(
         // A new task governs its own reply language — store it as the language sample when it's
         // substantial enough to read (else clear, and the directive falls back to the task text).
         g.reply_lang_sample = crate::ai::prompts::is_language_sample(&task).then(|| task.clone());
-        // Drop the previous screenshot from RAM — new task starts fresh.
-        *state.chat_full_jpeg.lock() = None;
+        // Drop the previous task's screenshots from RAM — new task starts fresh.
+        state.chat_full_jpegs.lock().clear();
     } else if is_reply && crate::ai::prompts::is_language_sample(&task) {
         // A substantial reply updates the sticky language sample, so a mid-session switch takes
         // effect and survives the next machine `[User completed:]` turn — in BOTH directions
@@ -4855,7 +4873,7 @@ async fn guide_inner(
                 training_shot_file = save_training_shot(base.as_deref(), &request_id, &full_bytes);
             }
             log::info!("[capture] ok in {} ms", capture_started.elapsed().as_millis());
-            *state.chat_full_jpeg.lock() = Some(full_bytes);
+            keep_full_shot(&state, &request_id, full_bytes);
             (
                 b64,
                 rect_opt,
@@ -6248,7 +6266,7 @@ async fn send_correction_inner(
             let base = app.path().navisual_data_dir().ok();
             training_shot_file = save_training_shot(base.as_deref(), &request_id, &bytes);
         }
-        *state.chat_full_jpeg.lock() = Some(bytes);
+        keep_full_shot(&state, &request_id, bytes);
     }
 
     // Phase 0.2 — show shared-app boundary on correction too.
@@ -9224,7 +9242,7 @@ pub fn run() {
                 supabase_session_path,
                 supabase_session: tokio::sync::Mutex::new(initial_session),
                 screen_sig: parking_lot::Mutex::new(None),
-                chat_full_jpeg: parking_lot::Mutex::new(None),
+                chat_full_jpegs: parking_lot::Mutex::new(std::collections::VecDeque::new()),
                 packs,
                 learned: parking_lot::Mutex::new(learned),
                 learned_click_gen: std::sync::atomic::AtomicU64::new(0),
@@ -9242,7 +9260,7 @@ pub fn run() {
             // on the next launch.
             if window.label() == "panel" {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
-                    // chat_full_jpeg lives only in process memory — exiting
+                    // chat_full_jpegs live only in process memory — exiting
                     // drops it. No disk files to clean up.
                     window.app_handle().exit(0);
                 }
