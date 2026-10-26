@@ -37,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN,
     HTCLIENT, SC_MINIMIZE, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WM_NCCALCSIZE, WM_NCHITTEST, WM_SYSCOMMAND, GetLayeredWindowAttributes, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
 /// Class names we never treat as a capture target (shell, IME, overlays).
@@ -1416,6 +1416,61 @@ pub fn set_panel_border(hwnd_raw: usize, enabled: bool) {
             }
         }
     }
+}
+
+/// Our overlay's top-level window: own process, click-through, visible, and not tao's
+/// "Tao Thread Event Target" helper, which carries the same style (see `raise_overlay_topmost`).
+fn own_overlay_hwnd() -> Option<HWND> {
+    struct State {
+        pid: u32,
+        found: Option<HWND>,
+    }
+    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let state = &mut *(lparam.0 as *mut State);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != state.pid {
+            return TRUE;
+        }
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex_style & WS_EX_TRANSPARENT.0) == 0 || !IsWindowVisible(hwnd).as_bool() {
+            return TRUE;
+        }
+        let mut buf = [0u16; 128];
+        let n = GetClassNameW(hwnd, &mut buf);
+        if String::from_utf16_lossy(&buf[..n as usize]) == "Tao Thread Event Target" {
+            return TRUE;
+        }
+        state.found = Some(hwnd);
+        FALSE
+    }
+    let mut state = State { pid: std::process::id(), found: None };
+    unsafe {
+        let _ = EnumWindows(Some(callback), LPARAM(&mut state as *mut State as isize));
+    }
+    state.found
+}
+
+/// Run `f` with our own overlay (caption, pointer) left out of screen captures:
+/// `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` for the duration, then `WDA_NONE`. The
+/// overlay stays on screen exactly as it is. Measured 2026-10-26 on a layered, click-through,
+/// topmost test window with this module's capture path: hidden from the very first BitBlt after
+/// the call, back on the first after restoring, and the founder watching saw no flicker across
+/// 20 s of toggling. `None` when the overlay is not found or the call is refused (Windows older
+/// than 10 2004): the caller must not trust a capture that may contain our own caption.
+pub fn with_overlay_excluded<T>(f: impl FnOnce() -> T) -> Option<T> {
+    struct Restore(HWND);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = SetWindowDisplayAffinity(self.0, WDA_NONE);
+            }
+        }
+    }
+    let hwnd = own_overlay_hwnd()?;
+    unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }.ok()?;
+    let _restore = Restore(hwnd);
+    Some(f())
 }
 
 pub fn raise_overlay_topmost() {

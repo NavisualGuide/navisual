@@ -671,6 +671,25 @@ pub fn get_panel_rects() -> Vec<Rect> {
     }
 }
 
+/// Capture `rect` as it is on screen NOW, with our own overlay (caption, pointer) left out of
+/// the capture though not off the screen (`win::with_overlay_excluded`). `exclude` (our panel) is
+/// blanked as in every other capture. `None` when the overlay could not be left out or the
+/// capture failed -- such a picture may hold our own caption and must not be compared.
+pub fn capture_region_without_overlay(
+    rect: Rect,
+    exclude: &[Rect],
+) -> Option<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+    #[cfg(windows)]
+    {
+        win::with_overlay_excluded(|| capture_region_raw(rect, exclude).ok()).flatten()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (rect, exclude);
+        None
+    }
+}
+
 /// Re-assert the overlay window's TOPMOST z-order so the guidance pointer stays
 /// above transient popups (dropdown menus, combo lists, tooltips) created by
 /// other apps. No-op on non-Windows. See `win::raise_overlay_topmost`.

@@ -322,6 +322,9 @@ fn locate_passes(
     // Prefer a pre-captured OCR image (taken at AI-capture time, overlay cleared, BEFORE the
     // streamed subtitle appeared) so OCR never reads our own caption — and there's no clear/
     // redraw flicker. Fall back to a fresh re-capture when none was supplied (e.g. next_step).
+    // A pre-captured frame is seconds old by now (the model's answer came in between), so a hit
+    // read from it is re-checked on the live screen before it is drawn (`hit_left_the_screen`).
+    let frame_from_capture = pre_ocr.is_some();
     let (ocr_bytes, crop_rect, img_w, img_h) = if let Some((png, rect)) = pre_ocr {
         let (iw, ih) = image::load_from_memory(png)
             .map(|i| (i.width(), i.height()))
@@ -524,6 +527,14 @@ fn locate_passes(
             )
             .filter(|r| !rejected_by_avoid(&r.bbox, &opts.avoid_bboxes))
             {
+                if frame_from_capture
+                    && hit_left_the_screen(&mut ocr_trace, &ocr_bytes, &crop_rect, img_w, img_h, result.bbox, target_text)
+                {
+                    trace.ocr = ocr_trace;
+                    trace.final_decision = FinalDecision::Gone;
+                    trace.elapsed_ms = started.elapsed().as_millis() as u32;
+                    return Ok((None, trace));
+                }
                 trace.ocr = ocr_trace;
                 trace.final_decision = FinalDecision::HitOcr;
                 trace.final_bbox = Some(result.bbox);
@@ -727,6 +738,18 @@ fn locate_passes(
         return Ok((None, trace));
     }
 
+    // Corroborated -- but read from the capture-time frame. A notification that closed itself
+    // while the model answered is still in it (2026-10-25: Google's "全部更改" bar, gone by the
+    // locate, was found by OCR and pointed at). Check the spot on the live screen first.
+    if frame_from_capture
+        && hit_left_the_screen(&mut ocr_trace, &ocr_bytes, &crop_rect, img_w, img_h, bbox, target_text)
+    {
+        trace.ocr = ocr_trace;
+        trace.final_decision = FinalDecision::Gone;
+        trace.elapsed_ms = started.elapsed().as_millis() as u32;
+        return Ok((None, trace));
+    }
+
     // Pointer snap: OCR's `bbox` is only the matched *text* span — a single word (so a
     // multi-word link/title pointer covers just one word) or a whole long line. When the
     // UIA role hit-test resolved an interactive control under the match, its rect is the
@@ -814,6 +837,95 @@ fn try_selection_pass(
 /// either way, plus a shared-character check for the reordered case. This loosens layer 2
 /// only; the live `verify_context_element` (layer 3) remains the strong gate, so the
 /// risk profile matches the existing English behaviour.
+/// A pixel counts as changed when any channel moved more than this (of 255): a hover tint or a
+/// caret blink stays under it, a light bar giving way to a dark page does not.
+const CHANGED_DELTA: u8 = 48;
+/// The hit has left the screen when at least this share of its area changed.
+const GONE_SHARE: f32 = 0.5;
+
+/// Share of pixels that changed clearly between two crops of the same spot, or `None` when they
+/// are not the same size (nothing comparable).
+fn changed_share(old: &image::RgbaImage, new: &image::RgbaImage) -> Option<f32> {
+    if old.dimensions() != new.dimensions() || old.width() == 0 || old.height() == 0 {
+        return None;
+    }
+    let changed = old
+        .pixels()
+        .zip(new.pixels())
+        .filter(|(a, b)| (0..3).any(|i| a.0[i].abs_diff(b.0[i]) > CHANGED_DELTA))
+        .count();
+    Some(changed as f32 / (old.width() * old.height()) as f32)
+}
+
+/// Whether an OCR hit read from the capture-time frame has left the screen since: its area
+/// captured again now, with our own overlay left out of that capture (the streamed caption sits
+/// over the bottom centre during the answer), and compared with the same area of the old frame.
+/// Records the outcome in the trace and the log either way. Anything that stops the check (a
+/// scaled frame, the overlay not excluded, a failed capture) keeps the hit: the check may only
+/// take a pointer away when it has seen the spot change.
+fn hit_left_the_screen(
+    ocr_trace: &mut OcrTrace,
+    frame_png: &[u8],
+    crop: &Rect,
+    img_w: u32,
+    img_h: u32,
+    hit: Rect,
+    target_text: &str,
+) -> bool {
+    let started = Instant::now();
+    let verdict: Result<f32, &str> = (|| {
+        if img_w != crop.width || img_h != crop.height {
+            return Err("frame not at screen scale");
+        }
+        let x0 = hit.x.max(crop.x);
+        let y0 = hit.y.max(crop.y);
+        let x1 = (hit.x + hit.width as i32).min(crop.x + crop.width as i32);
+        let y1 = (hit.y + hit.height as i32).min(crop.y + crop.height as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return Err("hit outside the frame");
+        }
+        let region = Rect { x: x0, y: y0, width: (x1 - x0) as u32, height: (y1 - y0) as u32 };
+        let now = capture::capture_region_without_overlay(region, &capture::get_panel_rects())
+            .ok_or("could not capture without our overlay")?;
+        let frame = image::load_from_memory(frame_png).map_err(|_| "frame unreadable")?.to_rgba8();
+        let then = image::imageops::crop_imm(
+            &frame,
+            (x0 - crop.x) as u32,
+            (y0 - crop.y) as u32,
+            region.width,
+            region.height,
+        )
+        .to_image();
+        let share = changed_share(&then, &now).ok_or("sizes differ")?;
+        // Dev builds only: the same spot captured WITH our overlay in the picture, so a live check
+        // can show both halves at once -- that the caption really sat over the spot, and that
+        // leaving the overlay out removed it. One more capture; release builds skip it.
+        if cfg!(debug_assertions) {
+            if let Ok(plain) = capture::capture_region_raw(region, &capture::get_panel_rects()) {
+                if let Some(with_overlay) = changed_share(&then, &plain) {
+                    log::info!(
+                        "[fresh] (dev) with our overlay in the picture the same spot reads {:.0}% changed",
+                        with_overlay * 100.0
+                    );
+                }
+            }
+        }
+        Ok(share)
+    })();
+    let ms = started.elapsed().as_millis();
+    let (gone, detail) = match verdict {
+        Ok(share) if share >= GONE_SHARE => (true, format!("changed {:.0}%: gone", share * 100.0)),
+        Ok(share) => (false, format!("unchanged {:.0}%", share * 100.0)),
+        Err(why) => (false, format!("not checked: {why}")),
+    };
+    log::info!(
+        "[fresh] OCR hit {target_text:?} at ({},{} {}x{}) since capture: {detail} ({ms} ms)",
+        hit.x, hit.y, hit.width, hit.height
+    );
+    ocr_trace.freshness = Some(detail);
+    gone
+}
+
 /// Whether the target has LEFT the screen rather than been missed. All of:
 /// - the model picked it by id from the element list the app enumerated at capture time, and
 ///   that element carries the target's name -- so the app itself saw it there;
@@ -1322,6 +1434,29 @@ mod tests {
             ..Default::default()
         };
         t
+    }
+
+    fn solid(w: u32, h: u32, v: u8) -> image::RgbaImage {
+        image::RgbaImage::from_pixel(w, h, image::Rgba([v, v, v, 255]))
+    }
+
+    #[test]
+    fn a_bar_that_closed_has_changed_and_small_changes_have_not() {
+        // Google's light notification bar, then the dark page under it.
+        let bar = solid(56, 13, 232);
+        assert!(changed_share(&bar, &solid(56, 13, 32)).unwrap() >= GONE_SHARE);
+        // The same spot, untouched.
+        assert_eq!(changed_share(&bar, &bar.clone()), Some(0.0));
+        // A hover tint (232 -> 241) moves no pixel past the threshold.
+        assert_eq!(changed_share(&bar, &solid(56, 13, 241)), Some(0.0));
+        // A caret blinking in the area: one dark column of 56.
+        let mut caret = bar.clone();
+        for y in 0..13 {
+            caret.put_pixel(20, y, image::Rgba([0, 0, 0, 255]));
+        }
+        assert!(changed_share(&bar, &caret).unwrap() < 0.05);
+        // Different sizes cannot be compared.
+        assert_eq!(changed_share(&bar, &solid(50, 13, 232)), None);
     }
 
     #[test]
