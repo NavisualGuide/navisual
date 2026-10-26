@@ -1,10 +1,12 @@
 // Humanize a Tauri accelerator ("Ctrl+KeyE", "Ctrl+Backquote") for display:
 // strip the Key/Digit prefix and map punctuation codes to their printed symbol,
 // so it reads "Ctrl+E", "Ctrl+`". The stored value stays the raw accelerator —
-// this is display-only.
+// this is display-only. Backquote shows as "`", the key actually pressed: it showed as "~"
+// from 2026-07-07 while the README and website said "`", and "Ctrl+~" reads as a Shift chord
+// (the Icon default then looked like Ctrl+Shift+~). Founder, 2026-10-26: one form, Ctrl+`.
 
 const KEY_SYMBOL: Record<string, string> = {
-  Backquote: "~", Minus: "-", Equal: "=", Backslash: "\\", Slash: "/",
+  Backquote: "`", Minus: "-", Equal: "=", Backslash: "\\", Slash: "/",
   Comma: ",", Period: ".", Semicolon: ";", Quote: "'",
   BracketLeft: "[", BracketRight: "]", Space: "Space",
   Escape: "Esc", Delete: "Del", ArrowUp: "↑", ArrowDown: "↓",

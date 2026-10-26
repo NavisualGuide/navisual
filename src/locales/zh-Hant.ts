@@ -414,7 +414,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "hk.pause": "暫停 / 取消",
   "hk.icon": "切換圖示模式",
   "hk.talk": "語音輸入（按住說話）",
-  "hk.backquoteHint": "~（波浪號 / 反引號）鍵就在 Esc 鍵正下方（鍵盤左上角）。",
+  "hk.backquoteHint": "`（反引號，鍵帽上方印著 ~ 波浪號）鍵就在 Esc 鍵正下方（鍵盤左上角）。",
 
   // ── 音訊分頁 (P3) ─────────────────────────────────────────────────────────
   "au.output": "語音輸出（TTS）",
