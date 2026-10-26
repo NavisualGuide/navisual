@@ -298,6 +298,9 @@
     activeScreen: Rect | null,
     workArea: Rect | null,
     rawText: string,
+    // The marks on screen (pointer, hint ring, candidates) in canvas coordinates, each with
+    // the room its rings take. The caption must not cover what it is telling the user to click.
+    avoid: Rect[] = [],
   ) {
     const text = plainCaption(rawText);
     const sx = activeScreen ? (activeScreen.x - ox) : 0;
@@ -379,7 +382,21 @@
     const stripH = lines.length * lineH + vPad * 2;
     const left   = cx - stripW / 2;
     const right  = cx + stripW / 2;
-    const stripY = bottom - stripH - 12 * scale;
+    // Bottom centre by default, the top of the work area when the bottom would cover a mark.
+    // Bottom centre is also where web pages put their notifications: on 2026-10-25 the caption
+    // sat over Google's "全部更改" bar while the step told the user to click it, and the hint
+    // ring drawn on the bar looked like a ring around the caption. The top is used only if it
+    // covers less (a mark as tall as the screen keeps the caption where users expect it).
+    const top = workArea ? (workArea.y - oy) : sy;
+    const overlap = (y: number) => avoid.reduce((sum, a) => {
+      const w = Math.min(right, a.x + a.width) - Math.max(left, a.x);
+      const h = Math.min(y + stripH, a.y + a.height) - Math.max(y, a.y);
+      return sum + (w > 0 && h > 0 ? w * h : 0);
+    }, 0);
+    const bottomY = bottom - stripH - 12 * scale;
+    const topY = top + 12 * scale;
+    const atBottom = overlap(bottomY);
+    const stripY = atBottom > 0 && overlap(topY) < atBottom ? topY : bottomY;
 
     ctx.fillStyle = "rgba(0,0,0,0.52)";
     ctx.beginPath();
@@ -712,6 +729,19 @@
     ctx.restore();
   }
 
+  /** The marks this update draws, in canvas coordinates, each grown by the room its ripple
+   *  rings take (they grow to ~0.7 x the short side, plus a fixed margin): what the caption
+   *  must not cover. Empty for a caption-only step. */
+  function marksRoom(ctx: CanvasRenderingContext2D, u: OverlayUpdate, ox: number, oy: number): Rect[] {
+    const rects = u.kind === "candidates" ? u.candidates
+      : (u.kind === "box" || u.kind === "hint") && u.bbox ? [u.bbox] : [];
+    const scale = dprOf(ctx);
+    return rects.map((r) => {
+      const pad = 24 * scale + 0.7 * Math.min(r.width, r.height);
+      return { x: r.x - ox - pad, y: r.y - oy - pad, width: r.width + 2 * pad, height: r.height + 2 * pad };
+    });
+  }
+
   function renderFrame(timestamp: number) {
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
@@ -793,9 +823,9 @@
       }
 
       // Subtitle is drawn alongside every overlay kind (box, hint, subtitle).
-      // Rust always passes step.instruction as u.text.
+      // Rust always passes step.instruction as u.text. It steps aside for the marks.
       if (theme.subtitle_enabled && u.text) {
-        drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.work_area, u.text);
+        drawSubtitle(ctx, vw, vh, ox, oy, u.active_screen, u.work_area, u.text, marksRoom(ctx, u, ox, oy));
       }
 
       // Subtitle-only step — no bbox to locate, but AI bbox dev toggle may still apply.
