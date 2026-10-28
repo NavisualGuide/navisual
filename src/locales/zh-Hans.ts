@@ -187,13 +187,15 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   // ── 首次运行隐私须知（同意门）─────────────────────────────────────────────
   "privacy.aria": "隐私须知",
   "privacy.title": "开始第一个任务之前",
+  "privacy.titleChanged": "隐私须知有更新",
   "privacy.lead": "Navisual 会截取你当前的窗口，并发送给你选择的 AI 服务商。",
   "privacy.b1": "它截取你指定的那个窗口 —— 如果你选的是整个屏幕，就是整个屏幕 —— 并把画面发送给你选择的 AI 服务商。AI 也可能要求再看一次同一任务里之前的画面。",
-  "privacy.b2": "它保存的任何截图都只存在你自己的电脑上 —— 绝不会存到我们的服务器。",
+  "privacy.b2": "它会把每一步的截图随保存的会话一起存在你自己的电脑上 —— 绝不会存到我们的服务器。可以在设置里关掉。",
   "privacy.b3strong": "默认的免费档所用的 AI 模型，可能会保留你的请求 —— 包括截图 —— 用于训练。",
   "privacy.b3rest": "付费档和你自己的 API Key 不会；Ollama 则完全不离开你的电脑。",
   "privacy.b4": "指引过程中，它会记录你在那个应用里点了哪个控件 —— 只记控件的名称，绝不记它的内容。它不监控你的键盘。",
   "privacy.b5": "语音输入若你开启，会把你的音频发送给微软的语音服务。",
+  "privacy.b6": "Navisual 会记录你输入的任务，让我们知道大家用它做什么、哪里做得不好 —— 绝不记录截图；AI 跑在你自己的电脑上时，什么都不记录。可以在设置里关掉。",
   "privacy.policyBefore": "",
   "privacy.policyLink": "完整隐私政策",
   "privacy.policyAfter": "是完整版本，内容以它为准 —— 捕获什么、发往哪里、保存什么、以及如何停止。你随时可以从「关于」里重新打开它。",
@@ -400,10 +402,10 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "sg.learnedNotesOpenFailed": "无法打开这个文件。",
   "sg.learnedNotesDeleteFailed": "无法删除这个文件。",
   "sg.whatYouType": "你输入的内容",
-  "sg.whatYouTypeToggle": "把我输入的任务连同每步结果一起发送",
-  "sg.whatYouTypeHint": "随每步结果一起发送，让我们知道大家用 Navisual 做什么、以及哪些任务它做得不好。截图绝不发送。",
-  "sg.whatYouTypeLocal": "如果 AI 跑在你自己的机器或内网上 —— localhost，或 192.168.x 的机器 —— 那么无论这里怎么设置，都不会发送任何内容。",
-  "sg.whatYouTypeByok": "如果你用自己的 API Key 连 Anthropic 或 OpenAI 这类服务商，则会发送，除非你在这里关掉。",
+  "sg.whatYouTypeToggle": "记录任务请求",
+  "sg.whatYouTypeHint": "Navisual 会记录你输入的任务，以及按 \u2717 这步不对 时附上的说明，连同每次请求和每步结果，让我们知道大家用它做什么、以及哪些任务它做得不好。截图绝不记录。",
+  "sg.whatYouTypeLocal": "如果 AI 跑在你自己的机器或内网上 —— localhost，或 192.168.x 的机器 —— 那么无论这里怎么设置，Navisual 都什么也不记录。",
+  "sg.whatYouTypeByok": "如果你用自己的 API Key 连 Anthropic 或 OpenAI 这类服务商，则会记录，除非你在这里关掉。",
   "sg.privacyPolicy": "隐私政策",
 
   // ── 快捷键标签页 (P3) ─────────────────────────────────────────────────────
@@ -585,7 +587,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "exp.openTitle": "打开一个导出的会话文件 —— 它会显示在面板里；只有你继续在它里面操作，它才会进入这个列表",
 
   // ── 其余的对话／账户消息 ──────────────────────────────────────────────────
-  "wrong.shareNote": "会分享给 Navisual 团队用于改进指引 —— 绝不包含你的屏幕内容或你输入的请求。",
+  "wrong.shareNote": "会记录下来，供 Navisual 团队改进指引 —— 绝不包括你的屏幕。你输入的内容会一并记录，除非你在设置里关掉。",
 
   "exp.folderLayout": "<code>steps/</code> 里是未经处理的原始截图，<code>steps-annotated/</code> 里是加了标注的，旁边还有一份可读的 <code>session.md</code> 和完整记录 <code>session.json</code>。你随时可以用 <code>tools/annotate-session.ps1</code> 重新生成指针或字幕 —— 不需要重跑任何东西。",
   "pv.keyPlaceholderOptional": "sk-\u2026（可留空）",

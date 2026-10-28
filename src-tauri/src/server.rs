@@ -221,10 +221,16 @@ pub async fn submit_feedback(
         .send()
         .await?;
     if !resp.status().is_success() {
+        // PostgREST's `code` and `message` only: on a constraint failure its `details` is
+        // "Failing row contains (...)" -- every column, the user's typed task included -- and
+        // this error is written to the log.
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
         bail!(
-            "submit_feedback failed ({}): {}",
-            resp.status(),
-            resp.text().await.unwrap_or_default()
+            "submit_feedback failed ({}): {} {}",
+            status,
+            body["code"].as_str().unwrap_or(""),
+            body["message"].as_str().unwrap_or("")
         );
     }
     Ok(())

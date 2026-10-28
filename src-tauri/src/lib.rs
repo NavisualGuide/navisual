@@ -9085,24 +9085,32 @@ async fn submit_feedback(
     state: State<'_, AppState>,
     payload: FeedbackPayload,
 ) -> Result<(), String> {
-    // Cap and gate the typed request BEFORE anything writes it anywhere.
+    // Cap and gate what the user typed BEFORE anything writes it anywhere: the task, and
+    // the note typed with a ✗ Wrong report (the same box, so the same switch -- founder,
+    // 2026-10-27; the note had gone up whatever the switch said).
     //
     // `request_text_loggable()` is two gates: the user has not opted out, AND the
     // AI answering them is not running on their own machine or private network
     // (Ollama on localhost, LM Studio on a LAN box). Keyed on the configured URL,
-    // not the provider name -- see the note on `endpoint_is_local`.
+    // not the provider name -- see the note on `endpoint_is_local`. A local AI also
+    // stops the whole row below, not just the text.
     //
-    // Both checks live here rather than in App.svelte because the UI is not a
+    // All of it lives here rather than in App.svelte because the UI is not a
     // security boundary -- every Tauri command is callable from the page, which
     // is the same reasoning that moved the change_password check server-side in
     // v0.7.26. A frontend that forgets the toggle, or a page that calls this
     // command directly, still cannot send more than the user allowed.
-    let (training_enabled, log_request_text) = {
+    let (training_enabled, log_request_text, ai_local) = {
         let r = state.ai_router.lock().await;
-        (r.config.training_capture_enabled, r.config.request_text_loggable())
+        (
+            r.config.training_capture_enabled,
+            r.config.request_text_loggable(),
+            r.config.ai_runs_locally(),
+        )
     };
     let mut payload = payload;
     payload.task_prompt = clamp_logged_request(payload.task_prompt.take(), log_request_text);
+    payload.note = clamp_logged_request(payload.note.take(), log_request_text);
     let payload = payload;
 
     if training_enabled {
@@ -9124,6 +9132,13 @@ async fn submit_feedback(
         }
     }
 
+    // A local AI: no row leaves the machine (founder, 2026-10-27). Returned before the
+    // session lookup too, which may renew an expired sign-in with our server.
+    if ai_local {
+        log::info!("[feedback] {} row not logged: the AI runs on this machine or network", payload.kind);
+        return Ok(());
+    }
+
     let (supabase_url, anon_key, token) = {
         let (url, key) = managed_url_key(&state).await?;
         let token = acct_session_token(&state).await.ok();
@@ -9135,9 +9150,15 @@ async fn submit_feedback(
     if let Some(obj) = row.as_object_mut() {
         obj.remove("request_id");
     }
-    server::submit_feedback(&supabase_url, &anon_key, token.as_deref(), &row)
-        .await
-        .map_err(|e| e.to_string())
+    // The page swallows this command's error (feedback is best-effort), so without this line
+    // a row the server refuses -- a kind the table's constraint does not list yet -- is lost
+    // with no trace anywhere. The kind and the outcome only, never the row.
+    let result = server::submit_feedback(&supabase_url, &anon_key, token.as_deref(), &row).await;
+    match &result {
+        Ok(()) => log::info!("[feedback] {} row sent", payload.kind),
+        Err(e) => log::warn!("[feedback] {} row refused: {e}", payload.kind),
+    }
+    result.map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
