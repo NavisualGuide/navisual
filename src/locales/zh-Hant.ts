@@ -188,13 +188,15 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   // ── 首次執行隱私須知（同意關卡）───────────────────────────────────────────
   "privacy.aria": "隱私須知",
   "privacy.title": "開始第一個工作之前",
+  "privacy.titleChanged": "隱私須知有更新",
   "privacy.lead": "Navisual 會擷取你目前的視窗，並傳送給你選擇的 AI 服務商。",
   "privacy.b1": "它擷取你指定的那個視窗 —— 如果你選的是整個螢幕，就是整個螢幕 —— 並把畫面傳送給你選擇的 AI 服務商。AI 也可能要求再看一次同一個工作裡之前的畫面。",
-  "privacy.b2": "它儲存的任何螢幕截圖都只存在你自己的電腦上 —— 絕不會存到我們的伺服器。",
+  "privacy.b2": "它會把每一步的螢幕截圖隨儲存的工作階段一起存在你自己的電腦上 —— 絕不會存到我們的伺服器。可以在設定裡關掉。",
   "privacy.b3strong": "預設的免費方案所用的 AI 模型，可能會保留你的請求 —— 包括螢幕截圖 —— 用於訓練。",
   "privacy.b3rest": "付費方案和你自己的 API Key 不會；Ollama 則完全不離開你的電腦。",
   "privacy.b4": "指引過程中，它會記錄你在那個應用程式裡點了哪個控制項 —— 只記控制項的名稱，絕不記它的內容。它不監控你的鍵盤。",
   "privacy.b5": "語音輸入若你開啟，會把你的音訊傳送給微軟的語音服務。",
+  "privacy.b6": "Navisual 會記錄你輸入的工作，讓我們知道大家用它做什麼、哪裡做得不好 —— 絕不記錄螢幕截圖；AI 跑在你自己的電腦上時，什麼都不記錄。可以在設定裡關掉。",
   "privacy.policyBefore": "",
   "privacy.policyLink": "完整隱私權政策",
   "privacy.policyAfter": "是完整版本，內容以它為準 —— 擷取什麼、傳往哪裡、儲存什麼、以及如何停止。你隨時可以從「關於」重新開啟它。",
@@ -401,10 +403,10 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "sg.learnedNotesOpenFailed": "無法開啟這個檔案。",
   "sg.learnedNotesDeleteFailed": "無法刪除這個檔案。",
   "sg.whatYouType": "你輸入的內容",
-  "sg.whatYouTypeToggle": "把我輸入的工作連同每步結果一起傳送",
-  "sg.whatYouTypeHint": "隨每步結果一起傳送，讓我們知道大家用 Navisual 做什麼、以及哪些工作它做得不好。螢幕截圖絕不傳送。",
-  "sg.whatYouTypeLocal": "如果 AI 跑在你自己的電腦或內部網路上 —— localhost，或 192.168.x 的機器 —— 那麼無論這裡怎麼設定，都不會傳送任何內容。",
-  "sg.whatYouTypeByok": "如果你用自己的 API Key 連 Anthropic 或 OpenAI 這類服務商，則會傳送，除非你在這裡關掉。",
+  "sg.whatYouTypeToggle": "記錄工作請求",
+  "sg.whatYouTypeHint": "Navisual 會記錄你輸入的工作，以及按 \u2717 這步不對 時附上的說明，連同每次請求和每步結果，讓我們知道大家用它做什麼、以及哪些工作它做得不好。螢幕截圖絕不記錄。",
+  "sg.whatYouTypeLocal": "如果 AI 跑在你自己的電腦或內部網路上 —— localhost，或 192.168.x 的機器 —— 那麼無論這裡怎麼設定，Navisual 都什麼也不記錄。",
+  "sg.whatYouTypeByok": "如果你用自己的 API Key 連 Anthropic 或 OpenAI 這類服務商，則會記錄，除非你在這裡關掉。",
   "sg.privacyPolicy": "隱私權政策",
 
   // ── 快速鍵分頁 (P3) ───────────────────────────────────────────────────────
@@ -586,7 +588,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "exp.openTitle": "開啟一個匯出的工作階段檔案 —— 它會顯示在面板裡；只有你繼續在它裡面操作，它才會進入這個清單",
 
   // ── 其餘的對話／帳戶訊息 ──────────────────────────────────────────────────
-  "wrong.shareNote": "會分享給 Navisual 團隊用於改進指引 —— 絕不包含你的畫面內容或你輸入的請求。",
+  "wrong.shareNote": "會記錄下來，供 Navisual 團隊改進指引 —— 絕不包括你的畫面。你輸入的內容會一併記錄，除非你在設定裡關掉。",
 
   "exp.folderLayout": "<code>steps/</code> 裡是未經處理的原始螢幕截圖，<code>steps-annotated/</code> 裡是加了標註的，旁邊還有一份可讀的 <code>session.md</code> 和完整記錄 <code>session.json</code>。你隨時可以用 <code>tools/annotate-session.ps1</code> 重新產生指標或字幕 —— 不需要重跑任何東西。",
   "pv.keyPlaceholderOptional": "sk-\u2026（可留空）",

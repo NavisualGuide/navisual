@@ -174,7 +174,7 @@ pub struct Config {
     /// it, and it writes screenshots of a real screen to a folder the user picks.
     /// (It stopped being the ONLY thing that puts them on disk when
     /// `session_screenshots` shipped in v0.7.27 -- that one writes into the session
-    /// store and is off by default.) Keeping it behind the flag means the ring buffer is the only
+    /// store, on by default since v0.7.40.) Keeping it behind the flag means the ring buffer is the only
     /// part running for everyone else, and that is memory-only.
     ///
     /// **The buffer keeps filling regardless.** Gating the UI, not the capture, is
@@ -186,11 +186,13 @@ pub struct Config {
     /// Keep the frame each step was guided from, beside its stored session, so reopening a
     /// session can show what the screen looked like when that step was given (plan §4).
     ///
-    /// **Off by default, and that is the point.** "Frames never touch disk unless you turn
-    /// this on" is the simplest sentence in the privacy story and the first one a sceptical
-    /// user checks. Optional rather than never, because the capability already exists three
-    /// times over — debug captures, training capture, session export — so the only honest
-    /// question was ever whether it becomes the default.
+    /// **On by default since v0.7.40**, off from v0.7.27 ("frames never touch disk unless you
+    /// turn this on"). The founder's call (2026-10-27): the frames stay on the user's own
+    /// computer, and a saved session that cannot show its screens is most of its use gone --
+    /// the same rule as the typed task, default on with a switch. Weighed and accepted: the
+    /// session's HTML file embeds the frames, so a session file sent to anyone carries them,
+    /// and pruned sessions go to the Recycle Bin with theirs. A `.env` that already holds
+    /// `SESSION_SCREENSHOTS=false` (anyone who saved Settings before) keeps it off.
     ///
     /// What gets stored is the **OCR frame**: the same masked region as the AI's own picture,
     /// at native resolution, and it is what the locator read (§4.2). Never the export frame,
@@ -331,7 +333,7 @@ impl Default for Config {
             training_capture_enabled: false,
             log_request_text: true,
             session_export_enabled: false,
-            session_screenshots: false,
+            session_screenshots: true,
             gemini_thinking_budget: None,
             reasoning_effort: None,
             expected_result: false,
@@ -814,23 +816,28 @@ pub fn endpoint_is_local(raw: &str) -> bool {
 }
 
 impl Config {
-    /// May the typed request be stored on a feedback row for the ACTIVE provider?
+    /// Does the ACTIVE provider's AI run on the user's own machine or private network?
+    /// Then no feedback row leaves the machine at all (founder, 2026-10-27): nothing of
+    /// the user's ever left their network, and the app keeps it that way.
+    pub fn ai_runs_locally(&self) -> bool {
+        match self.api_provider.as_str() {
+            // The three endpoints a user can repoint. Checked by URL, not by name.
+            "ollama" => endpoint_is_local(&self.ollama_base_url),
+            "custom" => endpoint_is_local(&self.custom_base_url),
+            "qwen" => endpoint_is_local(&self.qwen_base_url),
+            // managed, anthropic, gemini, openai, deepseek: fixed public vendor
+            // endpoints. The request has already crossed the internet.
+            _ => false,
+        }
+    }
+
+    /// May what the user typed -- the task, and a ✗ Wrong report's note -- be stored on a
+    /// feedback row for the ACTIVE provider?
     ///
     /// Two gates, both of which must pass: the user has not opted out, and the AI
     /// answering them is not running on their own machine or private network.
     pub fn request_text_loggable(&self) -> bool {
-        if !self.log_request_text {
-            return false;
-        }
-        match self.api_provider.as_str() {
-            // The three endpoints a user can repoint. Checked by URL, not by name.
-            "ollama" => !endpoint_is_local(&self.ollama_base_url),
-            "custom" => !endpoint_is_local(&self.custom_base_url),
-            "qwen" => !endpoint_is_local(&self.qwen_base_url),
-            // managed, anthropic, gemini, openai, deepseek: fixed public vendor
-            // endpoints. The request has already crossed the internet.
-            _ => true,
-        }
+        self.log_request_text && !self.ai_runs_locally()
     }
 }
 
@@ -960,5 +967,21 @@ mod endpoint_locality_tests {
         let mut c = cfg("anthropic");
         c.log_request_text = false;
         assert!(!c.request_text_loggable());
+    }
+
+    /// `ai_runs_locally` stops the whole feedback row, so it must not depend on the
+    /// typed-text switch: opting out of the text never makes a remote AI "local".
+    #[test]
+    fn a_local_ai_is_local_whatever_the_text_switch_says() {
+        for on in [true, false] {
+            let mut c = cfg("ollama");
+            c.log_request_text = on;
+            assert!(c.ai_runs_locally());
+            let mut r = cfg("anthropic");
+            r.log_request_text = on;
+            assert!(!r.ai_runs_locally());
+        }
+        assert!(cfg("custom").ai_runs_locally(), "empty Custom fails closed");
+        assert!(!cfg("managed").ai_runs_locally());
     }
 }

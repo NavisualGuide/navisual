@@ -1077,10 +1077,15 @@ See the LICENSE file in the root of this repository for complete details.
   let showAbout = $state(false);
   // Info (About) dialog tab — "about" (version/links/update) or "usage" (token usage).
   let aboutTab = $state<"about" | "usage">("about");
-  // First-run privacy disclosure (S5). One-shot; persisted in localStorage so
-  // it never fires again on the same install.
+  // First-run privacy disclosure (S5), persisted in localStorage. The stored value is the
+  // notice version accepted, and an older one shows it again: bump the version when the
+  // notice says something new that people who already accepted should read. "1" was the
+  // only value until v0.7.39; 2 = the typed task goes to us, and step screenshots are kept
+  // with saved sessions by default (v0.7.40).
   let showPrivacyDisclosure = $state(false);
+  let privacyNoticeChanged = $state(false); // shown again to someone who accepted an older one
   const PRIVACY_DISCLOSURE_KEY = "navisual-privacy-disclosed-v1";
+  const PRIVACY_NOTICE_VERSION = "2";
   let appVersion = $state("…");
   let pendingUpdate = $state<Update | null>(null);
   let updateStatus = $state<"idle" | "checking" | "downloading" | "done">("idle");
@@ -1158,7 +1163,7 @@ See the LICENSE file in the root of this repository for complete details.
     debug_log_files_enabled: false,
     training_capture_enabled: false,
     session_export_enabled: false,
-    session_screenshots: false,
+    session_screenshots: true,
     log_request_text: true,
     task_suggestions: true,
     developer_mode: false,
@@ -3146,9 +3151,13 @@ See the LICENSE file in the root of this repository for complete details.
     phase = "thinking";
     startTimer();
     const token = ++requestToken;
+    let logged = false;
     try {
       const res = await invoke<GuideResponse>("guide", { task: taskText, isReply });
       stopTimer();
+      // `no_target`: nothing was captured, so nothing was asked; the retry logs its own row.
+      if (!res.no_target) logRequest(taskText, res);
+      logged = true;
       if (token !== requestToken) return;
       if (res.chat_thumb_b64) attachThumb(userEntryId, res.chat_thumb_b64, res.request_id);
       if (!res.ok) {
@@ -3166,6 +3175,7 @@ See the LICENSE file in the root of this repository for complete details.
       applyResponse(res, 0, token);
     } catch (e) {
       stopTimer();
+      if (!logged) logRequest(taskText, null);
       if (token !== requestToken) return;
       phase = prevPhase;
       lastRequestFailed = true;
@@ -3368,8 +3378,8 @@ See the LICENSE file in the root of this repository for complete details.
   }
 
   // Best-effort test-user feedback → Supabase (see submit_feedback in lib.rs).
-  // "worked" on Next; a reason category on Wrong. Failures are ignored.
-  // The three AUTOMATIC kinds carry no instruction text.
+  // "request" when a typed request is answered; "worked" on Next; a reason category on
+  // Wrong. Failures are ignored. The AUTOMATIC kinds carry no instruction text.
   //
   // `worked` / `worked_auto` / `task_complete` fire without the user choosing to
   // report anything — `worked` alone was 1,317 of ~1,442 rows in the live table,
@@ -3388,9 +3398,11 @@ See the LICENSE file in the root of this repository for complete details.
   // Reports keep it, since that is where it earns its place. And a dev running
   // with training capture on loses nothing either: prompt_log.jsonl holds the full
   // prompt and response locally, joined to this row by request_id.
-  const AUTOMATIC_KINDS = ["worked", "worked_auto", "task_complete"];
+  const AUTOMATIC_KINDS = ["request", "worked", "worked_auto", "task_complete"];
 
-  async function logFeedback(kind: string, note: string) {
+  // `over` replaces fields read from panel state, for a row about a response the panel
+  // may not be showing (see logRequest).
+  async function logFeedback(kind: string, note: string, over: Record<string, unknown> = {}) {
     const automatic = AUTOMATIC_KINDS.includes(kind);
     try {
       await invoke("submit_feedback", {
@@ -3412,11 +3424,32 @@ See the LICENSE file in the root of this repository for complete details.
           task_prompt: lastRequestHint || null,
           session_id: sessionId || null,
           request_id: lastRequestId || null,
+          ...over,
         },
       });
     } catch (_) {
       /* offline / not signed in / not configured — feedback is best-effort */
     }
+  }
+
+  // One row per typed request, written when its answer (or its failure) comes back. Rows
+  // used to be written only when a step ENDED -- Next, Autopilot, done, ✗ Wrong -- so a
+  // task answered once and then abandoned (another task typed, the panel closed) left no
+  // trace, and the requests that failed fastest were the ones never seen. Built from the
+  // response, not panel state: a reply superseded by a newer request still records what it
+  // was asked, and a failed reply does not inherit the previous step's target. The typed
+  // text is gated in submit_feedback like every row's.
+  function logRequest(taskText: string, res: GuideResponse | null) {
+    logFeedback("request", "", {
+      model: res?.model || routedModel || activeModel,
+      target_text: res?.steps[0]?.target_text ?? null,
+      located: !!res?.located,
+      locate_role: res?.located?.role ?? null,
+      locate_conf: res?.located?.confidence ?? null,
+      task_prompt: taskText,
+      session_id: res?.session_id || sessionId || null,
+      request_id: res?.request_id || null,
+    });
   }
 
   // B5 — route the ✗ Wrong retry by the layer that actually failed. The AI cannot
@@ -3672,11 +3705,13 @@ See the LICENSE file in the root of this repository for complete details.
     try { isPackaged = await invoke<boolean>("is_packaged"); } catch (_) {}
     if (!isPackaged) setTimeout(() => checkForUpdates(), 5000);
 
-    // S5 — first-run privacy disclosure. Shown once per install; the user's
-    // acknowledgement is persisted in localStorage (lives in WebView2 user
-    // data, removed by uninstall).
+    // S5 — first-run privacy disclosure. Shown once per install and again when its version
+    // moves; the acknowledgement is persisted in localStorage (lives in WebView2 user data,
+    // removed by uninstall).
     try {
-      if (!localStorage.getItem(PRIVACY_DISCLOSURE_KEY)) {
+      const accepted = localStorage.getItem(PRIVACY_DISCLOSURE_KEY);
+      if (accepted !== PRIVACY_NOTICE_VERSION) {
+        privacyNoticeChanged = accepted !== null;
         showPrivacyDisclosure = true;
       }
     } catch (_) {}
@@ -5241,7 +5276,7 @@ See the LICENSE file in the root of this repository for complete details.
         style="max-width: 360px;"
       >
         <div class="modal-header">
-          <span class="modal-title">{t("privacy.title")}</span>
+          <span class="modal-title">{t(privacyNoticeChanged ? "privacy.titleChanged" : "privacy.title")}</span>
         </div>
         <div class="modal-body" style="padding: 18px 20px; line-height: 1.5;">
           <p style="margin: 0 0 10px 0;">
@@ -5249,8 +5284,9 @@ See the LICENSE file in the root of this repository for complete details.
           </p>
           <!-- SINGLE SOURCE OF TRUTH: navisualguide.com/privacy.html
                (repo NavisualGuide.github.io, file privacy.html — its §1 carries a
-               matching comment listing these same five facts, so the pointer works
-               from either end).
+               matching comment listing these same six facts, so the pointer works
+               from either end). Changing a fact means bumping PRIVACY_NOTICE_VERSION
+               too, or everyone who already accepted never reads it.
                This list used to restate the policy in full and drifted from it — the
                2026-09-06 audit found it still promising "full-screen needs your
                permission each time" (that consent loop was removed in v0.5.23) and
@@ -5269,6 +5305,7 @@ See the LICENSE file in the root of this repository for complete details.
             <li><strong>{t("privacy.b3strong")}</strong> {t("privacy.b3rest")}</li>
             <li>{t("privacy.b4")}</li>
             <li>{t("privacy.b5")}</li>
+            <li>{t("privacy.b6")}</li>
           </ul>
           <p style="margin: 0 0 14px 0; font-size: 0.85em; color: var(--text-tertiary);">
             <!-- Split into before/link/after rather than one string with markup: Chinese
@@ -5282,7 +5319,7 @@ See the LICENSE file in the root of this repository for complete details.
           <button
             class="btn-primary btn-full"
             onclick={() => {
-              try { localStorage.setItem(PRIVACY_DISCLOSURE_KEY, "1"); } catch (_) {}
+              try { localStorage.setItem(PRIVACY_DISCLOSURE_KEY, PRIVACY_NOTICE_VERSION); } catch (_) {}
               showPrivacyDisclosure = false;
             }}
           >
@@ -5806,16 +5843,6 @@ See the LICENSE file in the root of this repository for complete details.
               </p>
             </div>
             <div class="setting-group">
-              <p class="setting-label">{t("sg.savedSessions")}</p>
-              <label class="toggle-row">
-                <input type="checkbox" bind:checked={settingsForm.session_screenshots} />
-                <span>{t("sg.savedSessionsToggle")}</span>
-              </label>
-              <p class="setting-hint" style="margin-top:4px">
-                {t("sg.savedSessionsHint", { n: sessionKeep })}
-              </p>
-            </div>
-            <div class="setting-group">
               <p class="setting-label">{t("sg.learnedNotes")}</p>
               <p class="setting-hint">{t("sg.learnedNotesHint")}</p>
               {#if learnedGuides.length === 0}
@@ -5837,6 +5864,16 @@ See the LICENSE file in the root of this repository for complete details.
               {#if learnedError}
                 <p class="setting-hint learned-error">{t(learnedError)}</p>
               {/if}
+            </div>
+            <div class="setting-group">
+              <p class="setting-label">{t("sg.savedSessions")}</p>
+              <label class="toggle-row">
+                <input type="checkbox" bind:checked={settingsForm.session_screenshots} />
+                <span>{t("sg.savedSessionsToggle")}</span>
+              </label>
+              <p class="setting-hint" style="margin-top:4px">
+                {t("sg.savedSessionsHint", { n: sessionKeep })}
+              </p>
             </div>
             <div class="setting-group">
               <p class="setting-label">{t("sg.whatYouType")}</p>

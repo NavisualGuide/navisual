@@ -197,13 +197,15 @@ export const en = {
   // that describe what Navisual IS, never counts, key names or mechanisms.
   "privacy.aria": "Privacy notice",
   "privacy.title": "Before your first task",
+  "privacy.titleChanged": "This privacy notice has changed",
   "privacy.lead": "Navisual captures your active window and sends it to the AI provider you've selected.",
   "privacy.b1": "It captures the window you point it at \u2014 or your whole screen, if you pick that \u2014 and sends the picture to the AI provider you choose. The AI may also ask to see an earlier picture from the same task again.",
-  "privacy.b2": "Any screenshot it saves is saved on your own computer \u2014 never on our servers.",
+  "privacy.b2": "It keeps each step's screenshot with your saved sessions, on your own computer \u2014 never on our servers. You can switch that off in Settings.",
   "privacy.b3strong": "The default free tier uses AI models that may keep your requests \u2014 including the screenshots \u2014 to train on.",
   "privacy.b3rest": "Paid tiers and your own API key don't; Ollama never leaves your machine.",
   "privacy.b4": "While guiding, it notes which control you click in that app \u2014 the control's name, never its contents. It does not monitor your keyboard.",
   "privacy.b5": "Voice input, if you turn it on, sends your audio to Microsoft's speech service.",
+  "privacy.b6": "Navisual logs the task you type, so we can see what people use it for and where it goes wrong \u2014 never a screenshot, and nothing at all when the AI runs on your own machine. You can switch it off in Settings.",
   "privacy.policyBefore": "The",
   "privacy.policyLink": "full privacy policy",
   "privacy.policyAfter": "is the complete and authoritative version \u2014 what is captured, where it goes, what is stored, and how to stop it. You can reopen it any time from About.",
@@ -417,10 +419,10 @@ export const en = {
   "sg.learnedNotesOpenFailed": "Could not open the file.",
   "sg.learnedNotesDeleteFailed": "Could not delete the file.",
   "sg.whatYouType": "What you type",
-  "sg.whatYouTypeToggle": "Send the task I type along with step outcomes",
-  "sg.whatYouTypeHint": "Sent with each step outcome, so we can see what people use Navisual for and which tasks it handles badly. Screenshots are never sent.",
-  "sg.whatYouTypeLocal": "If the AI runs on your own machine or network \u2014 localhost, or a box at 192.168.x \u2014 nothing is sent, whatever this says.",
-  "sg.whatYouTypeByok": "Your own API key to a provider like Anthropic or OpenAI does send it, unless you turn this off.",
+  "sg.whatYouTypeToggle": "Log task requests",
+  "sg.whatYouTypeHint": "Navisual logs the task you type, and any note you add with \u2717 This is wrong, with each request and step outcome, so we can see what people use it for and which tasks it handles badly. Screenshots are never logged.",
+  "sg.whatYouTypeLocal": "If the AI runs on your own machine or network \u2014 localhost, or a box at 192.168.x \u2014 Navisual logs nothing at all, whatever this says.",
+  "sg.whatYouTypeByok": "With your own API key to a provider like Anthropic or OpenAI, it is logged unless you turn this off.",
   "sg.privacyPolicy": "Privacy policy",
 
   // ── Hotkeys tab (P3) ──────────────────────────────────────────────────────
@@ -608,7 +610,7 @@ export const en = {
   "exp.openTitle": "Open an exported session file \u2014 it shows in the panel, and joins this list only if you carry on working in it",
 
   // ── Remaining conversation / account messages ─────────────────────────────
-  "wrong.shareNote": "Shared with the Navisual team to improve guidance \u2014 never your screen or request text.",
+  "wrong.shareNote": "Logged for the Navisual team to improve guidance \u2014 never your screen. What you typed is logged with it unless you switch that off in Settings.",
 
   "exp.folderLayout": "<code>steps/</code> holds the untouched screenshots and <code>steps-annotated/</code> the marked-up ones, alongside a readable <code>session.md</code> and the full record in <code>session.json</code>. You can redo the pointer or caption any time with <code>tools/annotate-session.ps1</code> \u2014 nothing needs re-running.",
   "pv.keyPlaceholderOptional": "sk-\u2026 or leave blank",
