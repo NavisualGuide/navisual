@@ -5353,6 +5353,9 @@ async fn guide_inner(
 
     // Emit balance update for managed provider before processing the result.
     if let Some(remaining) = router.get_managed_free_remaining() {
+        if remaining <= 5 {
+            log::info!("[quota] free requests left: {remaining}");
+        }
         let _ = app.emit("balance_update", remaining);
     }
     if let Some(coins) = router.get_managed_coin_balance() {
@@ -6581,6 +6584,9 @@ async fn send_correction_inner(
     );
 
     if let Some(remaining) = router.get_managed_free_remaining() {
+        if remaining <= 5 {
+            log::info!("[quota] free requests left: {remaining}");
+        }
         let _ = app.emit("balance_update", remaining);
     }
     if let Some(coins) = router.get_managed_coin_balance() {

@@ -1066,6 +1066,17 @@ See the LICENSE file in the root of this repository for complete details.
   // taking the offer, by picking a target, or by the next successful request -- a stale
   // offer pointing at a screen the user already left is worse than none.
   let noTargetOffer = $state(false);
+  // The pin is in force and its window is gone (closed, hidden, cloaked): the state the chip
+  // calls "Pinned window closed". Every request is refused until the user picks again, and
+  // on 2026-10-29 a user retried twelve times, so the way out sits in the panel from the
+  // moment the window goes rather than in a sentence naming the chip.
+  const pinGone = $derived(pinnedHwnd !== null && sharedApp === null);
+  // Free requests left when the panel says so and Autopilot stands down: the header's count
+  // appears at the same point. Autopilot spends about one every 6 s, so this is half a
+  // minute of warning, which is why it cannot be left running to the wall.
+  const FREE_LOW = 5;
+  let freeLowOffer = $state(false);
+  let freeLowSeen = false;
   // What to run again once the user has fixed the scope. The three callers fail in
   // different ways -- a fresh task, an advance, a correction -- and re-running the wrong
   // one is worse than not re-running at all, so each hands in its own closure.
@@ -1713,6 +1724,15 @@ See the LICENSE file in the root of this repository for complete details.
   let autopilotStalls = 0;
   const AUTOPILOT_MAX_STALLS = 3;
 
+  // Off, as the button would do it, so saving Settings afterwards cannot turn it back on.
+  function pauseAutopilot(message?: string) {
+    if (!autoAdvanceEnabled) return;
+    autoAdvanceEnabled = false;
+    settingsForm = { ...settingsForm, auto_advance: false };
+    stopAutopilotPolling();
+    if (message) addToHistory("system", message);
+  }
+
   function startAutopilotPolling() {
     if (autopilotInterval !== null) return;
     autopilotStalls = 0;
@@ -1751,12 +1771,7 @@ See the LICENSE file in the root of this repository for complete details.
           autopilotStalls = 0;
         } else if (++autopilotStalls >= AUTOPILOT_MAX_STALLS) {
           autopilotStalls = 0;
-          autoAdvanceEnabled = false;
-          stopAutopilotPolling();
-          addToHistory(
-            "system",
-            t("msg.autopilotPaused"),
-          );
+          pauseAutopilot(t("msg.autopilotPaused"));
         }
       } catch (_) {}
     }, 500);
@@ -3950,7 +3965,16 @@ See the LICENSE file in the root of this repository for complete details.
 
     listen<number>("balance_update", (event) => {
       billing.applyFreeRemaining(event.payload);
-      if (event.payload <= 0 && billing.tier === "free") showTrialExhausted = true;
+      if (billing.tier !== "free") return;
+      if (event.payload <= 0) {
+        pauseAutopilot();
+        showTrialExhausted = true;
+      } else if (event.payload <= FREE_LOW && !freeLowSeen) {
+        // Once a run: turning Autopilot back on after this is the user's call.
+        freeLowSeen = true;
+        freeLowOffer = true;
+        pauseAutopilot(t("msg.autopilotPausedFreeLow", { n: event.payload }));
+      }
     });
 
     // Paid tier — coins debited server-side after each request; relay returns
@@ -3996,6 +4020,8 @@ See the LICENSE file in the root of this repository for complete details.
     listen("trial_exhausted", () => {
       billing.markFreeExhausted();
       exhaustedReason = "free";
+      // Every screen change would otherwise ask again and be refused (five times on 2026-10-29).
+      pauseAutopilot();
       showTrialExhausted = true;
     });
 
@@ -4820,6 +4846,36 @@ See the LICENSE file in the root of this repository for complete details.
           <button class="stale-action"
             onclick={() => { noTargetOffer = false; noTargetRetry = null; openTargetPicker(); }}
             >{t("panel.pickAnApp")}</button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- No ✕: nothing works until this is answered, and it clears itself when it is. -->
+    {#if pinGone}
+      <div class="stale-banner notarget-banner" role="status">
+        <span class="stale-icon">📌</span>
+        <span class="stale-text">{t("panel.pinGoneOffer")}</span>
+        <div class="notarget-actions">
+          <button class="stale-action" onclick={() => openTargetPicker()}>{t("panel.pickWindowAgain")}</button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Before the wall, not at it: the exhausted modal arrives mid-task, when the user has
+         a problem half solved and is least able to stop and read it. -->
+    {#if freeLowOffer && billing.tier === "free" && settingsForm.api_provider === "managed" && (billing.freeRemaining ?? 0) > 0}
+      <div class="stale-banner notarget-banner" role="status">
+        <span class="stale-icon">🎁</span>
+        <span class="stale-text">
+          {billing.promoOffer && !account.signedIn
+            ? t("panel.freeLowPromo", { n: billing.freeRemaining ?? 0, coins: fmtNum(billing.promoOffer.coins) })
+            : t("panel.freeLow", { n: billing.freeRemaining ?? 0 })}
+        </span>
+        <button class="stale-dismiss" onclick={() => { freeLowOffer = false; }} title={t("panel.dismiss")}>✕</button>
+        <div class="notarget-actions">
+          <button class="stale-action" onclick={() => { freeLowOffer = false; openSettings("account"); }}>
+            {billing.promoOffer && !account.signedIn ? t("panel.getFreeCoins") : t("balance.getMore")}
+          </button>
         </div>
       </div>
     {/if}
