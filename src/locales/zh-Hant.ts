@@ -326,7 +326,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "about.installRestart": "安裝並重新啟動",
   "about.checking": "正在檢查更新\u2026",
   "about.checkUpdates": "檢查更新",
-  "about.license": "採用 FSL-1.1-Apache-2.0 授權 —— 每個版本發布兩年後轉為 Apache 2.0。",
+  "about.license": "採用 FSL-1.1-ALv2 授權 —— 每個版本發布兩年後轉為 Apache 2.0。",
   "about.blenderNotice": "內建的 Blender Nav-Pack 引用了 Blender 自己的圖示設計（© Blender Foundation），僅用於畫面上的指引。Blender 是 Blender Foundation 的註冊商標。Navisual 與 Blender Foundation 無關聯，也未獲其背書。",
 
   "usage.navisualAccount": "Navisual 帳戶",
