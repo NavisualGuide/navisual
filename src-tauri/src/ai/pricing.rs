@@ -81,9 +81,13 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         "gpt-5.4-mini" => (0.75, 4.50), // superseded by gpt-5.6-luna
         "gpt-5.4" => (2.50, 15.0),      // superseded by gpt-5.6-terra
         "gpt-5.5" => (5.0, 30.0),       // superseded by gpt-5.6-sol
-        // DeepSeek (text-only)
-        "deepseek-v4-flash" => (0.14, 0.28),
-        "deepseek-v4-pro" => (0.435, 0.87),
+        // DeepSeek (api-docs.deepseek.com/quick_start/pricing, read 2026-11-03). These are
+        // the PEAK rates, 01:00-04:00 and 06:00-10:00 UTC on Chinese working days; every
+        // other hour is half price, so for most users outside China these rows over-state by
+        // about 2x. Flash (V4.1) reads images; the retired Flash names are served by it at its
+        // price. Pro is text-only. Until 2026-11 the rows read (0.14, 0.28) and (0.435, 0.87).
+        "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => (0.30, 1.20),
+        "deepseek-v4-pro" => (1.32, 3.96),
         // Qwen — 3.8/3.7 (2026-08-16 refresh) supersede 3.6; 3.8-max is the first -max
         // generation that's natively vision-capable, 3.7-flash is the cheapest vision pick
         // in the whole table.

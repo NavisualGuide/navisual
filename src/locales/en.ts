@@ -464,9 +464,8 @@ export const en = {
   "pv.qRecommended": "(recommended)",
   "pv.qFast": "(fast)",
   "pv.qBest": "(best quality)",
-  "pv.qRecommendedTextOnly": "(recommended, text-only)",
+  "pv.qRecommendedSeesScreen": "(recommended, sees the screen)",
   "pv.qBestTextOnly": "(best quality, text-only)",
-  "pv.qVisionExp": "(experimental, sees the screen)",
   "pv.qMultimodal": "(multimodal)",
   "pv.qCheapVision": "(fast, cheapest vision pick)",
 
@@ -481,7 +480,7 @@ export const en = {
   "pv.hintGemini": "Recommended for most users outside mainland China. Free API key available at aistudio.google.com.",
   "pv.hintAnthropic": "Pay per use \u00b7 highest quality. API key at console.anthropic.com.",
   "pv.hintOpenai": "Pay per use. API key at platform.openai.com.",
-  "pv.hintDeepseek": "\u26a0 Text-only \u2014 DeepSeek cannot see your screen (its API rejects images). Guidance is inferred from your description, so it may be wrong on unfamiliar or custom apps. For mainland China with screen analysis, use Qwen instead.",
+  "pv.hintDeepseek": "deepseek-flash sees your screen. \u26a0 deepseek-v4-pro is text-only: DeepSeek's API rejects images for it, so its guidance is inferred from your description and may be wrong on unfamiliar or custom apps.",
   "pv.hintQwen": "Qwen (DashScope) \u2014 pick your region below and the endpoint fills in automatically. Supports image analysis, and is the recommended cloud option for mainland China where US AI services are geoblocked.",
   "pv.hintOllama": "Free \u00b7 runs locally \u00b7 no data leaves your machine. Requires Ollama installed with a vision model (e.g. llama3.2-vision).",
 

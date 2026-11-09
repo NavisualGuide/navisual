@@ -446,9 +446,8 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "pv.qRecommended": "（推荐）",
   "pv.qFast": "（快）",
   "pv.qBest": "（质量最好）",
-  "pv.qRecommendedTextOnly": "（推荐，纯文本）",
+  "pv.qRecommendedSeesScreen": "（推荐，能看屏幕）",
   "pv.qBestTextOnly": "（质量最好，纯文本）",
-  "pv.qVisionExp": "（实验性，能看屏幕）",
   "pv.qMultimodal": "（多模态）",
   "pv.qCheapVision": "（快，最便宜的视觉选择）",
 
@@ -461,7 +460,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "pv.hintGemini": "中国大陆以外的用户大多推荐用它。可在 aistudio.google.com 免费申请 API Key。",
   "pv.hintAnthropic": "按量付费 \u00b7 质量最高。API Key 在 console.anthropic.com 申请。",
   "pv.hintOpenai": "按量付费。API Key 在 platform.openai.com 申请。",
-  "pv.hintDeepseek": "\u26a0 纯文本 —— DeepSeek 看不到你的屏幕（它的 API 拒收图片）。指引只能靠你的描述推断，所以在不常见或自研的应用上可能会错。在中国大陆又需要屏幕分析的话，请改用 Qwen。",
+  "pv.hintDeepseek": "deepseek-flash 能看你的屏幕。\u26a0 deepseek-v4-pro 只有纯文本：DeepSeek 的 API 不接受给它的图片，指引只能靠你的描述推断，所以在不常见或自研的应用上可能会错。",
   "pv.hintQwen": "Qwen（DashScope）—— 在下面选好区域，服务地址会自动填好。支持图像分析；在美国 AI 服务被地理封锁的中国大陆，这是推荐的云端选择。",
   "pv.hintOllama": "免费 \u00b7 本地运行 \u00b7 没有任何数据离开你的电脑。需要先装好 Ollama 并配一个视觉模型（例如 llama3.2-vision）。",
 

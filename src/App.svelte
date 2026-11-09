@@ -1158,7 +1158,7 @@ See the LICENSE file in the root of this repository for complete details.
     gemini_api_key: "", gemini_model: "gemini-2.5-flash", gemini_fast_model: "gemini-2.5-flash-lite",
     ollama_base_url: "http://localhost:11434", ollama_model: "llama3.2-vision",
     openai_api_key: "", openai_model: "gpt-5.5",
-    deepseek_api_key: "", deepseek_model: "deepseek-v4-flash",
+    deepseek_api_key: "", deepseek_model: "deepseek-flash",
     qwen_api_key: "", qwen_model: "qwen3.6-plus",
     qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     custom_api_key: "", custom_model: "", custom_base_url: "",
@@ -1197,7 +1197,7 @@ See the LICENSE file in the root of this repository for complete details.
   const MODEL_PRESETS_ANTHROPIC = ["claude-haiku-4-5-20251001","claude-sonnet-5","claude-opus-5"];
   const MODEL_PRESETS_GEMINI    = ["gemini-3.8-flash","gemini-2.5-flash-lite","gemini-4-argon","gemini-3.1-pro-preview","gemini-2.5-flash"];
   const MODEL_PRESETS_OPENAI    = ["gpt-6.1-sol","gpt-6-luna","gpt-6-astra"];
-  const MODEL_PRESETS_DEEPSEEK  = ["deepseek-v4-flash","deepseek-v4-pro","deepseek-v4-flash-vision-exp"];
+  const MODEL_PRESETS_DEEPSEEK  = ["deepseek-flash","deepseek-v4-pro"];
   const MODEL_PRESETS_QWEN      = ["qwen3.8-max","qwen3.7-flash","qwen3.5-omni-plus"];
   // Qwen DashScope OpenAI-compatible endpoints by region. Picking a region in the
   // Settings "Endpoint" dropdown auto-fills qwen_base_url; "Custom" reveals a free
@@ -5692,14 +5692,13 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="deepseek-model" class="setting-select"
                   value={customDeepSeek ? "__custom__" : settingsForm.deepseek_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customDeepSeek = false; settingsForm.deepseek_model = v; } else { customDeepSeek = true; settingsForm.deepseek_model = ""; } }}>
-                  <option value="deepseek-v4-flash">deepseek-v4-flash {t("pv.qRecommendedTextOnly")}</option>
+                  <option value="deepseek-flash">deepseek-flash {t("pv.qRecommendedSeesScreen")}</option>
                   <option value="deepseek-v4-pro">deepseek-v4-pro {t("pv.qBestTextOnly")}</option>
-                  <option value="deepseek-v4-flash-vision-exp">deepseek-v4-flash-vision-exp {t("pv.qVisionExp")}</option>
                   <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customDeepSeek}
                   <input class="setting-input" type="text" bind:value={settingsForm.deepseek_model}
-                    placeholder="e.g. deepseek-v4-flash" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. deepseek-flash" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
 

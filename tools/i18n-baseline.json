@@ -29,7 +29,7 @@
     "src/App.svelte:Writes the last 30 steps — screenshots, the conversation, and the locator outcome per step — to a folder you choose. The last 30 steps are",
     "src/App.svelte:ai_bbox",
     "src/App.svelte:e.g. claude-sonnet-5",
-    "src/App.svelte:e.g. deepseek-v4-flash",
+    "src/App.svelte:e.g. deepseek-flash",
     "src/App.svelte:e.g. gemini-3.8-flash",
     "src/App.svelte:e.g. gemma4:e4b",
     "src/App.svelte:e.g. gpt-6.1-sol",
