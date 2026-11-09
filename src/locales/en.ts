@@ -445,8 +445,8 @@ export const en = {
   "au.inputToggle": "Enable 🎤 push-to-talk",
   "au.inputHint": "Uses the WebView2 Web Speech API \u2014 audio is sent to Microsoft's online speech service; requires internet and microphone permission.",
   "au.voiceLanguage": "Voice language",
-  "au.autoDetect": "Auto-detect",
-  "au.voiceLangHint": "Sets both the TTS voice language and the voice-input language. Auto-detect speaks each reply in its own language and uses your OS language for voice input.",
+  "au.autoDetect": "Auto",
+  "au.voiceLangHint": "Sets both the read-aloud language and the voice-input language. On Auto, each reply is read in its own language, and voice input listens for the interface language (your Windows language when the interface follows the system). Speech can't be identified before you speak, so choose one here if you speak another.",
 
   // ── Provider tab (P3) ─────────────────────────────────────────────────────
   "pv.provider": "Provider",
@@ -537,6 +537,12 @@ export const en = {
   "msg.signInToBuy": "Sign in to buy coins \u2014 use Google below, or enter your email.",
   "msg.voiceDisabled": "Voice input is disabled \u2014 enable it in Settings \u2192 Audio",
   "msg.speechUnsupported": "Speech recognition is not supported in this environment",
+  "msg.voiceNothingHeard": "Voice input didn't catch any words. Try again, a little closer to the microphone.",
+  "msg.voiceNoMic": "Voice input found no microphone.",
+  "msg.voiceBlocked": "Voice input was blocked. In Windows Settings → Privacy & security → Microphone, let desktop apps use the microphone.",
+  "msg.voiceNetwork": "Voice input couldn't reach Microsoft's speech service. It needs an internet connection.",
+  "msg.voiceLangUnsupported": "The speech service doesn't recognise {lang}. Choose another voice language in Settings → Audio.",
+  "msg.voiceFailed": "Voice input stopped with an error ({code}).",
   "msg.noOllamaModels": "No models found \u2014 pull one with `ollama pull`.",
 
   // ── Conversation messages, part 2 ─────────────────────────────────────────
@@ -580,7 +586,9 @@ export const en = {
   "au.langDe": "German",
   "au.langEs": "Spanish",
   "au.langJa": "Japanese",
-  "au.langZhCN": "Chinese (Simplified)",
+  "au.langZhCN": "Chinese (Mandarin)",
+  "au.langZhTW": "Chinese (Taiwan Mandarin)",
+  "au.langYueHK": "Cantonese (Hong Kong)",
   "au.langKo": "Korean",
   "au.langPtBR": "Portuguese (Brazil)",
 

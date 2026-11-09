@@ -428,8 +428,8 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "au.inputToggle": "启用 🎤 按住说话",
   "au.inputHint": "使用 WebView2 的 Web Speech API —— 音频会发送给微软的在线语音服务；需要联网和麦克风权限。",
   "au.voiceLanguage": "语音语言",
-  "au.autoDetect": "自动识别",
-  "au.voiceLangHint": "同时决定 TTS 朗读语言和语音输入的识别语言。选「自动识别」时，朗读跟随每条回复自己的语言，语音输入则使用你的系统语言。",
+  "au.autoDetect": "自动",
+  "au.voiceLangHint": "同时决定朗读语言和语音输入的识别语言。选「自动」时，每条回复按它自己的语言朗读；语音输入按界面语言识别（界面跟随系统时用 Windows 的语言）。开口之前无法判断你要说哪种语言，所以说别的语言时请在这里选。",
 
   // ── 服务商标签页 (P3) ─────────────────────────────────────────────────────
   "pv.provider": "服务商",
@@ -515,6 +515,12 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "msg.signInToBuy": "购买金币前需要登录 —— 用下面的 Google 登录，或填写邮箱。",
   "msg.voiceDisabled": "语音输入已关闭 —— 可在「设置 → 音频」里开启",
   "msg.speechUnsupported": "当前环境不支持语音识别",
+  "msg.voiceNothingHeard": "语音输入没听清。请靠近麦克风再说一次。",
+  "msg.voiceNoMic": "语音输入找不到麦克风。",
+  "msg.voiceBlocked": "语音输入被拦截了。请在 Windows 设置 → 隐私和安全性 → 麦克风里允许桌面应用使用麦克风。",
+  "msg.voiceNetwork": "语音输入连不上微软的语音服务，需要联网。",
+  "msg.voiceLangUnsupported": "语音服务不支持「{lang}」。请在「设置 → 音频」里换一种语音语言。",
+  "msg.voiceFailed": "语音输入出错了（{code}）。",
   "msg.noOllamaModels": "没有找到模型 —— 用 `ollama pull` 拉取一个。",
 
   // ── 对话消息（续）─────────────────────────────────────────────────────────
@@ -557,7 +563,9 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "au.langDe": "德语",
   "au.langEs": "西班牙语",
   "au.langJa": "日语",
-  "au.langZhCN": "中文（简体）",
+  "au.langZhCN": "中文（普通话）",
+  "au.langZhTW": "中文（台湾国语）",
+  "au.langYueHK": "粤语（香港）",
   "au.langKo": "韩语",
   "au.langPtBR": "葡萄牙语（巴西）",
 

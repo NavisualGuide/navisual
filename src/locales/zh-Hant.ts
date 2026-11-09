@@ -429,8 +429,8 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "au.inputToggle": "啟用 🎤 按住說話",
   "au.inputHint": "使用 WebView2 的 Web Speech API —— 音訊會傳送給微軟的線上語音服務；需要連網和麥克風權限。",
   "au.voiceLanguage": "語音語言",
-  "au.autoDetect": "自動偵測",
-  "au.voiceLangHint": "同時決定 TTS 朗讀語言和語音輸入的辨識語言。選「自動偵測」時，朗讀跟隨每則回覆自己的語言，語音輸入則使用你的系統語言。",
+  "au.autoDetect": "自動",
+  "au.voiceLangHint": "同時決定朗讀語言和語音輸入的辨識語言。選「自動」時，每則回覆按它自己的語言朗讀；語音輸入按介面語言辨識（介面跟隨系統時用 Windows 的語言）。開口之前無法判斷你要說哪種語言，所以說別的語言時請在這裡選。",
 
   // ── 服務商分頁 (P3) ───────────────────────────────────────────────────────
   "pv.provider": "服務商",
@@ -516,6 +516,12 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "msg.signInToBuy": "購買金幣前需要登入 —— 用下面的 Google 登入，或填寫電子郵件。",
   "msg.voiceDisabled": "語音輸入已關閉 —— 可在「設定 → 音訊」裡開啟",
   "msg.speechUnsupported": "目前環境不支援語音辨識",
+  "msg.voiceNothingHeard": "語音輸入沒聽清楚。請靠近麥克風再說一次。",
+  "msg.voiceNoMic": "語音輸入找不到麥克風。",
+  "msg.voiceBlocked": "語音輸入被封鎖了。請在 Windows 設定 → 隱私權與安全性 → 麥克風裡允許桌面應用程式使用麥克風。",
+  "msg.voiceNetwork": "語音輸入連不上微軟的語音服務，需要連網。",
+  "msg.voiceLangUnsupported": "語音服務不支援「{lang}」。請在「設定 → 音訊」裡換一種語音語言。",
+  "msg.voiceFailed": "語音輸入出錯了（{code}）。",
   "msg.noOllamaModels": "找不到模型 —— 用 `ollama pull` 拉取一個。",
 
   // ── 對話訊息（續）─────────────────────────────────────────────────────────
@@ -558,7 +564,9 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "au.langDe": "德語",
   "au.langEs": "西班牙語",
   "au.langJa": "日語",
-  "au.langZhCN": "中文（簡體）",
+  "au.langZhCN": "中文（普通話）",
+  "au.langZhTW": "中文（台灣國語）",
+  "au.langYueHK": "粵語（香港）",
   "au.langKo": "韓語",
   "au.langPtBR": "葡萄牙語（巴西）",
 

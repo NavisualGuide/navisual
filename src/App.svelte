@@ -19,7 +19,7 @@ See the LICENSE file in the root of this repository for complete details.
   import { providerName } from "./lib/providers";
   import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
-  import { i18n, t, packStarter, fmtNum, fmtDate, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
+  import { i18n, t, packStarter, fmtNum, fmtDate, localeFromTag, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
   import type { MessageKey } from "./locales/en";
   import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
   import AccountPanel from "./AccountPanel.svelte";
@@ -1853,31 +1853,129 @@ See the LICENSE file in the root of this repository for complete details.
     }
   }
 
+  /// The recognition language for voice input, and where it came from (for the log line).
+  /// Recognition cannot tell which language is coming before the user speaks, so "auto" has to
+  /// guess. It used to guess the OS language alone, and an English Windows with a Chinese
+  /// interface turned Mandarin into English words (the founder's own setup, 2026-11-08). The
+  /// interface language is the better guess when the user picked one; the OS tag still wins
+  /// when it names the same language more precisely (en-GB, zh-HK). Read-aloud is unaffected:
+  /// its "auto" follows each reply.
+  function voiceInputLang(): { lang: string; from: string } {
+    const v = settingsForm.voice_language;
+    if (v && v !== "auto") return { lang: v, from: "setting" };
+    const os = navigator.language || "en-US";
+    const ui = i18n.setting; // the choice itself, not what "system" resolved to
+    if (ui === "en") {
+      return { lang: os.toLowerCase().split(/[-_]/)[0] === "en" ? os : "en-US", from: "interface" };
+    }
+    if (ui === "zh-Hans" || ui === "zh-Hant") {
+      const sameScript = os.toLowerCase().startsWith("zh") && localeFromTag(os) === ui;
+      return { lang: sameScript ? os : ui === "zh-Hans" ? "zh-CN" : "zh-TW", from: "interface" };
+    }
+    return { lang: os, from: "system" };
+  }
+
+  /// The voice languages offered in Settings → Audio. Spoken languages are named by speech and
+  /// region, not by script: "Simplified" is a way of writing, and nobody speaks it. zh-TW and
+  /// zh-HK also write traditional characters, which is the other reason a zh-Hant user needs them.
+  const VOICE_LANGUAGES: [string, MessageKey][] = [
+    ["en-US", "au.langEnUS"],
+    ["en-GB", "au.langEnGB"],
+    ["fr-FR", "au.langFr"],
+    ["de-DE", "au.langDe"],
+    ["es-ES", "au.langEs"],
+    ["ja-JP", "au.langJa"],
+    ["zh-CN", "au.langZhCN"],
+    ["zh-TW", "au.langZhTW"],
+    ["zh-HK", "au.langYueHK"],
+    ["ko-KR", "au.langKo"],
+    ["pt-BR", "au.langPtBR"],
+  ];
+
+  /// What each Web Speech error tells the user. "aborted" is our own stop() and says nothing.
+  const VOICE_ERRORS: Record<string, MessageKey> = {
+    "no-speech": "msg.voiceNothingHeard",
+    "audio-capture": "msg.voiceNoMic",
+    "not-allowed": "msg.voiceBlocked",
+    "service-not-allowed": "msg.voiceBlocked",
+    "network": "msg.voiceNetwork",
+    "language-not-supported": "msg.voiceLangUnsupported",
+  };
+
+  function voiceLangLabel(code: string): string {
+    const key = VOICE_LANGUAGES.find(([c]) => c === code)?.[1];
+    return key ? t(key) : code;
+  }
+
+  /// Recognition is never perfect, in any language, so the transcript goes into the task box
+  /// for the user to check and send. It used to be sent at once, which spent a request on every
+  /// misheard sentence. Appends to what is already typed; replaces an untouched prefill.
+  function insertTranscript(text: string) {
+    if (!task.trim() || prefillActive) {
+      clearPrefill();
+      task = text;
+    } else {
+      const prev = task.trimEnd();
+      // No space next to CJK text; a space between words everywhere else.
+      const cjk = /[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+      const joiner = cjk.test(prev.slice(-1)) || cjk.test(text[0]) ? "" : " ";
+      task = prev + joiner + text;
+    }
+    tick().then(() => {
+      autoGrowTaskInput();
+      // Only when the panel already has focus: taking it from the target app closes an open
+      // menu there and corrupts the next capture (applyPrefill keeps the same rule).
+      if (document.hasFocus() && taskInputEl) {
+        taskInputEl.focus();
+        const end = taskInputEl.value.length;
+        taskInputEl.setSelectionRange(end, end);
+      }
+    });
+  }
+
+  function logVoice(line: string) {
+    invoke("log_voice", { line }).catch(() => {});
+  }
+
   function startVoiceInput() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const SR = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
     if (!SR) {
       addToHistory("error", t("msg.speechUnsupported"));
+      logVoice("unsupported: no SpeechRecognition in this webview");
       return;
     }
+    const { lang, from } = voiceInputLang();
     speechRecognition = new SR();
     speechRecognition.continuous = false;
     speechRecognition.interimResults = false;
-    speechRecognition.lang =
-      settingsForm.voice_language && settingsForm.voice_language !== "auto"
-        ? settingsForm.voice_language
-        : navigator.language || "en-US";
+    speechRecognition.lang = lang;
     isRecording = true;
+    logVoice(`listening lang=${lang} (${from})`);
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     speechRecognition.onresult = (event: any) => {
       const transcript = (event.results[0][0].transcript as string).trim();
       isRecording = false;
-      if (transcript) {
-        task = transcript;
-        guide();
-      }
+      // The length only, never the words: the user has not decided to send them yet.
+      logVoice(`heard ${transcript.length} chars lang=${lang}`);
+      if (transcript) insertTranscript(transcript);
+      else addToHistory("error", t("msg.voiceNothingHeard"));
     };
-    speechRecognition.onerror = () => { isRecording = false; };
+    speechRecognition.onnomatch = () => {
+      isRecording = false;
+      logVoice(`no match lang=${lang}`);
+      addToHistory("error", t("msg.voiceNothingHeard"));
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    speechRecognition.onerror = (event: any) => {
+      isRecording = false;
+      const code: string = event?.error ?? "unknown";
+      logVoice(`error=${code} lang=${lang} (${from})`);
+      if (code === "aborted") return;
+      const key = VOICE_ERRORS[code];
+      addToHistory("error", key ? t(key, { lang: voiceLangLabel(lang) }) : t("msg.voiceFailed", { code }));
+    };
     speechRecognition.onend   = () => { isRecording = false; };
     speechRecognition.start();
   }
@@ -6062,15 +6160,9 @@ See the LICENSE file in the root of this repository for complete details.
                 bind:value={settingsForm.voice_language}
                 disabled={!settingsForm.tts_enabled && !settingsForm.voice_input_enabled}>
                 <option value="auto">{t("au.autoDetect")}</option>
-                <option value="en-US">{t("au.langEnUS")}</option>
-                <option value="en-GB">{t("au.langEnGB")}</option>
-                <option value="fr-FR">{t("au.langFr")}</option>
-                <option value="de-DE">{t("au.langDe")}</option>
-                <option value="es-ES">{t("au.langEs")}</option>
-                <option value="ja-JP">{t("au.langJa")}</option>
-                <option value="zh-CN">{t("au.langZhCN")}</option>
-                <option value="ko-KR">{t("au.langKo")}</option>
-                <option value="pt-BR">{t("au.langPtBR")}</option>
+                {#each VOICE_LANGUAGES as [code, key] (code)}
+                  <option value={code}>{t(key)}</option>
+                {/each}
               </select>
               <p class="stub-hint" style="margin-top:4px">{t("au.voiceLangHint")}</p>
             </div>

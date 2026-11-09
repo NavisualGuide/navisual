@@ -3547,6 +3547,17 @@ fn log_hotkeys(line: String) {
     log::info!("[hotkeys] {line}");
 }
 
+/// Voice input runs entirely in the webview, so the language it listened for and how each attempt
+/// ended never reached this log: "Auto" quietly meant the OS language, and an English Windows with
+/// a Chinese interface turned Mandarin into English words with nothing here to say why
+/// (2026-11-08). One line per attempt and per outcome (rule 1); the transcript's length, never its
+/// words. Capped, because the text comes from the webview.
+#[tauri::command]
+fn log_voice(line: String) {
+    let line: String = line.chars().take(200).collect();
+    log::info!("[voice] {line}");
+}
+
 /// Deployment status of the pack-shipped Blender add-on (the script-channel bridge):
 /// which Blender installs exist, whether each has the add-on, and whether any is older
 /// than the version the pack ships. Drives the panel's install prompt.
@@ -9393,6 +9404,7 @@ pub fn run() {
             blender_addon_status,
             combos_held_elsewhere,
             log_hotkeys,
+            log_voice,
             install_blender_addon,
             speak,
             get_settings,
