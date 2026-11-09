@@ -284,7 +284,7 @@ impl Default for Config {
             openai_api_key: None,
             openai_model: "gpt-6.1-sol".to_string(),
             deepseek_api_key: None,
-            deepseek_model: "deepseek-v4-flash".to_string(),
+            deepseek_model: crate::ai::deepseek::FLASH.to_string(),
             qwen_api_key: None,
             qwen_model: "qwen3.8-max".to_string(),
             qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
@@ -435,7 +435,11 @@ impl Config {
         }
         if let Ok(v) = env::var("DEEPSEEK_MODEL") {
             if !v.is_empty() {
-                config.deepseek_model = v;
+                let current = crate::ai::deepseek::current_model_name(&v);
+                if current != v {
+                    log::info!("[config] DEEPSEEK_MODEL={v} is a retired DeepSeek name; using {current}");
+                }
+                config.deepseek_model = current.to_string();
             }
         }
 

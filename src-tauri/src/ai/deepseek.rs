@@ -948,11 +948,33 @@ const TEXT_ONLY_NOTICE: &str = r#"
 
 IMPORTANT — YOU CANNOT SEE THE SCREEN. No screenshot is provided to you (this provider is text-only). Never say or imply that you can see the user's screen. Base your guidance on the [Current Window Info] (the focused app's title and class), the user's words, and your general knowledge of how that application's UI is normally laid out. If you are unsure what is currently on screen, ask a short clarifying question (set needs_input=true) rather than guessing — do NOT invent specific on-screen elements you cannot confirm. ALWAYS return at least one step whose "instruction" is your reply to the user; when you are answering a question or asking for clarification, put that reply/question in the instruction (e.g. "I can't see your screen — tell me which app you're in and what you want to do"). Never return an empty "steps" list."#;
 
-/// Text-only message builder (no screenshot) for the literal DeepSeek API.
-/// CONFIRMED 2026-05-24: api.deepseek.com rejects `image_url` content parts with
-/// HTTP 400 ("unknown variant `image_url`, expected `text`") on deepseek-v4-flash
-/// and deepseek-v4-pro — DeepSeek V4 has no vision via the official API. The
-/// screenshot is dropped here; DeepSeek guidance is inferred from text only.
+/// DeepSeek's current Flash model, which reads images (DeepSeek's pricing page and vision
+/// guide, read 2026-11-03: V4.1 Flash, `deepseek-flash`).
+pub const FLASH: &str = "deepseek-flash";
+
+/// Whether the literal DeepSeek API takes an image for `model`. Only `deepseek-flash` does;
+/// `deepseek-v4-pro` still has no vision, and anything else stays text-only, so a model that
+/// would answer an image with a 400 never gets one.
+pub fn takes_images(model: &str) -> bool {
+    model == FLASH
+}
+
+/// The name to use for a saved DeepSeek model. `deepseek-v4-flash` (the app's default until
+/// 2026-11) and `deepseek-v4-flash-vision-exp` are retired names: DeepSeek still accepts them
+/// and serves them with `deepseek-flash` at its price. Reading them as the current name gives
+/// those settings the screenshot, and keeps them working once DeepSeek drops the alias.
+pub fn current_model_name(model: &str) -> &str {
+    match model {
+        "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => FLASH,
+        m => m,
+    }
+}
+
+/// Text-only message builder (no screenshot) for the literal DeepSeek API, for a model
+/// `takes_images` says no to. Measured 2026-05-24 and 2026-07-09: api.deepseek.com answered an
+/// `image_url` part with HTTP 400 ("unknown variant `image_url`, expected `text`") on
+/// deepseek-v4-flash and deepseek-v4-pro. Flash has read images since V4.1; Pro still does not.
+/// The screenshot is dropped here; guidance is inferred from text only.
 pub fn build_messages(
     user_text: &str,
     _screenshot_b64: Option<&str>,
@@ -997,8 +1019,8 @@ pub fn build_messages(
 /// endpoint. Both accept the standard `image_url` content part with a base64
 /// data URL, so the screenshot is included.
 ///
-/// Do NOT use this for the literal DeepSeek API (api.deepseek.com), which
-/// rejects image_url with HTTP 400 — that one needs `build_messages` instead.
+/// On the literal DeepSeek API (api.deepseek.com) use this only for a model `takes_images`
+/// allows; the others answer image_url with HTTP 400 and need `build_messages` instead.
 pub fn build_openai_messages(
     user_text: &str,
     screenshot_b64: Option<&str>,
@@ -1061,5 +1083,29 @@ fn log_effort_once(what: &str) {
             log::info!("[reasoning] openai {what}");
             *last = Some(what.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_deepseek_flash_gets_the_screenshot() {
+        assert!(takes_images("deepseek-flash"));
+        // Pro still answers an image with a 400; an unknown name stays text-only.
+        assert!(!takes_images("deepseek-v4-pro"));
+        assert!(!takes_images("deepseek-chat"));
+        assert!(!takes_images(""));
+    }
+
+    #[test]
+    fn retired_flash_names_are_read_as_deepseek_flash() {
+        assert_eq!(current_model_name("deepseek-v4-flash"), FLASH);
+        assert_eq!(current_model_name("deepseek-v4-flash-vision-exp"), FLASH);
+        assert_eq!(current_model_name("deepseek-v4-pro"), "deepseek-v4-pro");
+        assert_eq!(current_model_name("my-own-model"), "my-own-model");
+        // So a saved retired name ends up with the screenshot.
+        assert!(takes_images(current_model_name("deepseek-v4-flash")));
     }
 }

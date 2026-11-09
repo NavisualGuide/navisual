@@ -447,9 +447,8 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "pv.qRecommended": "（推薦）",
   "pv.qFast": "（快）",
   "pv.qBest": "（品質最好）",
-  "pv.qRecommendedTextOnly": "（推薦，純文字）",
+  "pv.qRecommendedSeesScreen": "（推薦，看得到畫面）",
   "pv.qBestTextOnly": "（品質最好，純文字）",
-  "pv.qVisionExp": "（實驗性，看得到畫面）",
   "pv.qMultimodal": "（多模態）",
   "pv.qCheapVision": "（快，最便宜的視覺選擇）",
 
@@ -462,7 +461,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "pv.hintGemini": "中國大陸以外的使用者大多推薦用它。可在 aistudio.google.com 免費申請 API Key。",
   "pv.hintAnthropic": "按量付費 \u00b7 品質最高。API Key 在 console.anthropic.com 申請。",
   "pv.hintOpenai": "按量付費。API Key 在 platform.openai.com 申請。",
-  "pv.hintDeepseek": "\u26a0 純文字 —— DeepSeek 看不到你的畫面（它的 API 拒收圖片）。指引只能靠你的描述推斷，所以在不常見或自製的應用程式上可能會錯。在中國大陸又需要畫面分析的話，請改用 Qwen。",
+  "pv.hintDeepseek": "deepseek-flash 看得到你的畫面。\u26a0 deepseek-v4-pro 只有純文字：DeepSeek 的 API 不接受給它的圖片，指引只能靠你的描述推斷，所以在不常見或自製的應用程式上可能會錯。",
   "pv.hintQwen": "Qwen（DashScope）—— 在下面選好區域，服務位址會自動填好。支援影像分析；在美國 AI 服務被地理封鎖的中國大陸，這是推薦的雲端選擇。",
   "pv.hintOllama": "免費 \u00b7 本機執行 \u00b7 沒有任何資料離開你的電腦。需要先裝好 Ollama 並配一個視覺模型（例如 llama3.2-vision）。",
 
