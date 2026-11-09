@@ -1,6 +1,6 @@
 [package]
 name = "navisual-backend"
-version = "0.7.41"
+version = "0.7.42"
 description = "Navisual — Rust/Tauri backend"
 authors = ["Navisual"]
 license = "FSL-1.1-ALv2"
