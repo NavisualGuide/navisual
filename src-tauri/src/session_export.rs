@@ -1157,8 +1157,8 @@ fn draw_caption(img: &mut image::RgbaImage, text: &str, bottom_inset: u32) {
                     }
                     let p = img.get_pixel_mut(x as u32, y as u32);
                     let a = cov.min(1.0);
-                    for k in 0..3 {
-                        p.0[k] = (p.0[k] as f32 * (1.0 - a) + 255.0 * a) as u8;
+                    for c in p.0.iter_mut().take(3) {
+                        *c = (*c as f32 * (1.0 - a) + 255.0 * a) as u8;
                     }
                 });
             }
@@ -1452,8 +1452,8 @@ fn fill_round_rect(
             }
             let a = alpha * cov;
             let p = img.get_pixel_mut(px_ as u32, py as u32);
-            for k in 0..3 {
-                p.0[k] = (p.0[k] as f32 * (1.0 - a)) as u8;
+            for c in p.0.iter_mut().take(3) {
+                *c = (*c as f32 * (1.0 - a)) as u8;
             }
         }
     }

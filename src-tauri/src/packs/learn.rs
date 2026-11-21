@@ -1030,10 +1030,9 @@ fn is_ui_label(role: &str, name: &str, app: &AppKey) -> bool {
     // Part of the document's name in the title bar ("Q3 planning" in "Contoso Notes - Q3 planning").
     let doc = document_part(&app.title, app);
     let nn = norm(n);
-    if nn.chars().count() >= 4 && !doc.is_empty() && (contains_words(&doc, &nn) || contains_words(&nn, &doc)) {
-        return false;
-    }
-    true
+    let names_the_document =
+        nn.chars().count() >= 4 && !doc.is_empty() && (contains_words(&doc, &nn) || contains_words(&nn, &doc));
+    !names_the_document
 }
 
 /// "shopping list.txt" -> "shopping list": the words of a document's name, not its type.
