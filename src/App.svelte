@@ -3018,6 +3018,11 @@ See the LICENSE file in the root of this repository for complete details.
       // turn -- the app's words, not the person's. Show it as the clean system note the
       // live session uses, not as a user bubble with brackets.
       const completed = turn.content.startsWith('[User completed: "') && turn.content.endsWith('"]');
+      // Next past an unanswered question is the app's words too (built in nextStep below,
+      // recognised in lib.rs by `is_machine_continuation`): the same quiet note the live
+      // session showed, not the English briefing in a user bubble.
+      const skippedQuestion = turn.role === "user"
+        && turn.content.startsWith("[The user did not answer your question:");
       // A correction turn's CONTENT is the prompt the model was sent -- the "you pressed
       // wrong, re-examine the screen" briefing, with the user's own words appended after
       // `User note: `. Only that tail is theirs, and it is the only part worth showing; the
@@ -3040,6 +3045,7 @@ See the LICENSE file in the root of this repository for complete details.
       // completion a wall of the same sentence twice.
       const role: HistoryRole = completed
         ? "completed"
+        : skippedQuestion ? "system"
         : turn.role === "assistant" ? "ai"
         : turn.role === "user" ? "user"
         : turn.role === "correction" ? "correction"
@@ -3049,6 +3055,7 @@ See the LICENSE file in the root of this repository for complete details.
       const rowId = await addToHistory(
         role,
         completed ? completionLabel(turn.clicked, turn.advanced_by)
+        : skippedQuestion ? t("msg.skippedQuestion")
         : role === "correction" ? correctionText
         : turn.content,
       );
@@ -3374,6 +3381,9 @@ See the LICENSE file in the root of this repository for complete details.
         unanswered ? t("msg.skippedQuestion")
         : completed ? completionLabel(null, advanceKind) : t("msg.reanalysing"));
       try {
+        // Both lines below open with a prefix lib.rs reads (`is_machine_continuation`) to keep
+        // this the same session. Change one and change the other -- the skipped-question line
+        // once went unrecognised, and the backend started a new task from it, in English.
         const res = await invoke<GuideResponse>("guide", {
           task: unanswered
             ? `[The user did not answer your question: "${unanswered}" — they pressed Next to move on. `
