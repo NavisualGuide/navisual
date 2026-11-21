@@ -2415,6 +2415,26 @@ mod prompt_assembly_tests {
     }
 
     #[test]
+    fn next_past_an_unanswered_question_continues_the_session() {
+        assert!(is_machine_continuation("[User completed: \"Click File.\"]"));
+        assert!(is_machine_continuation(
+            "[The user did not answer your question: \"您想找什么？\" — they pressed Next to move on.]"
+        ));
+        // The user's own words, in any language, are a task or a reply -- never a continuation.
+        assert!(!is_machine_continuation("帮我在这个页面上找点东西"));
+        assert!(!is_machine_continuation("The user did not answer, so open File"));
+        assert!(!is_machine_continuation(""));
+    }
+
+    #[test]
+    fn the_panel_still_writes_the_lines_the_backend_reads() {
+        // The two lines are built in App.svelte and read here; nothing else ties them together.
+        let panel = include_str!("../../src/App.svelte");
+        assert!(panel.contains(&format!("`{SKIPPED_QUESTION_PREFIX} \"${{unanswered}}\"")));
+        assert!(panel.contains(&format!("`{COMPLETED_PREFIX} \"${{completed}}\"]`")));
+    }
+
+    #[test]
     fn use_a_appends_the_completed_steps_expectation_only_when_on() {
         let step = |instruction: &str, expected: Option<&str>| {
             let mut s: GuidanceStep =
@@ -3145,7 +3165,7 @@ fn record_exchange(
     // "[User completed: …]" string, so `task` is non-empty and every turn got pinned —
     // which makes pinning meaningless and stops the window evicting user turns at all,
     // growing the prompt without bound. `is_next_requery` is the discriminator (it is
-    // exactly `task.starts_with("[User completed:")`, set at the top of `guide`).
+    // `is_machine_continuation(task)`, set at the top of `guide`).
     let pinned = !task.is_empty() && !is_next_requery;
     session.add_turn_pinned("user", user_turn_text, None, pinned);
     session.set_last_user_turn_title(window_title);
@@ -3157,6 +3177,22 @@ fn record_exchange(
         .collect::<Vec<_>>()
         .join("\n");
     session.add_turn("assistant", content, Some("...".to_string()));
+}
+
+/// The panel's → Next re-query sends one of two lines it builds itself (App.svelte, `nextStep`):
+/// a step the user completed, or a question the user did not answer. Both are the app's words,
+/// and both continue the session.
+pub(crate) const COMPLETED_PREFIX: &str = "[User completed:";
+pub(crate) const SKIPPED_QUESTION_PREFIX: &str = "[The user did not answer your question:";
+
+/// Is `task` one of the panel's own continuation lines rather than something the user typed?
+///
+/// Only the completion line was recognised until 2026-11-21. Next past an unanswered question
+/// was taken for a NEW task: the session, its history and its goal were dropped, and the
+/// language sample was read from the English briefing, so a Chinese user was answered in
+/// English (seen live, mainland routing test, Speed tier). Any provider, any version.
+pub(crate) fn is_machine_continuation(task: &str) -> bool {
+    task.starts_with(COMPLETED_PREFIX) || task.starts_with(SKIPPED_QUESTION_PREFIX)
 }
 
 /// Use A of H1 (harness-plan.md): the `[User completed: "…"]` line, followed by the completed
@@ -4557,7 +4593,10 @@ async fn guide_inner(
     // Flow A: any candidate boxes on screen are resolved by the state the user's
     // click left behind — read it before this request changes anything.
     resolve_pending_candidates(&app, &state, false).await;
-    let is_next_requery = task.starts_with("[User completed:");
+    let is_next_requery = is_machine_continuation(&task);
+    if task.starts_with(SKIPPED_QUESTION_PREFIX) {
+        log::info!("[memory] Next past an unanswered question: same session, language kept");
+    }
     // ✗ Wrong's memory is for the screen the user is stuck on: an advance or a new task ends it.
     // A typed reply does not -- it is usually about the same problem.
     if !task.is_empty() && !is_reply {

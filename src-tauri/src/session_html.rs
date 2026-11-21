@@ -137,6 +137,11 @@ pub fn session_to_html(session: &Session, frames_dir: &Path, thickness: u32) -> 
                 "<p class=\"done\">✓ {}</p>\n",
                 esc(&completion_line(turn))
             ));
+        } else if turn.role == "user"
+            && turn.content.starts_with(crate::SKIPPED_QUESTION_PREFIX)
+        {
+            // The app's briefing to the model, not the user's words -- say what happened.
+            body.push_str("<p class=\"done\">Question skipped — Next pressed</p>\n");
         } else if turn.role == "user" {
             body.push_str(&format!("<p class=\"you\">{}</p>\n", esc(&turn.content)));
         } else if turn.role == "assistant" {
@@ -529,6 +534,18 @@ mod tests {
             "the completion states the fact, escaped"
         );
         assert!(html.contains("Test task"), "the task is the title");
+    }
+
+    #[test]
+    fn a_skipped_question_is_a_note_not_the_users_words() {
+        let session = session_with(vec![
+            turn("user", "帮我找点东西"),
+            turn("assistant", "您想找什么？"),
+            turn("user", "[The user did not answer your question: \"您想找什么？\" — they pressed Next to move on.]"),
+        ]);
+        let html = session_to_html(&session, Path::new("nowhere"), 4);
+        assert!(html.contains("<p class=\"done\">Question skipped — Next pressed</p>"));
+        assert!(!html.contains("<p class=\"you\">[The user did not answer"));
     }
 
     #[test]
