@@ -199,9 +199,17 @@ pub async fn get_balance(supabase_url: &str, access_token: &str) -> Result<Balan
     Ok(resp.json().await?)
 }
 
+/// The `Authorization` bearer for a PostgREST call: the user's JWT when there is one, else
+/// the project key only if it is a legacy JWT key (`eyJ...`). Supabase's new publishable key
+/// (`sb_publishable_...`) is not a JWT and is rejected as a bearer; it goes on `apikey` alone,
+/// which already maps the request to the anon role.
+fn postgrest_bearer<'a>(access_token: Option<&'a str>, project_key: &'a str) -> Option<&'a str> {
+    access_token.or_else(|| project_key.starts_with("eyJ").then_some(project_key))
+}
+
 /// Insert one feedback row into the Supabase `feedback` table via PostgREST.
 /// Uses the user's JWT when signed in (so `auth.uid()` fills `user_id`), and
-/// falls back to the anon key (anon role) for BYOK / offline users.
+/// falls back to the project key (anon role) for BYOK / offline users.
 pub async fn submit_feedback(
     supabase_url: &str,
     anon_key: &str,
@@ -210,11 +218,11 @@ pub async fn submit_feedback(
 ) -> Result<()> {
     let client = Client::new();
     let url = format!("{}/rest/v1/feedback", supabase_url);
-    let bearer = access_token.unwrap_or(anon_key);
-    let resp = client
-        .post(&url)
-        .header("apikey", anon_key)
-        .header("Authorization", format!("Bearer {}", bearer))
+    let mut req = client.post(&url).header("apikey", anon_key);
+    if let Some(bearer) = postgrest_bearer(access_token, anon_key) {
+        req = req.header("Authorization", format!("Bearer {}", bearer));
+    }
+    let resp = req
         .header("Content-Type", "application/json")
         .header("Prefer", "return=minimal")
         .json(row)
@@ -1295,6 +1303,15 @@ pub fn migrate_session_to_vault(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_publishable_key_is_never_sent_as_a_bearer() {
+        use super::postgrest_bearer;
+        assert_eq!(postgrest_bearer(Some("user.jwt"), "sb_publishable_x"), Some("user.jwt"));
+        assert_eq!(postgrest_bearer(None, "sb_publishable_x"), None);
+        // The legacy anon key is a JWT and keeps its old behaviour.
+        assert_eq!(postgrest_bearer(None, "eyJhbGciOi.x.y"), Some("eyJhbGciOi.x.y"));
+    }
+
     use super::*;
 
     fn idle_server() -> OAuthCallbackServer {
