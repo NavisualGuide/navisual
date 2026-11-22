@@ -3802,7 +3802,12 @@ See the LICENSE file in the root of this repository for complete details.
   // Human-readable "supplier — detail" for the chat status messages. For managed
   // it names the selected quality tier (Speed/Regular/Smart) so the user can see
   // which managed model is active; for BYOK it's the provider + model.
-  const TIER_LABELS: Record<string, string> = { free: "Free", speed: "Speed", regular: "Regular", smart: "Smart" };
+  // Tier names are translated: the Chinese interface calls them 速度档 / 主力档 / 智能档.
+  const TIER_KEYS: Record<string, MessageKey> = { free: "tier.free", speed: "tier.speed", regular: "tier.regular", smart: "tier.smart" };
+  function tierLabel(tier: string): string {
+    const key = TIER_KEYS[tier];
+    return key ? t(key) : tier;
+  }
   const TIER_COINS: Record<string, number> = { free: 0, speed: 6, regular: 12, smart: 18 };
   // Greys out a paid tier's <option> when the current coin balance can't
   // cover even one request at it — purely a UI hint (picking a disabled
@@ -3818,7 +3823,7 @@ See the LICENSE file in the root of this repository for complete details.
     // paid user sees their selected quality tier.
     settingsForm.api_provider === "managed"
       ? (billing.tier === "paid"
-          ? t("prov.managedPaid", { tier: TIER_LABELS[settingsForm.managed_tier] ?? "Regular" })
+          ? t("prov.managedPaid", { tier: tierLabel(settingsForm.managed_tier || "regular") })
           : t("prov.managedFree"))
     : settingsForm.api_provider === "anthropic" ? `Anthropic · ${settingsForm.anthropic_model}`
     : settingsForm.api_provider === "gemini" ? `Google Gemini · ${settingsForm.gemini_model}`
@@ -4168,11 +4173,7 @@ See the LICENSE file in the root of this repository for complete details.
     listen<[string, number]>("tier_auto_selected", (event) => {
       const [tier, priceMicro] = event.payload;
       const coins = Math.floor(priceMicro / 5_000);
-      const label = TIER_LABELS[tier] ?? tier;
-      addToHistory(
-        "system",
-        `Your free requests ran out — this used ${coins} coin${coins === 1 ? "" : "s"} (${label} tier).`,
-      );
+      addToHistory("system", t("msg.freeRanOutCharged", { coins: String(coins), tier: tierLabel(tier) }));
     });
 
     listen("oauth_complete", async () => {
@@ -6313,7 +6314,7 @@ See the LICENSE file in the root of this repository for complete details.
           <div class="setting-group">
             <p class="setting-label" style="margin:0 0 8px">{t("usage.navisualAccount")}</p>
             {#if billing.tier === "paid" && billing.coins != null}
-              <p class="setting-hint">{t("usage.coinsLine", { coins: fmtNum(billing.coins), tier: TIER_LABELS[settingsForm.managed_tier] ?? "Regular", perReq: TIER_COINS[settingsForm.managed_tier] ?? 12 })}</p>
+              <p class="setting-hint">{t("usage.coinsLine", { coins: fmtNum(billing.coins), tier: tierLabel(settingsForm.managed_tier || "regular"), perReq: TIER_COINS[settingsForm.managed_tier] ?? 12 })}</p>
             {:else if usageManagedRemaining != null}
               <p class="setting-hint">{t("usage.freeLine", { left: usageManagedRemaining, total: 30 })}</p>
             {:else}

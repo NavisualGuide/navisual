@@ -493,6 +493,12 @@ export const en = {
   "pv.tierSpeed": "Speed \u2014 fastest \u00b7 6 coins/request",
   "pv.tierRegular": "Regular \u2014 balanced \u00b7 12 coins/request",
   "pv.tierSmart": "Smart \u2014 best grounding \u00b7 18 coins/request",
+  // The tier names on their own, wherever a sentence names the selected tier.
+  "tier.free": "Free",
+  "tier.speed": "Speed",
+  "tier.regular": "Regular",
+  "tier.smart": "Smart",
+  "msg.freeRanOutCharged": "Your free requests ran out \u2014 this request used {coins} coins ({tier} tier).",
   "pv.tierNoCoins": " (not enough coins)",
   "pv.tierHintFree": "Free requests are used automatically until they run out, no matter which tier is selected here \u2014 this only decides what happens afterward, or once you buy coins.",
   "pv.tierHintSpeed": "The fastest and cheapest tier; good for simple, text-heavy UIs. Coins are bought on the Account tab.",
