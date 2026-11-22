@@ -17,9 +17,9 @@ See the LICENSE file in the root of this repository for complete details.
   import { prettyHotkey, acceleratorCombo, combosInText, comboLabel } from "./lib/hotkey";
   import { DEFAULT_THICKNESS, strokeScale } from "./lib/overlay-weight";
   import { providerName } from "./lib/providers";
-  import { billing, MICRO_PER_COIN } from "./lib/billing.svelte";
+  import { billing, MICRO_PER_COIN, TIER_COINS, requestsPerTier } from "./lib/billing.svelte";
   import { account } from "./lib/account.svelte";
-  import { i18n, t, packStarter, fmtNum, fmtDate, localeFromTag, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
+  import { i18n, t, packStarter, fmtNum, fmtDate, localeFromTag, siteUrl, UI_LANGUAGE_CHOICES, UI_LANGUAGE_LABELS } from "./lib/i18n.svelte";
   import type { MessageKey } from "./locales/en";
   import TrialExhaustedModal from "./TrialExhaustedModal.svelte";
   import AccountPanel from "./AccountPanel.svelte";
@@ -2533,7 +2533,7 @@ See the LICENSE file in the root of this repository for complete details.
     billing.clearPromoGranted();
     await addToHistory(
       "system",
-      t("msg.coinsGranted", { coins: fmtNum(coins) }),
+      t("msg.coinsGranted", { coins: fmtNum(coins), ...requestsPerTier(coins, fmtNum) }),
     );
   }
 
@@ -3808,7 +3808,6 @@ See the LICENSE file in the root of this repository for complete details.
     const key = TIER_KEYS[tier];
     return key ? t(key) : tier;
   }
-  const TIER_COINS: Record<string, number> = { free: 0, speed: 6, regular: 12, smart: 18 };
   // Greys out a paid tier's <option> when the current coin balance can't
   // cover even one request at it — purely a UI hint (picking a disabled
   // option isn't possible, so this can't desync from the relay's own
@@ -4940,7 +4939,7 @@ See the LICENSE file in the root of this repository for complete details.
                the guide's Blender section (privacy.html §3 is the formal version). -->
           <button
             class="stale-action addon-what"
-            onclick={() => openUrl("https://navisualguide.com/docs.html#apps")}
+            onclick={() => openUrl(siteUrl("docs.html#apps"))}
             title={t("addon.whatTitle")}>{t("addon.what")}</button>
           <button class="stale-action" onclick={installBlenderAddon}>{t("addon.installBtn")}</button>
         {:else if addonPrompt === "installing"}
@@ -5499,7 +5498,7 @@ See the LICENSE file in the root of this repository for complete details.
                  whole sentence in `policyAfter`. A single interpolated string would have
                  forced English word order onto every locale. -->
             {t("privacy.policyBefore")}
-            <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("privacy.policyLink")}</button>
+            <button class="legal-link" onclick={() => openUrl(siteUrl("privacy.html"))}>{t("privacy.policyLink")}</button>
             {t("privacy.policyAfter")}
           </p>
           <button
@@ -6069,7 +6068,7 @@ See the LICENSE file in the root of this repository for complete details.
                 {t("sg.whatYouTypeHint")}
                 <br><br>
                 <strong>{t("sg.whatYouTypeLocal")}</strong> {t("sg.whatYouTypeByok")}
-                <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("sg.privacyPolicy")}</button>
+                <button class="legal-link" onclick={() => openUrl(siteUrl("privacy.html"))}>{t("sg.privacyPolicy")}</button>
               </p>
             </div>
 
@@ -6264,13 +6263,13 @@ See the LICENSE file in the root of this repository for complete details.
           <p class="about-tagline">{t("about.tagline")}</p>
           <p class="about-disclaimer">{t("about.disclaimer")}</p>
           <div class="about-links">
-            <button class="about-link" onclick={() => openUrl("https://navisualguide.com/docs.html")}>{t("about.userGuide")}</button>
+            <button class="about-link" onclick={() => openUrl(siteUrl("docs.html"))}>{t("about.userGuide")}</button>
             <!-- The first-run notice is shown once per install and has no reopen path,
                  so without this the policy was unreachable from inside a screen-reading
                  app. It is also what makes the notice's "reopen it any time from About"
                  true. -->
-            <button class="about-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("about.privacy")}</button>
-            <button class="about-link" onclick={() => openUrl("https://navisualguide.com")}>navisualguide.com</button>
+            <button class="about-link" onclick={() => openUrl(siteUrl("privacy.html"))}>{t("about.privacy")}</button>
+            <button class="about-link" onclick={() => openUrl(siteUrl())}>navisualguide.com</button>
             <button class="about-link" onclick={() => openUrl("https://github.com/NavisualGuide/navisual")}>GitHub</button>
             <button class="about-link" onclick={openFeedbackEmail}>{t("about.sendFeedback")}</button>
           </div>

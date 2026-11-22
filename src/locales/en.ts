@@ -558,7 +558,7 @@ export const en = {
   "msg.autopilotPaused": "Autopilot paused \u2014 the screen kept changing without a clear next step. Turn it back on when you're ready.",
   "msg.autopilotPausedFreeLow": "Autopilot paused so it doesn't spend your last free requests on its own ({n} left). Press \u2192 Next for each step, or turn it back on.",
   "msg.providerSwitched": "AI provider switched to {provider}",
-  "msg.coinsGranted": "🎁 {coins} coins added to your account \u2014 thanks for signing up. They work on the faster quality tiers; Navisual stays free either way.",
+  "msg.coinsGranted": "🎁 {coins} coins added to your account \u2014 thanks for signing up. That is about {speed} requests on Speed, {regular} on Regular or {smart} on Smart; Navisual stays free either way.",
   "msg.exported": "Exported {n} session(s) to {folder}",
   "msg.exportFailed": "Could not export the sessions: {error}",
   "msg.openedWithPics": "Opened from a file. It joins your recent tasks only if you carry on working in it.",
@@ -643,7 +643,7 @@ export const en = {
 
   // ── Signup promotion ──────────────────────────────────────────────────────
   "promo.headline": "Create a free account and get {coins} coins.",
-  "promo.sub": "Enough to try the faster, smarter models on the Navisual relay. Navisual stays free to use",
+  "promo.sub": "About {speed} requests on Speed, {regular} on Regular or {smart} on Smart. Navisual stays free to use",
   "promo.ends": " — offer ends {date}",
 
   // ── No-target offer + backend error codes ──

@@ -170,3 +170,19 @@ export function fmtNum(n: number): string {
 export function fmtDate(d: Date, opts?: Intl.DateTimeFormatOptions): string {
   return d.toLocaleDateString(intlLocale(), opts);
 }
+
+/** The pages navisualguide.com has a Chinese edition of, under /zh/. */
+const ZH_SITE_PAGES = new Set(["", "docs.html", "privacy.html", "terms.html"]);
+
+/**
+ * A page on navisualguide.com in the interface's language: `siteUrl("docs.html#apps")`.
+ *
+ * The Chinese editions are written in Simplified Chinese only, and a Traditional reader gets
+ * them too: closer than English. A page with no Chinese edition opens in English. The
+ * Chinese privacy policy and terms say the English text governs where the two differ.
+ */
+export function siteUrl(page = ""): string {
+  const [path, anchor] = page.split("#");
+  const zh = i18n.locale !== "en" && ZH_SITE_PAGES.has(path);
+  return `https://navisualguide.com/${zh ? "zh/" : ""}${path}${anchor ? `#${anchor}` : ""}`;
+}

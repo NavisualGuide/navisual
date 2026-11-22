@@ -10,7 +10,7 @@
   // response (billing.promoOffer), so closing or resizing the campaign changes what the
   // app says without a release. When no campaign is live the component renders nothing at
   // all, which is what retires the message everywhere at once.
-  import { billing } from "./lib/billing.svelte";
+  import { billing, requestsPerTier } from "./lib/billing.svelte";
   import { t, fmtNum, fmtDate } from "./lib/i18n.svelte";
   import { account } from "./lib/account.svelte";
 
@@ -41,7 +41,7 @@
     <div class="promo-text">
       <strong>{t("promo.headline", { coins: fmtNum(billing.promoOffer!.coins) })}</strong>
       <span class="promo-sub">
-        {t("promo.sub")}{deadline ? t("promo.ends", { date: deadline }) : ""}.
+        {t("promo.sub", requestsPerTier(billing.promoOffer!.coins, fmtNum))}{deadline ? t("promo.ends", { date: deadline }) : ""}.
       </span>
     </div>
   </div>

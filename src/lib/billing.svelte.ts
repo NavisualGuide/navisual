@@ -29,6 +29,21 @@ export interface BalanceInfo {
 /** 1 coin = $0.005 = 5,000 µ$ — fixed forever (S.2 coin model). */
 export const MICRO_PER_COIN = 5_000;
 
+/** Coins per request on each managed tier. The relay's prices are the real ones; these
+ *  drive the picker's hints and the per-tier counts below. */
+export const TIER_COINS: Record<string, number> = { free: 0, speed: 6, regular: 12, smart: 18 };
+
+/** How many requests `coins` buys on each paid tier, formatted with `fmt`. "The faster
+ *  models" read as Speed while the figure beside it was Regular's (2026-11-22), so every
+ *  sentence that counts requests names all three. */
+export function requestsPerTier(coins: number, fmt: (n: number) => string) {
+  return {
+    speed: fmt(Math.floor(coins / TIER_COINS.speed)),
+    regular: fmt(Math.floor(coins / TIER_COINS.regular)),
+    smart: fmt(Math.floor(coins / TIER_COINS.smart)),
+  };
+}
+
 class Billing {
   /** Free requests remaining on this device; null = not yet known. */
   freeRemaining = $state<number | null>(null);

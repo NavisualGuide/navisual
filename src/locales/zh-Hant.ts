@@ -536,7 +536,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "msg.autopilotPaused": "自動推進已暫停 —— 畫面一直在變，但沒有明確的下一步。你準備好了再打開它。",
   "msg.autopilotPausedFreeLow": "自動推進已暫停，免得它自己用完你最後的免費次數（還剩 {n} 次）。請按「下一步」逐步繼續，或重新開啟它。",
   "msg.providerSwitched": "AI 服務商已切換為 {provider}",
-  "msg.coinsGranted": "🎁 {coins} 金幣已存入你的帳戶 —— 感謝註冊。金幣可用於更快的品質等級；不用它 Navisual 也一直免費。",
+  "msg.coinsGranted": "🎁 {coins} 金幣已存入你的帳戶 —— 感謝註冊。速度檔約 {speed} 次，主力檔約 {regular} 次，智能檔約 {smart} 次；不用它 Navisual 也一直免費。",
   "msg.exported": "已匯出 {n} 個工作階段到 {folder}",
   "msg.exportFailed": "匯出工作階段失敗：{error}",
   "msg.openedWithPics": "已從檔案開啟。只有你繼續在它裡面操作，它才會進入最近工作清單。",
@@ -620,7 +620,7 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
 
   // ── 註冊優惠 ──────────────────────────────────────────────────────────────
   "promo.headline": "註冊免費帳戶，送 {coins} 金幣。",
-  "promo.sub": "足夠你試試 Navisual 中繼上更快、更聰明的模型。Navisual 本身一直免費",
+  "promo.sub": "速度檔約 {speed} 次，主力檔約 {regular} 次，智能檔約 {smart} 次。Navisual 本身一直免費",
   "promo.ends": " —— 活動截止 {date}",
 
   // ── No-target offer + backend error codes ──

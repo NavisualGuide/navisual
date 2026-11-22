@@ -8,7 +8,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { billing } from "./lib/billing.svelte";
   import PromoOffer from "./PromoOffer.svelte";
-  import { t } from "./lib/i18n.svelte";
+  import { t, siteUrl } from "./lib/i18n.svelte";
 
   let {
     open = $bindable(false),
@@ -94,9 +94,9 @@
           <button class="btn-primary btn-full" style="margin-bottom: 6px;" onclick={() => onBuy(20)}>{t("bill.buyCoins", { amount: 20 })}</button>
           <p class="legal-agree" style="margin-bottom: 14px;">
             {t("bill.agreePrefix")}
-            <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/terms.html")}>{t("bill.terms")}</button>
+            <button class="legal-link" onclick={() => openUrl(siteUrl("terms.html"))}>{t("bill.terms")}</button>
             {t("bill.and")}
-            <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("bill.privacy")}</button>.
+            <button class="legal-link" onclick={() => openUrl(siteUrl("privacy.html"))}>{t("bill.privacy")}</button>.
           </p>
           <p style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 16px;">
             {t("trial.ownKey")}

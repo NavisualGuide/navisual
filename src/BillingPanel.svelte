@@ -6,7 +6,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { billing } from "./lib/billing.svelte";
   import PromoOffer from "./PromoOffer.svelte";
-  import { t, fmtNum } from "./lib/i18n.svelte";
+  import { t, fmtNum, siteUrl } from "./lib/i18n.svelte";
   import { providerName } from "./lib/providers";
 
   let {
@@ -95,9 +95,9 @@
 </div>
 <p class="setting-hint legal-agree">
   {t("bill.agreePrefix")}
-  <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/terms.html")}>{t("bill.terms")}</button>
+  <button class="legal-link" onclick={() => openUrl(siteUrl("terms.html"))}>{t("bill.terms")}</button>
   {t("bill.and")}
-  <button class="legal-link" onclick={() => openUrl("https://navisualguide.com/privacy.html")}>{t("bill.privacy")}</button>.
+  <button class="legal-link" onclick={() => openUrl(siteUrl("privacy.html"))}>{t("bill.privacy")}</button>.
 </p>
 <!-- Was three sentences. "If you're not signed in yet, Google sign-in runs first"
      described the pre-merge flow and is now wrong twice over: sign-in lives on this
