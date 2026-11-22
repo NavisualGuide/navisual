@@ -1198,7 +1198,7 @@ See the LICENSE file in the root of this repository for complete details.
   const MODEL_PRESETS_GEMINI    = ["gemini-3.8-flash","gemini-2.5-flash-lite","gemini-4-argon","gemini-3.1-pro-preview","gemini-2.5-flash"];
   const MODEL_PRESETS_OPENAI    = ["gpt-6.1-sol","gpt-6-luna","gpt-6-astra"];
   const MODEL_PRESETS_DEEPSEEK  = ["deepseek-flash","deepseek-v4-pro"];
-  const MODEL_PRESETS_QWEN      = ["qwen3.8-max","qwen3.7-flash","qwen3.5-omni-plus"];
+  const MODEL_PRESETS_QWEN      = ["qwen3.8-omni-flash","qwen4-max"];
   // Qwen DashScope OpenAI-compatible endpoints by region. Picking a region in the
   // Settings "Endpoint" dropdown auto-fills qwen_base_url; "Custom" reveals a free
   // field for local servers (LM Studio / llama.cpp) and workspace URLs (e.g. HK ws-xxx…).
@@ -5823,14 +5823,13 @@ See the LICENSE file in the root of this repository for complete details.
                 <select id="qwen-model" class="setting-select"
                   value={customQwen ? "__custom__" : settingsForm.qwen_model}
                   onchange={(e) => { const v = e.currentTarget.value; if (v !== "__custom__") { customQwen = false; settingsForm.qwen_model = v; } else { customQwen = true; settingsForm.qwen_model = ""; } }}>
-                  <option value="qwen3.8-max">qwen3.8-max {t("pv.qRecommended")}</option>
-                  <option value="qwen3.7-flash">qwen3.7-flash {t("pv.qCheapVision")}</option>
-                  <option value="qwen3.5-omni-plus">qwen3.5-omni-plus {t("pv.qMultimodal")}</option>
+                  <option value="qwen3.8-omni-flash">qwen3.8-omni-flash {t("pv.qRecommended")}</option>
+                  <option value="qwen4-max">qwen4-max {t("pv.qBest")}</option>
                   <option value="__custom__">{t("pv.customModel")}</option>
                 </select>
                 {#if customQwen}
                   <input class="setting-input" type="text" bind:value={settingsForm.qwen_model}
-                    placeholder="e.g. qwen3.8-max" spellcheck="false" style="margin-top:6px" />
+                    placeholder="e.g. qwen3.8-omni-flash" spellcheck="false" style="margin-top:6px" />
                 {/if}
               </div>
               <div class="setting-group">

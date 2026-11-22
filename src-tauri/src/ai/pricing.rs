@@ -93,6 +93,14 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // in the whole table.
         "qwen3.8-max" => (2.00, 6.00),
         "qwen3.7-flash" => (0.03, 0.13),
+        // 2026-11-20 China-roster pass (model-comparison.md). qwen4-max at QwenCloud's USD
+        // rate; DashScope Beijing bills CNY 10 / 30, about the same. qwen3.7-plus and
+        // qwen3.8-omni-flash from Beijing's CNY list (2 / 8 and 0.8 / 2.7) at ~7.1 CNY to the
+        // dollar. Kimi K3 is served through DashScope Beijing, CNY 20 / 100, thinking only.
+        "qwen4-max" => (1.50, 4.50),
+        "qwen3.7-plus" => (0.28, 1.13),
+        "qwen3.8-omni-flash" => (0.11, 0.38),
+        "kimi-k3" | "kimi/kimi-k3" => (2.82, 14.10),
         "qwen3.6-plus" => (0.16, 2.87),  // superseded by qwen3.8-max
         "qwen3.6-flash" => (0.10, 1.00), // superseded by qwen3.7-flash
         _ => return None,
