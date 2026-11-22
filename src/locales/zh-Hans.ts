@@ -325,6 +325,9 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "about.installRestart": "安装并重启",
   "about.checking": "正在检查更新\u2026",
   "about.checkUpdates": "检查更新",
+  "about.upToDate": "已是最新版本（v{version}）。",
+  "about.checkFailed": "检查更新失败。请检查网络，或到 navisualguide.com 下载最新版本。",
+  "about.installFailed": "更新没有安装成功。请再试一次，或到 navisualguide.com 下载最新版本。",
   "about.license": "采用 FSL-1.1-ALv2 许可 —— 每个版本发布两年后转为 Apache 2.0。",
   "about.blenderNotice": "内置的 Blender Nav-Pack 引用了 Blender 自己的图标设计（© Blender Foundation），仅用于屏幕上的指引。Blender 是 Blender Foundation 的注册商标。Navisual 与 Blender Foundation 无关联，也未获其认可。",
 

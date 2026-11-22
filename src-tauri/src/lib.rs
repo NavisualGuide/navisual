@@ -3594,6 +3594,16 @@ fn log_voice(line: String) {
     log::info!("[voice] {line}");
 }
 
+/// The updater runs from the webview, and the panel swallowed every failure: a manual check that
+/// failed, or an install whose download or signature failed, left no line saying which check it
+/// was or how it ended (2026-11-22, a mainland machine that could not reach GitHub). One line per
+/// failure (rule 1). Capped, because the text comes from the webview.
+#[tauri::command]
+fn log_update(line: String) {
+    let line: String = line.chars().take(300).collect();
+    log::warn!("[update] {line}");
+}
+
 /// Deployment status of the pack-shipped Blender add-on (the script-channel bridge):
 /// which Blender installs exist, whether each has the add-on, and whether any is older
 /// than the version the pack ships. Drives the panel's install prompt.
@@ -9444,6 +9454,7 @@ pub fn run() {
             combos_held_elsewhere,
             log_hotkeys,
             log_voice,
+            log_update,
             install_blender_addon,
             speak,
             get_settings,

@@ -342,6 +342,9 @@ export const en = {
   "about.installRestart": "Install & restart",
   "about.checking": "Checking for updates\u2026",
   "about.checkUpdates": "Check for updates",
+  "about.upToDate": "You have the latest version (v{version}).",
+  "about.checkFailed": "Couldn't check for updates. Check your connection, or download the latest version from navisualguide.com.",
+  "about.installFailed": "The update couldn't be installed. Try again, or download the latest version from navisualguide.com.",
   "about.license": "Licensed under FSL-1.1-ALv2 \u2014 converts to Apache 2.0 two years after each release.",
   "about.blenderNotice": "The bundled Blender Nav-Pack references Blender's own icon designs (\u00a9 Blender Foundation) for on-screen guidance only. Blender is a registered trademark of the Blender Foundation. Navisual is not affiliated with or endorsed by the Blender Foundation.",
 
