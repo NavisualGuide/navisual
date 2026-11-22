@@ -1100,6 +1100,11 @@ See the LICENSE file in the root of this repository for complete details.
   let appVersion = $state("…");
   let pendingUpdate = $state<Update | null>(null);
   let updateStatus = $state<"idle" | "checking" | "downloading" | "done">("idle");
+  // What the last check or install the user asked for came to. Before 2026-11-22 a manual check
+  // that found nothing, or failed, just put the button back: from a mainland machine that could
+  // not reach GitHub, "already up to date" and "never got through" looked the same ("没反应").
+  // The background check at startup stays silent and never sets this.
+  let updateNote = $state<"" | "latest" | "checkFailed" | "installFailed">("");
   let updateProgress = $state(0);
   // True when running under MSIX package identity (Microsoft Store / sideloaded
   // MSIX) rather than the NSIS install or dev. The Store requires updates to flow
@@ -1790,15 +1795,21 @@ See the LICENSE file in the root of this repository for complete details.
     if (isPackaged) return;
     if (updateStatus === "checking" || updateStatus === "downloading") return;
     updateStatus = "checking";
+    if (manual) updateNote = "";
     try {
       const update = await checkUpdate();
       if (update?.available) {
         pendingUpdate = update;
+        updateNote = "";
       } else if (manual) {
         pendingUpdate = null;
+        updateNote = "latest";
       }
-    } catch (_) {
-      // Silently ignore network errors on background check
+    } catch (e) {
+      // The background check stays quiet; one the user asked for says it failed. The plugin
+      // logs each endpoint's own error; this line says which check it was and how it ended.
+      if (manual) updateNote = "checkFailed";
+      logUpdate(`${manual ? "manual" : "background"} check failed: ${String(e)}`);
     } finally {
       if (updateStatus === "checking") updateStatus = "idle";
     }
@@ -1827,9 +1838,17 @@ See the LICENSE file in the root of this repository for complete details.
       // downloadAndInstall has resolved → NSIS has been spawned and is
       // waiting for us to exit so it can replace the locked binary.
       invoke("exit_for_update").catch(() => {});
-    } catch (_) {
+    } catch (e) {
+      // A failed download or a bad signature used to drop back to the Install button with no
+      // word and no log line.
       updateStatus = "idle";
+      updateNote = "installFailed";
+      logUpdate(`install of v${pendingUpdate?.version ?? "?"} failed: ${String(e)}`);
     }
+  }
+
+  function logUpdate(line: string) {
+    invoke("log_update", { line }).catch(() => {});
   }
 
   function toggleMute() {
@@ -2423,6 +2442,8 @@ See the LICENSE file in the root of this repository for complete details.
   function openAbout(tab: "about" | "usage" = "about") {
     aboutTab = tab;
     if (tab === "usage") loadUsage();
+    // A fresh look at About should not show an hours-old "up to date".
+    if (!showAbout) updateNote = "";
     showAbout = true;
   }
 
@@ -6258,6 +6279,13 @@ See the LICENSE file in the root of this repository for complete details.
                it gets a plain statement of fact instead of a control that would
                either do nothing or violate Store policy. -->
           <div class="about-update">
+            {#if !isPackaged && updateStatus === "idle" && updateNote}
+              {#if updateNote === "latest"}
+                <span class="update-status">{t("about.upToDate", { version: appVersion })}</span>
+              {:else}
+                <span class="update-status update-failed" role="alert">{t(updateNote === "checkFailed" ? "about.checkFailed" : "about.installFailed")}</span>
+              {/if}
+            {/if}
             {#if isPackaged}
               <span class="update-status">{t("about.storeUpdates")}</span>
             {:else if updateStatus === "downloading"}
@@ -9024,6 +9052,10 @@ See the LICENSE file in the root of this repository for complete details.
   .update-avail {
     color: var(--warning);
     font-weight: 600;
+  }
+
+  .update-failed {
+    color: var(--warning);
   }
 
   .update-done {
