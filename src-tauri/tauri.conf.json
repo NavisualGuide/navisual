@@ -51,6 +51,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk3QUIzQTUxNUExRkE0QQpSV1JLK3FFVnBiTjZDVTczVHltVTdjdW5VUFNUM1pPK0p4TVpaOWRpNVB5Unpzdm15OUl6cGpZbQo=",
       "endpoints": [
+        "https://gwekzberpfuxsoddwwqj.supabase.co/storage/v1/object/public/releases/latest.json",
         "https://github.com/NavisualGuide/navisual/releases/latest/download/latest.json"
       ]
     }
