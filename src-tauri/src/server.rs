@@ -200,9 +200,10 @@ pub async fn get_balance(supabase_url: &str, access_token: &str) -> Result<Balan
 }
 
 /// The `Authorization` bearer for a PostgREST call: the user's JWT when there is one, else
-/// the project key only if it is a legacy JWT key (`eyJ...`). Supabase's new publishable key
-/// (`sb_publishable_...`) is not a JWT and is rejected as a bearer; it goes on `apikey` alone,
-/// which already maps the request to the anon role.
+/// the project key only if it is a legacy JWT key (`eyJ...`). Supabase's publishable key
+/// (`sb_publishable_...`) is not a JWT, and its docs say to send it on `apikey` only, which
+/// already maps the request to the anon role. (Measured 2026-11-22: PostgREST also accepted
+/// it as a bearer, so this follows the documented form rather than fixing a live failure.)
 fn postgrest_bearer<'a>(access_token: Option<&'a str>, project_key: &'a str) -> Option<&'a str> {
     access_token.or_else(|| project_key.starts_with("eyJ").then_some(project_key))
 }
