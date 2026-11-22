@@ -469,8 +469,6 @@ export const en = {
   "pv.qBest": "(best quality)",
   "pv.qRecommendedSeesScreen": "(recommended, sees the screen)",
   "pv.qBestTextOnly": "(best quality, text-only)",
-  "pv.qMultimodal": "(multimodal)",
-  "pv.qCheapVision": "(fast, cheapest vision pick)",
 
   // Provider picker
   "pv.optManaged": "Managed \u2014 free + paid",

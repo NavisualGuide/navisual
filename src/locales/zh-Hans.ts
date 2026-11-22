@@ -451,8 +451,6 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "pv.qBest": "（质量最好）",
   "pv.qRecommendedSeesScreen": "（推荐，能看屏幕）",
   "pv.qBestTextOnly": "（质量最好，纯文本）",
-  "pv.qMultimodal": "（多模态）",
-  "pv.qCheapVision": "（快，最便宜的视觉选择）",
 
   "pv.optManaged": "托管 —— 免费 + 付费",
   "pv.optCustom": "自定义（OpenAI 兼容）",

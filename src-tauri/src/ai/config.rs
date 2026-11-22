@@ -286,7 +286,9 @@ impl Default for Config {
             deepseek_api_key: None,
             deepseek_model: crate::ai::deepseek::FLASH.to_string(),
             qwen_api_key: None,
-            qwen_model: "qwen3.8-max".to_string(),
+            // S1 2026-11-20 (model-comparison.md): 23/24 against qwen3.8-max's 21/24, at a
+            // twentieth of the price. qwen4-max boxes better but needed the bare-array parse.
+            qwen_model: "qwen3.8-omni-flash".to_string(),
             qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             custom_api_key: None,
             custom_model: String::new(),

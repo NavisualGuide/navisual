@@ -452,8 +452,6 @@ export const zhHant: Partial<Record<MessageKey, string>> = {
   "pv.qBest": "（品質最好）",
   "pv.qRecommendedSeesScreen": "（推薦，看得到畫面）",
   "pv.qBestTextOnly": "（品質最好，純文字）",
-  "pv.qMultimodal": "（多模態）",
-  "pv.qCheapVision": "（快，最便宜的視覺選擇）",
 
   "pv.optManaged": "託管 —— 免費 + 付費",
   "pv.optCustom": "自訂（OpenAI 相容）",

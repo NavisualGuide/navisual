@@ -879,9 +879,19 @@ fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    let mut stream =
-        serde_json::Deserializer::from_str(stripped).into_iter::<NavigateStepResponse>();
-    if let Some(Ok(mut resp)) = stream.next() {
+    let first = if stripped.starts_with('[') {
+        serde_json::Deserializer::from_str(stripped)
+            .into_iter::<Value>()
+            .next()
+            .and_then(|v| v.ok())
+            .and_then(answer_from_array)
+    } else {
+        serde_json::Deserializer::from_str(stripped)
+            .into_iter::<NavigateStepResponse>()
+            .next()
+            .and_then(|r| r.ok())
+    };
+    if let Some(mut resp) = first {
         if !resp.steps.is_empty() {
             return Some(resp);
         }
@@ -911,6 +921,42 @@ fn parse_first_nav_response(text: &str) -> Option<NavigateStepResponse> {
         return Some(resp);
     }
     None
+}
+
+/// An answer that came back as a JSON array instead of the schema's object. `qwen4-max` did
+/// this in 15 of 24 S1 answers (2026-11-20, model-comparison.md), in three shapes: the bare
+/// `steps` list (most), the whole answer object inside a one-item array, and a tool call
+/// written out as text (`[{"id", "name": "navigate_step", "input": {...}}]`). Without this
+/// each fell through to `wrap_as_single_step`, so the user saw raw JSON as the instruction and
+/// got no pointer. A bare list carries no goal, plan or summary, which leaves them unchanged.
+/// `None` when the array is none of these, so the caller still wraps it.
+fn answer_from_array(value: Value) -> Option<NavigateStepResponse> {
+    let Value::Array(items) = value else {
+        return None;
+    };
+    if let [only] = items.as_slice() {
+        let inner = if only.get("steps").is_some() {
+            Some(only.clone())
+        } else {
+            // A tool call's arguments arrive as an object or as a JSON string.
+            only.get("input").or_else(|| only.get("arguments")).map(|a| match a {
+                Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
+                other => other.clone(),
+            })
+        };
+        if let Some(Ok(resp)) = inner.map(serde_json::from_value::<NavigateStepResponse>) {
+            log::info!("[parse] answer came inside a one-item array; unwrapped");
+            return Some(resp);
+        }
+    }
+    let steps: Vec<GuidanceStep> = serde_json::from_value(Value::Array(items)).ok()?;
+    if steps.is_empty() {
+        return None;
+    }
+    log::info!("[parse] answer was a bare list of {} step(s); read as steps", steps.len());
+    let mut resp = wrap_as_single_step("");
+    resp.steps = steps;
+    Some(resp)
 }
 
 /// Wrap arbitrary text as a single-step response so non-empty but unparseable
@@ -1097,6 +1143,54 @@ mod tests {
         assert!(!takes_images("deepseek-v4-pro"));
         assert!(!takes_images("deepseek-chat"));
         assert!(!takes_images(""));
+    }
+
+    // The three array shapes qwen4-max answered with on S1 (2026-11-20).
+    #[test]
+    fn a_bare_list_of_steps_is_read_as_the_steps() {
+        let text = r#"[
+  {"instruction": "Click the zoom out button", "target_text": "Zoom out",
+   "target_bbox": [975, 928, 995, 942]},
+  {"instruction": "Check the page", "checkpoint": true}
+]"#;
+        let resp = parse_first_nav_response(text).expect("parsed");
+        assert_eq!(resp.steps.len(), 2);
+        assert_eq!(resp.steps[0].target_text.as_deref(), Some("Zoom out"));
+        assert_eq!(resp.steps[0].target_bbox, Some([975.0, 928.0, 995.0, 942.0]));
+        // Nothing raw reaches the user.
+        assert!(!resp.steps[0].instruction.contains('{'));
+        assert!(resp.goal.is_empty());
+    }
+
+    #[test]
+    fn a_whole_answer_inside_an_array_is_unwrapped() {
+        let text = r#"```json
+[{"steps": [{"instruction": "Click Align Right", "target_text": "Align Right"}],
+  "goal": "Right-align the paragraph", "state_summary": "Word is open", "needs_input": false}]
+```"#;
+        let resp = parse_first_nav_response(text).expect("parsed");
+        assert_eq!(resp.steps[0].instruction, "Click Align Right");
+        assert_eq!(resp.goal, "Right-align the paragraph");
+    }
+
+    #[test]
+    fn a_tool_call_written_as_text_is_unwrapped() {
+        let text = r#"[{"id": "call_1e56", "name": "navigate_step",
+  "input": {"steps": [{"instruction": "Click Align Right"}], "state_summary": "s"}}]"#;
+        assert_eq!(parse_first_nav_response(text).expect("parsed").steps[0].instruction, "Click Align Right");
+        let as_string = r#"[{"name": "navigate_step",
+  "arguments": "{\"steps\": [{\"instruction\": \"Click Align Right\"}]}"}]"#;
+        assert_eq!(parse_first_nav_response(as_string).expect("parsed").steps[0].instruction, "Click Align Right");
+    }
+
+    #[test]
+    fn an_array_that_is_not_an_answer_is_still_left_to_the_wrap() {
+        assert!(parse_first_nav_response("[1, 2, 3]").is_none());
+        assert!(parse_first_nav_response("[]").is_none());
+        assert!(parse_first_nav_response(r#"[{"label": "no instruction here"}]"#).is_none());
+        // The object path is unchanged.
+        let obj = r#"{"steps": [{"instruction": "Click OK"}], "state_summary": "s"}"#;
+        assert_eq!(parse_first_nav_response(obj).expect("parsed").steps[0].instruction, "Click OK");
     }
 
     #[test]

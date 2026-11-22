@@ -255,7 +255,8 @@ impl RunConfig {
             .unwrap_or_else(|| {
                 let tag = if variant.is_empty() { String::new() } else { format!("-{variant}") };
                 dir.join("results")
-                    .join(format!("{battery}-{provider}-{model}{tag}-{stamp}.jsonl"))
+                    // A gateway model name such as `kimi/kimi-k3` must not become a folder.
+                    .join(format!("{battery}-{provider}-{}{tag}-{stamp}.jsonl", model.replace('/', "_")))
             });
         Self {
             dir,
@@ -729,7 +730,26 @@ fn base_config(rc: &RunConfig) -> Config {
         "gemini" => config.gemini_model = rc.model.clone(),
         "openai" => config.openai_model = rc.model.clone(),
         "anthropic" => config.anthropic_model = rc.model.clone(),
-        other => panic!("provider {other:?} is not a BYOK eval target (gemini | openai | anthropic)"),
+        // The Qwen provider is whatever QWEN_BASE_URL in the .env names; on DashScope Beijing
+        // that endpoint also serves other vendors' models by name (kimi/kimi-k3).
+        "qwen" => config.qwen_model = rc.model.clone(),
+        "deepseek" => config.deepseek_model = rc.model.clone(),
+        // The managed client against a stand-in for the relay on this machine, which makes the
+        // relay's changes to the body and forwards it on a BYOK key: a way to measure the
+        // relay's request shape (forced tool call, no streaming) on a model the relay does not
+        // route yet. Never production: that would spend coins and write feedback rows.
+        "managed" => {
+            let url = std::env::var("NAVISUAL_EVAL_RELAY_URL").unwrap_or_default();
+            assert!(
+                url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:"),
+                "a managed target needs NAVISUAL_EVAL_RELAY_URL on this machine, got {url:?}"
+            );
+            config.supabase_url = Some(url);
+            config.managed_model = rc.model.clone();
+        }
+        other => panic!(
+            "provider {other:?} is not an eval target (gemini | openai | anthropic | qwen | deepseek | managed)"
+        ),
     }
     config.reasoning_effort = rc.reasoning.clone();
     // Set from the variant alone, never inherited from the .env: a hand-set EXPECTED_RESULT
