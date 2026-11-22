@@ -219,33 +219,96 @@ jobs:
           echo "stable_exe=$stableExe"          >> $env:GITHUB_OUTPUT
           echo "stable_sig=$stableSig"          >> $env:GITHUB_OUTPUT
 
+      # Two manifests, identical but for where the installer is fetched from: the
+      # GitHub one (latest.json) and the Supabase one (supabase/latest.json). The
+      # updater reads Supabase first, GitHub second (tauri.conf.json), and
+      # downloads from whichever manifest answered -- so each manifest must point
+      # at its own host. github.com is unreachable on some mainland routes
+      # (Alibaba Cloud Chengdu, 2026-11-22), Supabase is reachable wherever the
+      # relay is.
       - name: Generate latest.json
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
           $sig = Get-Content "${{ steps.assets.outputs.stable_sig }}" -Raw -ErrorAction SilentlyContinue
+          if (-not $sig -or -not $sig.Trim()) { throw "updater signature is empty" }
+          $exeName = Split-Path -Leaf "${{ steps.assets.outputs.versioned_exe }}"
 
-          # Stable URL — points to the latest published release's stable-named asset.
-          $downloadUrl = "https://github.com/NavisualGuide/navisual/releases/latest/download/Navisual-Setup.exe"
-
-          $manifest = @{
-            version   = $version
-            notes     = "See https://github.com/NavisualGuide/navisual/releases/tag/v$version"
-            pub_date  = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-            platforms = @{
-              "windows-x86_64" = @{
-                url       = $downloadUrl
-                signature = if ($sig) { $sig.Trim() } else { "" }
+          function Write-Manifest([string]$url, [string]$path) {
+            @{
+              version   = $version
+              notes     = "See https://github.com/NavisualGuide/navisual/releases/tag/v$version"
+              pub_date  = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+              platforms = @{
+                "windows-x86_64" = @{
+                  url       = $url
+                  signature = $sig.Trim()
+                }
               }
-            }
-          } | ConvertTo-Json -Depth 5
-          $manifest | Out-File -FilePath latest.json -Encoding utf8
+            } | ConvertTo-Json -Depth 5 | Out-File -FilePath $path -Encoding utf8
+          }
+
+          # GitHub: the stable URL of the latest published release.
+          Write-Manifest "https://github.com/NavisualGuide/navisual/releases/latest/download/Navisual-Setup.exe" "latest.json"
+          # Supabase: the VERSIONED path, so the signature always matches the file
+          # even while the stable copy is being replaced.
+          New-Item -ItemType Directory -Force supabase | Out-Null
+          Write-Manifest "$env:SUPABASE_RELEASES_PUBLIC/v$version/$exeName" "supabase/latest.json"
+        env:
+          SUPABASE_RELEASES_PUBLIC: https://gwekzberpfuxsoddwwqj.supabase.co/storage/v1/object/public/releases
+
+      # Supabase Storage, through its S3 endpoint, with a key that can only reach
+      # Storage (not the service-role key). BEFORE the GitHub release, so a
+      # failure here stops the run with nothing published anywhere. Order matters:
+      # the installer first, the manifest last, so the manifest never names a file
+      # that is not there yet. The updater stops at the first manifest it can read,
+      # even an old one -- a stale Supabase latest.json would hold back EVERY
+      # install -- so the step ends by reading the public manifest back.
+      - name: Upload to Supabase Storage
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          # Newer AWS CLIs add CRC checksums S3-compatible stores may reject.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          S3_ENDPOINT: https://gwekzberpfuxsoddwwqj.storage.supabase.co/storage/v1/s3
+          SUPABASE_RELEASES_PUBLIC: https://gwekzberpfuxsoddwwqj.supabase.co/storage/v1/object/public/releases
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $exe = "${{ steps.assets.outputs.versioned_exe }}"
+          $sig = "${{ steps.assets.outputs.versioned_sig }}"
+          $exeName = Split-Path -Leaf $exe
+
+          function Put([string]$file, [string]$key, [string]$type) {
+            aws s3 cp $file "s3://releases/$key" --endpoint-url $env:S3_ENDPOINT `
+              --content-type $type --cache-control "no-cache" --only-show-errors
+            if ($LASTEXITCODE -ne 0) { throw "upload failed: $key" }
+            Write-Host "uploaded $key"
+          }
+
+          Put $exe "v$version/$exeName" "application/octet-stream"
+          Put $sig "v$version/$exeName.sig" "text/plain"
+          Put $exe "Navisual-Setup.exe" "application/octet-stream"
+          Put "supabase/latest.json" "latest.json" "application/json"
+
+          # Read it back as a client would.
+          $m = Invoke-RestMethod "$env:SUPABASE_RELEASES_PUBLIC/latest.json?check=$([guid]::NewGuid())"
+          if ($m.version -ne $version) { throw "public latest.json says $($m.version), expected $version" }
+          if (-not $m.platforms.'windows-x86_64'.signature) { throw "public latest.json has no signature" }
+          $url = $m.platforms.'windows-x86_64'.url
+          $head = Invoke-WebRequest $url -Method Head
+          $want = (Get-Item $exe).Length
+          if ([int64]$head.Headers['Content-Length'][0] -ne $want) { throw "installer at $url is not $want bytes" }
+          Write-Host "Supabase manifest $version -> $url ($want bytes)"
 
       # Publish GitHub Release with all assets. Auto-marked as "latest" by
       # GitHub when the tag is the highest semver. The stable URLs
       #   .../releases/latest/download/Navisual-Setup.exe
       #   .../releases/latest/download/latest.json
-      # are used by the website and the Tauri auto-updater respectively.
+      # are the updater's second endpoint and a fallback download; the website and
+      # the updater's first endpoint are the Supabase copies uploaded above.
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
