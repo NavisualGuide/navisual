@@ -189,16 +189,18 @@ actions — the user does everything.
     milestones toward the goal — a route overview the user can open from a
     "Working on: ..." panel, like a map app showing the whole trip rather
     than only the next turn. Not turn-by-turn (steps/instruction already
-    cover that) and not required for a simple one-step task. REVISE the
-    whole list — replace it, don't append — whenever a step succeeds, fails,
-    or your understanding of the route otherwise changes; a stale plan is
-    worse than none. Omit the field to leave whatever you set last unchanged.
-    Also set plan_completed_count (top-level, next to plan_outline) to how
-    many of its milestones are already done, counting from the first (0 =
-    still on the first one). Update it as milestones finish, and again
-    whenever you revise plan_outline itself — count against the NEW list,
-    not the old one. Omit to leave the previous count unchanged; it means
-    nothing without plan_outline, so omit both together.
+    cover that) and not required for a simple one-step task. [Planned route]
+    in the message shows the list you set earlier and how far along it is.
+    KEEP IT STEADY: when a milestone is done, raise plan_completed_count and
+    leave plan_outline out, so the list the user is watching stays as it
+    is. Send a new plan_outline only when the route itself changes — a step
+    failed, the screen is not what the plan expected, or the user changed
+    the goal — and keep the milestones already done at its front, in order,
+    so the progress shown never moves backwards. A stale plan is worse than
+    none. plan_completed_count (top-level, next to plan_outline) is how many
+    milestones are done, counting from the first (0 = still on the first
+    one); count against the new list whenever you send one, and omit it to
+    leave the count as it is.
 
 Use the navigate_step tool for all responses."#;
 
@@ -241,6 +243,13 @@ pub const STATE_SUMMARY_FIELD: &str = "Your ONLY memory between turns — earlie
 /// what to write: the request does that, only on the turn a note was written.
 pub const APP_NOTE_FIELD: &str = "Only when the prompt asks for a learned note: that one line. Otherwise omit.";
 
+/// The plan fields, described once for every client that sends a schema; the DeepSeek/Qwen JSON
+/// instruction carries the same text verbatim (asserted by `field_lines_match_the_shared_text`).
+/// Until 2026-11-23 each client had its own copy telling the model to "REVISE the whole list"
+/// whenever its understanding changed, while the app never showed it the list again: the plan
+/// a user watched was redrawn from memory nine times in one 23-call session.
+pub const PLAN_OUTLINE_FIELD: &str = "A short route overview toward the goal, like a map app's route overview rather than turn-by-turn directions (that is steps/instruction): 2-8 short plain-language milestones. The user watches it as their progress. [Planned route] in the message shows the list you set earlier. Send a new list only when the route itself changes (a step failed, the screen is not what the plan expected, the user changed the goal), with the milestones already done kept at its front, in order. Omit it to leave the list as it is, which is the normal case once it is set; omit it entirely on a simple one-step task.";
+pub const PLAN_COUNT_FIELD: &str = "How many of the plan's milestones are done, counting from the first: 0 means still on the first one, 1 means the first is done and you are on the second. When a milestone finishes, send this and leave plan_outline out. When you do send a new plan_outline, count against the new list. Omit it to leave the count as it is.";
 pub const KEEP_FIELD: &str = "Facts the user may still need after they leave the screen, each copied exactly as it was shown, and only what was shown in full: never a value you completed yourself. Kept notes are never rewritten and come back on every later turn: add a fact once, and never repeat one already kept. Omit when there is nothing new.";
 
 /// The system prompt, carrying rule 19 when H1 is on.
@@ -908,8 +917,19 @@ mod tests {
             ("deepseek", crate::ai::deepseek::JSON_FORMAT_INSTRUCTION),
             ("ollama", crate::ai::ollama::JSON_FORMAT_INSTRUCTION),
         ] {
-            assert!(format.contains("- keep: facts the user may still need"), "{who}'s field line");
+            assert!(format.contains(&format!("- keep: {}", super::KEEP_FIELD)), "{who}'s field line");
         }
+    }
+
+    // The JSON instruction restates the schema in prose, and it drifted: on 2026-11-23 the new
+    // "only what was shown in full" reached every schema's keep field but not DeepSeek's line.
+    #[test]
+    fn field_lines_match_the_shared_text() {
+        let ds = crate::ai::deepseek::JSON_FORMAT_INSTRUCTION;
+        assert!(ds.contains(&format!("- plan_outline: {}", super::PLAN_OUTLINE_FIELD)));
+        assert!(ds.contains(&format!("- plan_completed_count: {}", super::PLAN_COUNT_FIELD)));
+        assert!(super::SYSTEM_PROMPT.contains("[Planned route]"), "rule 18 names the block");
+        assert!(!super::SYSTEM_PROMPT.contains("REVISE the\n    whole list"));
     }
 
     #[test]
@@ -1269,7 +1289,7 @@ mod tests {
         assert_eq!(super::SYSTEM_PROMPT.matches(super::PROMPT_TAIL).count(), 1);
         assert!(super::SYSTEM_PROMPT.ends_with(super::PROMPT_TAIL));
         let on = super::system_prompt(true);
-        assert!(on.contains("omit both together.\n19. EXPECTED RESULT:"), "rule 19 follows rule 18");
+        assert!(on.contains("leave the count as it is.\n19. EXPECTED RESULT:"), "rule 19 follows rule 18");
         assert!(on.ends_with(super::PROMPT_TAIL));
         assert_eq!(on.len(), super::SYSTEM_PROMPT.len() + 1 + super::EXPECTED_RESULT_RULE.len());
     }

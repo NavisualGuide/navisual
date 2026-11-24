@@ -3072,9 +3072,9 @@ async fn set_look_sources(
     }
 }
 
-/// The window context with the session's memory after it: the kept notes, then the list of
-/// earlier screens when that is on. Each only when it has anything in it. One function for
-/// `guide`, `send_correction` and the replay harness.
+/// The window context with the session's memory after it: the kept notes, the planned route,
+/// then the list of earlier screens when that is on. Each only when it has anything in it. One
+/// function for `guide`, `send_correction` and the replay harness.
 fn with_session_memory(
     window_context: String,
     session: Option<&crate::ai::session::Session>,
@@ -3082,7 +3082,7 @@ fn with_session_memory(
     offer_recall: bool,
 ) -> String {
     let Some(s) = session else { return window_context };
-    let mut parts = vec![window_context, s.kept_notes()];
+    let mut parts = vec![window_context, s.kept_notes(), s.planned_route()];
     if list_on {
         parts.push(s.earlier_screens(offer_recall));
     }
