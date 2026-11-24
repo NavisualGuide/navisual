@@ -28,11 +28,30 @@
 /// The prompt line for a click on `role "name"`. One function, so the replay harness reports a
 /// click in exactly the words the app uses.
 pub(crate) fn prompt_line(role: &str, name: &str) -> String {
+    // A container as the deepest element under the pointer means the thing clicked has no
+    // element of its own -- OrcaSlicer's Hostname box (wxWidgets) reports as Group "Print Host
+    // upload". Stated as a fact, it made two models tell the user "that click selected the
+    // group, not the address" over a screen showing the address scrolled to its end, and ask
+    // for the same click three more times (2026-11-23). So for a container, say what it is.
+    if is_container(role) {
+        return format!(
+            "\n[Last user action] The user clicked inside {role} \"{name}\". That names only the \
+             container: what they clicked inside it has no accessible name of its own, so it may \
+             well be the control you asked for. Judge from the screen whether the step took \
+             effect.\n"
+        );
+    }
     format!(
         "\n[Last user action] The user clicked {role} \"{name}\". Treat this as what \
          they just did — if it is not what you asked for, say so and correct course \
          instead of assuming your previous step succeeded.\n"
     )
+}
+
+/// UIA control types that only hold other controls. A click resolved to one of these landed
+/// on something the accessibility tree does not name.
+fn is_container(role: &str) -> bool {
+    matches!(role, "Group" | "Pane" | "Window" | "Custom")
 }
 
 #[cfg(windows)]
@@ -451,4 +470,17 @@ pub fn history_after(_gen: u64) -> Vec<Resolved> {
 #[cfg(not(windows))]
 pub fn last_click_at() -> Option<std::time::Instant> {
     None
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    #[test]
+    fn a_container_is_reported_as_where_the_click_landed_not_what_was_clicked() {
+        let group = super::prompt_line("Group", "Print Host upload");
+        assert!(group.contains("clicked inside Group \"Print Host upload\""), "{group}");
+        assert!(group.contains("Judge from the screen"), "{group}");
+        assert!(!group.contains("say so and correct course"), "{group}");
+        let button = super::prompt_line("Button", "Close");
+        assert!(button.contains("The user clicked Button \"Close\". Treat this as what they just did"), "{button}");
+    }
 }

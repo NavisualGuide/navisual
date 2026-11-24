@@ -8941,6 +8941,16 @@ fn is_packaged() -> bool {
     packaged
 }
 
+/// A debug build (`npm run tauri dev`) never self-updates. It runs whatever branch is checked
+/// out, often one cut before the latest release, so the updater offered that release to a dev
+/// build (seen 2026-11-23: a branch at 0.7.42 offered 0.7.46) -- and "Install & restart" runs
+/// the real installer over the installed app. Debug only: a `--no-bundle` release build keeps
+/// the updater, since it is how a release is exercised before tagging.
+#[tauri::command]
+fn is_dev_build() -> bool {
+    cfg!(debug_assertions)
+}
+
 /// Epoch-millis stamp taken as the first statement of `run()`, so a webview
 /// timestamp can be expressed as an offset from process start.
 static PROCESS_START_MS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
@@ -9434,6 +9444,7 @@ pub fn run() {
             submit_feedback,
             exit_for_update,
             is_packaged,
+            is_dev_build,
             backend_ready,
             report_boot_timing,
             overlay_script_alive,
