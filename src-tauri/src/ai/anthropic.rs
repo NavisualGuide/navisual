@@ -114,7 +114,7 @@ impl AnthropicClient {
                             }
                         }
                     },
-                    "goal": {"type": "string", "description": "The user's overall objective, carried across turns. Set it from their first request. When they add detail or a constraint later, MERGE it into the existing goal rather than replacing it - 'centre them at the bottom' REFINES 'add page numbers starting on page 3', it is not a new goal. Replace the goal outright only when the user genuinely switches to a different task. Omit or leave empty to keep the current goal unchanged."},
+                    "goal": {"type": "string", "description": crate::ai::prompts::GOAL_FIELD},
                     "plan_outline": {
                         "type": "array",
                         "items": {"type": "string"},

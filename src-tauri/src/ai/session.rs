@@ -175,7 +175,14 @@ impl Turn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
+    /// The model-owned goal: a short title, shown on the Working-on card.
     pub task_description: String,
+    /// The user's opening request, in their own words, never rewritten by the model. Restated
+    /// on every turn after the goal (`prompts::goal_anchor`) and read for the reply language,
+    /// so a short goal costs neither. Empty for sessions saved before it existed, which fall
+    /// back to the goal as before.
+    #[serde(default)]
+    pub request: String,
     /// Model-maintained route overview toward `task_description` — see
     /// `NavigateStepResponse::plan_outline`. `#[serde(default)]` so sessions saved
     /// before this field existed load as an empty (no-plan-shown) list.
@@ -226,6 +233,7 @@ impl Session {
         let now = Local::now().to_rfc3339();
         Self {
             id: Uuid::new_v4(),
+            request: task_description.clone(),
             task_description,
             plan_outline: Vec::new(),
             plan_completed_count: 0,
@@ -1187,6 +1195,19 @@ mod tests {
             "Centre them at the bottom".into(),
         ]);
         assert_eq!(s.plan_outline.len(), 3, "revision replaces, it doesn't append");
+    }
+
+    #[test]
+    fn the_request_survives_the_model_rewriting_the_goal() {
+        let mut s = Session::new("Walk me through these steps: 1. Find the IP.".into());
+        assert_eq!(s.request, s.task_description);
+        s.set_task_description("Show the K2 camera in OrcaSlicer".into());
+        assert_eq!(s.request, "Walk me through these steps: 1. Find the IP.");
+        // A session saved before the field existed reads back with no request.
+        let mut v = serde_json::to_value(&s).unwrap();
+        v.as_object_mut().unwrap().remove("request");
+        let old: Session = serde_json::from_value(v).unwrap();
+        assert_eq!(old.request, "");
     }
 
     #[test]

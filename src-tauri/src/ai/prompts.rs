@@ -245,6 +245,12 @@ pub const STATE_SUMMARY_FIELD: &str = "Your ONLY memory between turns — earlie
 /// what to write: the request does that, only on the turn a note was written.
 pub const APP_NOTE_FIELD: &str = "Only when the prompt asks for a learned note: that one line. Otherwise omit.";
 
+/// The goal, described once for every client. A short title of the model's own: it heads the
+/// Working-on card, and the user's own words reach the model separately (`goal_anchor`), so a
+/// copied request is no longer needed to keep them -- luna copied a ten-step request in full and
+/// the card showed the whole page (2026-11-23).
+pub const GOAL_FIELD: &str = "The user's overall objective as a short title in your own words, at most about 60 characters, in the user's language. The user sees it as the name of their task, so never copy their message into it: their own words reach you separately on every turn. Set it from their first request. When they add detail or a constraint later, fold it into the existing goal rather than replacing it, keeping it short. Replace the goal outright only when the user genuinely switches to a different task. Omit or leave empty to keep the current goal unchanged.";
+
 /// The plan fields, described once for every client that sends a schema; the DeepSeek/Qwen JSON
 /// instruction carries the same text verbatim (asserted by `field_lines_match_the_shared_text`).
 /// Until 2026-11-23 each client had its own copy telling the model to "REVISE the whole list"
@@ -610,13 +616,31 @@ pub fn held_keys_note(keys: &[String]) -> String {
     )
 }
 
-pub fn goal_anchor(task_description: &str) -> String {
-    let t = task_description.trim();
-    if t.is_empty() {
+/// The longest opening request restated on every turn; a pasted page is cut here.
+const REQUEST_ANCHOR_CHARS: usize = 1500;
+
+/// The goal restated at the tail of every continuation turn: the model's short `goal` (the
+/// Working-on card's title), then the user's opening request in their own words when it says
+/// more. The goal used to be the only thing restated, so a model that shortened it -- as the
+/// card needs -- dropped the user's own steps from every later turn, and one that copied the
+/// request verbatim kept them but filled the card with a pasted page (founder, 2026-11-23:
+/// luna vs 3.8 Flash on the same ten-step request). Each half now does one job.
+pub fn goal_anchor(goal: &str, request: &str) -> String {
+    let g = goal.trim();
+    let r = request.trim();
+    let head = if g.is_empty() { r } else { g };
+    if head.is_empty() {
         return String::new();
     }
+    let own = if r.is_empty() || r == g {
+        String::new()
+    } else {
+        let cut: String = r.chars().take(REQUEST_ANCHOR_CHARS).collect();
+        let more = if cut.len() < r.len() { "..." } else { "" };
+        format!(" In their own words when they started: \"{cut}{more}\".")
+    };
     format!(
-        "\n\nTHE USER'S GOAL, restated: \"{t}\". Everything you do serves this. \
+        "\n\nTHE USER'S GOAL, restated: \"{head}\".{own} Everything you do serves this. \
          If the current screen shows it is already achieved, say so instead of inventing \
          another step."
     )
@@ -923,11 +947,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn goal_anchor_restates_the_short_goal_then_the_users_own_words() {
+        let a = super::goal_anchor("Show the K2 camera in OrcaSlicer", "Walk me through these steps:\n1. Find the IP.");
+        assert!(a.contains("restated: \"Show the K2 camera in OrcaSlicer\"."), "{a}");
+        assert!(a.contains("In their own words when they started: \"Walk me through these steps:\n1. Find the IP.\""), "{a}");
+        // Equal, or no request saved (an older session): the goal alone, as before.
+        let same = super::goal_anchor("Add page numbers", "Add page numbers");
+        assert!(!same.contains("own words"), "{same}");
+        assert_eq!(super::goal_anchor("Add page numbers", ""), same);
+        // No goal yet: the request is the goal.
+        assert!(super::goal_anchor("", "Open Settings").contains("restated: \"Open Settings\"."));
+        assert_eq!(super::goal_anchor("", ""), "");
+        // A pasted page is cut, and says so.
+        let long = "x".repeat(super::REQUEST_ANCHOR_CHARS + 50);
+        let cut = super::goal_anchor("G", &long);
+        assert!(cut.contains(&format!("\"{}...\"", "x".repeat(super::REQUEST_ANCHOR_CHARS))), "cut");
+    }
+
     // The JSON instruction restates the schema in prose, and it drifted: on 2026-11-23 the new
     // "only what was shown in full" reached every schema's keep field but not DeepSeek's line.
     #[test]
     fn field_lines_match_the_shared_text() {
         let ds = crate::ai::deepseek::JSON_FORMAT_INSTRUCTION;
+        for format in [ds, crate::ai::ollama::JSON_FORMAT_INSTRUCTION] {
+            assert!(format.contains(&format!("- goal: {}", super::GOAL_FIELD)));
+        }
         assert!(ds.contains(&format!("- plan_outline: {}", super::PLAN_OUTLINE_FIELD)));
         assert!(ds.contains(&format!("- plan_completed_count: {}", super::PLAN_COUNT_FIELD)));
         assert!(super::SYSTEM_PROMPT.contains("[Planned route]"), "rule 18 names the block");

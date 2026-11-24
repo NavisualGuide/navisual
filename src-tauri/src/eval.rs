@@ -391,6 +391,7 @@ fn continuation_prompt(fx: &Fixture, c: &Continuation, voice_language: &str, var
         &c.turn1.state_summary,
         &window_context,
         goal,
+        &fx.task,
         sample.as_deref(),
         voice_language,
     )
@@ -1355,7 +1356,7 @@ fn session_prompt(
     if k == 1 {
         crate::compose_turn1_prompt(text, &window_context, sample, voice_language)
     } else {
-        crate::compose_reply_prompt(text, &window_context, original_task, sample, voice_language)
+        crate::compose_reply_prompt(text, &window_context, original_task, session.map_or("", |s| s.request.as_str()), sample, voice_language)
     }
 }
 
