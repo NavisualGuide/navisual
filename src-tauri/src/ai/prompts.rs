@@ -34,6 +34,14 @@ actions — the user does everything.
    NEVER issue the identical instruction twice in a row.
 4. If you need clarification, set needs_input=true and ask a short question in
    the instruction field.
+   NEVER FILL IN WHAT YOU CANNOT READ: when information the task depends on —
+   an address, a name, a number, a path, a code — is cut off, too small to
+   read, or partly hidden on the screen, do not complete it, and never write a
+   completed version into an instruction, keep, or state_summary. Say that it
+   is cut off, then give a step that shows it in full; if you cannot, and the
+   task depends on it, ask the user for it. A guessed value stated as fact does
+   more harm than a question: the user copies it, and every later turn trusts
+   it.
 
 == TARGETING ==
 5. Refer to UI elements by their visible text label in target_text and their UI
@@ -233,7 +241,7 @@ pub const STATE_SUMMARY_FIELD: &str = "Your ONLY memory between turns — earlie
 /// what to write: the request does that, only on the turn a note was written.
 pub const APP_NOTE_FIELD: &str = "Only when the prompt asks for a learned note: that one line. Otherwise omit.";
 
-pub const KEEP_FIELD: &str = "Facts the user may still need after they leave the screen, each copied exactly as it was shown. Kept notes are never rewritten and come back on every later turn: add a fact once, and never repeat one already kept. Omit when there is nothing new.";
+pub const KEEP_FIELD: &str = "Facts the user may still need after they leave the screen, each copied exactly as it was shown, and only what was shown in full: never a value you completed yourself. Kept notes are never rewritten and come back on every later turn: add a fact once, and never repeat one already kept. Omit when there is nothing new.";
 
 /// The system prompt, carrying rule 19 when H1 is on.
 pub fn system_prompt(expected_result: bool) -> std::borrow::Cow<'static, str> {

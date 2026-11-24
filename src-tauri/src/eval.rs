@@ -148,6 +148,14 @@ struct Fixture {
     /// reading them -- "don't press Ctrl+B" contains the phrase too.
     #[serde(default)]
     instruction_none: Vec<String>,
+    /// Phrases that fail the answer if written into the model's memory -- `keep` or
+    /// `state_summary` -- which the user never reads but every later turn trusts. Kept apart
+    /// from `instruction_none` so batteries graded before it existed grade the same. Found on
+    /// a cut-off IP address (s4cut): the instruction said "click in the box to see it all"
+    /// while `keep` stored "Printer IP: 192.168.1.189", and a later turn told the user to
+    /// change a correct file to match the invented address.
+    #[serde(default)]
+    memory_none: Vec<String>,
     /// S2 (harness-plan.md H1): a turn-2 item. The session already holds turn 1; `image` is the
     /// screen after the user acted, and the answer graded is the model's reply to it.
     #[serde(default)]
@@ -552,6 +560,18 @@ fn score(fx: &Fixture, resp: &NavigateStepResponse, w: u32, h: u32) -> (Outcome,
             .find_map(|t| fx.instruction_none.iter().find(|p| contains_phrase(&t, &normalize(p))));
         if let Some(p) = said {
             return (Outcome::Wrong, format!("said {p:?}: {first_instruction:?}"));
+        }
+    }
+    if !fx.memory_none.is_empty() {
+        let stored = resp
+            .keep
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(resp.state_summary.as_str()))
+            .map(normalize)
+            .find_map(|t| fx.memory_none.iter().find(|p| contains_phrase(&t, &normalize(p))));
+        if let Some(p) = stored {
+            return (Outcome::Wrong, format!("stored {p:?} in memory: {first_instruction:?}"));
         }
     }
     if fx.instruction_script.as_deref() == Some("cjk") {
@@ -1729,8 +1749,23 @@ mod tests {
             instruction_script: None,
             instruction_all: vec![],
             instruction_none: vec![],
+            memory_none: vec![],
             continuation: None,
         }
+    }
+
+    // s4cut, from gemini-3.8-flash's own answer: a fine instruction over an invented address.
+    #[test]
+    fn memory_none_fails_a_guess_kept_out_of_sight() {
+        let mut f = fx(PassIf::TextOrBbox);
+        f.target_text_any = vec!["hostname".into()];
+        f.memory_none = vec!["192.168.1".into()];
+        let hidden = resp(r#"{"steps":[{"instruction":"Click inside the Hostname box to view the full IP address.","target_text":"Hostname"}],"keep":["Printer IP: 192.168.1.187"]}"#);
+        assert_eq!(score(&f, &hidden, 1000, 1000).0, Outcome::Wrong);
+        let summary = resp(r#"{"steps":[{"instruction":"Click inside the Hostname box.","target_text":"Hostname"}],"state_summary":"The Hostname shows http://192.168.1.18"}"#);
+        assert_eq!(score(&f, &summary, 1000, 1000).0, Outcome::Wrong);
+        let honest = resp(r#"{"steps":[{"instruction":"The address is cut off: click in the Hostname box and press End.","target_text":"Hostname"}],"state_summary":"Hostname shows http://192.168 (cut off)."}"#);
+        assert_eq!(score(&f, &honest, 1000, 1000).0, Outcome::Pass);
     }
 
     // The two halves of a recovery, from the S2 pilot's own answers.
