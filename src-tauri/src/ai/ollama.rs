@@ -39,12 +39,12 @@ Step fields (inside "steps" array only):
 - target_element_id: integer id from the [Screen Elements] list in the message when your target appears there — only ids from the list, never invented; still fill target_text (optional, omit when the target is not listed or no list is present)
 
 Top-level fields (outside "steps", required):
-- goal: the user's overall objective, carried across turns. MERGE later detail into it rather than replacing it ('centre them at the bottom' refines the goal, it is not a new goal); replace it outright only on a genuine task switch; omit to leave it unchanged
+- goal: The user's overall objective as a short title in your own words, at most about 60 characters, in the user's language. The user sees it as the name of their task, so never copy their message into it: their own words stay in the conversation for you to read. Set it from their first request. When they add detail or a constraint later, fold it into the existing goal rather than replacing it, keeping it short. Replace the goal outright only when the user genuinely switches to a different task. Omit or leave empty to keep the current goal unchanged.
 - state_summary: your ONLY memory between turns (earlier turns are truncated away). Rewrite it in full each turn carrying the user's GOAL in their own words, any CONSTRAINTS they stated, what is DONE, anything TRIED THAT FAILED, and anything you have SEEN on an earlier screen that the user may still need once it is gone, copied exactly
 - needs_input: true only if you must ask the user a question before continuing
 
 Optional top-level field:
-- keep: facts the user may still need after they leave the screen, each copied exactly as shown; kept notes come back on every later turn and are never rewritten, so add each once and never repeat one already kept (omit when there is nothing new)
+- keep: Facts the user may still need after they leave the screen, each copied exactly as it was shown, and only what was shown in full: never a value you completed yourself. Kept notes are never rewritten and come back on every later turn: add a fact once, and never repeat one already kept. Omit when there is nothing new.
 - app_note: only when the prompt asks for a learned note, that one line; otherwise omit
 - suggested_tasks: up to 3 short next-task suggestions the user might ask for (each under 80 characters, in the user's language) — ONLY when the current task looks complete or no task is in progress; omit mid-sequence"#;
 

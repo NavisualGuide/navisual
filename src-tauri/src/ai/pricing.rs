@@ -65,6 +65,12 @@ fn price_for(model: &str) -> Option<(f64, f64)> {
         // checked 2026-10-16). Cached input $0.10 -> $0.20, implicit caching only; no free tier.
         // Thinking bills as output. From December this row under-states by half.
         "gemini-4-argon" => (2.0, 10.0),
+        // Gemini 4 Hydrogen, the fast Gemini 4 model and Google's recommended upgrade from 3.8
+        // Flash (released 2026-11-12): $1.50 / $7.50 flat across the 1M context
+        // (blog.google "Introducing Gemini 4 Hydrogen", read 2026-11-23; the Developer API
+        // pricing page could not be fetched). Thinking bills as output, as on every Gemini row.
+        // Same list price as 3.8 Flash's standard rate from 2027-01-01.
+        "gemini-4-hydrogen" => (1.50, 7.50),
         // OpenAI — GPT-6 (2026-10-11): Luna 6 for Speed and Sol 6.1 for Smart are the
         // founder's picks for L1; Astra is the top of the line. List prices from
         // developers.openai.com/api/docs/models/compare. Cached input is a tenth of these and

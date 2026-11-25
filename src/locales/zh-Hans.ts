@@ -319,6 +319,7 @@ export const zhHans: Partial<Record<MessageKey, string>> = {
   "about.privacy": "隐私",
   "about.sendFeedback": "反馈问题",
   "about.storeUpdates": "更新由 Microsoft Store 管理。",
+  "about.devUpdates": "开发版：不检查更新，运行的是当前签出的代码。",
   "about.downloading": "下载中\u2026 {pct}%",
   "about.installed": "\u2713 已安装 —— 请重启 Navisual",
   "about.available": "有新版本 v{version}",

@@ -458,6 +458,30 @@ impl Session {
         out
     }
 
+    /// The plan the model set on earlier turns and how far along it is, as the user sees it in
+    /// the Working-on card. Without it the model never saw its own list again and redrew it from
+    /// its summary: on the founder's 23-call K2 session it rewrote the list nine times, between
+    /// four and seven milestones, and the progress bar ran backwards. Empty until a plan exists.
+    pub fn planned_route(&self) -> String {
+        if self.plan_outline.is_empty() {
+            return String::new();
+        }
+        let done = self.plan_completed_count.min(self.plan_outline.len());
+        let mut out = format!(
+            "[Planned route] The plan_outline you set earlier, as the user sees it: {done} of {} done.",
+            self.plan_outline.len()
+        );
+        for (i, m) in self.plan_outline.iter().enumerate() {
+            let mark = match i.cmp(&done) {
+                std::cmp::Ordering::Less => " (done)",
+                std::cmp::Ordering::Equal => " (current)",
+                std::cmp::Ordering::Greater => "",
+            };
+            out.push_str(&format!("\n{}. {m}{mark}", i + 1));
+        }
+        out
+    }
+
     /// Record what was drawn for this turn's step, once the locator has decided it.
     ///
     /// Separate from `set_last_user_turn_facts` because of WHEN it is known: the facts come
@@ -1163,6 +1187,21 @@ mod tests {
             "Centre them at the bottom".into(),
         ]);
         assert_eq!(s.plan_outline.len(), 3, "revision replaces, it doesn't append");
+    }
+
+    #[test]
+    fn planned_route_shows_the_list_and_where_the_user_is() {
+        let mut s = Session::new("k2 camera".into());
+        assert_eq!(s.planned_route(), "", "nothing before a plan exists");
+        s.set_plan_outline(vec!["Find the IP".into(), "Make the folders".into(), "Start go2rtc".into()]);
+        s.set_plan_completed_count(1);
+        assert_eq!(
+            s.planned_route(),
+            "[Planned route] The plan_outline you set earlier, as the user sees it: 1 of 3 done.\n\
+             1. Find the IP (done)\n2. Make the folders (current)\n3. Start go2rtc"
+        );
+        s.set_plan_completed_count(3);
+        assert!(s.planned_route().ends_with("3. Start go2rtc (done)"), "all done, none current");
     }
 
     #[test]

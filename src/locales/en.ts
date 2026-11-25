@@ -336,6 +336,7 @@ export const en = {
   "about.privacy": "Privacy",
   "about.sendFeedback": "Send feedback",
   "about.storeUpdates": "Updates are managed by the Microsoft Store.",
+  "about.devUpdates": "Development build: updates are off. It runs the code that is checked out.",
   "about.downloading": "Downloading\u2026 {pct}%",
   "about.installed": "\u2713 Installed \u2014 please restart Navisual",
   "about.available": "v{version} available",

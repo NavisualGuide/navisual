@@ -1113,6 +1113,8 @@ See the LICENSE file in the root of this repository for complete details.
   // channels instead of maintaining a separate Store build. See the Rust
   // `is_packaged` command + navisual-internal/docs/msix-store-spike.md.
   let isPackaged = $state(false);
+  /** A debug build from source: no self-update, ever (lib.rs `is_dev_build`). */
+  let isDevBuild = $state(false);
   let settingsTab = $state<SettingsTab>("provider");
   $effect(() => {
     if (showSettings && settingsTab === "screen-guide") untrack(() => loadLearnedGuides());
@@ -1792,7 +1794,7 @@ See the LICENSE file in the root of this repository for complete details.
   async function checkForUpdates(manual = false) {
     // Store builds never self-update — see isPackaged. Guarded here rather than
     // only at the call sites so no future caller can reintroduce the network hit.
-    if (isPackaged) return;
+    if (isPackaged || isDevBuild) return;
     if (updateStatus === "checking" || updateStatus === "downloading") return;
     updateStatus = "checking";
     if (manual) updateNote = "";
@@ -3851,7 +3853,9 @@ See the LICENSE file in the root of this repository for complete details.
     // Plain invoke, not invokeReady: is_packaged takes no State, so it answers
     // during the startup race and must not queue behind the readiness gate.
     try { isPackaged = await invoke<boolean>("is_packaged"); } catch (_) {}
-    if (!isPackaged) setTimeout(() => checkForUpdates(), 5000);
+    // A dev build never self-updates (lib.rs `is_dev_build`). Same awaited order as above.
+    try { isDevBuild = await invoke<boolean>("is_dev_build"); } catch (_) {}
+    if (!isPackaged && !isDevBuild) setTimeout(() => checkForUpdates(), 5000);
 
     // S5 — first-run privacy disclosure. Shown once per install and again when its version
     // moves; the acknowledgement is persisted in localStorage (lives in WebView2 user data,
@@ -6287,6 +6291,8 @@ See the LICENSE file in the root of this repository for complete details.
             {/if}
             {#if isPackaged}
               <span class="update-status">{t("about.storeUpdates")}</span>
+            {:else if isDevBuild}
+              <span class="update-status">{t("about.devUpdates")}</span>
             {:else if updateStatus === "downloading"}
               <span class="update-status">{t("about.downloading", { pct: updateProgress })}</span>
               <div class="update-progress-bar"><div class="update-progress-fill" style="width:{updateProgress}%"></div></div>
