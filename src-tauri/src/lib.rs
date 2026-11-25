@@ -2441,18 +2441,18 @@ mod prompt_assembly_tests {
     fn continuation_prompt_is_what_guide_built_inline() {
         let task = "[User completed: \"Click Export.\"]";
         let ctx = "\n[Current Window Info]\nTitle: 'Contoso Notes'";
-        let p = compose_continuation_prompt(task, "DONE: opened File.", ctx, "Export as PDF", "", None, "auto");
+        let p = compose_continuation_prompt(task, "DONE: opened File.", ctx, "Export as PDF", None, "auto");
         let inline = format!(
             "{}{}{}",
             format!(
                 "{task} The previous state summary: DONE: opened File.. Here is the current screen. Please provide the next instruction.\n{ctx}"
             ),
-            crate::ai::prompts::goal_anchor("Export as PDF", ""),
+            crate::ai::prompts::goal_anchor("Export as PDF"),
             crate::ai::prompts::reply_language_directive(None, "Export as PDF", "auto")
         );
         assert_eq!(p, inline);
         // A resumed session (empty task) opens with the resume template instead.
-        let resumed = compose_continuation_prompt("", "S", "", "G", "", None, "auto");
+        let resumed = compose_continuation_prompt("", "S", "", "G", None, "auto");
         assert!(resumed.starts_with(&crate::ai::prompts::session_resume_template("S")));
     }
 
@@ -2947,12 +2947,6 @@ fn compose_turn1_prompt(
     )
 }
 
-/// What the reply language is read from: the user's opening request when the session has one,
-/// else the goal. The goal is the model's short title and may not be in the user's language.
-fn own_words<'a>(goal: &'a str, request: &'a str) -> &'a str {
-    if request.trim().is_empty() { goal } else { request }
-}
-
 /// A continuation turn's user message -- Next, a screen change, or a resumed session: the
 /// machine-built `[User completed: …]` line with the state summary (or the resume template when
 /// `task` is empty), the window context under it, then the goal and reply-language anchors at
@@ -2962,8 +2956,7 @@ fn compose_continuation_prompt(
     task: &str,
     summary: &str,
     window_context: &str,
-    goal: &str,
-    request: &str,
+    original_task: &str,
     reply_sample: Option<&str>,
     voice_language: &str,
 ) -> String {
@@ -2984,8 +2977,8 @@ fn compose_continuation_prompt(
         // dropped the goal half. Without this the objective is stated once on turn 1 and
         // then evicted with the window, leaving the model steering from its own rolling
         // summary (memory-management-plan.md §1).
-        crate::ai::prompts::goal_anchor(goal, request),
-        crate::ai::prompts::reply_language_directive(reply_sample, own_words(goal, request), voice_language)
+        crate::ai::prompts::goal_anchor(original_task),
+        crate::ai::prompts::reply_language_directive(reply_sample, original_task, voice_language)
     )
 }
 
@@ -2996,16 +2989,15 @@ fn compose_continuation_prompt(
 fn compose_reply_prompt(
     task: &str,
     window_context: &str,
-    goal: &str,
-    request: &str,
+    original_task: &str,
     reply_sample: Option<&str>,
     voice_language: &str,
 ) -> String {
     format!(
         "{}{}{}",
         with_window_context(task.to_string(), window_context),
-        crate::ai::prompts::goal_anchor(goal, request),
-        crate::ai::prompts::reply_language_directive(reply_sample, own_words(goal, request), voice_language)
+        crate::ai::prompts::goal_anchor(original_task),
+        crate::ai::prompts::reply_language_directive(reply_sample, original_task, voice_language)
     )
 }
 
@@ -5187,11 +5179,11 @@ async fn guide_inner(
     // Qwen drifting to Chinese on multi-turn English sessions). Empty on the first turn,
     // where the request IS the prompt. NB: a comment here used to credit the goal half to
     // `prompts::language_anchor` — no such function ever existed.
-    let (original_task, request) = router
+    let original_task = router
         .session_manager
         .current_session
         .as_ref()
-        .map(|s| (s.task_description.clone(), s.request.clone()))
+        .map(|s| s.task_description.clone())
         .unwrap_or_default();
     // An explicitly-chosen Language setting is an authoritative reply-language signal (it also
     // rescues the pinyin-mis-transcription case); "auto" defers to the request's own script.
@@ -5219,7 +5211,6 @@ async fn guide_inner(
             &summary,
             &window_context,
             &original_task,
-            &request,
             reply_sample.as_deref(),
             &voice_language,
         );
@@ -5238,7 +5229,6 @@ async fn guide_inner(
             &task,
             &window_context,
             &original_task,
-            &request,
             reply_sample.as_deref(),
             &voice_language,
         );
@@ -6433,17 +6423,17 @@ async fn send_correction_inner(
     // multi-turn continuation, equally prone to the Chinese-drift feedback loop. `router`
     // is already locked above (line ~2108); reuse it, don't re-lock (tokio Mutex isn't
     // re-entrant — a second lock().await here would deadlock).
-    let (original_task, request) = router
+    let original_task = router
         .session_manager
         .current_session
         .as_ref()
-        .map(|s| (s.task_description.clone(), s.request.clone()))
+        .map(|s| s.task_description.clone())
         .unwrap_or_default();
     // Honor the sticky session language sample here too (a correction is a continuation).
     let reply_sample = state.guidance.lock().reply_lang_sample.clone();
     let anchor = crate::ai::prompts::reply_language_directive(
         reply_sample.as_deref(),
-        own_words(&original_task, &request),
+        &original_task,
         &router.config.voice_language,
     );
 
