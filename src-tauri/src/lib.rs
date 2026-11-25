@@ -3227,7 +3227,7 @@ const LAST_CLICK_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1
 /// Arming here means the hook is always pointed at the app of the *current* target before the
 /// user's next click, and is disarmed (pid 0) whenever there is no single target — full-screen
 /// mode included, where "which app did they click" has no answer worth reporting.
-fn last_click_snapshot(hwnd: Option<usize>) -> Option<String> {
+fn last_click_snapshot(hwnd: Option<usize>, report: bool) -> Option<String> {
     #[cfg(windows)]
     {
         let pid = hwnd
@@ -3239,12 +3239,16 @@ fn last_click_snapshot(hwnd: Option<usize>) -> Option<String> {
             return None;
         }
         let line = last_click::describe(LAST_CLICK_MAX_AGE)?;
+        if !report {
+            log::info!("[click] not reported, a new task has asked for nothing yet: {}", line.trim());
+            return None;
+        }
         log::info!("[click] reported to AI: {}", line.trim());
         Some(line)
     }
     #[cfg(not(windows))]
     {
-        let _ = hwnd;
+        let _ = (hwnd, report);
         None
     }
 }
@@ -5053,9 +5057,16 @@ async fn guide_inner(
     let app_state_text = app_state_snapshot(new_hwnd_opt);
     // What the user actually did since the last turn, as a resolved control. Also (re)arms
     // the click hook for the app being guided — see `last_click` for the privacy contract.
-    let click_line = last_click_snapshot(new_hwnd_opt);
+    // Not on a new task's first turn: nothing has been asked yet, so a click before it is no
+    // answer to a step, and the model narrated it as if remembered from the last task ("The
+    // dialog is closed." opening a fresh one after a Close click -- founder, 2026-11-24).
+    let opens_task = !task.is_empty() && !is_reply && !is_next_requery;
+    let click_line = last_click_snapshot(new_hwnd_opt, !opens_task);
     // A key the last step named that another program holds: the model is told once.
-    let click_line = join_lines(click_line, held_keys::take_note());
+    // Taken either way, so it is told once; dropped with the click when the step it was about
+    // belonged to the last task.
+    let held_note = held_keys::take_note().filter(|_| !opens_task);
+    let click_line = join_lines(click_line, held_note);
     let window_context = window_context_text(
         info.as_deref(),
         &pack_context,
